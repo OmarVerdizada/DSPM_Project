@@ -1,0 +1,25 @@
+{
+    "timestamp": "2026-05-13 10:46:48.808982",
+    "total_files": 3,
+    "findings": [
+        {
+            "file": "./test_data/a.txt",
+            "findings": [],
+            "risk": "LOW"
+        },
+        {
+            "file": "./test_data/b.txt",
+            "findings": [
+                "email"
+            ],
+            "risk": "MEDIUM"
+        },
+        {
+            "file": "./test_data/c.txt",
+            "findings": [
+                "password"
+            ],
+            "risk": "HIGH"
+        }
+    ]
+}
