@@ -1,18 +1,28 @@
 import re
 
-patterns = {
-    "email": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
-    "password": r"password\s*=\s*\w+",
-}
 
-def classify_file(file_path):
+EMAIL_REGEX = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+PASSWORD_REGEX = r"PASSWORD\s*=\s*([^\s]+)"
+
+
+def classify_content(content: str):
     findings = []
 
-    with open(file_path, "r", errors="ignore") as f:
-        content = f.read()
+    emails = re.findall(EMAIL_REGEX, content)
+    passwords = re.findall(PASSWORD_REGEX, content)
 
-        for label, pattern in patterns.items():
-            if re.search(pattern, content):
-                findings.append(label)
+    for e in emails:
+        findings.append({
+            "type": "email",
+            "value": e,
+            "risk": "medium"
+        })
+
+    for p in passwords:
+        findings.append({
+            "type": "password",
+            "value": p,
+            "risk": "high"
+        })
 
     return findings
