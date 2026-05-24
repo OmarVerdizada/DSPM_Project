@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DSPM DLP Discovery</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">D</span>
+          <div>
+            <h1>DSPM</h1>
+            <p>DLP discovery console</p>
+          </div>
+        </div>
+
+        <form id="connection-form" class="panel">
+          <label>
+            File server / IP
+            <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
+          </label>
+          <label>
+            Domain
+            <input id="domain" name="domain" value="WORKGROUP" />
+          </label>
+          <label>
+            Username
+            <input id="username" name="username" autocomplete="username" placeholder="DOMAIN\\user" />
+          </label>
+          <label>
+            Password
+            <input id="password" name="password" type="password" autocomplete="current-password" />
+          </label>
+          <label>
+            Local sample path
+            <input id="local_path" name="local_path" value="test_data" />
+          </label>
+          <label>
+            Max folder depth
+            <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
+          </label>
+          <div class="actions">
+            <button type="button" id="test-btn">Test</button>
+            <button type="submit" id="scan-btn">Fetch data</button>
+          </div>
+        </form>
+
+        <div id="connection-status" class="status muted">Ready</div>
+      </aside>
+
+      <main>
+        <section class="topbar">
+          <div>
+            <p class="eyebrow">Active Directory file-server assessment</p>
+            <h2>Data discovery and DLP rule preparation</h2>
+          </div>
+          <div class="health" id="health">API checking...</div>
+        </section>
+
+        <section class="metrics" aria-label="Risk summary">
+          <div class="metric critical">
+            <span>Critical</span>
+            <strong id="critical-count">0</strong>
+          </div>
+          <div class="metric high">
+            <span>High</span>
+            <strong id="high-count">0</strong>
+          </div>
+          <div class="metric medium">
+            <span>Medium</span>
+            <strong id="medium-count">0</strong>
+          </div>
+          <div class="metric low">
+            <span>Low</span>
+            <strong id="low-count">0</strong>
+          </div>
+          <div class="metric">
+            <span>Total files</span>
+            <strong id="total-count">0</strong>
+          </div>
+        </section>
+
+        <section class="workspace">
+          <div class="table-toolbar">
+            <div>
+              <h3>Discovered data</h3>
+              <p id="scan-meta">No scan has been run yet.</p>
+            </div>
+            <input id="filter" placeholder="Filter by file, finding, or risk" />
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>File</th>
+                  <th>Source</th>
+                  <th>Findings</th>
+                  <th>Risk</th>
+                  <th>Reasons</th>
+                  <th>DLP recommendations</th>
+                </tr>
+              </thead>
+              <tbody id="results-body">
+                <tr>
+                  <td colspan="6" class="empty">Run a scan to see file risk assessment.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="workspace risk-logic">
+          <div class="table-toolbar">
+            <div>
+              <h3>Risk logic</h3>
+              <p>Why assets become critical, high, medium, or low.</p>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="logic-table">
+              <thead>
+                <tr>
+                  <th>Signal</th>
+                  <th>Base risk</th>
+                  <th>Score impact</th>
+                  <th>Why it matters</th>
+                  <th>DLP action</th>
+                </tr>
+              </thead>
+              <tbody id="risk-rules-body">
+                <tr>
+                  <td colspan="5" class="empty">Loading risk logic...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
