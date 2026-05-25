@@ -22,6 +22,7 @@ class ScanConfig:
     local_path: str = "test_data"
     max_depth: int = 4
     use_sample_when_empty: bool = True
+    asset_overrides: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -116,12 +117,20 @@ class DSPMDiscoveryEngine:
         return []
 
     def _analyze_record(self, record: dict) -> dict:
+        record["asset_overrides"] = self.config.asset_overrides
         findings = classify_content(record.get("content", ""))
+        record["finding_signals"] = [
+            f"{finding.get('type', '')} {finding.get('description', '')}".strip()
+            for finding in findings
+        ]
         acl_assessment = analyze_acl(record.get("acl") or {}, record)
         risk: RiskAssessment = calculate_risk(record, findings, acl_assessment)
 
         public_record = dict(record)
-        public_record.pop("content", None)
+        content = public_record.pop("content", "")
+        public_record.pop("asset_overrides", None)
+        public_record.pop("finding_signals", None)
+        public_record["preview"] = _safe_preview(content)
         public_record["findings"] = findings
         public_record["permissions"] = acl_assessment
         public_record["risk"] = risk.to_dict()
@@ -146,3 +155,23 @@ class DSPMDiscoveryEngine:
             low=counts["LOW"],
             sensitive_files=sensitive_files,
         )
+
+
+def _safe_preview(content: str, max_lines: int = 8, max_chars: int = 1800) -> dict:
+    if not content:
+        return {"available": False, "lines": [], "truncated": False}
+
+    lines = content.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    selected = lines[:max_lines]
+    text = "\n".join(selected)
+    truncated = len(lines) > max_lines or len(text) > max_chars
+
+    if len(text) > max_chars:
+        text = text[:max_chars]
+        selected = text.split("\n")
+
+    return {
+        "available": True,
+        "lines": selected,
+        "truncated": truncated,
+    }

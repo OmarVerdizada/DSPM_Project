@@ -57,63 +57,132 @@
             <p class="eyebrow">Active Directory file-server assessment</p>
             <h2>Data discovery and DLP rule preparation</h2>
           </div>
-          <div class="health" id="health">API checking...</div>
-        </section>
-
-        <section class="metrics" aria-label="Risk summary">
-          <div class="metric critical">
-            <span>Critical</span>
-            <strong id="critical-count">0</strong>
-          </div>
-          <div class="metric high">
-            <span>High</span>
-            <strong id="high-count">0</strong>
-          </div>
-          <div class="metric medium">
-            <span>Medium</span>
-            <strong id="medium-count">0</strong>
-          </div>
-          <div class="metric low">
-            <span>Low</span>
-            <strong id="low-count">0</strong>
-          </div>
-          <div class="metric">
-            <span>Total files</span>
-            <strong id="total-count">0</strong>
+          <div class="topbar-actions">
+            <button type="button" id="theme-toggle" class="secondary-btn">Dark mode</button>
+            <div class="health" id="health">API checking...</div>
           </div>
         </section>
 
-        <section class="workspace">
-          <div class="table-toolbar">
-            <div>
-              <h3>Discovered data</h3>
-              <p id="scan-meta">No scan has been run yet.</p>
+        <nav class="tabs" aria-label="Workspace sections">
+          <button type="button" class="tab active" data-tab="overview">Overview</button>
+          <button type="button" class="tab" data-tab="assets">Customer Assets</button>
+          <button type="button" class="tab" data-tab="reports">Reports</button>
+          <button type="button" class="tab" data-tab="logic">Risk Logic</button>
+        </nav>
+
+        <section id="tab-overview" class="tab-panel active">
+          <section class="metrics" aria-label="Risk summary">
+            <div class="metric critical">
+              <span>Critical</span>
+              <strong id="critical-count">0</strong>
             </div>
-            <input id="filter" placeholder="Filter by file, finding, or risk" />
-          </div>
+            <div class="metric high">
+              <span>High</span>
+              <strong id="high-count">0</strong>
+            </div>
+            <div class="metric medium">
+              <span>Medium</span>
+              <strong id="medium-count">0</strong>
+            </div>
+            <div class="metric low">
+              <span>Low</span>
+              <strong id="low-count">0</strong>
+            </div>
+            <div class="metric">
+              <span>Total files</span>
+              <strong id="total-count">0</strong>
+            </div>
+          </section>
 
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>File</th>
-                  <th>Source</th>
-                  <th>Findings</th>
-                  <th>Risk</th>
-                  <th>Reasons</th>
-                  <th>DLP recommendations</th>
-                </tr>
-              </thead>
-              <tbody id="results-body">
-                <tr>
-                  <td colspan="6" class="empty">Run a scan to see file risk assessment.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <section class="workspace">
+            <div class="table-toolbar">
+              <div>
+                <h3>Discovered data</h3>
+                <p id="scan-meta">No scan has been run yet.</p>
+              </div>
+              <input id="filter" placeholder="Filter by file, finding, or risk" />
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>File</th>
+                    <th>Source</th>
+                    <th>Findings</th>
+                    <th>Risk</th>
+                    <th>Manual risk</th>
+                    <th>Reasons</th>
+                    <th>DLP recommendations</th>
+                  </tr>
+                </thead>
+                <tbody id="results-body">
+                  <tr>
+                    <td colspan="7" class="empty">Run a scan to see file risk assessment.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
-        <section class="workspace risk-logic">
+        <section id="tab-assets" class="tab-panel">
+          <div class="asset-header">
+            <div>
+              <p class="eyebrow">MSSP customer context</p>
+              <h3>Customer asset risk</h3>
+              <p>Define tenant-specific crown-jewel paths, folders, extensions, or filenames. Saved rules are applied to every new scan.</p>
+            </div>
+            <div class="asset-actions">
+              <button type="button" id="add-asset-btn" class="secondary-btn">Add asset</button>
+              <button type="button" id="save-assets-btn">Save rules</button>
+            </div>
+          </div>
+
+          <div class="asset-editor">
+            <div class="asset-form-grid">
+              <label>
+                Match pattern
+                <input id="asset-pattern" placeholder="finance, /HR/, .env, password.txt" />
+              </label>
+              <label>
+                Forced risk
+                <select id="asset-level">
+                  <option value="CRITICAL">Critical</option>
+                  <option value="HIGH">High</option>
+                  <option value="MEDIUM">Medium</option>
+                  <option value="LOW">Low</option>
+                </select>
+              </label>
+              <label>
+                Business reason
+                <input id="asset-reason" placeholder="Customer considers this a regulated or crown-jewel asset" />
+              </label>
+            </div>
+            <p id="asset-save-status" class="save-status">Rules are loaded from this browser.</p>
+          </div>
+
+          <div class="asset-rule-list" id="asset-rule-list"></div>
+        </section>
+
+        <section id="tab-reports" class="tab-panel">
+          <div class="report-header">
+            <div>
+              <p class="eyebrow">Executive evidence</p>
+              <h3>Reporting center</h3>
+              <p>Generate customer-ready reports from the latest scan and current manual risk decisions.</p>
+            </div>
+            <div class="report-actions">
+              <button type="button" id="export-csv-btn" class="secondary-btn">Export CSV</button>
+              <button type="button" id="export-word-btn" class="secondary-btn">Export Word</button>
+              <button type="button" id="export-pdf-btn">Print / PDF</button>
+            </div>
+          </div>
+
+          <div id="report-preview" class="report-preview"></div>
+        </section>
+
+        <section id="tab-logic" class="tab-panel workspace risk-logic">
           <div class="table-toolbar">
             <div>
               <h3>Risk logic</h3>
@@ -143,6 +212,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=3"></script>
   </body>
 </html>

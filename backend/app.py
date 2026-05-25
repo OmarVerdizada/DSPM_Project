@@ -41,8 +41,15 @@ class ConnectionRequest(BaseModel):
     max_depth: int = Field(default=4, ge=1, le=12)
 
 
+class AssetOverride(BaseModel):
+    pattern: str = Field(description="Customer-specific asset name, folder, extension, or path fragment")
+    level: str = Field(pattern="^(CRITICAL|HIGH|MEDIUM|LOW)$")
+    reason: str = ""
+
+
 class ScanRequest(ConnectionRequest):
     save_report: bool = True
+    asset_overrides: list[AssetOverride] = Field(default_factory=list)
 
 
 @app.get("/")
@@ -86,4 +93,13 @@ def _to_config(payload: ConnectionRequest) -> ScanConfig:
         domain=payload.domain.strip() or "WORKGROUP",
         local_path=payload.local_path.strip() or "test_data",
         max_depth=payload.max_depth,
+        asset_overrides=[
+            {
+                "pattern": item.pattern.strip(),
+                "level": item.level.strip().upper(),
+                "reason": item.reason.strip(),
+            }
+            for item in getattr(payload, "asset_overrides", [])
+            if item.pattern.strip()
+        ],
     )

@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 
 
 FILENAME_KEYWORDS = {
+    "access",
+    "admin",
+    "backup",
     "password",
     "passwd",
     "secret",
@@ -11,21 +14,54 @@ FILENAME_KEYWORDS = {
     "apikey",
     "api_key",
     "credential",
+    "creds",
     "confidential",
+    "contract",
+    "customer",
+    "database",
+    "db",
+    "export",
     "salary",
     "finance",
+    "invoice",
+    "legal",
+    "payroll",
     "hr",
+    "vpn",
 }
 
 EXTENSION_RISK = {
     ".env": 25,
+    ".pem": 25,
+    ".key": 25,
+    ".p12": 25,
+    ".pfx": 25,
+    ".kdbx": 25,
     ".bak": 20,
     ".sql": 20,
+    ".sqlite": 20,
+    ".db": 20,
+    ".dump": 20,
+    ".zip": 15,
+    ".rar": 15,
+    ".7z": 15,
+    ".tar": 15,
+    ".gz": 15,
+    ".pst": 15,
+    ".ost": 15,
     ".log": 10,
     ".txt": 10,
     ".csv": 10,
+    ".tsv": 10,
     ".xlsx": 10,
+    ".xls": 10,
     ".docx": 10,
+    ".doc": 10,
+    ".pdf": 10,
+    ".json": 10,
+    ".xml": 10,
+    ".yaml": 10,
+    ".yml": 10,
 }
 
 FINDING_WEIGHTS = {
@@ -36,6 +72,13 @@ FINDING_WEIGHTS = {
 }
 
 RISK_RULE_DESCRIPTIONS = [
+    {
+        "signal": "Private keys, cloud access keys, JWTs",
+        "base_risk": "CRITICAL",
+        "score": "Minimum 90",
+        "reason": "Secrets that authenticate systems or cloud accounts can cause immediate compromise if copied from a share.",
+        "dlp_action": "Quarantine, rotate the secret, and alert the security owner.",
+    },
     {
         "signal": "Password, token, API key, secret",
         "base_risk": "HIGH",
@@ -68,15 +111,22 @@ RISK_RULE_DESCRIPTIONS = [
         "signal": "Sensitive filename/path",
         "base_risk": "MEDIUM",
         "score": "+15",
-        "reason": "Names like password, finance, HR, secret, salary, or credential often reveal high-value files.",
+        "reason": "Names like password, backup, finance, HR, contract, database, salary, secret, or credential often reveal high-value files.",
         "dlp_action": "Add filename and path conditions to DLP policies.",
     },
     {
         "signal": "Risky file extension",
         "base_risk": "LOW-MEDIUM",
         "score": "+10 to +25",
-        "reason": "Files such as .env, .bak, .sql, .log, .csv, and .txt commonly contain exported data or secrets.",
+        "reason": "Secrets, backups, databases, archives, mailboxes, office documents, structured exports, and logs often need deeper inspection.",
         "dlp_action": "Increase inspection depth for these extensions.",
+    },
+    {
+        "signal": "MSSP asset override",
+        "base_risk": "Manual",
+        "score": "Forced level",
+        "reason": "Every customer has different crown-jewel assets, so analysts can manually raise or lower risk for matching asset names or paths.",
+        "dlp_action": "Use customer-specific context before creating or tuning DLP policy.",
     },
     {
         "signal": "Broad or writable permissions",
@@ -161,6 +211,13 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
     score = min(score, 100)
     level = get_level(score)
 
+    override = _match_asset_override(file_obj)
+    if override:
+        level = override["level"]
+        score = _score_for_level(level)
+        reasons.insert(0, f"MSSP asset override: {override['reason']}")
+        recommendations.insert(0, "Validate this customer-specific asset classification with the data owner")
+
     if not recommendations and score > 0:
         recommendations.append("Monitor this file class and validate business ownership")
 
@@ -180,6 +237,34 @@ def get_level(score: int) -> str:
     if score >= 40:
         return "MEDIUM"
     return "LOW"
+
+
+def _score_for_level(level: str) -> int:
+    return {
+        "CRITICAL": 95,
+        "HIGH": 80,
+        "MEDIUM": 55,
+        "LOW": 20,
+    }.get(level, 20)
+
+
+def _match_asset_override(file_obj: dict) -> dict | None:
+    path = str(file_obj.get("path", "")).lower()
+    name = str(file_obj.get("name", "")).lower()
+    signals = " ".join(str(item).lower() for item in file_obj.get("finding_signals") or [])
+
+    for override in file_obj.get("asset_overrides") or []:
+        pattern = str(override.get("pattern", "")).strip().lower()
+        level = str(override.get("level", "")).strip().upper()
+        if not pattern or level not in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+            continue
+        if pattern in path or pattern in name or pattern in signals:
+            return {
+                "level": level,
+                "reason": override.get("reason") or f"{pattern} is marked as {level}",
+            }
+
+    return None
 
 
 def get_risk_rules() -> list[dict]:
