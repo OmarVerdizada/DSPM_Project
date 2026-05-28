@@ -76,13 +76,18 @@ class ApiKeyRequest(BaseModel):
 
 
 @app.get("/")
-def dashboard() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+def login_root() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "login.html")
 
 
 @app.get("/login")
 def login_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "login.html")
+
+
+@app.get("/dashboard")
+def dashboard() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "index.html")
 
 
 @app.get("/api/health")

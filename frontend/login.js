@@ -3,7 +3,7 @@ const loginStatus = document.querySelector("#login-status");
 
 try {
   if (window.sessionStorage.getItem("dspm-access-token")) {
-    window.location.replace("/");
+    window.location.replace("/dashboard");
   }
 } catch {
   // Continue to login form when storage is unavailable.
@@ -44,6 +44,8 @@ loginForm.addEventListener("submit", async (event) => {
     const result = await response.json();
     sessionSet("dspm-access-token", result.access_token);
     sessionSet("dspm-tenant-id", result.tenant_id || "default");
+    sessionSet("dspm-role", result.role || "viewer");
+    sessionSet("dspm-user", data.get("username") || "user");
     setLoginStatus("Success. Opening dashboard...");
     window.location.replace("/");
   } catch (error) {

@@ -23,20 +23,6 @@
           </div>
         </div>
 
-        <form id="auth-form" class="panel auth-panel">
-          <label>
-            Username
-            <input id="auth-username" name="auth_username" autocomplete="username" placeholder="admin" />
-          </label>
-          <label>
-            Password
-            <input id="auth-password" name="auth_password" type="password" autocomplete="current-password" placeholder="admin123" />
-          </label>
-          <button type="submit" id="login-btn">Sign in</button>
-          <button type="button" id="logout-btn" class="secondary-btn">Sign out</button>
-          <p id="auth-status" class="save-status">Sign in to unlock scans and tenant data.</p>
-        </form>
-
         <form id="connection-form" class="panel">
           <label>
             File server / IP
@@ -88,6 +74,22 @@
           <div class="topbar-actions">
             <button type="button" id="theme-toggle" class="secondary-btn">Dark mode</button>
             <div class="health" id="health">API checking...</div>
+            <section class="profile-menu" aria-label="Profile">
+              <button type="button" id="profile-toggle" class="profile-toggle">
+                <span class="profile-avatar">A</span>
+                <span>
+                  <strong id="profile-name">Admin</strong>
+                  <small id="profile-tenant">default tenant</small>
+                </span>
+              </button>
+              <div class="profile-panel">
+                <div>
+                  <span>Signed in as</span>
+                  <strong id="profile-role">admin</strong>
+                </div>
+                <button type="button" id="logout-btn" class="secondary-btn">Sign out</button>
+              </div>
+            </section>
           </div>
         </section>
 

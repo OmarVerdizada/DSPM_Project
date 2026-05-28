@@ -458,6 +458,76 @@ main {
   gap: 10px;
 }
 
+.profile-menu {
+  position: relative;
+}
+
+.profile-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
+  padding: 5px 10px 5px 6px;
+}
+
+.profile-avatar {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.profile-toggle strong,
+.profile-toggle small {
+  display: block;
+  line-height: 1.1;
+  text-align: left;
+}
+
+.profile-toggle small {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+.profile-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 10;
+  display: none;
+  width: 220px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 12px;
+}
+
+.profile-menu.open .profile-panel,
+.profile-menu:focus-within .profile-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.profile-panel span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.profile-panel strong {
+  display: block;
+  margin-top: 4px;
+}
+
 .eyebrow {
   margin-bottom: 6px;
   font-size: 13px;
@@ -1488,6 +1558,11 @@ progress::-moz-progress-bar {
   .asset-actions,
   .report-actions {
     justify-content: start;
+  }
+
+  .profile-panel {
+    left: 0;
+    right: auto;
   }
 
   .sidebar {

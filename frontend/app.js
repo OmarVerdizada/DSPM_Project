@@ -21,9 +21,11 @@ const reportPreview = document.querySelector("#report-preview");
 const exportCsvBtn = document.querySelector("#export-csv-btn");
 const exportWordBtn = document.querySelector("#export-word-btn");
 const exportPdfBtn = document.querySelector("#export-pdf-btn");
-const authForm = document.querySelector("#auth-form");
-const authStatus = document.querySelector("#auth-status");
 const logoutBtn = document.querySelector("#logout-btn");
+const profileToggle = document.querySelector("#profile-toggle");
+const profileName = document.querySelector("#profile-name");
+const profileTenant = document.querySelector("#profile-tenant");
+const profileRole = document.querySelector("#profile-role");
 const refreshHistoryBtn = document.querySelector("#refresh-history-btn");
 const historyBody = document.querySelector("#history-body");
 const executiveSummary = document.querySelector("#executive-summary");
@@ -58,6 +60,8 @@ let assetRules = loadAssetRules();
 let editingAssetIndex = null;
 let accessToken = safeSessionGet("dspm-access-token") || "";
 let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
+let currentUser = safeSessionGet("dspm-user") || "admin";
+let currentRole = safeSessionGet("dspm-role") || "admin";
 let latestDashboard = null;
 
 async function api(path, payload, method = "POST") {
@@ -117,26 +121,22 @@ function setAuthState(isAuthenticated) {
   }
 }
 
-async function performLogin(username, password) {
-  const result = await api("/api/auth/login", { username, password }, "POST");
-  accessToken = result.access_token;
-  currentTenant = result.tenant_id || "default";
-  safeSessionSet("dspm-access-token", accessToken);
-  safeSessionSet("dspm-tenant-id", currentTenant);
-  setAuthState(true);
-  authStatus.textContent = `Signed in as ${result.role} for tenant ${currentTenant}.`;
-  await loadProtectedMetadata();
-  await loadHistory();
-  await loadAudit();
-}
-
 function logout() {
   accessToken = "";
   latestDashboard = null;
   safeSessionSet("dspm-access-token", "");
   safeSessionSet("dspm-tenant-id", "default");
+  safeSessionSet("dspm-role", "");
+  safeSessionSet("dspm-user", "");
   setAuthState(false);
-  authStatus.textContent = "Signed out.";
+}
+
+function renderProfile() {
+  profileName.textContent = currentUser || "User";
+  profileTenant.textContent = `${currentTenant || "default"} tenant`;
+  profileRole.textContent = currentRole || "viewer";
+  const initial = (currentUser || "U").trim().charAt(0).toUpperCase();
+  document.querySelector(".profile-avatar").textContent = initial || "U";
 }
 
 function updateSummary(summary = {}) {
@@ -1239,17 +1239,6 @@ function renderIntegrations() {
     .join("");
 }
 
-authForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  authStatus.textContent = "Signing in...";
-  try {
-    const data = new FormData(authForm);
-    await performLogin(data.get("auth_username") || "", data.get("auth_password") || "");
-  } catch (error) {
-    authStatus.textContent = `Sign-in failed: ${error.message}`;
-  }
-});
-
 testBtn.addEventListener("click", async () => {
   setBusy(true);
   setStatus("Testing connection...");
@@ -1388,9 +1377,13 @@ exportDlpPolicyBtn.addEventListener("click", () => {
   });
 });
 logoutBtn.addEventListener("click", logout);
+profileToggle.addEventListener("click", () => {
+  document.querySelector(".profile-menu").classList.toggle("open");
+});
 
 applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
+renderProfile();
 renderAssetRules();
 renderReportPreview();
 renderExecutiveExperience();
@@ -1419,7 +1412,6 @@ async function loadProtectedMetadata() {
 }
 
 if (accessToken) {
-  authStatus.textContent = `Token loaded for tenant ${currentTenant}.`;
   loadProtectedMetadata();
   loadHistory().catch(() => {});
   loadAudit().catch(() => {});
