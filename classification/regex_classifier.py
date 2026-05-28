@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from classification.ml_classifier import classify_with_ml
+
 
 @dataclass(frozen=True, slots=True)
 class DetectionRule:
@@ -127,5 +129,10 @@ def classify_content(content: str) -> list[dict]:
                 "samples": matches,
             }
         )
+
+    existing = {finding["type"] for finding in findings}
+    for finding in classify_with_ml(content):
+        if finding["type"] not in existing:
+            findings.append(finding)
 
     return findings

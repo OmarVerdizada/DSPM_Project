@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
+
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -43,6 +45,8 @@ TEXT_EXTENSIONS = {
     ".md",
 }
 
+SCANNABLE_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS
+
 
 @dataclass(slots=True)
 class FileRecord:
@@ -71,7 +75,11 @@ class FileRecord:
 
 
 def read_text_preview(path: Path, max_bytes: int = 1024 * 256) -> str:
-    if path.suffix.lower() not in TEXT_EXTENSIONS:
+    extension = path.suffix.lower()
+    if extension in BINARY_TEXT_EXTENSIONS:
+        return extract_binary_text(path)
+
+    if extension not in TEXT_EXTENSIONS:
         return ""
 
     try:

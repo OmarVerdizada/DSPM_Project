@@ -6,16 +6,79 @@
     <title>DSPM DLP Discovery</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
-  <body>
+  <body class="auth-locked">
+    <section id="login-screen" class="login-screen">
+      <div class="login-visual">
+        <div class="logo-lockup large">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" role="img">
+              <path d="M8 13c0-3 2-5 5-5h15c8 0 14 6 14 16s-6 16-14 16H13c-3 0-5-2-5-5V13Z" />
+              <path d="M19 16h8c4 0 7 3 7 8s-3 8-7 8h-8V16Z" />
+              <path d="M19 16v16" />
+            </svg>
+          </span>
+          <div>
+            <h1>DSPM</h1>
+            <p>Data security posture command center</p>
+          </div>
+        </div>
+        <div class="login-graphic" aria-hidden="true">
+          <div class="graphic-node n1"></div>
+          <div class="graphic-node n2"></div>
+          <div class="graphic-node n3"></div>
+          <div class="graphic-node n4"></div>
+          <div class="graphic-line l1"></div>
+          <div class="graphic-line l2"></div>
+          <div class="graphic-line l3"></div>
+          <div class="graphic-core">DSPM</div>
+        </div>
+      </div>
+      <form id="login-form" class="login-card">
+        <p class="eyebrow">Secure access</p>
+        <h2>Sign in to continue</h2>
+        <p>Authentication is required before scans, reports, tenant history, and security operations are available.</p>
+        <label>
+          Username
+          <input id="login-username" name="username" autocomplete="username" placeholder="Enter username" />
+        </label>
+        <label>
+          Password
+          <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="Enter password" />
+        </label>
+        <button type="submit">Sign in</button>
+        <span id="login-status" class="save-status">Local default: admin / admin123.</span>
+      </form>
+    </section>
+
     <div class="app-shell">
       <aside class="sidebar">
-        <div class="brand">
-          <span class="brand-mark">D</span>
+        <div class="brand logo-lockup">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" role="img">
+              <path d="M8 13c0-3 2-5 5-5h15c8 0 14 6 14 16s-6 16-14 16H13c-3 0-5-2-5-5V13Z" />
+              <path d="M19 16h8c4 0 7 3 7 8s-3 8-7 8h-8V16Z" />
+              <path d="M19 16v16" />
+            </svg>
+          </span>
           <div>
             <h1>DSPM</h1>
             <p>DLP discovery console</p>
           </div>
         </div>
+
+        <form id="auth-form" class="panel auth-panel">
+          <label>
+            Username
+            <input id="auth-username" name="auth_username" autocomplete="username" placeholder="admin" />
+          </label>
+          <label>
+            Password
+            <input id="auth-password" name="auth_password" type="password" autocomplete="current-password" placeholder="admin123" />
+          </label>
+          <button type="submit" id="login-btn">Sign in</button>
+          <button type="button" id="logout-btn" class="secondary-btn">Sign out</button>
+          <p id="auth-status" class="save-status">Sign in to unlock scans and tenant data.</p>
+        </form>
 
         <form id="connection-form" class="panel">
           <label>
@@ -35,12 +98,20 @@
             <input id="password" name="password" type="password" autocomplete="current-password" />
           </label>
           <label>
+            Credential ref
+            <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
+          </label>
+          <label>
             Local sample path
             <input id="local_path" name="local_path" value="test_data" />
           </label>
           <label>
             Max folder depth
             <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
+          </label>
+          <label class="checkbox-row">
+            <input id="async_scan" name="async_scan" type="checkbox" checked />
+            Run through async queue
           </label>
           <div class="actions">
             <button type="button" id="test-btn">Test</button>
@@ -65,8 +136,12 @@
 
         <nav class="tabs" aria-label="Workspace sections">
           <button type="button" class="tab active" data-tab="overview">Overview</button>
+          <button type="button" class="tab" data-tab="executive">Executive</button>
           <button type="button" class="tab" data-tab="assets">Customer Assets</button>
           <button type="button" class="tab" data-tab="reports">Reports</button>
+          <button type="button" class="tab" data-tab="history">History</button>
+          <button type="button" class="tab" data-tab="security">Security</button>
+          <button type="button" class="tab" data-tab="integrations">Integrations</button>
           <button type="button" class="tab" data-tab="logic">Risk Logic</button>
         </nav>
 
@@ -93,6 +168,8 @@
               <strong id="total-count">0</strong>
             </div>
           </section>
+
+          <section id="overview-insights" class="insights-grid"></section>
 
           <section class="workspace">
             <div class="table-toolbar">
@@ -124,6 +201,52 @@
               </table>
             </div>
           </section>
+        </section>
+
+        <section id="tab-executive" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">CISO view</p>
+              <h3>Risk posture command center</h3>
+              <p>Current exposure, trend movement, alert pressure, and the top files that need attention.</p>
+            </div>
+            <button type="button" id="refresh-executive-btn" class="secondary-btn">Refresh</button>
+          </div>
+
+          <div id="executive-hero" class="executive-hero"></div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Risk distribution</h4>
+                <span id="risk-total-label">No scan yet</span>
+              </div>
+              <div id="risk-distribution"></div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Folder heatmap</h4>
+                <span>By source path</span>
+              </div>
+              <div id="risk-heatmap"></div>
+            </section>
+          </div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Signal mix</h4>
+                <span>Detection categories</span>
+              </div>
+              <div id="signal-matrix"></div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Risk topology</h4>
+                <span>Source to exposure path</span>
+              </div>
+              <div id="risk-topology" class="risk-topology"></div>
+            </section>
+          </div>
+          <div id="executive-top-files" class="top-files-grid"></div>
         </section>
 
         <section id="tab-assets" class="tab-panel">
@@ -173,13 +296,123 @@
               <p>Generate customer-ready reports from the latest scan and current manual risk decisions.</p>
             </div>
             <div class="report-actions">
-              <button type="button" id="export-csv-btn" class="secondary-btn">Export CSV</button>
+              <button type="button" id="export-csv-btn" class="secondary-btn">Export Excel</button>
               <button type="button" id="export-word-btn" class="secondary-btn">Export Word</button>
               <button type="button" id="export-pdf-btn">Print / PDF</button>
             </div>
           </div>
 
           <div id="report-preview" class="report-preview"></div>
+        </section>
+
+        <section id="tab-history" class="tab-panel workspace">
+          <div class="table-toolbar">
+            <div>
+              <h3>Scan history and audit</h3>
+              <p>Tenant scan trend, posture score, and immutable activity trail.</p>
+            </div>
+            <button type="button" id="refresh-history-btn" class="secondary-btn">Refresh</button>
+          </div>
+          <div id="executive-summary" class="history-grid"></div>
+          <div class="table-wrap">
+            <table class="logic-table">
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>Scan</th>
+                  <th>Critical</th>
+                  <th>High</th>
+                  <th>Medium</th>
+                  <th>Low</th>
+                </tr>
+              </thead>
+              <tbody id="history-body">
+                <tr><td colspan="6" class="empty">Sign in to load scan history.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="tab-security" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Governance</p>
+              <h3>Security operations</h3>
+              <p>API keys, audit evidence, DLP export, and tenant controls exposed by the backend.</p>
+            </div>
+          </div>
+
+          <div class="security-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>API key management</h4>
+                <span>Admin only</span>
+              </div>
+              <label>
+                Key label
+                <input id="api-key-label" value="automation" />
+              </label>
+              <button type="button" id="create-api-key-btn">Create API key</button>
+              <pre id="api-key-output" class="code-output">No key generated in this session.</pre>
+            </section>
+
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>DLP policy export</h4>
+                <span>Generic JSON</span>
+              </div>
+              <p class="panel-copy">Exports the current customer asset rules as an import-ready policy skeleton.</p>
+              <button type="button" id="export-dlp-policy-btn" class="secondary-btn">Generate policy</button>
+              <pre id="dlp-policy-output" class="code-output">No policy generated yet.</pre>
+            </section>
+          </div>
+
+          <section class="workspace">
+            <div class="table-toolbar">
+              <div>
+                <h3>Audit trail</h3>
+                <p>Immutable tenant activity captured by the backend.</p>
+              </div>
+              <button type="button" id="refresh-audit-btn" class="secondary-btn">Refresh audit</button>
+            </div>
+            <div class="table-wrap">
+              <table class="logic-table">
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Actor</th>
+                    <th>Action</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody id="audit-body">
+                  <tr><td colspan="4" class="empty">Sign in as admin to load audit events.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-integrations" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Platform coverage</p>
+              <h3>Connectors and response workflows</h3>
+              <p>What is active today, what has a backend adapter, and what is ready for production integration.</p>
+            </div>
+          </div>
+          <div class="integration-layout">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Reference architecture</h4>
+                <span>Connector-ready</span>
+              </div>
+              <div id="integration-diagram" class="integration-diagram"></div>
+            </section>
+            <section>
+              <div id="integration-grid" class="integration-grid"></div>
+            </section>
+          </div>
         </section>
 
         <section id="tab-logic" class="tab-panel workspace risk-logic">
