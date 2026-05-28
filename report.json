@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-05-28T10:33:57.152211+00:00",
+  "timestamp": "2026-05-28T12:03:10.911916+00:00",
   "source": "local",
   "summary": {
     "total_files": 3,
-    "critical": 0,
+    "critical": 1,
     "high": 0,
-    "medium": 2,
+    "medium": 1,
     "low": 1,
     "sensitive_files": 2
   },
@@ -136,8 +136,8 @@
         ]
       },
       "risk": {
-        "score": 55,
-        "level": "MEDIUM",
+        "score": 95,
+        "level": "CRITICAL",
         "reasons": [
           "MSSP asset override: Credential files are crown-jewel assets",
           "Password-like secret detected (1 match)",
@@ -151,6 +151,12 @@
       }
     }
   ],
-  "scan_id": "20260528103357152226",
-  "alerts": []
+  "scan_id": "20260528120310911936",
+  "alerts": [
+    {
+      "severity": "CRITICAL",
+      "title": "Critical sensitive exposure detected",
+      "message": "1 critical files found in scan 20260528120310911936"
+    }
+  ]
 }
