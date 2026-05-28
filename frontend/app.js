@@ -22,8 +22,6 @@ const exportCsvBtn = document.querySelector("#export-csv-btn");
 const exportWordBtn = document.querySelector("#export-word-btn");
 const exportPdfBtn = document.querySelector("#export-pdf-btn");
 const authForm = document.querySelector("#auth-form");
-const loginForm = document.querySelector("#login-form");
-const loginStatus = document.querySelector("#login-status");
 const authStatus = document.querySelector("#auth-status");
 const logoutBtn = document.querySelector("#logout-btn");
 const refreshHistoryBtn = document.querySelector("#refresh-history-btn");
@@ -58,8 +56,8 @@ let latestReport = null;
 let rowOverrides = loadRowOverrides();
 let assetRules = loadAssetRules();
 let editingAssetIndex = null;
-let accessToken = safeStorageGet("dspm-access-token") || "";
-let currentTenant = safeStorageGet("dspm-tenant-id") || "default";
+let accessToken = safeSessionGet("dspm-access-token") || "";
+let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
 let latestDashboard = null;
 
 async function api(path, payload, method = "POST") {
@@ -114,12 +112,8 @@ function setAuthState(isAuthenticated) {
   document.body.classList.toggle("auth-locked", !isAuthenticated);
   document.body.classList.toggle("auth-ready", isAuthenticated);
   setBusy(!isAuthenticated);
-  const onLoginPage = window.location.pathname === "/login";
-  if (!isAuthenticated && !onLoginPage) {
-    window.history.replaceState({}, "", "/login");
-  }
-  if (isAuthenticated && onLoginPage) {
-    window.history.replaceState({}, "", "/");
+  if (!isAuthenticated) {
+    window.location.replace("/login");
   }
 }
 
@@ -127,13 +121,10 @@ async function performLogin(username, password) {
   const result = await api("/api/auth/login", { username, password }, "POST");
   accessToken = result.access_token;
   currentTenant = result.tenant_id || "default";
-  safeStorageSet("dspm-access-token", accessToken);
-  safeStorageSet("dspm-tenant-id", currentTenant);
+  safeSessionSet("dspm-access-token", accessToken);
+  safeSessionSet("dspm-tenant-id", currentTenant);
   setAuthState(true);
   authStatus.textContent = `Signed in as ${result.role} for tenant ${currentTenant}.`;
-  if (loginStatus) {
-    loginStatus.textContent = "Signed in successfully.";
-  }
   await loadProtectedMetadata();
   await loadHistory();
   await loadAudit();
@@ -142,13 +133,10 @@ async function performLogin(username, password) {
 function logout() {
   accessToken = "";
   latestDashboard = null;
-  safeStorageSet("dspm-access-token", "");
-  safeStorageSet("dspm-tenant-id", "default");
+  safeSessionSet("dspm-access-token", "");
+  safeSessionSet("dspm-tenant-id", "default");
   setAuthState(false);
   authStatus.textContent = "Signed out.";
-  if (loginStatus) {
-    loginStatus.textContent = "Signed out. Sign in to continue.";
-  }
 }
 
 function updateSummary(summary = {}) {
@@ -457,6 +445,27 @@ function safeStorageGet(key) {
 function safeStorageSet(key, value) {
   try {
     window.localStorage.setItem(key, value);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function safeSessionGet(key) {
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSessionSet(key, value) {
+  try {
+    if (value) {
+      window.sessionStorage.setItem(key, value);
+    } else {
+      window.sessionStorage.removeItem(key);
+    }
   } catch {
     return false;
   }
@@ -1238,17 +1247,6 @@ authForm.addEventListener("submit", async (event) => {
     await performLogin(data.get("auth_username") || "", data.get("auth_password") || "");
   } catch (error) {
     authStatus.textContent = `Sign-in failed: ${error.message}`;
-  }
-});
-
-loginForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  loginStatus.textContent = "Signing in...";
-  try {
-    const data = new FormData(loginForm);
-    await performLogin(data.get("username") || "", data.get("password") || "");
-  } catch (error) {
-    loginStatus.textContent = `Sign-in failed: ${error.message}`;
   }
 });
 

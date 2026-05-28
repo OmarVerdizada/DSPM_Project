@@ -78,6 +78,10 @@ select {
   display: grid;
 }
 
+.login-page .login-screen.standalone {
+  display: grid;
+}
+
 .login-visual,
 .login-card {
   border: 1px solid var(--line);

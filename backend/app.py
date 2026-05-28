@@ -82,7 +82,7 @@ def dashboard() -> FileResponse:
 
 @app.get("/login")
 def login_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "index.html")
+    return FileResponse(FRONTEND_DIR / "login.html")
 
 
 @app.get("/api/health")
