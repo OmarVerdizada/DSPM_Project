@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 
@@ -80,6 +81,13 @@ RISK_RULE_DESCRIPTIONS = [
         "dlp_action": "Quarantine, rotate the secret, and alert the security owner.",
     },
     {
+        "signal": "SaaS and developer tokens",
+        "base_risk": "CRITICAL",
+        "score": "Minimum 90",
+        "reason": "GitHub, Slack, Google, Azure, and source-code secret tokens can expose production systems or collaboration data.",
+        "dlp_action": "Block movement, rotate the token, and create a security incident task.",
+    },
+    {
         "signal": "Password, token, API key, secret",
         "base_risk": "HIGH",
         "score": "Minimum 70",
@@ -101,11 +109,25 @@ RISK_RULE_DESCRIPTIONS = [
         "dlp_action": "Block external transfer and notify data owner.",
     },
     {
+        "signal": "IBAN, SWIFT, passport, national ID",
+        "base_risk": "HIGH",
+        "score": "+35",
+        "reason": "Financial and government identifiers increase regulatory exposure and require evidence-backed access control.",
+        "dlp_action": "Apply regulated-data label, restrict sharing, and require owner attestation.",
+    },
+    {
         "signal": "Confidential keywords",
         "base_risk": "MEDIUM",
         "score": "+20",
         "reason": "Business-sensitive labels indicate documents that should be reviewed before broad access.",
         "dlp_action": "Apply warning, classification label, or owner review workflow.",
+    },
+    {
+        "signal": "HR, legal, customer, finance, PHI context",
+        "base_risk": "MEDIUM-HIGH",
+        "score": "+20 to +35",
+        "reason": "Context classifiers identify regulated business domains even when the file has few explicit identifiers.",
+        "dlp_action": "Route to the correct data owner and tune policies by business domain.",
     },
     {
         "signal": "Sensitive filename/path",
@@ -151,6 +173,7 @@ class RiskAssessment:
     level: str
     reasons: list[str] = field(default_factory=list)
     dlp_recommendations: list[str] = field(default_factory=list)
+    remediation: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -158,6 +181,7 @@ class RiskAssessment:
             "level": self.level,
             "reasons": self.reasons,
             "dlp_recommendations": self.dlp_recommendations,
+            "remediation": self.remediation,
         }
 
 
@@ -226,6 +250,7 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
         level=level,
         reasons=_dedupe(reasons) or ["No sensitive signal detected"],
         dlp_recommendations=_dedupe(recommendations),
+        remediation=_build_remediation(level, score, file_obj, findings, acl_assessment),
     )
 
 
@@ -269,6 +294,53 @@ def _match_asset_override(file_obj: dict) -> dict | None:
 
 def get_risk_rules() -> list[dict]:
     return RISK_RULE_DESCRIPTIONS
+
+
+def _build_remediation(level: str, score: int, file_obj: dict, findings: list[dict], acl_assessment: dict) -> dict:
+    finding_types = {str(finding.get("type", "")).lower() for finding in findings}
+    has_secret = any("key" in item or "token" in item or "secret" in item or "password" in item for item in finding_types)
+    has_regulated = any(item in finding_types for item in {"credit_card", "iban", "swift_bic", "passport_number", "national_id"})
+    has_acl_issue = bool(acl_assessment.get("issues"))
+
+    if level == "CRITICAL":
+        sla = "24 hours"
+        owner = "Security owner"
+        status = "Open - urgent"
+    elif level == "HIGH":
+        sla = "3 business days"
+        owner = "Data owner"
+        status = "Open"
+    elif level == "MEDIUM":
+        sla = "14 days"
+        owner = "Business owner"
+        status = "Needs review"
+    else:
+        sla = "30 days"
+        owner = "IT operations"
+        status = "Monitor"
+
+    actions: list[str] = []
+    if has_secret:
+        actions.extend(["Quarantine file copy", "Rotate exposed secret", "Invalidate tokens and review access logs"])
+    if has_regulated:
+        actions.extend(["Apply regulated-data label", "Restrict external sharing", "Create DLP block rule for matching identifiers"])
+    if has_acl_issue:
+        actions.extend(["Remove broad or writable groups", "Confirm least-privilege access with the data owner"])
+    if not actions and level in {"HIGH", "CRITICAL"}:
+        actions.append("Create remediation ticket and request owner attestation")
+    if not actions:
+        actions.append("Monitor movement and validate business ownership")
+
+    ticket_seed = str(file_obj.get("path") or file_obj.get("name") or score).encode("utf-8", errors="ignore")
+    ticket_id = int(hashlib.sha1(ticket_seed).hexdigest()[:8], 16) % 100000
+
+    return {
+        "status": status,
+        "owner": owner,
+        "sla": sla,
+        "ticket": f"DSPM-{ticket_id:05d}",
+        "actions": _dedupe(actions),
+    }
 
 
 def _dedupe(items: list[str]) -> list[str]:

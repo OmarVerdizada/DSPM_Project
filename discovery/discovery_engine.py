@@ -19,7 +19,7 @@ class ScanConfig:
     username: str = ""
     password: str = ""
     domain: str = "WORKGROUP"
-    local_path: str = "test_data"
+    local_path: str = "enterprise_test_data"
     max_depth: int = 4
     use_sample_when_empty: bool = True
     asset_overrides: list[dict] = field(default_factory=list)

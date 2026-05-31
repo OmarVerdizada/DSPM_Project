@@ -10,6 +10,7 @@ const scanMeta = document.querySelector("#scan-meta");
 const tabs = document.querySelectorAll(".tab");
 const tabPanels = document.querySelectorAll(".tab-panel");
 const themeToggle = document.querySelector("#theme-toggle");
+const tenantSwitcher = document.querySelector("#tenant-switcher");
 const addAssetBtn = document.querySelector("#add-asset-btn");
 const saveAssetsBtn = document.querySelector("#save-assets-btn");
 const assetPattern = document.querySelector("#asset-pattern");
@@ -38,6 +39,9 @@ const riskHeatmap = document.querySelector("#risk-heatmap");
 const signalMatrix = document.querySelector("#signal-matrix");
 const riskTopology = document.querySelector("#risk-topology");
 const executiveTopFiles = document.querySelector("#executive-top-files");
+const postureTrend = document.querySelector("#posture-trend");
+const remediationWorkflow = document.querySelector("#remediation-workflow");
+const msspPortfolio = document.querySelector("#mssp-portfolio");
 const createApiKeyBtn = document.querySelector("#create-api-key-btn");
 const apiKeyLabel = document.querySelector("#api-key-label");
 const apiKeyOutput = document.querySelector("#api-key-output");
@@ -47,22 +51,56 @@ const refreshAuditBtn = document.querySelector("#refresh-audit-btn");
 const auditBody = document.querySelector("#audit-body");
 const integrationGrid = document.querySelector("#integration-grid");
 const integrationDiagram = document.querySelector("#integration-diagram");
+const detailDrawer = document.querySelector("#detail-drawer");
+const detailDrawerEyebrow = detailDrawer.querySelector("#detail-drawer-eyebrow");
+const detailDrawerTitle = detailDrawer.querySelector("#detail-drawer-title");
+const detailDrawerMeta = detailDrawer.querySelector("#detail-drawer-meta");
+const detailDrawerBody = detailDrawer.querySelector("#detail-drawer-body");
 
 const DEFAULT_ASSETS = [
   { pattern: "password", level: "CRITICAL", reason: "Credential files are crown-jewel assets" },
   { pattern: "finance", level: "HIGH", reason: "Finance folders carry regulated business data" },
 ];
 
+const RISK_SCORE_BANDS = [
+  {
+    level: "LOW",
+    range: "0-39",
+    title: "Low exposure",
+    description: "No regulated data, secrets, broad access, or risky business context was found. Monitor and keep normal retention controls in place.",
+  },
+  {
+    level: "MEDIUM",
+    range: "40-69",
+    title: "Review needed",
+    description: "Personal data, confidential labels, risky paths, or file types indicate business-sensitive data that should be owned and classified.",
+  },
+  {
+    level: "HIGH",
+    range: "70-89",
+    title: "Controlled data",
+    description: "Credentials, payment data, finance records, payroll, customer exports, or broad writable access require restrictive handling.",
+  },
+  {
+    level: "CRITICAL",
+    range: "90-100",
+    title: "Immediate action",
+    description: "Private keys, cloud tokens, secrets, or crown-jewel assets can create direct compromise and should be quarantined or remediated first.",
+  },
+];
+
+let accessToken = safeSessionGet("dspm-access-token") || "";
+let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
+let currentUser = safeSessionGet("dspm-user") || "admin";
+let currentRole = safeSessionGet("dspm-role") || "admin";
 let latestFiles = [];
 let latestReport = null;
 let rowOverrides = loadRowOverrides();
 let assetRules = loadAssetRules();
 let editingAssetIndex = null;
-let accessToken = safeSessionGet("dspm-access-token") || "";
-let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
-let currentUser = safeSessionGet("dspm-user") || "admin";
-let currentRole = safeSessionGet("dspm-role") || "admin";
 let latestDashboard = null;
+let tenantPortfolio = [];
+let latestRiskRules = [];
 
 async function api(path, payload, method = "POST") {
   const response = await fetch(path, {
@@ -95,7 +133,7 @@ function readPayload() {
     username: data.get("username") || "",
     password: data.get("password") || "",
     credential_ref: data.get("credential_ref") || "",
-    local_path: data.get("local_path") || "test_data",
+    local_path: data.get("local_path") || "enterprise_test_data",
     max_depth: Number(data.get("max_depth") || 4),
     async_scan: Boolean(data.get("async_scan")),
     asset_overrides: assetRules,
@@ -135,6 +173,7 @@ function renderProfile() {
   profileName.textContent = currentUser || "User";
   profileTenant.textContent = `${currentTenant || "default"} tenant`;
   profileRole.textContent = currentRole || "viewer";
+  tenantSwitcher.value = currentTenant;
   const initial = (currentUser || "U").trim().charAt(0).toUpperCase();
   document.querySelector(".profile-avatar").textContent = initial || "U";
 }
@@ -172,6 +211,20 @@ function list(items) {
   }
 
   return `<ul class="list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function detailButton(items, file, type, label, emptyText) {
+  if (!items || items.length === 0) {
+    return `<span class="subtext">${escapeHtml(emptyText)}</span>`;
+  }
+
+  return `
+    <button type="button" class="detail-toggle" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(label)}">
+        <span class="detail-chevron">›</span>
+        <span class="detail-toggle-label">${escapeHtml(label)}</span>
+        <span class="detail-count">${items.length}</span>
+    </button>
+  `;
 }
 
 function renderRows(files) {
@@ -219,8 +272,8 @@ function renderRows(files) {
               ${riskOption("LOW", "Low", rowOverrides[key] || "")}
             </select>
           </td>
-          <td>${list(reasons)}</td>
-          <td>${list(recommendations)}</td>
+          <td>${detailButton(reasons, file, "reasons", "Reasons", "No reasons")}</td>
+          <td>${detailButton(recommendations, file, "recommendations", "DLP actions", "No actions")}</td>
         </tr>
       `;
     })
@@ -290,32 +343,157 @@ function fileKey(file) {
   return `${file.source || "unknown"}|${file.share || ""}|${file.path || file.name || ""}`;
 }
 
+function openDetailDrawer(key, type) {
+  const file = latestFiles.find((item) => fileKey(item) === key);
+  const isRecommendation = type === "recommendations";
+  const items = isRecommendation ? file?.risk?.dlp_recommendations || [] : file?.risk?.reasons || [];
+  detailDrawerEyebrow.textContent = isRecommendation ? "DLP recommendations" : "Risk context";
+  detailDrawerTitle.textContent = file?.name || (isRecommendation ? "DLP recommendations" : "Reasons");
+  detailDrawerMeta.textContent = file?.path || "";
+  detailDrawerBody.innerHTML = items.length
+    ? `
+      <ol class="detail-list ${isRecommendation ? "recommendations" : "reasons"}">
+        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ol>
+    `
+    : `<p class="subtext">No ${isRecommendation ? "DLP recommendations" : "risk reasons"} were generated for this file.</p>`;
+  detailDrawer.classList.remove("hidden");
+  detailDrawer.getBoundingClientRect();
+  detailDrawer.classList.add("open");
+}
+
+function closeDetailDrawer() {
+  detailDrawer.classList.remove("open");
+  window.setTimeout(() => {
+    if (!detailDrawer.classList.contains("open")) {
+      detailDrawer.classList.add("hidden");
+    }
+  }, 180);
+}
+
 function renderRiskRules(rules) {
+  latestRiskRules = rules || [];
   if (!rules || rules.length === 0) {
-    riskRulesBody.innerHTML = '<tr><td colspan="5" class="empty">No risk logic configured.</td></tr>';
+    riskRulesBody.innerHTML = '<div class="empty compact">No risk logic configured.</div>';
     return;
   }
 
-  riskRulesBody.innerHTML = rules
-    .map(
-      (rule) => `
-        <tr>
-          <td class="file-path">${escapeHtml(rule.signal)}</td>
-          <td><span class="badge ${riskBadgeClass(rule.base_risk)}">${escapeHtml(rule.base_risk)}</span></td>
-          <td>${escapeHtml(rule.score)}</td>
-          <td>${escapeHtml(rule.reason)}</td>
-          <td>${escapeHtml(rule.dlp_action)}</td>
-        </tr>
-      `
-    )
-    .join("");
+  const formulaCards = [
+    ["Detection weights", "Critical findings add 45 points and force at least 90. High findings add 35 and force at least 70. Medium findings add 20. Low findings add 5."],
+    ["Context boosters", "Sensitive filenames or paths add 15 points. Risky extensions add 10-25. SMB exposure adds 5. Broad or writable permissions can add 15-40."],
+    ["Customer assets", "Analyst asset rules can force LOW, MEDIUM, HIGH, or CRITICAL when a path matches a customer-specific pattern."],
+    ["Posture score", "File risk scores are averaged as exposure. Posture is 100 minus that exposure, so it moves with every scan and manual override."],
+  ];
+
+  riskRulesBody.innerHTML = `
+    <div class="logic-hero">
+      <div>
+        <span class="eyebrow">Risk scoring model</span>
+        <h4>Every file receives a 0-100 risk score from content, path, extension, permissions, share exposure, and customer asset context.</h4>
+      </div>
+      <div class="logic-score-meter">
+        <strong>100</strong>
+        <span>maximum file risk</span>
+      </div>
+    </div>
+
+    <section class="logic-section">
+      <div class="logic-section-title">
+        <span>Severity ranges</span>
+        <strong>0-100 scale</strong>
+      </div>
+      <div class="logic-band-grid">
+        ${RISK_SCORE_BANDS.map(
+          (band) => `
+            <article class="logic-band ${band.level}">
+              <span>${band.range}</span>
+              <h4>${escapeHtml(band.level)} - ${escapeHtml(band.title)}</h4>
+              <p>${escapeHtml(band.description)}</p>
+            </article>
+          `
+        ).join("")}
+      </div>
+    </section>
+
+    <section class="logic-section">
+      <div class="logic-section-title">
+        <span>How the score is built</span>
+        <strong>Signals are additive, manual context can override</strong>
+      </div>
+      <div class="logic-card-grid">
+        ${formulaCards.map(
+          ([title, description]) => `
+            <article class="logic-card">
+              <h4>${escapeHtml(title)}</h4>
+              <p>${escapeHtml(description)}</p>
+            </article>
+          `
+        ).join("")}
+      </div>
+    </section>
+
+    <section class="logic-section">
+      <div class="logic-section-title">
+        <span>Detection and control rules</span>
+        <strong>${rules.length} signals</strong>
+      </div>
+      <div class="logic-signal-grid">
+        ${rules.map(renderLogicRuleCard).join("")}
+      </div>
+    </section>
+
+    <section class="logic-section">
+      <div class="logic-section-title">
+        <span>Customer asset context</span>
+        <strong>${assetRules.length} active overrides</strong>
+      </div>
+      <div class="logic-assets-grid">
+        ${assetRules.map(
+          (asset) => `
+            <article class="logic-asset">
+              <span class="badge ${asset.level}">${escapeHtml(asset.level)}</span>
+              <h4>${escapeHtml(asset.pattern)}</h4>
+              <p>${escapeHtml(asset.reason || "Matching files inherit this customer-specific risk context.")}</p>
+            </article>
+          `
+        ).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderRiskRulesCache() {
+  if (latestRiskRules.length) {
+    renderRiskRules(latestRiskRules);
+  }
+}
+
+function renderLogicRuleCard(rule) {
+  return `
+    <article class="logic-signal-card">
+      <div class="logic-signal-head">
+        <span class="badge ${riskBadgeClass(rule.base_risk)}">${escapeHtml(rule.base_risk)}</span>
+        <strong>${escapeHtml(rule.score)}</strong>
+      </div>
+      <h4>${escapeHtml(rule.signal)}</h4>
+      <p>${escapeHtml(rule.reason)}</p>
+      <div class="logic-action">
+        <span>DLP action</span>
+        <p>${escapeHtml(rule.dlp_action)}</p>
+      </div>
+    </article>
+  `;
 }
 
 function riskBadgeClass(value) {
-  if (value.includes("HIGH")) {
+  const normalized = String(value || "").toUpperCase();
+  if (normalized.includes("CRITICAL")) {
+    return "CRITICAL";
+  }
+  if (normalized.includes("HIGH")) {
     return "HIGH";
   }
-  if (value.includes("MEDIUM")) {
+  if (normalized.includes("MEDIUM") || normalized.includes("MANUAL")) {
     return "MEDIUM";
   }
   return "LOW";
@@ -363,9 +541,10 @@ function renderAssetRules() {
 }
 
 function saveAssetRules(message = "Asset rules saved.") {
-  safeStorageSet("dspm-asset-rules", JSON.stringify(assetRules));
+  safeStorageSet(tenantStorageKey("asset-rules"), JSON.stringify(assetRules));
   assetSaveStatus.textContent = message;
   renderAssetRules();
+  renderRiskRulesCache();
 }
 
 function upsertAssetRule() {
@@ -415,7 +594,7 @@ function resetAssetForm() {
 
 function loadAssetRules() {
   try {
-    const saved = JSON.parse(safeStorageGet("dspm-asset-rules") || "null");
+    const saved = JSON.parse(safeStorageGet(tenantStorageKey("asset-rules")) || "null");
     return Array.isArray(saved) ? saved : DEFAULT_ASSETS;
   } catch {
     return DEFAULT_ASSETS;
@@ -424,14 +603,18 @@ function loadAssetRules() {
 
 function loadRowOverrides() {
   try {
-    return JSON.parse(safeStorageGet("dspm-row-risk-overrides") || "{}");
+    return JSON.parse(safeStorageGet(tenantStorageKey("row-risk-overrides")) || "{}");
   } catch {
     return {};
   }
 }
 
 function saveRowOverrides() {
-  safeStorageSet("dspm-row-risk-overrides", JSON.stringify(rowOverrides));
+  safeStorageSet(tenantStorageKey("row-risk-overrides"), JSON.stringify(rowOverrides));
+}
+
+function tenantStorageKey(key) {
+  return `dspm-${currentTenant || "default"}-${key}`;
 }
 
 function safeStorageGet(key) {
@@ -536,8 +719,10 @@ function renderReportPreview() {
 }
 
 function renderExecutiveExperience() {
-  const summary = buildCurrentSummary();
-  const score = latestDashboard?.risk_posture_score ?? calculatePostureScore(summary);
+  const currentSummary = buildCurrentSummary();
+  const dashboardSummary = latestDashboard?.latest?.summary || {};
+  const summary = currentSummary.total_files ? currentSummary : dashboardSummary.total_files ? dashboardSummary : currentSummary;
+  const score = getCurrentPostureScore(summary);
   const distribution = buildRiskDistribution(summary);
   const topFiles = [...latestFiles].sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score).slice(0, 6);
   const criticalCount = summary.critical || 0;
@@ -586,11 +771,41 @@ function renderExecutiveExperience() {
   riskHeatmap.innerHTML = buildHeatmap(topFiles.length ? latestFiles : []);
   signalMatrix.innerHTML = buildSignalMatrix();
   riskTopology.innerHTML = buildRiskTopology(summary);
+  postureTrend.innerHTML = buildPostureTrend();
+  remediationWorkflow.innerHTML = buildRemediationWorkflow();
+  msspPortfolio.innerHTML = buildMsspPortfolio();
   executiveTopFiles.innerHTML = renderTopFiles(topFiles);
 }
 
-function calculatePostureScore(summary) {
-  return Math.max(0, 100 - summary.critical * 20 - summary.high * 8 - summary.medium * 3);
+function getCurrentPostureScore(summary = buildCurrentSummary()) {
+  if (latestFiles.length) {
+    return calculatePostureScore(summary, latestFiles);
+  }
+  const dashboardSummary = latestDashboard?.latest?.summary;
+  if (dashboardSummary?.total_files) {
+    return calculatePostureScore(dashboardSummary);
+  }
+  return latestDashboard?.risk_posture_score ?? calculatePostureScore(summary);
+}
+
+function calculatePostureScore(summary, files = []) {
+  if (files.length) {
+    const exposure = files.reduce((sum, file) => sum + (Number(getEffectiveRisk(file).score) || 0), 0) / files.length;
+    return clampScore(100 - Math.round(exposure));
+  }
+
+  const total = Number(summary.total_files || 0);
+  if (!total) {
+    return 100;
+  }
+
+  const exposure =
+    ((summary.critical || 0) * 95 + (summary.high || 0) * 80 + (summary.medium || 0) * 55 + (summary.low || 0) * 20) / total;
+  return clampScore(100 - Math.round(exposure));
+}
+
+function clampScore(value) {
+  return Math.max(0, Math.min(100, Number(value) || 0));
 }
 
 function countSensitiveFiles(files) {
@@ -618,6 +833,103 @@ function buildFindingStats() {
     .map(([type, count]) => ({ type, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 6);
+}
+
+function buildPostureTrend() {
+  const trend = latestDashboard?.trend || [];
+  if (!trend.length) {
+    return '<div class="empty compact">Scan history will draw a posture trend after the first saved assessment.</div>';
+  }
+
+  const points = trend.slice(-8).map((item) => {
+    const summary = item.summary || {};
+    return {
+      label: (item.timestamp || "").slice(5, 10) || "scan",
+      score: calculatePostureScore(summary),
+      critical: summary.critical || 0,
+      high: summary.high || 0,
+    };
+  });
+
+  const maxScore = 100;
+  return `
+    <div class="trend-bars">
+      ${points.map((item) => `
+        <div class="trend-bar" title="${escapeHtml(item.label)}: ${item.score}">
+          <span style="height:${Math.max(8, (item.score / maxScore) * 100)}%"></span>
+          <strong>${item.score}</strong>
+          <small>${escapeHtml(item.label)}</small>
+        </div>
+      `).join("")}
+    </div>
+    <div class="trend-caption">${points.at(-1)?.critical || 0} critical and ${points.at(-1)?.high || 0} high files in latest saved scan.</div>
+  `;
+}
+
+function buildRemediationWorkflow() {
+  const items = latestFiles
+    .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level))
+    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
+    .slice(0, 5);
+
+  if (!items.length) {
+    return '<div class="empty compact">No active remediation queue yet.</div>';
+  }
+
+  return `
+    <div class="remediation-list">
+      ${items.map((file) => {
+        const risk = getEffectiveRisk(file);
+        const remediation = file.risk?.remediation || {};
+        return `
+          <article class="remediation-item">
+            <span class="badge ${risk.level}">${risk.level}</span>
+            <div>
+              <h4>${escapeHtml(file.name || file.path || "Unknown file")}</h4>
+              <p>${escapeHtml(remediation.ticket || "DSPM ticket")} · ${escapeHtml(remediation.owner || "Data owner")} · SLA ${escapeHtml(remediation.sla || "review")}</p>
+              <small>${escapeHtml((remediation.actions || ["Validate business ownership"])[0])}</small>
+            </div>
+          </article>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function buildMsspPortfolio() {
+  const tenants = tenantPortfolio.length
+    ? tenantPortfolio
+    : [{ tenant_id: currentTenant, scan_count: latestDashboard?.trend?.length || 0, latest: latestDashboard?.latest || { summary: buildCurrentSummary() } }];
+
+  const totalCustomers = tenants.length;
+  const activeTenant = tenants.find((tenant) => tenant.tenant_id === currentTenant) || tenants[0];
+  const activeSummary = activeTenant.latest?.summary || buildCurrentSummary();
+  const openCritical = tenants.reduce((sum, tenant) => sum + Number(tenant.latest?.summary?.critical || 0), 0);
+
+  return `
+    <article class="mssp-summary-card">
+      <span>Managed customers</span>
+      <strong>${totalCustomers}</strong>
+      <p>Active customer: ${escapeHtml(currentTenant)} · ${activeSummary.total_files || 0} files in scope</p>
+    </article>
+    <article class="mssp-summary-card">
+      <span>Open critical exposure</span>
+      <strong>${openCritical}</strong>
+      <p>Aggregated across tenant-isolated customer workspaces.</p>
+    </article>
+    ${tenants.slice(0, 4).map((tenant) => {
+      const summary = tenant.latest?.summary || {};
+      const score = calculatePostureScore(summary);
+      const isActive = tenant.tenant_id === currentTenant;
+      return `
+        <article class="portfolio-card ${isActive ? "active" : ""}" data-tenant-jump="${escapeHtml(tenant.tenant_id)}">
+          <span>${escapeHtml(tenant.tenant_id)}</span>
+          <strong>${score}</strong>
+          <p>${summary.total_files || 0} files · ${summary.critical || 0} critical · ${tenant.scan_count || 0} scans</p>
+        </article>
+      `;
+    }).join("")}
+  `;
 }
 
 function buildDonutSvg(distribution) {
@@ -838,7 +1150,7 @@ function buildReportHtml(mode = "word") {
   const summary = buildCurrentSummary();
   const distribution = buildRiskDistribution(summary);
   const findingStats = buildFindingStats();
-  const score = latestDashboard?.risk_posture_score ?? calculatePostureScore(summary);
+  const score = getCurrentPostureScore(summary);
   const topFiles = [...latestFiles]
     .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
     .slice(0, 8);
@@ -1019,7 +1331,7 @@ function buildExcelWorkbookHtml() {
         <p>Generated ${escapeHtml(new Date().toLocaleString())} for tenant ${escapeHtml(currentTenant)}</p>
         <table class="kpi">
           <tr><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Total files</th><th>Posture score</th></tr>
-          <tr><td class="CRITICAL">${summary.critical}</td><td class="HIGH">${summary.high}</td><td class="MEDIUM">${summary.medium}</td><td class="LOW">${summary.low}</td><td>${summary.total_files}</td><td>${latestDashboard?.risk_posture_score ?? calculatePostureScore(summary)}</td></tr>
+          <tr><td class="CRITICAL">${summary.critical}</td><td class="HIGH">${summary.high}</td><td class="MEDIUM">${summary.medium}</td><td class="LOW">${summary.low}</td><td>${summary.total_files}</td><td>${getCurrentPostureScore(summary)}</td></tr>
         </table>
         <h2>Risk Distribution</h2>
         <table><tr><th>Level</th><th>Files</th></tr>${distribution.map((item) => `<tr><td class="${item.level}">${item.label}</td><td>${item.count}</td></tr>`).join("")}</table>
@@ -1102,6 +1414,26 @@ async function loadHistory() {
   renderHistory(history.history || []);
   renderExecutiveDashboard(dashboard);
   renderExecutiveExperience();
+  loadTenants().catch(() => {});
+}
+
+async function loadTenants() {
+  if (!accessToken || currentRole !== "admin") {
+    tenantSwitcher.classList.add("hidden");
+    tenantPortfolio = [{ tenant_id: currentTenant, scan_count: latestDashboard?.trend?.length || 0, latest: latestDashboard?.latest || { summary: {} } }];
+    renderExecutiveExperience();
+    return;
+  }
+
+  const data = await api("/api/tenants", null, "GET");
+  tenantPortfolio = data.tenants || [];
+  const tenantIds = new Set([currentTenant, ...tenantPortfolio.map((item) => item.tenant_id)]);
+  tenantSwitcher.innerHTML = [...tenantIds]
+    .map((tenantId) => `<option value="${escapeHtml(tenantId)}">${escapeHtml(tenantId)}</option>`)
+    .join("");
+  tenantSwitcher.value = currentTenant;
+  tenantSwitcher.classList.remove("hidden");
+  renderExecutiveExperience();
 }
 
 function renderHistory(items) {
@@ -1130,8 +1462,9 @@ function renderHistory(items) {
 
 function renderExecutiveDashboard(data) {
   const latest = data.latest?.summary || {};
+  const score = latest.total_files ? calculatePostureScore(latest) : data.risk_posture_score ?? 100;
   executiveSummary.innerHTML = `
-    <div class="history-card"><span>Posture score</span><strong>${escapeHtml(data.risk_posture_score ?? 100)}</strong></div>
+    <div class="history-card"><span>Posture score</span><strong>${escapeHtml(score)}</strong></div>
     <div class="history-card"><span>Tenant</span><strong>${escapeHtml(data.tenant_id || currentTenant)}</strong></div>
     <div class="history-card"><span>Reports</span><strong>${escapeHtml(data.retention?.report_count || 0)}</strong></div>
     <div class="history-card"><span>Open critical</span><strong>${escapeHtml(latest.critical || 0)}</strong></div>
@@ -1322,6 +1655,12 @@ assetRuleList.addEventListener("click", (event) => {
 });
 
 resultsBody.addEventListener("click", (event) => {
+  const detailButton = event.target.closest(".detail-toggle");
+  if (detailButton) {
+    openDetailDrawer(detailButton.dataset.detailKey || "", detailButton.dataset.detailType || "reasons");
+    return;
+  }
+
   const button = event.target.closest(".preview-toggle");
   if (!button) {
     return;
@@ -1334,6 +1673,18 @@ resultsBody.addEventListener("click", (event) => {
 
   const isHidden = panel.classList.toggle("hidden");
   button.textContent = isHidden ? "v" : "^";
+});
+
+detailDrawer.addEventListener("click", (event) => {
+  if (event.target.closest("[data-close-detail]")) {
+    closeDetailDrawer();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeDetailDrawer();
+  }
 });
 
 resultsBody.addEventListener("change", (event) => {
@@ -1380,6 +1731,30 @@ logoutBtn.addEventListener("click", logout);
 profileToggle.addEventListener("click", () => {
   document.querySelector(".profile-menu").classList.toggle("open");
 });
+tenantSwitcher.addEventListener("change", async () => {
+  currentTenant = tenantSwitcher.value || "default";
+  safeSessionSet("dspm-tenant-id", currentTenant);
+  latestFiles = [];
+  latestReport = null;
+  latestDashboard = null;
+  rowOverrides = loadRowOverrides();
+  assetRules = loadAssetRules();
+  renderProfile();
+  renderAssetRules();
+  renderRows([]);
+  updateSummaryFromFiles([]);
+  setStatus(`Switched MSSP customer to ${currentTenant}.`);
+  await loadHistory().catch((error) => setStatus(`Tenant switch failed: ${error.message}`));
+});
+
+msspPortfolio.addEventListener("click", async (event) => {
+  const card = event.target.closest("[data-tenant-jump]");
+  if (!card) {
+    return;
+  }
+  tenantSwitcher.value = card.dataset.tenantJump || currentTenant;
+  tenantSwitcher.dispatchEvent(new Event("change"));
+});
 
 applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
@@ -1400,14 +1775,14 @@ fetch("/api/health")
 
 async function loadProtectedMetadata() {
   if (!accessToken) {
-    riskRulesBody.innerHTML = '<tr><td colspan="5" class="empty">Sign in to load risk logic.</td></tr>';
+    riskRulesBody.innerHTML = '<div class="empty compact">Sign in to load risk logic.</div>';
     return;
   }
   try {
     const data = await api("/api/risk-rules", null, "GET");
     renderRiskRules(data.rules);
   } catch {
-    riskRulesBody.innerHTML = '<tr><td colspan="5" class="empty">Risk logic could not be loaded.</td></tr>';
+    riskRulesBody.innerHTML = '<div class="empty compact">Risk logic could not be loaded.</div>';
   }
 }
 

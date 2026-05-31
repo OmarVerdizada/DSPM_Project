@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=7" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -46,7 +46,7 @@
           </label>
           <label>
             Local sample path
-            <input id="local_path" name="local_path" value="test_data" />
+            <input id="local_path" name="local_path" value="enterprise_test_data" />
           </label>
           <label>
             Max folder depth
@@ -74,6 +74,9 @@
           <div class="topbar-actions">
             <button type="button" id="theme-toggle" class="secondary-btn">Dark mode</button>
             <div class="health" id="health">API checking...</div>
+            <select id="tenant-switcher" class="tenant-switcher" title="Switch MSSP customer">
+              <option value="default">default</option>
+            </select>
             <section class="profile-menu" aria-label="Profile">
               <button type="button" id="profile-toggle" class="profile-toggle">
                 <span class="profile-avatar">A</span>
@@ -173,6 +176,29 @@
           </div>
 
           <div id="executive-hero" class="executive-hero"></div>
+          <section class="visual-panel mssp-panel">
+            <div class="panel-title">
+              <h4>MSSP customer portfolio</h4>
+              <span>Tenant isolation and customer posture</span>
+            </div>
+            <div id="mssp-portfolio" class="mssp-portfolio"></div>
+          </section>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Posture trend</h4>
+                <span>Last scans</span>
+              </div>
+              <div id="posture-trend" class="posture-trend"></div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Remediation workflow</h4>
+                <span>Owner and SLA</span>
+              </div>
+              <div id="remediation-workflow" class="remediation-workflow"></div>
+            </section>
+          </div>
           <div class="executive-grid">
             <section class="visual-panel">
               <div class="panel-title">
@@ -375,35 +401,35 @@
         </section>
 
         <section id="tab-logic" class="tab-panel workspace risk-logic">
-          <div class="table-toolbar">
+          <div class="section-header">
             <div>
               <h3>Risk logic</h3>
-              <p>Why assets become critical, high, medium, or low.</p>
+              <p>Scoring model, severity ranges, detection signals, and customer asset context.</p>
             </div>
           </div>
 
-          <div class="table-wrap">
-            <table class="logic-table">
-              <thead>
-                <tr>
-                  <th>Signal</th>
-                  <th>Base risk</th>
-                  <th>Score impact</th>
-                  <th>Why it matters</th>
-                  <th>DLP action</th>
-                </tr>
-              </thead>
-              <tbody id="risk-rules-body">
-                <tr>
-                  <td colspan="5" class="empty">Loading risk logic...</td>
-                </tr>
-              </tbody>
-            </table>
+          <div id="risk-rules-body" class="risk-logic-board">
+            <div class="empty compact">Loading risk logic...</div>
           </div>
         </section>
       </main>
     </div>
 
-    <script src="/static/app.js?v=3"></script>
+    <div id="detail-drawer" class="detail-drawer hidden">
+      <div class="detail-drawer-backdrop" data-close-detail></div>
+      <aside class="detail-drawer-panel" aria-label="File detail">
+        <div class="detail-drawer-header">
+          <div>
+            <span id="detail-drawer-eyebrow">Risk context</span>
+            <h3 id="detail-drawer-title">Details</h3>
+            <p id="detail-drawer-meta"></p>
+          </div>
+          <button type="button" class="icon-btn" data-close-detail title="Close detail">x</button>
+        </div>
+        <div id="detail-drawer-body" class="detail-drawer-body"></div>
+      </aside>
+    </div>
+
+    <script src="/static/app.js?v=7"></script>
   </body>
 </html>

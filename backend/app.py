@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from backend.alerts import evaluate_alerts
 from backend.jobs import cancel_job, create_scan_job, get_job
 from backend.security import Principal, authenticate_user, create_token, generate_api_key, require_principal, require_role
-from backend.store import audit, data_retention_summary, read_audit_log, read_scan_history, save_scan_history
+from backend.store import audit, data_retention_summary, list_tenants, read_audit_log, read_scan_history, save_scan_history
 from backend.vault import CredentialVault
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
@@ -44,7 +44,7 @@ class ConnectionRequest(BaseModel):
     password: str = ""
     credential_ref: str = ""
     domain: str = "WORKGROUP"
-    local_path: str = "test_data"
+    local_path: str = "enterprise_test_data"
     max_depth: int = Field(default=4, ge=1, le=12)
 
 
@@ -180,6 +180,11 @@ def scan_history(principal: Principal = Depends(require_role("viewer"))) -> dict
     return {"history": read_scan_history(principal.tenant_id)}
 
 
+@app.get("/api/tenants")
+def tenant_portfolio(principal: Principal = Depends(require_role("admin"))) -> dict:
+    return {"tenants": list_tenants()}
+
+
 @app.get("/api/audit")
 def audit_log(principal: Principal = Depends(require_role("admin"))) -> dict:
     return {"events": read_audit_log(principal.tenant_id)}
@@ -190,7 +195,7 @@ def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) 
     history = read_scan_history(principal.tenant_id)
     latest = history[-1] if history else {"summary": {}}
     summary = latest.get("summary", {})
-    score = max(0, 100 - summary.get("critical", 0) * 20 - summary.get("high", 0) * 8 - summary.get("medium", 0) * 3)
+    score = _posture_score(summary)
     return {
         "tenant_id": principal.tenant_id,
         "risk_posture_score": score,
@@ -198,6 +203,20 @@ def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) 
         "trend": history[-14:],
         "retention": data_retention_summary(principal.tenant_id),
     }
+
+
+def _posture_score(summary: dict) -> int:
+    total = int(summary.get("total_files") or 0)
+    if total <= 0:
+        return 100
+
+    exposure = (
+        int(summary.get("critical") or 0) * 95
+        + int(summary.get("high") or 0) * 80
+        + int(summary.get("medium") or 0) * 55
+        + int(summary.get("low") or 0) * 20
+    ) / total
+    return max(0, min(100, round(100 - exposure)))
 
 
 @app.post("/api/dlp-policy")
@@ -241,7 +260,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         username=username,
         password=password,
         domain=domain,
-        local_path=payload.local_path.strip() or "test_data",
+        local_path=payload.local_path.strip() or "enterprise_test_data",
         max_depth=payload.max_depth,
         asset_overrides=[
             {

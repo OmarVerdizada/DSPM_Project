@@ -6,3 +6,5 @@ __pycache__/
 .vscode/
 node_modules/
 data/
+enterprise_test_data/
+report.json

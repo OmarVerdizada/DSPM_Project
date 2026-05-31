@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--username", default="", help="Domain username.")
     scan_parser.add_argument("--password", default="", help="Domain password.")
     scan_parser.add_argument("--domain", default="WORKGROUP", help="AD domain or workgroup.")
-    scan_parser.add_argument("--local-path", default="test_data", help="Local folder fallback/sample data path.")
+    scan_parser.add_argument("--local-path", default="enterprise_test_data", help="Local folder fallback/sample data path.")
     scan_parser.add_argument("--max-depth", type=int, default=4, help="Maximum recursive SMB folder depth.")
     scan_parser.add_argument("--output", default="report.json", help="Output report JSON path.")
     scan_parser.set_defaults(func=run_scan)

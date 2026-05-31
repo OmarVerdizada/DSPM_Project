@@ -47,6 +47,30 @@ RULES = [
         description="Database or service connection string detected",
     ),
     DetectionRule(
+        name="azure_storage_key",
+        pattern=re.compile(r"\b(?:DefaultEndpointsProtocol|AccountName|AccountKey|BlobEndpoint)\s*=\s*[^;\n]{4,}", re.IGNORECASE),
+        risk="CRITICAL",
+        description="Azure storage connection secret detected",
+    ),
+    DetectionRule(
+        name="google_api_key",
+        pattern=re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"),
+        risk="CRITICAL",
+        description="Google API key detected",
+    ),
+    DetectionRule(
+        name="slack_token",
+        pattern=re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+        risk="CRITICAL",
+        description="Slack token detected",
+    ),
+    DetectionRule(
+        name="github_token",
+        pattern=re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{30,}\b"),
+        risk="CRITICAL",
+        description="GitHub access token detected",
+    ),
+    DetectionRule(
         name="email",
         pattern=re.compile(r"\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b"),
         risk="MEDIUM",
@@ -71,10 +95,28 @@ RULES = [
         description="Possible payment card number detected",
     ),
     DetectionRule(
+        name="swift_bic",
+        pattern=re.compile(r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b"),
+        risk="HIGH",
+        description="Possible SWIFT/BIC bank identifier detected",
+    ),
+    DetectionRule(
         name="iban",
         pattern=re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"),
         risk="HIGH",
         description="Possible IBAN bank account identifier detected",
+    ),
+    DetectionRule(
+        name="passport_number",
+        pattern=re.compile(r"\b(?:passport|pass\.?|pasport)\s*(?:no\.?|number|#)?\s*[:=]?\s*[A-Z0-9]{6,12}\b", re.IGNORECASE),
+        risk="HIGH",
+        description="Passport identifier context detected",
+    ),
+    DetectionRule(
+        name="national_id",
+        pattern=re.compile(r"\b(?:national id|tax id|tin|ssn|social security)\s*[:=]?\s*[A-Z0-9\-]{6,18}\b", re.IGNORECASE),
+        risk="HIGH",
+        description="Government identifier context detected",
     ),
     DetectionRule(
         name="phone_number",
@@ -90,9 +132,22 @@ RULES = [
     ),
     DetectionRule(
         name="confidential_keyword",
-        pattern=re.compile(r"\b(confidential|restricted|internal use only|secret)\b", re.IGNORECASE),
+        pattern=re.compile(r"\b(confidential|restricted|internal use only|secret|nda|non-disclosure|board only|privileged)\b", re.IGNORECASE),
         risk="MEDIUM",
         description="Confidentiality keyword detected",
+        redact=False,
+    ),
+    DetectionRule(
+        name="source_code_secret_context",
+        pattern=re.compile(r"\b(?:client_secret|private_token|auth_token|db_password|encryption_key)\b\s*[:=]", re.IGNORECASE),
+        risk="HIGH",
+        description="Source-code secret assignment detected",
+    ),
+    DetectionRule(
+        name="legal_contract_context",
+        pattern=re.compile(r"\b(?:contract|statement of work|master service agreement|msa|nda|legal hold)\b", re.IGNORECASE),
+        risk="MEDIUM",
+        description="Legal or contract context detected",
         redact=False,
     ),
 ]

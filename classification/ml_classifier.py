@@ -46,6 +46,16 @@ def _spacy_ner(content: str) -> list[dict]:
 
 def _heuristic_findings(content: str) -> list[dict]:
     findings: list[dict] = []
+    if re.search(r"\b(source code|repository|git clone|commit hash|pull request|deployment key)\b", content, re.IGNORECASE):
+        findings.append(
+            {
+                "type": "ml_source_code_context",
+                "risk": "HIGH",
+                "description": "Source code context classifier detected engineering asset language",
+                "count": 1,
+                "samples": [],
+            }
+        )
     if re.search(r"\b(patient|diagnosis|treatment|medical record|mrn)\b", content, re.IGNORECASE):
         findings.append(
             {
@@ -56,12 +66,32 @@ def _heuristic_findings(content: str) -> list[dict]:
                 "samples": [],
             }
         )
-    if re.search(r"\b(invoice|salary|payroll|iban|swift|bank)\b", content, re.IGNORECASE):
+    if re.search(r"\b(invoice|salary|payroll|iban|swift|bank|payment|wire transfer|tax)\b", content, re.IGNORECASE):
         findings.append(
             {
                 "type": "ml_finance_context",
                 "risk": "MEDIUM",
                 "description": "Finance context classifier detected regulated business language",
+                "count": 1,
+                "samples": [],
+            }
+        )
+    if re.search(r"\b(employee|termination|performance review|bonus|compensation|hr case)\b", content, re.IGNORECASE):
+        findings.append(
+            {
+                "type": "ml_hr_context",
+                "risk": "MEDIUM",
+                "description": "HR context classifier detected employee-sensitive language",
+                "count": 1,
+                "samples": [],
+            }
+        )
+    if re.search(r"\b(customer list|customer export|account owner|crm|lead list|prospect)\b", content, re.IGNORECASE):
+        findings.append(
+            {
+                "type": "ml_customer_data_context",
+                "risk": "MEDIUM",
+                "description": "Customer data context classifier detected commercial data language",
                 "count": 1,
                 "samples": [],
             }

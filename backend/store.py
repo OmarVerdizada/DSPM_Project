@@ -79,6 +79,34 @@ def read_scan_history(tenant_id: str) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def list_tenants() -> list[dict]:
+    root = DATA_DIR / "tenants"
+    root.mkdir(parents=True, exist_ok=True)
+    tenants: list[dict] = []
+    for path in sorted(item for item in root.iterdir() if item.is_dir()):
+        tenant_id = path.name
+        history = read_scan_history(tenant_id)
+        latest = history[-1] if history else {"summary": {}}
+        tenants.append(
+            {
+                "tenant_id": tenant_id,
+                "scan_count": len(history),
+                "latest": latest,
+                "retention": data_retention_summary(tenant_id),
+            }
+        )
+    if not tenants:
+        tenants.append(
+            {
+                "tenant_id": "default",
+                "scan_count": 0,
+                "latest": {"summary": {}},
+                "retention": data_retention_summary("default"),
+            }
+        )
+    return tenants
+
+
 def read_audit_log(tenant_id: str, limit: int = 200) -> list[dict]:
     path = tenant_dir(tenant_id) / "audit.jsonl"
     if not path.exists():
