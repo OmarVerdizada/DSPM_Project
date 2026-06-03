@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css?v=11" />
+    <link rel="stylesheet" href="/static/styles.css?v=16" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -62,7 +62,23 @@
           </div>
         </form>
 
+        <section class="demo-data-card" aria-label="Demo data generator">
+          <div>
+            <span>Demo dataset</span>
+            <strong id="demo-data-title">Enterprise test data</strong>
+            <small id="demo-data-status">Generate local sample files for scans.</small>
+          </div>
+          <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
+        </section>
+
         <div id="connection-status" class="status muted">Ready</div>
+        <div id="scan-progress" class="scan-progress hidden" aria-live="polite">
+          <div class="scan-pulse" aria-hidden="true"></div>
+          <div>
+            <strong id="scan-progress-label">Scanning...</strong>
+            <div class="scan-progress-track"><span id="scan-progress-bar"></span></div>
+          </div>
+        </div>
       </aside>
 
       <main>
@@ -86,11 +102,21 @@
                 </span>
               </button>
               <div class="profile-panel">
-                <div>
-                  <span>Signed in as</span>
-                  <strong id="profile-role">admin</strong>
+                <div class="profile-panel-head">
+                  <span class="profile-avatar panel-avatar">A</span>
+                  <div>
+                    <span>Signed in as</span>
+                    <strong id="profile-panel-name">admin</strong>
+                  </div>
                 </div>
-                <button type="button" id="logout-btn" class="secondary-btn">Sign out</button>
+                <div class="profile-panel-meta">
+                  <span id="profile-role">admin</span>
+                  <span id="profile-panel-tenant">default</span>
+                </div>
+                <div class="profile-panel-actions">
+                  <a class="profile-action" href="/static/profile.html">Profile settings</a>
+                  <button type="button" id="logout-btn" class="profile-action danger">Sign out</button>
+                </div>
               </div>
             </section>
           </div>
@@ -439,10 +465,11 @@
                     <th>Role</th>
                     <th>Last login</th>
                     <th>Reset password</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody id="users-body">
-                  <tr><td colspan="5" class="empty">Sign in as admin to load users.</td></tr>
+                  <tr><td colspan="6" class="empty">Sign in as admin to load users.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -479,7 +506,7 @@
             <div>
               <p class="eyebrow">Tenant management</p>
               <h3>Customers and workspaces</h3>
-              <p>Register new accounts against an existing tenant and let admins create or remove empty tenant workspaces.</p>
+              <p>Create tenant workspaces, copy registration codes, and remove tenant data when a customer is offboarded.</p>
             </div>
           </div>
 
@@ -515,6 +542,7 @@
                 <thead>
                   <tr>
                     <th>Tenant</th>
+                    <th>Registration code</th>
                     <th>Reports</th>
                     <th>Audit</th>
                     <th>Alerts</th>
@@ -522,7 +550,7 @@
                   </tr>
                 </thead>
                 <tbody id="tenants-body">
-                  <tr><td colspan="5" class="empty">Sign in as admin to load tenants.</td></tr>
+                  <tr><td colspan="6" class="empty">Sign in as admin to load tenants.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -580,7 +608,8 @@
         <div id="detail-drawer-body" class="detail-drawer-body"></div>
       </aside>
     </div>
+    <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=11"></script>
+    <script src="/static/app.js?v=18"></script>
   </body>
 </html>

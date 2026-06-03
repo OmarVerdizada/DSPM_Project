@@ -37,7 +37,7 @@
       <form id="register-form" class="login-card">
         <p class="eyebrow">Create account</p>
         <h2>Register as viewer</h2>
-        <p>Choose an existing tenant. Admins can promote your role after account creation.</p>
+        <p>Use the tenant ID and registration code provided by your administrator.</p>
         <label>
           Username
           <input id="register-username" name="username" autocomplete="off" placeholder="analyst01" required />
@@ -47,10 +47,12 @@
           <input id="register-full-name" name="full_name" autocomplete="name" placeholder="Security Analyst" />
         </label>
         <label>
-          Tenant
-          <select id="register-tenant" name="tenant_id">
-            <option value="default">default</option>
-          </select>
+          Tenant ID
+          <input id="register-tenant" name="tenant_id" autocomplete="organization" placeholder="customer-a" required />
+        </label>
+        <label>
+          Registration code
+          <input id="register-code" name="registration_code" type="password" autocomplete="one-time-code" placeholder="Provided by admin" required />
         </label>
         <label>
           Password
@@ -61,11 +63,11 @@
           <input id="register-password-confirm" name="password_confirm" type="password" autocomplete="new-password" placeholder="Repeat password" required />
         </label>
         <button type="submit">Create viewer account</button>
-        <span id="register-status" class="save-status">Tenant list loads from the backend.</span>
+        <span id="register-status" class="save-status">Ready.</span>
         <div class="login-divider"></div>
         <a class="auth-link" href="/login">Already have an account? Sign in</a>
       </form>
     </section>
-    <script src="/static/register.js?v=1"></script>
+    <script src="/static/register.js?v=3"></script>
   </body>
 </html>

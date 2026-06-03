@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hmac
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -25,26 +27,31 @@ from backend.store import (
     create_tenant,
     create_user,
     data_retention_summary,
-    delete_tenant,
+    delete_user,
+    delete_tenant_with_data,
+    get_tenant,
     get_user,
     list_tenants,
     list_users,
     read_audit_log,
     read_scan_history,
+    rotate_registration_code,
     save_scan_history,
     tenant_exists,
-    tenant_usage,
     update_user_password,
+    update_user_profile,
     update_user_role,
 )
 from backend.vault import CredentialVault
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
+from scripts.generate_enterprise_test_data import generate as generate_enterprise_test_data
 from scripts.report import generate_report
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 vault = CredentialVault()
+PROTECTED_USERS = {"admin"}
 
 app = FastAPI(
     title="DSPM DLP Discovery API",
@@ -61,6 +68,11 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_: Request, __: RequestValidationError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": "Invalid request. Check required fields and formats."})
 
 
 class ConnectionRequest(BaseModel):
@@ -95,6 +107,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=200)
     full_name: str = Field(default="", max_length=120)
     tenant_id: str = Field(default="default", max_length=80)
+    registration_code: str = Field(default="", max_length=200)
 
 
 class UserCreateRequest(RegisterRequest):
@@ -120,6 +133,10 @@ class PasswordChangeRequest(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
 
+class ProfileUpdateRequest(BaseModel):
+    full_name: str = Field(default="", max_length=120)
+
+
 class CredentialRequest(BaseModel):
     username: str
     password: str
@@ -128,6 +145,11 @@ class CredentialRequest(BaseModel):
 
 class ApiKeyRequest(BaseModel):
     label: str = "default"
+
+
+class DemoDataRequest(BaseModel):
+    output: str = Field(default="enterprise_test_data", max_length=120)
+    files_per_share: int = Field(default=10, ge=1, le=40)
 
 
 @app.get("/")
@@ -145,6 +167,11 @@ def register_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "register.html")
 
 
+@app.get("/profile")
+def profile_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "profile.html")
+
+
 @app.get("/dashboard")
 def dashboard() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
@@ -158,11 +185,6 @@ def health() -> dict:
 @app.get("/api/risk-rules")
 def risk_rules(_: Principal = Depends(require_role("viewer"))) -> dict:
     return {"rules": get_risk_rules()}
-
-
-@app.get("/api/auth/tenants")
-def public_tenants() -> dict:
-    return {"tenants": [_public_tenant(tenant) for tenant in list_tenants()]}
 
 
 @app.post("/api/auth/login")
@@ -184,9 +206,11 @@ def register(payload: RegisterRequest) -> dict:
     username = sanitize_username(payload.username)
     tenant_id = _safe_tenant(payload.tenant_id)
     if not tenant_exists(tenant_id):
-        raise HTTPException(status_code=400, detail="Tenant does not exist")
+        raise HTTPException(status_code=403, detail="Registration failed")
+    if not _valid_registration_code(tenant_id, payload.registration_code):
+        raise HTTPException(status_code=403, detail="Registration failed")
     if get_user(username):
-        raise HTTPException(status_code=409, detail="Username already exists")
+        raise HTTPException(status_code=409, detail="Registration failed")
     user = create_user(username, hash_password(payload.password), "viewer", tenant_id, payload.full_name.strip())
     audit(tenant_id, username, "user.registered", {"role": "viewer"})
     return {"user": _public_user(user)}
@@ -194,12 +218,33 @@ def register(payload: RegisterRequest) -> dict:
 
 @app.post("/api/auth/change-password")
 def change_password(payload: PasswordChangeRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
+    if principal.subject in PROTECTED_USERS:
+        raise HTTPException(status_code=403, detail="Built-in admin account is protected")
     authenticated = authenticate_user(principal.subject, payload.current_password)
     if authenticated is None:
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     update_user_password(principal.subject, hash_password(payload.new_password))
     audit(principal.tenant_id, principal.subject, "user.password_changed")
     return {"status": "updated"}
+
+
+@app.get("/api/profile")
+def profile(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    user = get_user(principal.subject)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"user": _public_user(user), "protected": principal.subject in PROTECTED_USERS}
+
+
+@app.put("/api/profile")
+def update_profile(payload: ProfileUpdateRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
+    if principal.subject in PROTECTED_USERS:
+        raise HTTPException(status_code=403, detail="Built-in admin account is protected")
+    user = update_user_profile(principal.subject, payload.full_name.strip())
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    audit(principal.tenant_id, principal.subject, "user.profile_updated")
+    return {"user": _public_user(user)}
 
 
 @app.get("/api/users")
@@ -223,6 +268,8 @@ def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends
 @app.put("/api/users/{username}/role")
 def admin_update_user_role(username: str, payload: UserRoleRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
     target = sanitize_username(username)
+    if target in PROTECTED_USERS:
+        raise HTTPException(status_code=403, detail="Built-in admin account is protected")
     tenant_id = _safe_tenant(payload.tenant_id) if payload.tenant_id.strip() else None
     if tenant_id and not tenant_exists(tenant_id):
         raise HTTPException(status_code=400, detail="Tenant does not exist")
@@ -240,11 +287,35 @@ def admin_update_user_role(username: str, payload: UserRoleRequest, principal: P
 @app.post("/api/users/{username}/reset-password")
 def admin_reset_password(username: str, payload: PasswordResetRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
     target = sanitize_username(username)
+    if target in PROTECTED_USERS:
+        raise HTTPException(status_code=403, detail="Built-in admin account is protected")
     user = update_user_password(target, hash_password(payload.password))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     audit(principal.tenant_id, principal.subject, "user.password_reset", {"username": target})
     return {"status": "updated", "user": _public_user(user)}
+
+
+@app.post("/api/users/{username}/delete")
+@app.delete("/api/users/{username}")
+def admin_delete_user(username: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = sanitize_username(username)
+    if target in PROTECTED_USERS:
+        raise HTTPException(status_code=403, detail="Built-in admin account is protected")
+    user = get_user(target)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target == principal.subject:
+        raise HTTPException(status_code=400, detail="You cannot delete your own signed-in account")
+    if user["role"] == "admin" and user["is_active"]:
+        admins = [item for item in list_users() if item["role"] == "admin" and item["is_active"]]
+        if len(admins) <= 1:
+            raise HTTPException(status_code=400, detail="At least one active admin must remain")
+    deleted = delete_user(target)
+    if deleted is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    audit(principal.tenant_id, principal.subject, "user.deleted", {"username": target, "tenant_id": deleted["tenant_id"]})
+    return {"deleted": True, "user": _public_user(deleted)}
 
 
 @app.get("/api/users/activity")
@@ -263,6 +334,20 @@ def admin_create_tenant(payload: TenantRequest, principal: Principal = Depends(r
     return {"tenant": _public_tenant(tenant)}
 
 
+@app.post("/api/tenants/{tenant_id}/regenerate-registration-code")
+@app.post("/api/tenants/{tenant_id}/registration-code")
+def admin_rotate_tenant_registration_code(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = _safe_tenant(tenant_id)
+    if not tenant_exists(target):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    code = rotate_registration_code(target)
+    if not code:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    audit(principal.tenant_id, principal.subject, "tenant.registration_code_rotated", {"tenant_id": target})
+    tenant = get_tenant(target)
+    return {"tenant": _public_tenant(tenant), "registration_code": code}
+
+
 @app.delete("/api/tenants/{tenant_id}")
 def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
     target = _safe_tenant(tenant_id)
@@ -270,12 +355,10 @@ def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_r
         raise HTTPException(status_code=400, detail="Default tenant cannot be removed")
     if not tenant_exists(target):
         raise HTTPException(status_code=404, detail="Tenant not found")
-    usage = tenant_usage(target)
-    if any(usage.values()):
-        raise HTTPException(status_code=400, detail=f"Tenant is not empty: {usage}")
-    delete_tenant(target)
-    audit(principal.tenant_id, principal.subject, "tenant.deleted", {"tenant_id": target})
-    return {"deleted": True, "tenant_id": target}
+    deleted_usage = delete_tenant_with_data(target)
+    audit_tenant = principal.tenant_id if principal.tenant_id != target else "default"
+    audit(audit_tenant, principal.subject, "tenant.deleted", {"tenant_id": target, "deleted": deleted_usage})
+    return {"deleted": True, "tenant_id": target, "deleted_data": deleted_usage}
 
 
 @app.post("/api/api-keys")
@@ -307,6 +390,25 @@ def test_connection(payload: ConnectionRequest, principal: Principal = Depends(r
     engine = DSPMDiscoveryEngine(_to_config(payload, principal.tenant_id))
     audit(principal.tenant_id, principal.subject, "connection.test", {"server": payload.server})
     return engine.test_connection()
+
+
+@app.post("/api/demo-data/generate")
+def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    output = _safe_demo_output(payload.output)
+    generate_enterprise_test_data(output, payload.files_per_share)
+    manifest = _read_demo_manifest(output)
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "demo_data.generated",
+        {"output": str(output.relative_to(BASE_DIR)), "files_per_share": payload.files_per_share, "file_count": manifest.get("file_count", 0)},
+    )
+    return {
+        "status": "generated",
+        "local_path": str(output.relative_to(BASE_DIR)),
+        "file_count": manifest.get("file_count", 0),
+        "generated": manifest.get("generated", ""),
+    }
 
 
 @app.post("/api/scan")
@@ -374,6 +476,14 @@ def _safe_tenant(tenant_id: str) -> str:
     return safe
 
 
+def _valid_registration_code(tenant_id: str, registration_code: str) -> bool:
+    tenant = get_tenant(tenant_id)
+    expected = tenant.get("registration_code", "") if tenant else ""
+    if not expected:
+        return False
+    return hmac.compare_digest(registration_code.strip(), expected)
+
+
 def _public_user(user: dict) -> dict:
     return {
         "username": user["username"],
@@ -391,12 +501,36 @@ def _public_tenant(tenant: dict) -> dict:
     return {
         "tenant_id": tenant["tenant_id"],
         "display_name": tenant.get("display_name") or tenant["tenant_id"],
+        "registration_code": tenant.get("registration_code", ""),
         "created_at": tenant.get("created_at"),
         "updated_at": tenant.get("updated_at"),
         "scan_count": tenant.get("scan_count", 0),
         "latest": tenant.get("latest", {"summary": {}}),
         "retention": tenant.get("retention", {}),
     }
+
+
+def _safe_demo_output(output: str) -> Path:
+    name = output.strip() or "enterprise_test_data"
+    target = Path(name)
+    if target.is_absolute() or ".." in target.parts:
+        raise HTTPException(status_code=400, detail="Demo data output must be a project-local folder")
+    resolved = (BASE_DIR / target).resolve()
+    if not resolved.is_relative_to(BASE_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Demo data output must stay inside the project")
+    return resolved
+
+
+def _read_demo_manifest(output: Path) -> dict:
+    manifest = output / "_manifest.json"
+    if not manifest.exists():
+        return {}
+    try:
+        import json
+
+        return json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
 
 
 def _posture_score(summary: dict) -> int:

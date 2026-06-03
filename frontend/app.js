@@ -1,7 +1,14 @@
 const form = document.querySelector("#connection-form");
 const testBtn = document.querySelector("#test-btn");
 const scanBtn = document.querySelector("#scan-btn");
+const generateDemoDataBtn = document.querySelector("#generate-demo-data-btn");
+const demoDataTitle = document.querySelector("#demo-data-title");
+const demoDataStatus = document.querySelector("#demo-data-status");
 const statusBox = document.querySelector("#connection-status");
+const scanProgress = document.querySelector("#scan-progress");
+const scanProgressLabel = document.querySelector("#scan-progress-label");
+const scanProgressBar = document.querySelector("#scan-progress-bar");
+const toastHost = document.querySelector("#toast-host");
 const health = document.querySelector("#health");
 const filterInput = document.querySelector("#filter");
 const resultsBody = document.querySelector("#results-body");
@@ -27,6 +34,8 @@ const profileToggle = document.querySelector("#profile-toggle");
 const profileName = document.querySelector("#profile-name");
 const profileTenant = document.querySelector("#profile-tenant");
 const profileRole = document.querySelector("#profile-role");
+const profilePanelName = document.querySelector("#profile-panel-name");
+const profilePanelTenant = document.querySelector("#profile-panel-tenant");
 const refreshHistoryBtn = document.querySelector("#refresh-history-btn");
 const historyBody = document.querySelector("#history-body");
 const executiveSummary = document.querySelector("#executive-summary");
@@ -120,6 +129,8 @@ let editingAssetIndex = null;
 let latestDashboard = null;
 let tenantPortfolio = [];
 let latestRiskRules = [];
+let lastRenderedFileKeys = new Set();
+let hasRenderedScanRows = false;
 
 async function api(path, payload, method = "POST") {
   const response = await fetch(path, {
@@ -129,11 +140,23 @@ async function api(path, payload, method = "POST") {
   });
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed with ${response.status}`);
+    throw new Error(`${response.status}: ${await readErrorMessage(response)}`);
   }
 
   return response.json();
+}
+
+async function readErrorMessage(response) {
+  const message = await response.text();
+  if (!message) {
+    return `Request failed with ${response.status}`;
+  }
+  try {
+    const data = JSON.parse(message);
+    return typeof data.detail === "string" ? data.detail : "Request failed.";
+  } catch {
+    return "Request failed.";
+  }
 }
 
 function authHeaders() {
@@ -162,11 +185,70 @@ function readPayload() {
 function setBusy(isBusy) {
   testBtn.disabled = isBusy;
   scanBtn.disabled = isBusy;
+  generateDemoDataBtn.disabled = isBusy;
 }
 
 function setStatus(message, tone = "muted") {
   statusBox.className = `status ${tone}`;
   statusBox.textContent = message;
+}
+
+function animateNumber(element, target) {
+  if (!element) {
+    return;
+  }
+  const end = Number(target || 0);
+  const start = Number(element.dataset.value || element.textContent || 0) || 0;
+  element.dataset.value = String(end);
+  if (start === end) {
+    element.textContent = String(end);
+    return;
+  }
+  const duration = 720;
+  const started = performance.now();
+  const step = (now) => {
+    const progress = Math.min((now - started) / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    element.textContent = String(Math.round(start + (end - start) * eased));
+    if (progress < 1) {
+      requestAnimationFrame(step);
+    }
+  };
+  requestAnimationFrame(step);
+}
+
+function setScanProgress(active, progress = 0, label = "Scanning...") {
+  scanProgress.classList.toggle("hidden", !active);
+  scanProgress.classList.toggle("active", active);
+  scanProgressLabel.textContent = label;
+  scanProgressBar.style.width = `${Math.max(4, Math.min(100, Number(progress) || 0))}%`;
+}
+
+function showToast(title, message = "", tone = "info") {
+  const toast = document.createElement("div");
+  toast.className = `toast ${tone}`;
+  toast.innerHTML = `<strong>${escapeHtml(title)}</strong>${message ? `<span>${escapeHtml(message)}</span>` : ""}`;
+  toastHost.appendChild(toast);
+  window.setTimeout(() => toast.classList.add("leaving"), 4200);
+  window.setTimeout(() => toast.remove(), 4800);
+}
+
+function renderSkeletonRows(count = 6) {
+  resultsBody.innerHTML = Array.from({ length: count })
+    .map(
+      () => `
+        <tr class="skeleton-row">
+          <td><span class="skeleton-block wide"></span><span class="skeleton-block"></span></td>
+          <td><span class="skeleton-block"></span></td>
+          <td><span class="skeleton-block short"></span></td>
+          <td><span class="skeleton-pill"></span></td>
+          <td><span class="skeleton-block short"></span></td>
+          <td><span class="skeleton-block"></span></td>
+          <td><span class="skeleton-block wide"></span></td>
+        </tr>
+      `
+    )
+    .join("");
 }
 
 function setAuthState(isAuthenticated) {
@@ -192,17 +274,21 @@ function renderProfile() {
   profileName.textContent = currentUser || "User";
   profileTenant.textContent = `${currentTenant || "default"} tenant`;
   profileRole.textContent = currentRole || "viewer";
+  profilePanelName.textContent = currentUser || "User";
+  profilePanelTenant.textContent = currentTenant || "default";
   tenantSwitcher.value = currentTenant;
   const initial = (currentUser || "U").trim().charAt(0).toUpperCase();
-  document.querySelector(".profile-avatar").textContent = initial || "U";
+  document.querySelectorAll(".profile-avatar").forEach((item) => {
+    item.textContent = initial || "U";
+  });
 }
 
 function updateSummary(summary = {}) {
-  document.querySelector("#critical-count").textContent = summary.critical || 0;
-  document.querySelector("#high-count").textContent = summary.high || 0;
-  document.querySelector("#medium-count").textContent = summary.medium || 0;
-  document.querySelector("#low-count").textContent = summary.low || 0;
-  document.querySelector("#total-count").textContent = summary.total_files || 0;
+  animateNumber(document.querySelector("#critical-count"), summary.critical || 0);
+  animateNumber(document.querySelector("#high-count"), summary.high || 0);
+  animateNumber(document.querySelector("#medium-count"), summary.medium || 0);
+  animateNumber(document.querySelector("#low-count"), summary.low || 0);
+  animateNumber(document.querySelector("#total-count"), summary.total_files || 0);
 }
 
 function updateSummaryFromFiles(files = []) {
@@ -249,9 +335,12 @@ function detailButton(items, file, type, label, emptyText) {
 function renderRows(files) {
   const query = filterInput.value.trim().toLowerCase();
   const visible = files.filter((file) => JSON.stringify(file).toLowerCase().includes(query));
+  const currentKeys = new Set(visible.map((file) => fileKey(file)));
 
   if (visible.length === 0) {
     resultsBody.innerHTML = '<tr><td colspan="7" class="empty">No matching files.</td></tr>';
+    lastRenderedFileKeys = currentKeys;
+    hasRenderedScanRows = true;
     return;
   }
 
@@ -265,9 +354,10 @@ function renderRows(files) {
       const score = effectiveRisk.score;
       const key = fileKey(file);
       const preview = renderPreview(file.preview);
+      const flash = hasRenderedScanRows && !lastRenderedFileKeys.has(key) ? " row-flash" : "";
 
       return `
-        <tr data-file-key="${escapeHtml(key)}">
+        <tr class="${flash}" data-file-key="${escapeHtml(key)}">
           <td>
             <div class="file-title">
               <button type="button" class="preview-toggle" data-preview="${escapeHtml(key)}" title="Show file preview">v</button>
@@ -297,6 +387,8 @@ function renderRows(files) {
       `;
     })
     .join("");
+  lastRenderedFileKeys = currentKeys;
+  hasRenderedScanRows = true;
 }
 
 function switchTab(tabName) {
@@ -837,9 +929,11 @@ function renderExecutiveExperience() {
   `;
 
   executiveHero.innerHTML = `
-    <div class="score-ring" style="--score:${score}">
+    <div class="posture-meter" style="--meter:${score}; --needle:${-90 + score * 1.8}deg">
+      <div class="meter-arc"></div>
+      <div class="meter-needle"></div>
       <strong>${score}</strong>
-      <span>Risk posture</span>
+      <span>Posture: ${score} - ${score >= 80 ? "Low risk" : score >= 55 ? "High risk" : "Critical risk"}</span>
     </div>
     <div>
       <p class="eyebrow">Latest assessment</p>
@@ -853,7 +947,7 @@ function renderExecutiveExperience() {
   `;
 
   riskTotalLabel.textContent = `${summary.total_files || 0} files`;
-  riskDistribution.innerHTML = buildDistributionBars(distribution);
+  riskDistribution.innerHTML = `<div class="distribution-visual">${buildDonutSvg(distribution)}${buildDistributionBars(distribution)}</div>`;
   riskHeatmap.innerHTML = buildHeatmap(topFiles.length ? latestFiles : []);
   signalMatrix.innerHTML = buildSignalMatrix();
   riskTopology.innerHTML = buildRiskTopology(summary);
@@ -1028,7 +1122,7 @@ function buildDonutSvg(distribution) {
   const rings = distribution
     .map((item) => {
       const value = (item.count / total) * 100;
-      const circle = `<circle r="15.9" cx="18" cy="18" fill="transparent" stroke="${item.color}" stroke-width="7" stroke-dasharray="${value} ${100 - value}" stroke-dashoffset="${offset}" />`;
+      const circle = `<circle class="donut-segment" r="15.9" cx="18" cy="18" fill="transparent" stroke="${item.color}" stroke-width="7" stroke-dasharray="${value} ${100 - value}" stroke-dashoffset="${offset}" />`;
       offset -= value;
       return circle;
     })
@@ -2144,14 +2238,32 @@ async function ensureCredential(payload) {
 async function runQueuedScan(payload) {
   const job = await api("/api/scan", { ...payload, async_scan: true, save_report: true });
   setStatus(`Scan queued: ${job.id}`);
+  setScanProgress(true, job.progress || 5, "Scan queued...");
   return pollScan(job.id);
+}
+
+async function generateDemoData() {
+  requireAuth();
+  const output = document.querySelector("#local_path").value.trim() || "enterprise_test_data";
+  demoDataTitle.textContent = "Generating...";
+  demoDataStatus.textContent = "Rebuilding local demo dataset.";
+  setStatus("Generating enterprise demo data...");
+  const result = await api("/api/demo-data/generate", { output, files_per_share: 10 });
+  document.querySelector("#local_path").value = result.local_path || output;
+  demoDataTitle.textContent = result.local_path || "enterprise_test_data";
+  demoDataStatus.textContent = `${result.file_count || 0} sample files ready for scan.`;
+  setStatus(`Demo data generated: ${result.file_count || 0} files at ${result.local_path}.`);
+  showToast("Demo data ready", `${result.file_count || 0} files generated`, "success");
+  await loadAudit().catch(() => {});
 }
 
 async function pollScan(jobId) {
   while (true) {
     const job = await api(`/api/scans/${jobId}`, null, "GET");
     setStatus(`${job.message} (${job.progress || 0}%)`);
+    setScanProgress(true, job.progress || 0, job.message || "Scanning...");
     if (job.status === "completed") {
+      setScanProgress(true, 100, "Scan completed");
       return job.result;
     }
     if (job.status === "failed" || job.status === "cancelled") {
@@ -2212,23 +2324,31 @@ function renderTenantOptions() {
 
 function renderTenantsTable(tenants) {
   if (!accessToken || currentRole !== "admin") {
-    tenantsBody.innerHTML = '<tr><td colspan="5" class="empty">Admin role is required to manage tenants.</td></tr>';
+    tenantsBody.innerHTML = '<tr><td colspan="6" class="empty">Admin role is required to manage tenants.</td></tr>';
     tenantManagementStatus.textContent = "Admin role is required.";
     return;
   }
   if (!tenants.length) {
-    tenantsBody.innerHTML = '<tr><td colspan="5" class="empty">No tenants found.</td></tr>';
+    tenantsBody.innerHTML = '<tr><td colspan="6" class="empty">No tenants found.</td></tr>';
     return;
   }
   tenantsBody.innerHTML = tenants
     .map((tenant) => {
       const retention = tenant.retention || {};
       const disabled = tenant.tenant_id === "default" ? "disabled" : "";
+      const registrationCode = tenant.registration_code || "";
       return `
         <tr>
           <td>
             <strong>${escapeHtml(tenant.display_name || tenant.tenant_id)}</strong>
             <div class="subtext">${escapeHtml(tenant.tenant_id)}</div>
+          </td>
+          <td>
+            <div class="inline-control tenant-code-control">
+              <input class="table-input tenant-code-input" value="${escapeHtml(registrationCode || "Refresh tenants")}" readonly />
+              <button type="button" class="secondary-btn" data-copy-code="${escapeHtml(registrationCode)}" ${registrationCode ? "" : "disabled"}>Copy</button>
+              <button type="button" class="secondary-btn" data-regenerate-code="${escapeHtml(tenant.tenant_id)}">Generate</button>
+            </div>
           </td>
           <td>${escapeHtml(retention.report_count || 0)}</td>
           <td>${escapeHtml(retention.audit_events || 0)}</td>
@@ -2310,7 +2430,7 @@ function renderAudit(events) {
 
 async function loadUsers() {
   if (!accessToken || currentRole !== "admin") {
-    usersBody.innerHTML = '<tr><td colspan="5" class="empty">Admin role is required to manage users.</td></tr>';
+    usersBody.innerHTML = '<tr><td colspan="6" class="empty">Admin role is required to manage users.</td></tr>';
     userManagementStatus.textContent = "Admin role is required.";
     return;
   }
@@ -2321,7 +2441,7 @@ async function loadUsers() {
 
 function renderUsers(users) {
   if (!users.length) {
-    usersBody.innerHTML = '<tr><td colspan="5" class="empty">No users found.</td></tr>';
+    usersBody.innerHTML = '<tr><td colspan="6" class="empty">No users found.</td></tr>';
     return;
   }
   usersBody.innerHTML = users
@@ -2347,6 +2467,7 @@ function renderUsers(users) {
               <button type="button" class="secondary-btn" data-reset-user="${escapeHtml(user.username)}">Reset</button>
             </div>
           </td>
+          <td><button type="button" class="danger-btn" data-delete-user="${escapeHtml(user.username)}">Delete</button></td>
         </tr>
       `
     )
@@ -2391,6 +2512,14 @@ async function resetUserPassword(username, password) {
   await Promise.all([loadUsers(), loadAudit()]);
 }
 
+async function deleteUser(username) {
+  requireAuth();
+  userManagementStatus.textContent = `Deleting ${username}...`;
+  await api(`/api/users/${encodeURIComponent(username)}/delete`, {});
+  userManagementStatus.textContent = `Deleted ${username}.`;
+  await Promise.all([loadUsers(), loadAudit(), loadTenants().catch(() => {})]);
+}
+
 async function createTenant() {
   requireAuth();
   const payload = {
@@ -2404,7 +2533,7 @@ async function createTenant() {
   await api("/api/tenants", payload);
   newTenantId.value = "";
   newTenantName.value = "";
-  tenantManagementStatus.textContent = `Created ${payload.tenant_id}.`;
+  tenantManagementStatus.textContent = `Created ${payload.tenant_id}. Registration code generated.`;
   await Promise.all([loadTenants(), loadAudit()]);
 }
 
@@ -2419,6 +2548,34 @@ async function deleteTenant(tenantId) {
   }
   tenantManagementStatus.textContent = `Removed ${tenantId}.`;
   await Promise.all([loadTenants(), loadAudit()]);
+}
+
+async function regenerateTenantCode(tenantId) {
+  requireAuth();
+  tenantManagementStatus.textContent = `Generating code for ${tenantId}...`;
+  const result = await api(`/api/tenants/${encodeURIComponent(tenantId)}/regenerate-registration-code`, {});
+  tenantManagementStatus.textContent = `Registration code generated for ${tenantId}.`;
+  await loadTenants();
+  return result.registration_code;
+}
+
+async function copyText(value) {
+  if (!value) {
+    throw new Error("No registration code to copy.");
+  }
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.left = "-9999px";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
 }
 
 async function createApiKey() {
@@ -2504,10 +2661,31 @@ testBtn.addEventListener("click", async () => {
   }
 });
 
+generateDemoDataBtn.addEventListener("click", async () => {
+  setBusy(true);
+  try {
+    await generateDemoData();
+  } catch (error) {
+    demoDataTitle.textContent = "Generation failed";
+    demoDataStatus.textContent = error.message;
+    setStatus(`Demo data failed: ${error.message}`);
+    showToast("Demo data failed", error.message, "danger");
+  } finally {
+    setBusy(false);
+  }
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   setBusy(true);
   setStatus("Fetching and assessing data...");
+  renderSkeletonRows();
+  setScanProgress(true, 8, "Preparing scan...");
+  let simulatedProgress = 8;
+  const progressTimer = window.setInterval(() => {
+    simulatedProgress = Math.min(92, simulatedProgress + Math.max(2, Math.round((92 - simulatedProgress) * 0.16)));
+    setScanProgress(true, simulatedProgress, "Scanning...");
+  }, 700);
   try {
     requireAuth();
     const payload = await ensureCredential(readPayload());
@@ -2515,13 +2693,22 @@ form.addEventListener("submit", async (event) => {
     latestReport = report;
     latestFiles = report.files || [];
     updateSummaryFromFiles(latestFiles);
+    hasRenderedScanRows = true;
     renderRows(latestFiles);
     scanMeta.textContent = `${latestFiles.length} files scanned from ${report.source} at ${report.timestamp}`;
     setStatus("Scan completed and report.json updated.");
+    setScanProgress(true, 100, "Scan completed");
+    showToast("Scan completed", `${latestFiles.length} files found`, latestReport.summary?.critical ? "danger" : "success");
+    if (latestReport.summary?.critical) {
+      showToast("Critical exposure", `${latestReport.summary.critical} critical files found`, "danger");
+    }
     await loadHistory();
   } catch (error) {
     setStatus(`Scan failed: ${error.message}`);
+    showToast("Scan failed", error.message, "danger");
   } finally {
+    window.clearInterval(progressTimer);
+    window.setTimeout(() => setScanProgress(false), 700);
     setBusy(false);
   }
 });
@@ -2655,11 +2842,39 @@ createTenantBtn.addEventListener("click", () => {
   });
 });
 tenantsBody.addEventListener("click", (event) => {
+  const regenerateButton = event.target.closest("[data-regenerate-code]");
+  if (regenerateButton) {
+    regenerateTenantCode(regenerateButton.dataset.regenerateCode).then((code) => {
+      if (!code) {
+        return;
+      }
+      copyText(code).then(() => {
+          tenantManagementStatus.textContent = "New registration code generated and copied.";
+      }).catch(() => {
+        tenantManagementStatus.textContent = "New registration code generated. Copy it from the table.";
+      });
+    }).catch((error) => {
+      tenantManagementStatus.textContent = `Generate failed: ${error.message}`;
+    });
+    return;
+  }
+
+  const copyButton = event.target.closest("[data-copy-code]");
+  if (copyButton) {
+    copyText(copyButton.dataset.copyCode).then(() => {
+      tenantManagementStatus.textContent = "Registration code copied.";
+    }).catch((error) => {
+      tenantManagementStatus.textContent = `Copy failed: ${error.message}`;
+    });
+    return;
+  }
+
   const button = event.target.closest("[data-delete-tenant]");
   if (!button) {
     return;
   }
-  deleteTenant(button.dataset.deleteTenant).catch((error) => {
+  const tenantId = button.dataset.deleteTenant;
+  deleteTenant(tenantId).catch((error) => {
     tenantManagementStatus.textContent = `Remove failed: ${error.message}`;
   });
 });
@@ -2677,6 +2892,18 @@ usersBody.addEventListener("change", (event) => {
   });
 });
 usersBody.addEventListener("click", (event) => {
+  const deleteButton = event.target.closest("[data-delete-user]");
+  if (deleteButton) {
+    const username = deleteButton.dataset.deleteUser;
+    const confirmed = window.confirm(`Delete user ${username}?`);
+    if (confirmed) {
+      deleteUser(username).catch((error) => {
+        userManagementStatus.textContent = `Delete failed: ${error.message}`;
+      });
+    }
+    return;
+  }
+
   const button = event.target.closest("[data-reset-user]");
   if (!button) {
     return;
@@ -2700,6 +2927,12 @@ exportDlpPolicyBtn.addEventListener("click", () => {
 logoutBtn.addEventListener("click", logout);
 profileToggle.addEventListener("click", () => {
   document.querySelector(".profile-menu").classList.toggle("open");
+});
+document.addEventListener("click", (event) => {
+  const menu = event.target.closest(".profile-menu");
+  if (!menu) {
+    document.querySelector(".profile-menu")?.classList.remove("open");
+  }
 });
 tenantSwitcher.addEventListener("change", async () => {
   currentTenant = tenantSwitcher.value || "default";
