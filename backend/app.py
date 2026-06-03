@@ -10,8 +10,33 @@ from pydantic import BaseModel, Field
 
 from backend.alerts import evaluate_alerts
 from backend.jobs import cancel_job, create_scan_job, get_job
-from backend.security import Principal, authenticate_user, create_token, generate_api_key, require_principal, require_role
-from backend.store import audit, data_retention_summary, list_tenants, read_audit_log, read_scan_history, save_scan_history
+from backend.security import (
+    Principal,
+    authenticate_user,
+    create_token,
+    generate_api_key,
+    hash_password,
+    require_principal,
+    require_role,
+    sanitize_username,
+)
+from backend.store import (
+    audit,
+    create_tenant,
+    create_user,
+    data_retention_summary,
+    delete_tenant,
+    get_user,
+    list_tenants,
+    list_users,
+    read_audit_log,
+    read_scan_history,
+    save_scan_history,
+    tenant_exists,
+    tenant_usage,
+    update_user_password,
+    update_user_role,
+)
 from backend.vault import CredentialVault
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
@@ -65,6 +90,36 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=80)
+    password: str = Field(min_length=8, max_length=200)
+    full_name: str = Field(default="", max_length=120)
+    tenant_id: str = Field(default="default", max_length=80)
+
+
+class UserCreateRequest(RegisterRequest):
+    role: str = Field(default="viewer", pattern="^(admin|analyst|viewer)$")
+
+
+class TenantRequest(BaseModel):
+    tenant_id: str = Field(min_length=1, max_length=80)
+    display_name: str = Field(default="", max_length=120)
+
+
+class UserRoleRequest(BaseModel):
+    role: str = Field(pattern="^(admin|analyst|viewer)$")
+    tenant_id: str = Field(default="", max_length=80)
+
+
+class PasswordResetRequest(BaseModel):
+    password: str = Field(min_length=8, max_length=200)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=200)
+
+
 class CredentialRequest(BaseModel):
     username: str
     password: str
@@ -85,6 +140,11 @@ def login_page() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "login.html")
 
 
+@app.get("/register")
+def register_page() -> FileResponse:
+    return FileResponse(FRONTEND_DIR / "register.html")
+
+
 @app.get("/dashboard")
 def dashboard() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
@@ -100,6 +160,11 @@ def risk_rules(_: Principal = Depends(require_role("viewer"))) -> dict:
     return {"rules": get_risk_rules()}
 
 
+@app.get("/api/auth/tenants")
+def public_tenants() -> dict:
+    return {"tenants": [_public_tenant(tenant) for tenant in list_tenants()]}
+
+
 @app.post("/api/auth/login")
 def login(payload: LoginRequest) -> dict:
     principal = authenticate_user(payload.username, payload.password)
@@ -112,6 +177,105 @@ def login(payload: LoginRequest) -> dict:
         "role": principal.role,
         "tenant_id": principal.tenant_id,
     }
+
+
+@app.post("/api/auth/register")
+def register(payload: RegisterRequest) -> dict:
+    username = sanitize_username(payload.username)
+    tenant_id = _safe_tenant(payload.tenant_id)
+    if not tenant_exists(tenant_id):
+        raise HTTPException(status_code=400, detail="Tenant does not exist")
+    if get_user(username):
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = create_user(username, hash_password(payload.password), "viewer", tenant_id, payload.full_name.strip())
+    audit(tenant_id, username, "user.registered", {"role": "viewer"})
+    return {"user": _public_user(user)}
+
+
+@app.post("/api/auth/change-password")
+def change_password(payload: PasswordChangeRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
+    authenticated = authenticate_user(principal.subject, payload.current_password)
+    if authenticated is None:
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    update_user_password(principal.subject, hash_password(payload.new_password))
+    audit(principal.tenant_id, principal.subject, "user.password_changed")
+    return {"status": "updated"}
+
+
+@app.get("/api/users")
+def users(principal: Principal = Depends(require_role("admin"))) -> dict:
+    return {"users": [_public_user(user) for user in list_users()]}
+
+
+@app.post("/api/users")
+def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+    username = sanitize_username(payload.username)
+    tenant_id = _safe_tenant(payload.tenant_id)
+    if not tenant_exists(tenant_id):
+        raise HTTPException(status_code=400, detail="Tenant does not exist")
+    if get_user(username):
+        raise HTTPException(status_code=409, detail="Username already exists")
+    user = create_user(username, hash_password(payload.password), payload.role, tenant_id, payload.full_name.strip())
+    audit(principal.tenant_id, principal.subject, "user.created", {"username": username, "role": payload.role, "tenant_id": tenant_id})
+    return {"user": _public_user(user)}
+
+
+@app.put("/api/users/{username}/role")
+def admin_update_user_role(username: str, payload: UserRoleRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = sanitize_username(username)
+    tenant_id = _safe_tenant(payload.tenant_id) if payload.tenant_id.strip() else None
+    if tenant_id and not tenant_exists(tenant_id):
+        raise HTTPException(status_code=400, detail="Tenant does not exist")
+    if target == principal.subject and payload.role != "admin":
+        admins = [user for user in list_users() if user["role"] == "admin" and user["is_active"]]
+        if len(admins) <= 1:
+            raise HTTPException(status_code=400, detail="At least one active admin must remain")
+    user = update_user_role(target, payload.role, tenant_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    audit(principal.tenant_id, principal.subject, "user.role_updated", {"username": target, "role": payload.role, "tenant_id": tenant_id})
+    return {"user": _public_user(user)}
+
+
+@app.post("/api/users/{username}/reset-password")
+def admin_reset_password(username: str, payload: PasswordResetRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = sanitize_username(username)
+    user = update_user_password(target, hash_password(payload.password))
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    audit(principal.tenant_id, principal.subject, "user.password_reset", {"username": target})
+    return {"status": "updated", "user": _public_user(user)}
+
+
+@app.get("/api/users/activity")
+def user_activity(principal: Principal = Depends(require_role("admin"))) -> dict:
+    events = [event for event in read_audit_log(principal.tenant_id, 500) if str(event.get("action", "")).startswith(("auth.", "user."))]
+    return {"events": events}
+
+
+@app.post("/api/tenants")
+def admin_create_tenant(payload: TenantRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+    tenant_id = _safe_tenant(payload.tenant_id)
+    if tenant_exists(tenant_id):
+        raise HTTPException(status_code=409, detail="Tenant already exists")
+    tenant = create_tenant(tenant_id, payload.display_name.strip())
+    audit(principal.tenant_id, principal.subject, "tenant.created", {"tenant_id": tenant_id})
+    return {"tenant": _public_tenant(tenant)}
+
+
+@app.delete("/api/tenants/{tenant_id}")
+def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = _safe_tenant(tenant_id)
+    if target == "default":
+        raise HTTPException(status_code=400, detail="Default tenant cannot be removed")
+    if not tenant_exists(target):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    usage = tenant_usage(target)
+    if any(usage.values()):
+        raise HTTPException(status_code=400, detail=f"Tenant is not empty: {usage}")
+    delete_tenant(target)
+    audit(principal.tenant_id, principal.subject, "tenant.deleted", {"tenant_id": target})
+    return {"deleted": True, "tenant_id": target}
 
 
 @app.post("/api/api-keys")
@@ -202,6 +366,36 @@ def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) 
         "latest": latest,
         "trend": history[-14:],
         "retention": data_retention_summary(principal.tenant_id),
+    }
+
+
+def _safe_tenant(tenant_id: str) -> str:
+    safe = "".join(ch for ch in tenant_id.strip() if ch.isalnum() or ch in {"-", "_"}) or "default"
+    return safe
+
+
+def _public_user(user: dict) -> dict:
+    return {
+        "username": user["username"],
+        "role": user["role"],
+        "tenant_id": user["tenant_id"],
+        "full_name": user.get("full_name", ""),
+        "is_active": user.get("is_active", True),
+        "created_at": user.get("created_at"),
+        "updated_at": user.get("updated_at"),
+        "last_login_at": user.get("last_login_at"),
+    }
+
+
+def _public_tenant(tenant: dict) -> dict:
+    return {
+        "tenant_id": tenant["tenant_id"],
+        "display_name": tenant.get("display_name") or tenant["tenant_id"],
+        "created_at": tenant.get("created_at"),
+        "updated_at": tenant.get("updated_at"),
+        "scan_count": tenant.get("scan_count", 0),
+        "latest": tenant.get("latest", {"summary": {}}),
+        "retention": tenant.get("retention", {}),
     }
 
 

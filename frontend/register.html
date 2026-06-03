@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Register | DSPM</title>
+    <link rel="stylesheet" href="/static/styles.css?v=9" />
+  </head>
+  <body class="login-page">
+    <section class="login-screen standalone">
+      <div class="login-visual">
+        <div class="logo-lockup large">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 48 48" role="img">
+              <path d="M8 13c0-3 2-5 5-5h15c8 0 14 6 14 16s-6 16-14 16H13c-3 0-5-2-5-5V13Z" />
+              <path d="M19 16h8c4 0 7 3 7 8s-3 8-7 8h-8V16Z" />
+              <path d="M19 16v16" />
+            </svg>
+          </span>
+          <div>
+            <h1>DSPM</h1>
+            <p>Tenant-scoped data security workspace</p>
+          </div>
+        </div>
+        <div class="login-graphic" aria-hidden="true">
+          <div class="graphic-node n1"></div>
+          <div class="graphic-node n2"></div>
+          <div class="graphic-node n3"></div>
+          <div class="graphic-node n4"></div>
+          <div class="graphic-line l1"></div>
+          <div class="graphic-line l2"></div>
+          <div class="graphic-line l3"></div>
+          <div class="graphic-core">DSPM</div>
+        </div>
+      </div>
+
+      <form id="register-form" class="login-card">
+        <p class="eyebrow">Create account</p>
+        <h2>Register as viewer</h2>
+        <p>Choose an existing tenant. Admins can promote your role after account creation.</p>
+        <label>
+          Username
+          <input id="register-username" name="username" autocomplete="off" placeholder="analyst01" required />
+        </label>
+        <label>
+          Full name
+          <input id="register-full-name" name="full_name" autocomplete="name" placeholder="Security Analyst" />
+        </label>
+        <label>
+          Tenant
+          <select id="register-tenant" name="tenant_id">
+            <option value="default">default</option>
+          </select>
+        </label>
+        <label>
+          Password
+          <input id="register-password" name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" required />
+        </label>
+        <label>
+          Confirm password
+          <input id="register-password-confirm" name="password_confirm" type="password" autocomplete="new-password" placeholder="Repeat password" required />
+        </label>
+        <button type="submit">Create viewer account</button>
+        <span id="register-status" class="save-status">Tenant list loads from the backend.</span>
+        <div class="login-divider"></div>
+        <a class="auth-link" href="/login">Already have an account? Sign in</a>
+      </form>
+    </section>
+    <script src="/static/register.js?v=1"></script>
+  </body>
+</html>

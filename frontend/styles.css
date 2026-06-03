@@ -116,6 +116,27 @@ select {
   color: var(--muted);
 }
 
+.login-divider {
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 4px;
+}
+
+.register-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.login-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.login-actions button {
+  flex: 1 1 180px;
+}
+
 .sidebar {
   border-right: 1px solid var(--line);
   background: color-mix(in srgb, var(--surface-soft) 88%, var(--surface));
@@ -792,10 +813,37 @@ tbody tr:hover {
   align-items: end;
 }
 
+.asset-form-grid.compact-form {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin-bottom: 12px;
+}
+
 .save-status {
   margin: 10px 0 0;
   color: var(--muted);
   font-size: 13px;
+}
+
+.table-input {
+  width: 100%;
+  min-width: 130px;
+}
+
+.inline-control {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.auth-link {
+  color: var(--accent-strong);
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.auth-link:hover {
+  text-decoration: underline;
 }
 
 .asset-rule-list {
@@ -858,6 +906,47 @@ tbody tr:hover {
 .report-document {
   display: grid;
   gap: 18px;
+}
+
+.premium-report-preview {
+  gap: 0;
+  overflow: hidden;
+}
+
+.report-cover-strip {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  background: var(--accent);
+  color: white;
+  padding: 20px;
+}
+
+.report-cover-strip span,
+.report-cover-strip p {
+  color: color-mix(in srgb, white 78%, var(--accent-strong));
+}
+
+.report-cover-strip h4,
+.report-cover-strip p {
+  margin: 4px 0 0;
+}
+
+.report-cover-strip strong {
+  display: grid;
+  place-items: center;
+  min-width: 72px;
+  min-height: 72px;
+  border-radius: 999px;
+  background: white;
+  color: var(--accent);
+  font-size: 28px;
+}
+
+.premium-report-preview > .report-kpis,
+.premium-report-preview > .report-visual-grid {
+  margin: 18px;
 }
 
 .report-title {
@@ -1545,6 +1634,78 @@ progress::-moz-progress-bar {
   margin-top: 5px;
   color: var(--muted);
   line-height: 1.35;
+}
+
+.priority-file-list,
+.department-risk-list,
+.scan-comparison-list,
+.folder-risk-list {
+  display: grid;
+  gap: 10px;
+}
+
+.priority-file,
+.folder-risk-row {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-soft) 36%, var(--surface));
+  padding: 12px;
+}
+
+.priority-file {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+
+.priority-file strong,
+.folder-risk-row strong {
+  display: block;
+  word-break: break-word;
+}
+
+.priority-file p,
+.priority-file small,
+.folder-risk-row span,
+.department-risk-row span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  margin-top: 4px;
+  word-break: break-word;
+}
+
+.department-risk-row,
+.scan-comparison-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 110px;
+  gap: 12px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 0;
+}
+
+.department-risk-row progress {
+  width: 100%;
+}
+
+.scan-comparison-row {
+  grid-template-columns: minmax(0, 1fr) 70px 64px;
+}
+
+.scan-comparison-row strong,
+.scan-comparison-row small {
+  text-align: right;
+}
+
+.scan-comparison-row small.better {
+  color: var(--low);
+}
+
+.scan-comparison-row small.worse {
+  color: var(--critical);
 }
 
 .signal-matrix {

@@ -22,6 +22,7 @@ class SMBConfig:
     client_name: str = "dspm-client"
     max_depth: int = 4
     read_content: bool = True
+    include_hidden: bool = True
     max_read_bytes: int = 1024 * 256
 
 
@@ -123,6 +124,9 @@ class SMBScanner:
 
             remote_path = str(PurePosixPath(folder) / entry.filename)
             is_dir = bool(entry.isDirectory)
+            is_hidden = bool(getattr(entry, "isHidden", False))
+            if is_hidden and not self.config.include_hidden:
+                continue
 
             if is_dir:
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
@@ -138,6 +142,7 @@ class SMBScanner:
                     "size": int(getattr(entry, "file_size", 0) or 0),
                     "extension": extension,
                     "is_dir": False,
+                    "is_hidden": is_hidden,
                     "content": self._read_file_preview(share_name, remote_path, extension),
                     "acl": {},
                 }

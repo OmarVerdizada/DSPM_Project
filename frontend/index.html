@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css?v=7" />
+    <link rel="stylesheet" href="/static/styles.css?v=11" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -102,6 +102,7 @@
           <button type="button" class="tab" data-tab="assets">Customer Assets</button>
           <button type="button" class="tab" data-tab="reports">Reports</button>
           <button type="button" class="tab" data-tab="history">History</button>
+          <button type="button" class="tab" data-tab="tenants">Tenants</button>
           <button type="button" class="tab" data-tab="security">Security</button>
           <button type="button" class="tab" data-tab="integrations">Integrations</button>
           <button type="button" class="tab" data-tab="logic">Risk Logic</button>
@@ -231,6 +232,38 @@
               <div id="risk-topology" class="risk-topology"></div>
             </section>
           </div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Critical and high files</h4>
+                <span>Priority review queue</span>
+              </div>
+              <div id="priority-risk-files"></div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Department risk</h4>
+                <span>Team or folder ownership</span>
+              </div>
+              <div id="department-risk"></div>
+            </section>
+          </div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Scan comparison</h4>
+                <span>Latest versus previous scan</span>
+              </div>
+              <div id="scan-comparison"></div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Top risky folders</h4>
+                <span>Concentrated exposure</span>
+              </div>
+              <div id="top-risky-folders"></div>
+            </section>
+          </div>
           <div id="executive-top-files" class="top-files-grid"></div>
         </section>
 
@@ -330,6 +363,43 @@
           <div class="security-grid">
             <section class="visual-panel">
               <div class="panel-title">
+                <h4>User management</h4>
+                <span>Admin only</span>
+              </div>
+              <div class="asset-form-grid compact-form">
+                <label>
+                  Username
+                  <input id="new-user-username" autocomplete="off" />
+                </label>
+                <label>
+                  Role
+                  <select id="new-user-role">
+                    <option value="viewer">Viewer</option>
+                    <option value="analyst">Analyst</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </label>
+                <label>
+                  Tenant
+                  <select id="new-user-tenant">
+                    <option value="default">default</option>
+                  </select>
+                </label>
+                <label>
+                  Full name
+                  <input id="new-user-full-name" autocomplete="off" />
+                </label>
+                <label>
+                  Password
+                  <input id="new-user-password" type="password" autocomplete="new-password" />
+                </label>
+              </div>
+              <button type="button" id="create-user-btn">Create user</button>
+              <p id="user-management-status" class="save-status">User controls load after admin sign-in.</p>
+            </section>
+
+            <section class="visual-panel">
+              <div class="panel-title">
                 <h4>API key management</h4>
                 <span>Admin only</span>
               </div>
@@ -355,6 +425,32 @@
           <section class="workspace">
             <div class="table-toolbar">
               <div>
+                <h3>Users and roles</h3>
+                <p>Manage tenant access levels and reset local passwords.</p>
+              </div>
+              <button type="button" id="refresh-users-btn" class="secondary-btn">Refresh users</button>
+            </div>
+            <div class="table-wrap">
+              <table class="logic-table">
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Tenant</th>
+                    <th>Role</th>
+                    <th>Last login</th>
+                    <th>Reset password</th>
+                  </tr>
+                </thead>
+                <tbody id="users-body">
+                  <tr><td colspan="5" class="empty">Sign in as admin to load users.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="workspace">
+            <div class="table-toolbar">
+              <div>
                 <h3>Audit trail</h3>
                 <p>Immutable tenant activity captured by the backend.</p>
               </div>
@@ -372,6 +468,61 @@
                 </thead>
                 <tbody id="audit-body">
                   <tr><td colspan="4" class="empty">Sign in as admin to load audit events.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-tenants" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Tenant management</p>
+              <h3>Customers and workspaces</h3>
+              <p>Register new accounts against an existing tenant and let admins create or remove empty tenant workspaces.</p>
+            </div>
+          </div>
+
+          <section class="visual-panel tenant-admin-panel">
+            <div class="panel-title">
+              <h4>Add tenant</h4>
+              <span>Admin only</span>
+            </div>
+            <div class="asset-form-grid compact-form">
+              <label>
+                Tenant id
+                <input id="new-tenant-id" placeholder="customer-a" />
+              </label>
+              <label>
+                Display name
+                <input id="new-tenant-name" placeholder="Customer A" />
+              </label>
+            </div>
+            <button type="button" id="create-tenant-btn">Create tenant</button>
+            <p id="tenant-management-status" class="save-status">Tenant controls load after admin sign-in.</p>
+          </section>
+
+          <section class="workspace">
+            <div class="table-toolbar">
+              <div>
+                <h3>Tenant list</h3>
+                <p>Available tenants are used by registration, user management, and the MSSP switcher.</p>
+              </div>
+              <button type="button" id="refresh-tenants-btn" class="secondary-btn">Refresh tenants</button>
+            </div>
+            <div class="table-wrap">
+              <table class="logic-table">
+                <thead>
+                  <tr>
+                    <th>Tenant</th>
+                    <th>Reports</th>
+                    <th>Audit</th>
+                    <th>Alerts</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="tenants-body">
+                  <tr><td colspan="5" class="empty">Sign in as admin to load tenants.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -430,6 +581,6 @@
       </aside>
     </div>
 
-    <script src="/static/app.js?v=7"></script>
+    <script src="/static/app.js?v=11"></script>
   </body>
 </html>

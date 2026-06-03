@@ -13,17 +13,12 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from backend.store import create_user, get_user, list_users, mark_user_login
+
 
 ROLES = {"admin": 3, "analyst": 2, "viewer": 1}
 SECRET_KEY = os.getenv("DSPM_SECRET_KEY", "dev-only-change-me")
 TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "28800"))
-DEFAULT_USERS = {
-    "admin": {
-        "password_hash": hashlib.sha256(os.getenv("DSPM_ADMIN_PASSWORD", "admin123").encode()).hexdigest(),
-        "role": "admin",
-        "tenant": "default",
-    }
-}
 API_KEYS = {
     item.split(":", 1)[0]: item.split(":", 1)[1]
     for item in os.getenv("DSPM_API_KEYS", "").split(",")
@@ -39,6 +34,37 @@ class Principal:
     role: str
     tenant_id: str
     auth_type: str = "jwt"
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 210_000).hex()
+    return f"pbkdf2_sha256$210000${salt}${digest}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    if password_hash.startswith("pbkdf2_sha256$"):
+        _, rounds, salt, digest = password_hash.split("$", 3)
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(rounds)).hex()
+        return hmac.compare_digest(candidate, digest)
+    return hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), password_hash)
+
+
+def sanitize_username(username: str) -> str:
+    return username.strip().lower()
+
+
+def ensure_default_admin() -> None:
+    users = list_users()
+    if users:
+        return
+    create_user(
+        "admin",
+        hash_password(os.getenv("DSPM_ADMIN_PASSWORD", "admin123")),
+        "admin",
+        "default",
+        "Local Administrator",
+    )
 
 
 def _b64url(data: bytes) -> str:
@@ -92,13 +118,13 @@ def verify_token(token: str) -> Principal:
 
 
 def authenticate_user(username: str, password: str) -> Principal | None:
-    user = DEFAULT_USERS.get(username)
-    if not user:
+    user = get_user(sanitize_username(username))
+    if not user or not user["is_active"]:
         return None
-    password_hash = hashlib.sha256(password.encode()).hexdigest()
-    if not hmac.compare_digest(password_hash, user["password_hash"]):
+    if not verify_password(password, user["password_hash"]):
         return None
-    return Principal(username, user["role"], user["tenant"])
+    mark_user_login(user["username"])
+    return Principal(user["username"], user["role"], user["tenant_id"])
 
 
 def hash_api_key(raw_key: str) -> str:
@@ -139,3 +165,6 @@ def require_role(*roles: str):
         return principal
 
     return dependency
+
+
+ensure_default_admin()

@@ -7,6 +7,7 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 ## Highlights
 
 - AD/SMB file-server discovery with local enterprise demo data fallback.
+- Hidden local and SMB file entries are included in scan scope and marked in scan metadata.
 - Regex and heuristic classification for secrets, PCI, PII, finance, HR, legal, customer data, PHI context, source-code assets, passports, national IDs, IBAN, SWIFT/BIC, GitHub, Slack, Google, Azure, JWT, API keys, and private keys.
 - 0-100 file risk scoring with LOW, MEDIUM, HIGH, and CRITICAL severity bands.
 - Risk posture score that updates from the current scan and manual analyst overrides.
@@ -14,9 +15,11 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - MSSP multi-tenant mode with isolated history, audit, credentials, reports, and customer portfolio posture.
 - Customer asset rules for tenant-specific crown-jewel paths, folders, extensions, and filenames.
 - Executive dashboard with posture ring, risk distribution, folder heatmap, signal mix, posture trend, topology, MSSP portfolio, and remediation queue.
+- Scan result analytics include risk trend, critical/high file queue, department risk, scan comparison, and top risky folders.
 - Right-side detail drawers for long risk reasons and DLP recommendations.
-- Report center with Excel, Word, and print/PDF exports.
+- Report center with polished Excel, Word, and print/PDF exports, including KPI cards, SVG charts, department risk, folder heatmap, trend context, and priority file queues.
 - Security operations view with API keys, audit trail, DLP policy export, and credential vault support.
+- SQLite-backed tenant and user management with tenant-scoped registration, admin role management, password resets, and activity logging.
 
 ## Screens
 
@@ -25,7 +28,8 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - `Customer Assets`: tenant-specific business context and forced-risk rules.
 - `Reports`: customer-ready evidence exports.
 - `History`: tenant scan history and posture score.
-- `Security`: API keys, audit, DLP policy export.
+- `Tenants`: admin tenant creation, tenant removal for empty workspaces, and tenant portfolio status.
+- `Security`: user management, role management, password reset, API keys, audit, DLP policy export.
 - `Integrations`: connector and response workflow roadmap.
 - `Risk Logic`: severity ranges, scoring formula, detection signals, customer asset context.
 
@@ -86,6 +90,16 @@ The CLI writes a full JSON report with summary, file findings, permissions, risk
 Core endpoints:
 
 - `POST /api/auth/login`
+- `POST /api/auth/register`
+- `GET /api/auth/tenants`
+- `POST /api/auth/change-password`
+- `GET /api/users`
+- `POST /api/users`
+- `PUT /api/users/{username}/role`
+- `POST /api/users/{username}/reset-password`
+- `GET /api/users/activity`
+- `POST /api/tenants`
+- `DELETE /api/tenants/{tenant_id}`
 - `POST /api/test-connection`
 - `POST /api/scan`
 - `GET /api/scans/{job_id}`
@@ -144,11 +158,21 @@ The app supports a managed-service workflow:
 Useful environment variables:
 
 - `DSPM_ADMIN_PASSWORD`: overrides the default local admin password.
+- `DSPM_DB_PATH`: optional custom SQLite database path. Defaults to `data/dspm.sqlite`.
 - `DSPM_ENV`: shown in retention metadata.
 - `DSPM_API_KEYS`: API-key hash mapping in `tenant_id:hash` format.
 - `DSPM_WEBHOOK_URL`: optional alert webhook destination.
 
-Local runtime data is written under `data/tenants/` and is ignored by git.
+Local runtime data is stored in SQLite at `data/dspm.sqlite` and is ignored by git. The database and schema are created automatically on first run after `git clone` or `git pull`, so no machine-specific path changes are required.
+
+## Dependencies
+
+Install Python dependencies from `requirements.txt`. SQLite does not need a separate package because the app uses Python's built-in `sqlite3` module. The frontend is static HTML/CSS/JavaScript served by FastAPI, so no Node.js or npm install is required.
+
+Optional tooling:
+
+- Git is required only for committing and pushing changes to GitHub.
+- Browser print/PDF exports look best when print background graphics are enabled.
 
 ## Project Structure
 

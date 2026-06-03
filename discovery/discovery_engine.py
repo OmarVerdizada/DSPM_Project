@@ -33,6 +33,7 @@ class ScanSummary:
     medium: int
     low: int
     sensitive_files: int
+    hidden_files: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -42,6 +43,7 @@ class ScanSummary:
             "medium": self.medium,
             "low": self.low,
             "sensitive_files": self.sensitive_files,
+            "hidden_files": self.hidden_files,
         }
 
 
@@ -140,12 +142,15 @@ class DSPMDiscoveryEngine:
     def _build_summary(files: list[dict]) -> ScanSummary:
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         sensitive_files = 0
+        hidden_files = 0
 
         for item in files:
             level = item.get("risk", {}).get("level", "LOW")
             counts[level] = counts.get(level, 0) + 1
             if item.get("findings"):
                 sensitive_files += 1
+            if item.get("is_hidden"):
+                hidden_files += 1
 
         return ScanSummary(
             total_files=len(files),
@@ -154,6 +159,7 @@ class DSPMDiscoveryEngine:
             medium=counts["MEDIUM"],
             low=counts["LOW"],
             sensitive_files=sensitive_files,
+            hidden_files=hidden_files,
         )
 
 

@@ -39,6 +39,10 @@ const riskHeatmap = document.querySelector("#risk-heatmap");
 const signalMatrix = document.querySelector("#signal-matrix");
 const riskTopology = document.querySelector("#risk-topology");
 const executiveTopFiles = document.querySelector("#executive-top-files");
+const priorityRiskFiles = document.querySelector("#priority-risk-files");
+const departmentRisk = document.querySelector("#department-risk");
+const scanComparison = document.querySelector("#scan-comparison");
+const topRiskyFolders = document.querySelector("#top-risky-folders");
 const postureTrend = document.querySelector("#posture-trend");
 const remediationWorkflow = document.querySelector("#remediation-workflow");
 const msspPortfolio = document.querySelector("#mssp-portfolio");
@@ -49,6 +53,21 @@ const exportDlpPolicyBtn = document.querySelector("#export-dlp-policy-btn");
 const dlpPolicyOutput = document.querySelector("#dlp-policy-output");
 const refreshAuditBtn = document.querySelector("#refresh-audit-btn");
 const auditBody = document.querySelector("#audit-body");
+const createUserBtn = document.querySelector("#create-user-btn");
+const refreshUsersBtn = document.querySelector("#refresh-users-btn");
+const usersBody = document.querySelector("#users-body");
+const userManagementStatus = document.querySelector("#user-management-status");
+const newUserUsername = document.querySelector("#new-user-username");
+const newUserRole = document.querySelector("#new-user-role");
+const newUserTenant = document.querySelector("#new-user-tenant");
+const newUserFullName = document.querySelector("#new-user-full-name");
+const newUserPassword = document.querySelector("#new-user-password");
+const createTenantBtn = document.querySelector("#create-tenant-btn");
+const refreshTenantsBtn = document.querySelector("#refresh-tenants-btn");
+const tenantsBody = document.querySelector("#tenants-body");
+const tenantManagementStatus = document.querySelector("#tenant-management-status");
+const newTenantId = document.querySelector("#new-tenant-id");
+const newTenantName = document.querySelector("#new-tenant-name");
 const integrationGrid = document.querySelector("#integration-grid");
 const integrationDiagram = document.querySelector("#integration-diagram");
 const detailDrawer = document.querySelector("#detail-drawer");
@@ -656,13 +675,6 @@ function safeSessionSet(key, value) {
 }
 
 function renderReportPreview() {
-  const summary = buildCurrentSummary();
-  const topFiles = [...latestFiles]
-    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
-    .slice(0, 5);
-  const distribution = buildRiskDistribution(summary);
-  const findingStats = buildFindingStats();
-
   if (!latestFiles.length) {
     reportPreview.innerHTML = `
       <div class="report-empty">
@@ -673,49 +685,118 @@ function renderReportPreview() {
     return;
   }
 
+  const report = buildReportModel();
+
   reportPreview.innerHTML = `
-    <div class="report-document">
-      <div class="report-title">
+    <div class="report-document premium-report-preview">
+      <div class="report-cover-strip">
         <div>
           <span>DSPM assessment report</span>
-          <h4>${escapeHtml(readPayload().server || "Local sample scan")}</h4>
+          <h4>${escapeHtml(report.title)}</h4>
+          <p>${escapeHtml(report.generatedAt)} · tenant ${escapeHtml(currentTenant)}</p>
         </div>
-        <strong>${new Date().toLocaleString()}</strong>
+        <strong>${report.score}</strong>
       </div>
       <div class="report-kpis">
-        <div><span>Critical</span><strong>${summary.critical}</strong></div>
-        <div><span>High</span><strong>${summary.high}</strong></div>
-        <div><span>Medium</span><strong>${summary.medium}</strong></div>
-        <div><span>Low</span><strong>${summary.low}</strong></div>
-        <div><span>Total files</span><strong>${summary.total_files}</strong></div>
+        <div><span>Critical</span><strong>${report.summary.critical}</strong></div>
+        <div><span>High</span><strong>${report.summary.high}</strong></div>
+        <div><span>Medium</span><strong>${report.summary.medium}</strong></div>
+        <div><span>Low</span><strong>${report.summary.low}</strong></div>
+        <div><span>Total files</span><strong>${report.summary.total_files}</strong></div>
       </div>
       <div class="report-visual-grid">
         <div class="chart-panel">
           <h5>Risk distribution</h5>
-          ${buildDistributionBars(distribution)}
+          ${buildDistributionBars(report.distribution)}
         </div>
         <div class="chart-panel">
           <h5>Detection signals</h5>
-          ${renderFindingBars(findingStats)}
+          ${renderFindingBars(report.findingStats)}
         </div>
       </div>
-      <h5>Top risky files</h5>
-      ${topFiles
-        .map((file) => {
-          const risk = getEffectiveRisk(file);
-          return `
-            <div class="report-row">
-              <div>
-                <strong>${escapeHtml(file.name || file.path)}</strong>
-                <span>${escapeHtml(file.path || "")}</span>
-              </div>
-              <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
-            </div>
-          `;
-        })
-        .join("")}
+      <div class="report-visual-grid">
+        <div class="chart-panel">
+          <h5>Priority files</h5>
+          ${renderReportFileList(report.priorityFiles.slice(0, 5))}
+        </div>
+        <div class="chart-panel">
+          <h5>Top risky folders</h5>
+          ${renderReportFolderList(report.folders.slice(0, 5))}
+        </div>
+      </div>
     </div>
   `;
+}
+
+function buildReportModel() {
+  const summary = buildCurrentSummary();
+  const priorityFiles = [...latestFiles].sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score);
+  return {
+    title: readPayload().server || "Local sample scan",
+    generatedAt: new Date().toLocaleString(),
+    summary,
+    score: getCurrentPostureScore(summary),
+    distribution: buildRiskDistribution(summary),
+    findingStats: buildFindingStats(),
+    priorityFiles,
+    departments: groupFilesByDepartment(latestFiles),
+    folders: groupFilesByFolder(latestFiles),
+    comparison: buildReportComparisonRows(),
+  };
+}
+
+function renderReportFileList(files) {
+  if (!files.length) {
+    return '<p class="subtext">No priority files.</p>';
+  }
+  return files
+    .map((file) => {
+      const risk = getEffectiveRisk(file);
+      return `
+        <div class="report-row">
+          <div>
+            <strong>${escapeHtml(file.name || file.path || "")}</strong>
+            <span>${escapeHtml(file.path || "")}</span>
+          </div>
+          <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderReportFolderList(folders) {
+  if (!folders.length) {
+    return '<p class="subtext">No folder risk concentration yet.</p>';
+  }
+  return folders
+    .map(
+      (folder) => `
+        <div class="report-row">
+          <div>
+            <strong>${escapeHtml(folder.folder)}</strong>
+            <span>${folder.files} files · ${folder.critical} critical · avg ${Math.round(folder.score / Math.max(folder.files, 1))}</span>
+          </div>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function buildReportComparisonRows() {
+  const trend = latestDashboard?.trend || [];
+  if (trend.length < 2) {
+    return [];
+  }
+  const previous = trend[trend.length - 2].summary || {};
+  const latest = trend[trend.length - 1].summary || {};
+  return [
+    ["Critical", latest.critical || 0, previous.critical || 0],
+    ["High", latest.high || 0, previous.high || 0],
+    ["Medium", latest.medium || 0, previous.medium || 0],
+    ["Low", latest.low || 0, previous.low || 0],
+    ["Total files", latest.total_files || 0, previous.total_files || 0],
+  ].map(([label, current, prior]) => ({ label, current, prior, delta: Number(current) - Number(prior) }));
 }
 
 function renderExecutiveExperience() {
@@ -742,6 +823,11 @@ function renderExecutiveExperience() {
       <span>Sensitive files</span>
       <strong>${latestReport?.summary?.sensitive_files || countSensitiveFiles(latestFiles)}</strong>
       <p>Files with PII, secrets, PCI, PHI, or ML context signals.</p>
+    </div>
+    <div class="insight-card">
+      <span>Hidden files</span>
+      <strong>${latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length}</strong>
+      <p>Hidden local and SMB entries are included in discovery scope.</p>
     </div>
     <div class="insight-card">
       <span>Tenant</span>
@@ -774,6 +860,10 @@ function renderExecutiveExperience() {
   postureTrend.innerHTML = buildPostureTrend();
   remediationWorkflow.innerHTML = buildRemediationWorkflow();
   msspPortfolio.innerHTML = buildMsspPortfolio();
+  priorityRiskFiles.innerHTML = buildPriorityRiskFiles();
+  departmentRisk.innerHTML = buildDepartmentRisk();
+  scanComparison.innerHTML = buildScanComparison();
+  topRiskyFolders.innerHTML = buildTopRiskyFolders();
   executiveTopFiles.innerHTML = renderTopFiles(topFiles);
 }
 
@@ -1011,6 +1101,161 @@ function buildHeatmap(files) {
   `;
 }
 
+function buildPriorityRiskFiles() {
+  const items = latestFiles
+    .filter((file) => ["CRITICAL", "HIGH"].includes(getEffectiveRisk(file).level))
+    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
+    .slice(0, 8);
+
+  if (!items.length) {
+    return '<div class="empty compact">Critical and high files will appear after a risky scan.</div>';
+  }
+
+  return `
+    <div class="priority-file-list">
+      ${items
+        .map((file) => {
+          const risk = getEffectiveRisk(file);
+          return `
+            <article class="priority-file">
+              <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
+              <div>
+                <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
+                <p>${escapeHtml(file.path || "")}</p>
+                <small>${escapeHtml((file.findings || []).map((finding) => finding.type).slice(0, 3).join(", ") || "Risk context")}</small>
+              </div>
+            </article>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+}
+
+function buildDepartmentRisk() {
+  const groups = groupFilesByDepartment(latestFiles);
+  if (!groups.length) {
+    return '<div class="empty compact">Department or team risk appears after a scan.</div>';
+  }
+
+  const maxScore = Math.max(...groups.map((item) => item.score), 1);
+  return `
+    <div class="department-risk-list">
+      ${groups.slice(0, 8).map((item) => `
+        <div class="department-risk-row">
+          <div>
+            <strong>${escapeHtml(item.department)}</strong>
+            <span>${item.files} files · ${item.critical} critical · ${item.high} high</span>
+          </div>
+          <progress max="${maxScore}" value="${item.score}"></progress>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function groupFilesByDepartment(files) {
+  const groups = {};
+  files.forEach((file) => {
+    const department = inferDepartment(file);
+    const risk = getEffectiveRisk(file);
+    groups[department] = groups[department] || { department, files: 0, critical: 0, high: 0, score: 0 };
+    groups[department].files += 1;
+    groups[department].critical += risk.level === "CRITICAL" ? 1 : 0;
+    groups[department].high += risk.level === "HIGH" ? 1 : 0;
+    groups[department].score += risk.score;
+  });
+  return Object.values(groups).sort((a, b) => b.score - a.score);
+}
+
+function inferDepartment(file) {
+  const parts = String(file.path || file.name || "")
+    .split(/[\\\\/]/)
+    .filter(Boolean);
+  const known = ["Finance", "HR", "Legal", "Engineering", "IT", "Sales", "Marketing", "Identity", "Cloud", "Database", "Backups"];
+  const match = parts.find((part) => known.some((name) => part.toLowerCase().includes(name.toLowerCase())));
+  if (match) {
+    return match.replaceAll("_", " ");
+  }
+  return file.share || parts.slice(-3, -2)[0] || file.source || "Unassigned";
+}
+
+function buildScanComparison() {
+  const trend = latestDashboard?.trend || [];
+  if (trend.length < 2) {
+    return '<div class="empty compact">Save at least two scans to compare posture changes.</div>';
+  }
+
+  const previous = trend[trend.length - 2];
+  const latest = trend[trend.length - 1];
+  const previousSummary = previous.summary || {};
+  const latestSummary = latest.summary || {};
+  const rows = [
+    ["Critical", latestSummary.critical || 0, previousSummary.critical || 0],
+    ["High", latestSummary.high || 0, previousSummary.high || 0],
+    ["Medium", latestSummary.medium || 0, previousSummary.medium || 0],
+    ["Low", latestSummary.low || 0, previousSummary.low || 0],
+    ["Total", latestSummary.total_files || 0, previousSummary.total_files || 0],
+  ];
+
+  return `
+    <div class="scan-comparison-list">
+      ${rows.map(([label, current, prior]) => {
+        const delta = Number(current) - Number(prior);
+        const sign = delta > 0 ? "+" : "";
+        return `
+          <div class="scan-comparison-row">
+            <span>${escapeHtml(label)}</span>
+            <strong>${current}</strong>
+            <small class="${delta > 0 ? "worse" : delta < 0 ? "better" : ""}">${sign}${delta}</small>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function buildTopRiskyFolders() {
+  const folders = groupFilesByFolder(latestFiles);
+  if (!folders.length) {
+    return '<div class="empty compact">Top risky folders appear after a scan.</div>';
+  }
+
+  return `
+    <div class="folder-risk-list">
+      ${folders.slice(0, 8).map((item) => `
+        <article class="folder-risk-row">
+          <strong>${escapeHtml(item.folder)}</strong>
+          <span>${item.files} files · avg ${Math.round(item.score / Math.max(item.files, 1))} · ${item.critical} critical</span>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function groupFilesByFolder(files) {
+  const groups = {};
+  files.forEach((file) => {
+    const folder = inferFolder(file);
+    const risk = getEffectiveRisk(file);
+    groups[folder] = groups[folder] || { folder, files: 0, score: 0, critical: 0 };
+    groups[folder].files += 1;
+    groups[folder].score += risk.score;
+    groups[folder].critical += risk.level === "CRITICAL" ? 1 : 0;
+  });
+  return Object.values(groups).sort((a, b) => b.score - a.score);
+}
+
+function inferFolder(file) {
+  const parts = String(file.path || "")
+    .split(/[\\\\/]/)
+    .filter(Boolean);
+  if (file.share && parts.length) {
+    return `${file.share}/${parts.slice(0, -1).slice(-2).join("/") || "root"}`;
+  }
+  return parts.slice(0, -1).slice(-2).join("/") || file.share || file.source || "local";
+}
+
 function renderTopFiles(files) {
   if (!files.length) {
     return '<div class="empty compact">Top risky files will appear after a scan.</div>';
@@ -1121,7 +1366,7 @@ function exportCsv() {
     return;
   }
 
-  downloadFile("dspm-assessment.xls", buildExcelWorkbookHtml(), "application/vnd.ms-excel");
+  downloadFile("dspm-assessment.xls", buildPolishedExcelWorkbookHtml(), "application/vnd.ms-excel");
 }
 
 function exportWord() {
@@ -1130,7 +1375,7 @@ function exportWord() {
     return;
   }
 
-  downloadFile("dspm-assessment.doc", buildReportHtml("word"), "application/msword");
+  downloadFile("dspm-assessment.doc", buildExecutiveReportHtml("word"), "application/msword");
 }
 
 function exportPdf() {
@@ -1140,10 +1385,418 @@ function exportPdf() {
   }
 
   const reportWindow = window.open("", "_blank");
-  reportWindow.document.write(buildReportHtml("pdf"));
+  reportWindow.document.write(buildExecutiveReportHtml("pdf"));
   reportWindow.document.close();
   reportWindow.focus();
   reportWindow.print();
+}
+
+function reportColor(level) {
+  return {
+    CRITICAL: "#9f1239",
+    HIGH: "#c2410c",
+    MEDIUM: "#b7791f",
+    LOW: "#2f855a",
+  }[level] || "#0f766e";
+}
+
+function buildReportDonutSvg(distribution, total) {
+  const radius = 54;
+  const circumference = 2 * Math.PI * radius;
+  let offset = 0;
+  const rings = distribution
+    .map((item) => {
+      const length = total ? (item.count / total) * circumference : 0;
+      const circle = `<circle cx="80" cy="80" r="${radius}" fill="none" stroke="${reportColor(item.level)}" stroke-width="18" stroke-dasharray="${length} ${circumference - length}" stroke-dashoffset="${-offset}" />`;
+      offset += length;
+      return circle;
+    })
+    .join("");
+  return `
+    <svg class="report-svg" viewBox="0 0 160 160" role="img" aria-label="Risk distribution donut">
+      <circle cx="80" cy="80" r="${radius}" fill="none" stroke="#e5e7eb" stroke-width="18" />
+      ${rings}
+      <circle cx="80" cy="80" r="38" fill="#fff" />
+      <text x="80" y="76" text-anchor="middle" class="svg-number">${total}</text>
+      <text x="80" y="96" text-anchor="middle" class="svg-label">files</text>
+    </svg>
+  `;
+}
+
+function buildReportRiskBarsSvg(distribution, total) {
+  const rows = distribution
+    .map((item, index) => {
+      const y = 28 + index * 34;
+      const width = Math.max(6, total ? (item.count / total) * 250 : 0);
+      return `
+        <text x="0" y="${y + 9}" class="svg-axis">${escapeSvg(item.label)}</text>
+        <rect x="76" y="${y}" width="250" height="14" rx="7" fill="#e5e7eb"></rect>
+        <rect x="76" y="${y}" width="${width}" height="14" rx="7" fill="${reportColor(item.level)}"></rect>
+        <text x="340" y="${y + 11}" class="svg-value">${item.count}</text>
+      `;
+    })
+    .join("");
+  return `<svg class="report-svg wide" viewBox="0 0 390 170" role="img" aria-label="Risk bar chart">${rows}</svg>`;
+}
+
+function buildReportSignalSvg(stats) {
+  if (!stats.length) {
+    return '<p class="muted">No detection signals.</p>';
+  }
+  const max = Math.max(...stats.map((item) => item.count), 1);
+  const rows = stats.slice(0, 7)
+    .map((item, index) => {
+      const y = 24 + index * 28;
+      const label = item.type.length > 22 ? `${item.type.slice(0, 21)}...` : item.type;
+      const width = Math.max(8, (item.count / max) * 220);
+      return `
+        <text x="0" y="${y + 9}" class="svg-axis">${escapeSvg(label)}</text>
+        <rect x="142" y="${y}" width="220" height="12" rx="6" fill="#e5e7eb"></rect>
+        <rect x="142" y="${y}" width="${width}" height="12" rx="6" fill="#0f766e"></rect>
+        <text x="374" y="${y + 10}" class="svg-value">${item.count}</text>
+      `;
+    })
+    .join("");
+  return `<svg class="report-svg wide" viewBox="0 0 420 232" role="img" aria-label="Detection signal chart">${rows}</svg>`;
+}
+
+function buildReportTrendSvg() {
+  const trend = (latestDashboard?.trend || []).slice(-8);
+  if (trend.length < 2) {
+    return '<p class="muted">Save at least two scans to draw a trend line.</p>';
+  }
+  const points = trend.map((item, index) => {
+    const score = calculatePostureScore(item.summary || {});
+    const x = 24 + index * (300 / Math.max(trend.length - 1, 1));
+    const y = 138 - score * 1.08;
+    return { x, y, score, label: (item.timestamp || "").slice(5, 10) || `scan ${index + 1}` };
+  });
+  const polyline = points.map((item) => `${item.x},${item.y}`).join(" ");
+  const dots = points.map((item) => `<circle cx="${item.x}" cy="${item.y}" r="4" fill="#0f766e"></circle><text x="${item.x}" y="158" text-anchor="middle" class="svg-tick">${escapeSvg(item.label)}</text>`).join("");
+  return `
+    <svg class="report-svg wide" viewBox="0 0 360 170" role="img" aria-label="Risk trend">
+      <line x1="24" y1="138" x2="340" y2="138" stroke="#cbd5e1"></line>
+      <line x1="24" y1="30" x2="24" y2="138" stroke="#cbd5e1"></line>
+      <polyline points="${polyline}" fill="none" stroke="#0f766e" stroke-width="3"></polyline>
+      ${dots}
+      <text x="28" y="24" class="svg-label">Posture score</text>
+    </svg>
+  `;
+}
+
+function buildReportFolderHeatmapSvg(folders) {
+  if (!folders.length) {
+    return '<p class="muted">No folder concentration data.</p>';
+  }
+  const max = Math.max(...folders.map((item) => item.score), 1);
+  return `
+    <svg class="report-svg wide" viewBox="0 0 420 190" role="img" aria-label="Top folder heatmap">
+      ${folders.slice(0, 8).map((item, index) => {
+        const col = index % 4;
+        const row = Math.floor(index / 4);
+        const x = 8 + col * 102;
+        const y = 16 + row * 82;
+        const alpha = Math.max(0.16, item.score / max);
+        const label = item.folder.length > 15 ? `${item.folder.slice(0, 14)}...` : item.folder;
+        return `
+          <rect x="${x}" y="${y}" width="94" height="70" rx="8" fill="#0f766e" opacity="${alpha}"></rect>
+          <text x="${x + 9}" y="${y + 24}" class="svg-heat-title">${escapeSvg(label)}</text>
+          <text x="${x + 9}" y="${y + 44}" class="svg-heat-meta">${item.files} files</text>
+          <text x="${x + 9}" y="${y + 60}" class="svg-heat-meta">${item.critical} critical</text>
+        `;
+      }).join("")}
+    </svg>
+  `;
+}
+
+function buildPolishedReportHtml(mode = "word") {
+  const report = buildReportModel();
+  const maxSignal = Math.max(...report.findingStats.map((item) => item.count), 1);
+  const sourceLabel = escapeHtml(report.title);
+  const registerRows = report.priorityFiles
+    .map((file) => {
+      const risk = getEffectiveRisk(file);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(file.name || "")}</strong><br><span>${escapeHtml(file.path || "")}</span></td>
+          <td>${escapeHtml(file.source || "")}</td>
+          <td>${file.is_hidden ? "Yes" : "No"}</td>
+          <td><span class="risk ${risk.level}">${escapeHtml(risk.level)} ${escapeHtml(risk.score)}</span></td>
+          <td>${escapeHtml((file.findings || []).map((finding) => `${finding.type}: ${finding.count}`).join("; ") || "None")}</td>
+          <td>${escapeHtml((file.risk?.remediation?.actions || []).slice(0, 3).join("; ") || "Review ownership and access")}</td>
+        </tr>
+      `;
+    })
+    .join("");
+  const comparisonRows = report.comparison.length
+    ? report.comparison.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.current}</td><td>${item.prior}</td><td class="${item.delta > 0 ? "worse" : item.delta < 0 ? "better" : ""}">${item.delta > 0 ? "+" : ""}${item.delta}</td></tr>`).join("")
+    : '<tr><td colspan="4">Run and save at least two scans to populate comparison.</td></tr>';
+
+  return `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>DSPM Assessment Report</title>
+        <style>
+          @page { size: A4; margin: 14mm; }
+          * { box-sizing: border-box; }
+          body { margin: 0; background: ${mode === "pdf" ? "#fff" : "#eef2f7"}; color: #17202a; font-family: Arial, Helvetica, sans-serif; line-height: 1.35; }
+          .page { max-width: 1120px; margin: ${mode === "pdf" ? "0" : "28px auto"}; background: #fff; border: 1px solid #d8dee8; }
+          .cover { padding: 34px; color: #fff; background: #0f766e; }
+          .cover-top { display: table; width: 100%; }
+          .cover-copy { display: table-cell; vertical-align: top; }
+          .logo { display: table-cell; vertical-align: middle; text-align: right; }
+          .logo span { display: inline-block; width: 64px; height: 64px; border-radius: 12px; background: #fff; color: #0f766e; line-height: 64px; text-align: center; font-size: 28px; font-weight: 900; }
+          h1, h2, h3, p { margin-top: 0; }
+          h1 { font-size: 34px; margin-bottom: 8px; }
+          h2 { font-size: 19px; margin: 28px 0 12px; }
+          h3 { font-size: 14px; margin-bottom: 8px; }
+          .muted, td span { color: #667085; }
+          .content { padding: 28px; }
+          .summary { display: table; width: 100%; margin-bottom: 18px; }
+          .score { display: table-cell; width: 170px; vertical-align: middle; }
+          .score-ring { width: 138px; height: 138px; border-radius: 999px; background: conic-gradient(#0f766e ${report.score}%, #e5e7eb 0); display: table; }
+          .score-ring span { display: table-cell; vertical-align: middle; text-align: center; font-size: 34px; font-weight: 900; color: #0f766e; }
+          .summary-text { display: table-cell; vertical-align: middle; }
+          .kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 18px 0 24px; }
+          .kpi { border: 1px solid #d8dee8; border-radius: 8px; padding: 12px; background: #f8fafc; }
+          .kpi span { display: block; color: #667085; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+          .kpi strong { display: block; margin-top: 7px; font-size: 25px; }
+          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+          .panel { border: 1px solid #d8dee8; border-radius: 8px; padding: 14px; background: #fff; }
+          .bar { margin-bottom: 10px; }
+          .bar-label { display: table; width: 100%; font-size: 12px; margin-bottom: 4px; }
+          .bar-label span { display: table-cell; }
+          .bar-label strong { display: table-cell; text-align: right; }
+          .track { display: block; height: 9px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
+          .track b { display: block; height: 100%; background: #0f766e; }
+          .track b.CRITICAL { background: #9f1239; } .track b.HIGH { background: #c2410c; } .track b.MEDIUM { background: #b7791f; } .track b.LOW { background: #2f855a; }
+          .list-card { border: 1px solid #d8dee8; border-radius: 8px; padding: 10px; margin-bottom: 8px; background: #f8fafc; }
+          .list-card strong { display: block; word-break: break-word; }
+          .list-card span { font-size: 12px; }
+          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+          th, td { border: 1px solid #d8dee8; padding: 8px; text-align: left; vertical-align: top; }
+          th { background: #f1f5f9; color: #334155; }
+          .risk { display: inline-block; border-radius: 999px; padding: 4px 8px; color: #fff; font-weight: 700; white-space: nowrap; }
+          .CRITICAL { background: #9f1239; } .HIGH { background: #c2410c; } .MEDIUM { background: #b7791f; } .LOW { background: #2f855a; }
+          .better { color: #15803d; font-weight: 700; }
+          .worse { color: #9f1239; font-weight: 700; }
+          @media print { body { background: #fff; } .page { border: 0; margin: 0; } .cover { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
+        </style>
+      </head>
+      <body>
+        <div class="page">
+          <section class="cover">
+            <div class="cover-top">
+              <div class="cover-copy">
+                <h1>DSPM Assessment Report</h1>
+                <p>${sourceLabel}</p>
+                <p>Generated ${escapeHtml(report.generatedAt)} · tenant ${escapeHtml(currentTenant)}</p>
+              </div>
+              <div class="logo"><span>D</span></div>
+            </div>
+          </section>
+          <main class="content">
+            <section class="summary">
+              <div class="score"><div class="score-ring"><span>${report.score}</span></div></div>
+              <div class="summary-text">
+                <h2>Executive summary</h2>
+                <p class="muted">${report.summary.critical || report.summary.high ? "Critical or high exposure exists. Prioritize credential rotation, ownership validation, and access reduction." : "No urgent high-risk exposure is present in the current scan."}</p>
+              </div>
+            </section>
+            <section class="kpis">
+              <div class="kpi"><span>Critical</span><strong>${report.summary.critical}</strong></div>
+              <div class="kpi"><span>High</span><strong>${report.summary.high}</strong></div>
+              <div class="kpi"><span>Medium</span><strong>${report.summary.medium}</strong></div>
+              <div class="kpi"><span>Low</span><strong>${report.summary.low}</strong></div>
+              <div class="kpi"><span>Hidden</span><strong>${latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length}</strong></div>
+              <div class="kpi"><span>Total</span><strong>${report.summary.total_files}</strong></div>
+            </section>
+            <section class="grid">
+              <div class="panel">
+                <h2>Risk distribution</h2>
+                ${report.distribution.map((item) => `<div class="bar"><div class="bar-label"><span>${item.label}</span><strong>${item.count}</strong></div><span class="track"><b class="${item.level}" style="width:${(item.count / Math.max(report.summary.total_files, 1)) * 100}%"></b></span></div>`).join("")}
+              </div>
+              <div class="panel">
+                <h2>Detection signals</h2>
+                ${report.findingStats.length ? report.findingStats.map((item) => `<div class="bar"><div class="bar-label"><span>${escapeHtml(item.type)}</span><strong>${item.count}</strong></div><span class="track"><b style="width:${Math.max(8, (item.count / maxSignal) * 100)}%"></b></span></div>`).join("") : '<p class="muted">No detection signals.</p>'}
+              </div>
+            </section>
+            <section class="grid">
+              <div class="panel">
+                <h2>Department risk</h2>
+                ${report.departments.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.department)}</strong><span>${item.files} files · ${item.critical} critical · ${item.high} high</span></div>`).join("") || '<p class="muted">No department data.</p>'}
+              </div>
+              <div class="panel">
+                <h2>Top risky folders</h2>
+                ${report.folders.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.folder)}</strong><span>${item.files} files · ${item.critical} critical · avg ${Math.round(item.score / Math.max(item.files, 1))}</span></div>`).join("") || '<p class="muted">No folder data.</p>'}
+              </div>
+            </section>
+            <h2>Scan comparison</h2>
+            <table><thead><tr><th>Metric</th><th>Latest</th><th>Previous</th><th>Delta</th></tr></thead><tbody>${comparisonRows}</tbody></table>
+            <h2>Priority file queue</h2>
+            <table>
+              <thead><tr><th>File</th><th>Source</th><th>Hidden</th><th>Risk</th><th>Findings</th><th>Recommended action</th></tr></thead>
+              <tbody>${registerRows}</tbody>
+            </table>
+          </main>
+        </div>
+      </body>
+    </html>
+  `;
+}
+
+function buildExecutiveReportHtml(mode = "word") {
+  const report = buildReportModel();
+  const hiddenCount = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
+  const statusText = report.summary.critical || report.summary.high ? "Action required" : "Controlled";
+  const comparisonRows = report.comparison.length
+    ? report.comparison.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.current}</td><td>${item.prior}</td><td class="${item.delta > 0 ? "worse" : item.delta < 0 ? "better" : ""}">${item.delta > 0 ? "+" : ""}${item.delta}</td></tr>`).join("")
+    : '<tr><td colspan="4">Run and save at least two scans to populate comparison.</td></tr>';
+  const registerRows = report.priorityFiles
+    .map((file) => {
+      const risk = getEffectiveRisk(file);
+      return `
+        <tr>
+          <td><strong>${escapeHtml(file.name || "")}</strong><br><span>${escapeHtml(file.path || "")}</span></td>
+          <td>${escapeHtml(file.source || "")}</td>
+          <td>${file.is_hidden ? "Yes" : "No"}</td>
+          <td><span class="risk ${risk.level}">${escapeHtml(risk.level)} ${escapeHtml(risk.score)}</span></td>
+          <td>${escapeHtml((file.findings || []).map((finding) => `${finding.type}: ${finding.count}`).join("; ") || "None")}</td>
+          <td>${escapeHtml((file.risk?.remediation?.actions || []).slice(0, 3).join("; ") || "Review ownership and access")}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+    <!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>DSPM Assessment Report</title>
+        <style>
+          @page { size: A4; margin: 12mm; }
+          * { box-sizing: border-box; }
+          body { margin: 0; background: ${mode === "pdf" ? "#fff" : "#eef2f7"}; color: #17202a; font-family: "Segoe UI", Arial, Helvetica, sans-serif; font-size: 11.5px; line-height: 1.42; }
+          .page { width: 100%; max-width: 1040px; margin: ${mode === "pdf" ? "0" : "24px auto"}; background: #fff; border: 1px solid #d8dee8; }
+          .cover { padding: 30px 32px; color: #fff; background: #0f766e; }
+          .cover-top { display: table; width: 100%; table-layout: fixed; }
+          .cover-copy { display: table-cell; vertical-align: top; }
+          .logo { display: table-cell; vertical-align: middle; text-align: right; }
+          .logo span { display: inline-block; width: 64px; height: 64px; border-radius: 12px; background: #fff; color: #0f766e; line-height: 64px; text-align: center; font-size: 28px; font-weight: 900; }
+          h1, h2, p { margin-top: 0; }
+          h1 { font-size: 31px; margin-bottom: 8px; letter-spacing: 0; }
+          h2 { font-size: 17px; margin: 24px 0 10px; }
+          .muted, td span { color: #667085; }
+          .content { padding: 24px 26px 28px; }
+          .meta-strip { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 14px; align-items: stretch; margin-bottom: 16px; }
+          .executive-box { border: 1px solid #d8dee8; border-radius: 8px; padding: 16px; background: #f8fafc; }
+          .status-box { border-radius: 8px; padding: 16px; background: #ecfdf5; border: 1px solid #99f6e4; color: #134e4a; }
+          .status-box strong { display: block; font-size: 24px; margin-top: 6px; }
+          .kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 16px 0 18px; }
+          .kpi { border: 1px solid #d8dee8; border-radius: 8px; padding: 10px; background: #fff; }
+          .kpi span { display: block; color: #667085; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+          .kpi strong { display: block; margin-top: 5px; font-size: 23px; }
+          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+          .panel { border: 1px solid #d8dee8; border-radius: 8px; padding: 12px; background: #fff; break-inside: avoid; page-break-inside: avoid; }
+          .visual-panel { min-height: 230px; }
+          .report-svg { width: 100%; height: auto; display: block; }
+          .report-svg.wide { min-height: 160px; }
+          .svg-number { font-size: 27px; font-weight: 800; fill: #17202a; }
+          .svg-label, .svg-axis, .svg-value, .svg-tick { font-size: 10px; fill: #667085; }
+          .svg-value { font-weight: 800; fill: #17202a; }
+          .svg-heat-title { font-size: 9px; font-weight: 800; fill: #fff; }
+          .svg-heat-meta { font-size: 8px; fill: #ecfeff; }
+          .list-card { border: 1px solid #d8dee8; border-radius: 8px; padding: 9px; margin-bottom: 7px; background: #f8fafc; }
+          .list-card strong { display: block; word-break: break-word; }
+          .list-card span { font-size: 12px; }
+          table { width: 100%; border-collapse: collapse; font-size: 10.5px; margin-top: 8px; table-layout: fixed; }
+          th, td { border: 1px solid #d8dee8; padding: 7px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+          th { background: #f1f5f9; color: #334155; }
+          .risk { display: inline-block; border-radius: 999px; padding: 4px 8px; color: #fff; font-weight: 700; white-space: nowrap; }
+          .CRITICAL { background: #9f1239; } .HIGH { background: #c2410c; } .MEDIUM { background: #b7791f; } .LOW { background: #2f855a; }
+          .better { color: #15803d; font-weight: 700; }
+          .worse { color: #9f1239; font-weight: 700; }
+          .page-break { break-before: page; page-break-before: always; }
+          @media print { body { background: #fff; } .page { border: 0; margin: 0; max-width: none; } .cover, .status-box, .kpi, .panel { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
+        </style>
+      </head>
+      <body>
+        <div class="page">
+          <section class="cover">
+            <div class="cover-top">
+              <div class="cover-copy">
+                <h1>DSPM Assessment Report</h1>
+                <p>${escapeHtml(report.title)}</p>
+                <p>Generated ${escapeHtml(report.generatedAt)} &middot; tenant ${escapeHtml(currentTenant)}</p>
+              </div>
+              <div class="logo"><span>D</span></div>
+            </div>
+          </section>
+          <main class="content">
+            <section class="meta-strip">
+              <div class="executive-box">
+                <h2>Executive summary</h2>
+                <p class="muted">${report.summary.critical || report.summary.high ? "Critical or high exposure exists. Prioritize credential rotation, ownership validation, and access reduction." : "No urgent high-risk exposure is present in the current scan."}</p>
+              </div>
+              <div class="status-box">
+                <span>Risk posture</span>
+                <strong>${report.score}</strong>
+                <span>${statusText}</span>
+              </div>
+            </section>
+            <section class="kpis">
+              <div class="kpi"><span>Critical</span><strong>${report.summary.critical}</strong></div>
+              <div class="kpi"><span>High</span><strong>${report.summary.high}</strong></div>
+              <div class="kpi"><span>Medium</span><strong>${report.summary.medium}</strong></div>
+              <div class="kpi"><span>Low</span><strong>${report.summary.low}</strong></div>
+              <div class="kpi"><span>Hidden</span><strong>${hiddenCount}</strong></div>
+              <div class="kpi"><span>Total</span><strong>${report.summary.total_files}</strong></div>
+            </section>
+            <section class="grid">
+              <div class="panel visual-panel">
+                <h2>Risk distribution</h2>
+                ${buildReportDonutSvg(report.distribution, report.summary.total_files)}
+              </div>
+              <div class="panel visual-panel">
+                <h2>Risk bars</h2>
+                ${buildReportRiskBarsSvg(report.distribution, report.summary.total_files)}
+              </div>
+            </section>
+            <section class="grid">
+              <div class="panel visual-panel">
+                <h2>Detection signals</h2>
+                ${buildReportSignalSvg(report.findingStats)}
+              </div>
+              <div class="panel visual-panel">
+                <h2>Posture trend</h2>
+                ${buildReportTrendSvg()}
+              </div>
+            </section>
+            <section class="grid">
+              <div class="panel">
+                <h2>Department risk</h2>
+                ${report.departments.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.department)}</strong><span>${item.files} files &middot; ${item.critical} critical &middot; ${item.high} high</span></div>`).join("") || '<p class="muted">No department data.</p>'}
+              </div>
+              <div class="panel visual-panel">
+                <h2>Top risky folders</h2>
+                ${buildReportFolderHeatmapSvg(report.folders)}
+              </div>
+            </section>
+            <h2>Scan comparison</h2>
+            <table><thead><tr><th>Metric</th><th>Latest</th><th>Previous</th><th>Delta</th></tr></thead><tbody>${comparisonRows}</tbody></table>
+            <h2 class="page-break">Priority file queue</h2>
+            <table>
+              <thead><tr><th>File</th><th>Source</th><th>Hidden</th><th>Risk</th><th>Findings</th><th>Recommended action</th></tr></thead>
+              <tbody>${registerRows}</tbody>
+            </table>
+          </main>
+        </div>
+      </body>
+    </html>
+  `;
 }
 
 function buildReportHtml(mode = "word") {
@@ -1286,6 +1939,112 @@ function buildReportHtml(mode = "word") {
   `;
 }
 
+function buildPolishedExcelWorkbookHtml() {
+  const report = buildReportModel();
+  const hiddenCount = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
+  const riskRows = report.priorityFiles
+    .map((file) => {
+      const risk = getEffectiveRisk(file);
+      return `
+        <tr>
+          <td>${escapeHtml(file.name || "")}</td>
+          <td>${escapeHtml(file.path || "")}</td>
+          <td>${escapeHtml(file.source || "")}</td>
+          <td>${escapeHtml(file.share || "")}</td>
+          <td>${file.is_hidden ? "Yes" : "No"}</td>
+          <td class="${risk.level}">${escapeHtml(risk.level)}</td>
+          <td>${escapeHtml(risk.score)}</td>
+          <td>${escapeHtml((file.findings || []).map((finding) => `${finding.type}:${finding.count}`).join("; "))}</td>
+          <td>${escapeHtml((file.risk?.reasons || []).join("; "))}</td>
+          <td>${escapeHtml((file.risk?.dlp_recommendations || []).join("; "))}</td>
+          <td>${escapeHtml((file.risk?.remediation?.actions || []).join("; "))}</td>
+        </tr>
+      `;
+    })
+    .join("");
+  const departmentRows = report.departments
+    .map((item) => `<tr><td>${escapeHtml(item.department)}</td><td>${item.files}</td><td>${item.critical}</td><td>${item.high}</td><td>${item.score}</td></tr>`)
+    .join("");
+  const folderRows = report.folders
+    .map((item) => `<tr><td>${escapeHtml(item.folder)}</td><td>${item.files}</td><td>${item.critical}</td><td>${item.score}</td><td>${Math.round(item.score / Math.max(item.files, 1))}</td></tr>`)
+    .join("");
+  const signalRows = report.findingStats
+    .map((item) => `<tr><td>${escapeHtml(item.type)}</td><td>${item.count}</td></tr>`)
+    .join("");
+  const comparisonRows = report.comparison.length
+    ? report.comparison.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.current}</td><td>${item.prior}</td><td>${item.delta}</td></tr>`).join("")
+    : '<tr><td colspan="4">No previous saved scan</td></tr>';
+  const visualRiskRows = report.distribution
+    .map((item) => {
+      const filled = Math.round((item.count / Math.max(report.summary.total_files, 1)) * 20);
+      const cells = Array.from({ length: 20 }, (_, index) => `<td class="${index < filled ? item.level : ""}">${index < filled ? "" : ""}</td>`).join("");
+      return `<tr><td class="${item.level}">${item.label}</td><td>${item.count}</td>${cells}</tr>`;
+    })
+    .join("");
+
+  return `
+    <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+      <head>
+        <meta charset="utf-8" />
+        <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets>
+          <x:ExcelWorksheet><x:Name>Summary</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Risk Register</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Departments</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Folders</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Signals</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Comparison</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
+        </x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
+        <style>
+          body { font-family: Arial, sans-serif; color: #17202a; }
+          h1 { color: #0f766e; font-size: 24px; }
+          h2 { color: #334155; margin-top: 24px; }
+          table { border-collapse: collapse; width: 100%; margin-bottom: 22px; }
+          th { background: #0f766e; color: #fff; font-weight: bold; }
+          th, td { border: 1px solid #cbd5e1; padding: 8px; vertical-align: top; }
+          .meta th { background: #f1f5f9; color: #334155; }
+          .kpi th { background: #1f2937; color: #fff; }
+          .CRITICAL { background: #fce7f3; color: #9f1239; font-weight: bold; }
+          .HIGH { background: #ffedd5; color: #c2410c; font-weight: bold; }
+          .MEDIUM { background: #fef9c3; color: #b7791f; font-weight: bold; }
+          .LOW { background: #dcfce7; color: #2f855a; font-weight: bold; }
+          .chart-cell td { width: 18px; height: 18px; padding: 0; }
+        </style>
+      </head>
+      <body>
+        <h1>DSPM Assessment Workbook</h1>
+        <table class="meta">
+          <tr><th>Generated</th><td>${escapeHtml(report.generatedAt)}</td><th>Tenant</th><td>${escapeHtml(currentTenant)}</td></tr>
+          <tr><th>Source</th><td>${escapeHtml(report.title)}</td><th>Posture score</th><td>${report.score}</td></tr>
+        </table>
+        <table class="kpi">
+          <tr><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Hidden</th><th>Total files</th></tr>
+          <tr><td class="CRITICAL">${report.summary.critical}</td><td class="HIGH">${report.summary.high}</td><td class="MEDIUM">${report.summary.medium}</td><td class="LOW">${report.summary.low}</td><td>${hiddenCount}</td><td>${report.summary.total_files}</td></tr>
+        </table>
+        <h2>Risk Distribution</h2>
+        <table><tr><th>Level</th><th>Files</th></tr>${report.distribution.map((item) => `<tr><td class="${item.level}">${item.label}</td><td>${item.count}</td></tr>`).join("")}</table>
+        <h2>Visual Risk Bars</h2>
+        <table class="chart-cell">
+          <tr><th>Level</th><th>Files</th>${Array.from({ length: 20 }, (_, index) => `<th>${index + 1}</th>`).join("")}</tr>
+          ${visualRiskRows}
+        </table>
+        <h2>Risk Register</h2>
+        <table>
+          <tr><th>File</th><th>Path</th><th>Source</th><th>Share</th><th>Hidden</th><th>Risk</th><th>Score</th><th>Findings</th><th>Reasons</th><th>DLP Recommendations</th><th>Remediation Actions</th></tr>
+          ${riskRows}
+        </table>
+        <h2>Departments</h2>
+        <table><tr><th>Department</th><th>Files</th><th>Critical</th><th>High</th><th>Total risk score</th></tr>${departmentRows || '<tr><td colspan="5">No department data</td></tr>'}</table>
+        <h2>Folders</h2>
+        <table><tr><th>Folder</th><th>Files</th><th>Critical</th><th>Total risk score</th><th>Average risk</th></tr>${folderRows || '<tr><td colspan="5">No folder data</td></tr>'}</table>
+        <h2>Signals</h2>
+        <table><tr><th>Signal</th><th>Count</th></tr>${signalRows || '<tr><td colspan="2">No sensitive detection signals</td></tr>'}</table>
+        <h2>Scan Comparison</h2>
+        <table><tr><th>Metric</th><th>Latest</th><th>Previous</th><th>Delta</th></tr>${comparisonRows}</table>
+      </body>
+    </html>
+  `;
+}
+
 function buildExcelWorkbookHtml() {
   const summary = buildCurrentSummary();
   const distribution = buildRiskDistribution(summary);
@@ -1421,19 +2180,64 @@ async function loadTenants() {
   if (!accessToken || currentRole !== "admin") {
     tenantSwitcher.classList.add("hidden");
     tenantPortfolio = [{ tenant_id: currentTenant, scan_count: latestDashboard?.trend?.length || 0, latest: latestDashboard?.latest || { summary: {} } }];
+    renderTenantOptions();
+    renderTenantsTable([]);
     renderExecutiveExperience();
     return;
   }
 
   const data = await api("/api/tenants", null, "GET");
   tenantPortfolio = data.tenants || [];
+  renderTenantOptions();
+  renderTenantsTable(tenantPortfolio);
   const tenantIds = new Set([currentTenant, ...tenantPortfolio.map((item) => item.tenant_id)]);
   tenantSwitcher.innerHTML = [...tenantIds]
     .map((tenantId) => `<option value="${escapeHtml(tenantId)}">${escapeHtml(tenantId)}</option>`)
     .join("");
   tenantSwitcher.value = currentTenant;
   tenantSwitcher.classList.remove("hidden");
+  tenantManagementStatus.textContent = "Tenants loaded from SQLite.";
   renderExecutiveExperience();
+}
+
+function renderTenantOptions() {
+  const tenants = tenantPortfolio.length ? tenantPortfolio : [{ tenant_id: currentTenant || "default", display_name: currentTenant || "default" }];
+  newUserTenant.innerHTML = tenants
+    .map((tenant) => `<option value="${escapeHtml(tenant.tenant_id)}">${escapeHtml(tenant.display_name || tenant.tenant_id)}</option>`)
+    .join("");
+  if (tenants.some((tenant) => tenant.tenant_id === currentTenant)) {
+    newUserTenant.value = currentTenant;
+  }
+}
+
+function renderTenantsTable(tenants) {
+  if (!accessToken || currentRole !== "admin") {
+    tenantsBody.innerHTML = '<tr><td colspan="5" class="empty">Admin role is required to manage tenants.</td></tr>';
+    tenantManagementStatus.textContent = "Admin role is required.";
+    return;
+  }
+  if (!tenants.length) {
+    tenantsBody.innerHTML = '<tr><td colspan="5" class="empty">No tenants found.</td></tr>';
+    return;
+  }
+  tenantsBody.innerHTML = tenants
+    .map((tenant) => {
+      const retention = tenant.retention || {};
+      const disabled = tenant.tenant_id === "default" ? "disabled" : "";
+      return `
+        <tr>
+          <td>
+            <strong>${escapeHtml(tenant.display_name || tenant.tenant_id)}</strong>
+            <div class="subtext">${escapeHtml(tenant.tenant_id)}</div>
+          </td>
+          <td>${escapeHtml(retention.report_count || 0)}</td>
+          <td>${escapeHtml(retention.audit_events || 0)}</td>
+          <td>${escapeHtml(retention.alert_events || 0)}</td>
+          <td><button type="button" class="secondary-btn" data-delete-tenant="${escapeHtml(tenant.tenant_id)}" ${disabled}>Remove</button></td>
+        </tr>
+      `;
+    })
+    .join("");
 }
 
 function renderHistory(items) {
@@ -1502,6 +2306,119 @@ function renderAudit(events) {
       `
     )
     .join("");
+}
+
+async function loadUsers() {
+  if (!accessToken || currentRole !== "admin") {
+    usersBody.innerHTML = '<tr><td colspan="5" class="empty">Admin role is required to manage users.</td></tr>';
+    userManagementStatus.textContent = "Admin role is required.";
+    return;
+  }
+  const data = await api("/api/users", null, "GET");
+  renderUsers(data.users || []);
+  userManagementStatus.textContent = "Users loaded from SQLite.";
+}
+
+function renderUsers(users) {
+  if (!users.length) {
+    usersBody.innerHTML = '<tr><td colspan="5" class="empty">No users found.</td></tr>';
+    return;
+  }
+  usersBody.innerHTML = users
+    .map(
+      (user) => `
+        <tr data-user-row="${escapeHtml(user.username)}">
+          <td>
+            <strong>${escapeHtml(user.username)}</strong>
+            <div class="subtext">${escapeHtml(user.full_name || "No full name")}</div>
+          </td>
+          <td><input class="table-input" data-user-tenant="${escapeHtml(user.username)}" value="${escapeHtml(user.tenant_id || "default")}" /></td>
+          <td>
+            <select class="table-input" data-user-role="${escapeHtml(user.username)}">
+              ${["viewer", "analyst", "admin"]
+                .map((role) => `<option value="${role}" ${user.role === role ? "selected" : ""}>${role}</option>`)
+                .join("")}
+            </select>
+          </td>
+          <td>${escapeHtml(user.last_login_at || "Never")}</td>
+          <td>
+            <div class="inline-control">
+              <input class="table-input" data-user-password="${escapeHtml(user.username)}" type="password" placeholder="New password" />
+              <button type="button" class="secondary-btn" data-reset-user="${escapeHtml(user.username)}">Reset</button>
+            </div>
+          </td>
+        </tr>
+      `
+    )
+    .join("");
+}
+
+async function createUser() {
+  requireAuth();
+  const payload = {
+    username: newUserUsername.value.trim(),
+    password: newUserPassword.value,
+    full_name: newUserFullName.value.trim(),
+    tenant_id: newUserTenant.value.trim() || "default",
+    role: newUserRole.value || "viewer",
+  };
+  if (!payload.username || !payload.password) {
+    throw new Error("Username and password are required.");
+  }
+  userManagementStatus.textContent = "Creating user...";
+  await api("/api/users", payload);
+  newUserUsername.value = "";
+  newUserPassword.value = "";
+  newUserFullName.value = "";
+  userManagementStatus.textContent = `Created ${payload.username}.`;
+  await Promise.all([loadUsers(), loadAudit(), loadTenants().catch(() => {})]);
+}
+
+async function updateUserRole(username, role, tenantId) {
+  userManagementStatus.textContent = `Updating ${username}...`;
+  await api(`/api/users/${encodeURIComponent(username)}/role`, { role, tenant_id: tenantId || "default" }, "PUT");
+  userManagementStatus.textContent = `Updated ${username}.`;
+  await Promise.all([loadUsers(), loadAudit(), loadTenants().catch(() => {})]);
+}
+
+async function resetUserPassword(username, password) {
+  if (!password) {
+    throw new Error("Enter a new password first.");
+  }
+  userManagementStatus.textContent = `Resetting password for ${username}...`;
+  await api(`/api/users/${encodeURIComponent(username)}/reset-password`, { password });
+  userManagementStatus.textContent = `Password reset for ${username}.`;
+  await Promise.all([loadUsers(), loadAudit()]);
+}
+
+async function createTenant() {
+  requireAuth();
+  const payload = {
+    tenant_id: newTenantId.value.trim(),
+    display_name: newTenantName.value.trim(),
+  };
+  if (!payload.tenant_id) {
+    throw new Error("Tenant id is required.");
+  }
+  tenantManagementStatus.textContent = "Creating tenant...";
+  await api("/api/tenants", payload);
+  newTenantId.value = "";
+  newTenantName.value = "";
+  tenantManagementStatus.textContent = `Created ${payload.tenant_id}.`;
+  await Promise.all([loadTenants(), loadAudit()]);
+}
+
+async function deleteTenant(tenantId) {
+  requireAuth();
+  tenantManagementStatus.textContent = `Removing ${tenantId}...`;
+  await api(`/api/tenants/${encodeURIComponent(tenantId)}`, null, "DELETE");
+  if (currentTenant === tenantId) {
+    currentTenant = "default";
+    safeSessionSet("dspm-tenant-id", currentTenant);
+    renderProfile();
+  }
+  tenantManagementStatus.textContent = `Removed ${tenantId}.`;
+  await Promise.all([loadTenants(), loadAudit()]);
 }
 
 async function createApiKey() {
@@ -1717,6 +2634,59 @@ refreshExecutiveBtn.addEventListener("click", () => {
 refreshAuditBtn.addEventListener("click", () => {
   loadAudit().catch((error) => setStatus(`Audit failed: ${error.message}`));
 });
+refreshUsersBtn.addEventListener("click", () => {
+  loadUsers().catch((error) => {
+    userManagementStatus.textContent = `Users failed: ${error.message}`;
+  });
+});
+refreshTenantsBtn.addEventListener("click", () => {
+  loadTenants().catch((error) => {
+    tenantManagementStatus.textContent = `Tenants failed: ${error.message}`;
+  });
+});
+createUserBtn.addEventListener("click", () => {
+  createUser().catch((error) => {
+    userManagementStatus.textContent = `Create failed: ${error.message}`;
+  });
+});
+createTenantBtn.addEventListener("click", () => {
+  createTenant().catch((error) => {
+    tenantManagementStatus.textContent = `Create failed: ${error.message}`;
+  });
+});
+tenantsBody.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-delete-tenant]");
+  if (!button) {
+    return;
+  }
+  deleteTenant(button.dataset.deleteTenant).catch((error) => {
+    tenantManagementStatus.textContent = `Remove failed: ${error.message}`;
+  });
+});
+usersBody.addEventListener("change", (event) => {
+  const roleSelect = event.target.closest("[data-user-role]");
+  const tenantInput = event.target.closest("[data-user-tenant]");
+  if (!roleSelect && !tenantInput) {
+    return;
+  }
+  const username = roleSelect?.dataset.userRole || tenantInput?.dataset.userTenant;
+  const roleInput = usersBody.querySelector(`[data-user-role="${CSS.escape(username)}"]`);
+  const tenantValue = tenantInput?.value || usersBody.querySelector(`[data-user-tenant="${CSS.escape(username)}"]`)?.value || "default";
+  updateUserRole(username, roleInput?.value || "viewer", tenantValue).catch((error) => {
+    userManagementStatus.textContent = `Update failed: ${error.message}`;
+  });
+});
+usersBody.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-reset-user]");
+  if (!button) {
+    return;
+  }
+  const username = button.dataset.resetUser;
+  const input = usersBody.querySelector(`[data-user-password="${CSS.escape(username)}"]`);
+  resetUserPassword(username, input?.value || "").catch((error) => {
+    userManagementStatus.textContent = `Reset failed: ${error.message}`;
+  });
+});
 createApiKeyBtn.addEventListener("click", () => {
   createApiKey().catch((error) => {
     apiKeyOutput.textContent = error.message;
@@ -1790,6 +2760,7 @@ if (accessToken) {
   loadProtectedMetadata();
   loadHistory().catch(() => {});
   loadAudit().catch(() => {});
+  loadUsers().catch(() => {});
 } else {
   loadProtectedMetadata();
 }

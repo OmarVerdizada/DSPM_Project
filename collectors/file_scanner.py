@@ -56,6 +56,7 @@ class FileRecord:
     size: int
     extension: str
     is_dir: bool = False
+    is_hidden: bool = False
     share: str | None = None
     content: str = ""
     acl: dict | None = None
@@ -69,6 +70,7 @@ class FileRecord:
             "size": self.size,
             "extension": self.extension,
             "is_dir": self.is_dir,
+            "is_hidden": self.is_hidden,
             "content": self.content,
             "acl": self.acl or {},
         }
@@ -112,11 +114,24 @@ def scan_directory(path: str | Path) -> list[dict]:
                 name=item.name,
                 size=stat.st_size,
                 extension=item.suffix.lower(),
+                is_hidden=is_hidden_path(item),
                 content=read_text_preview(item),
             )
         )
 
     return [record.to_dict() for record in records]
+
+
+def is_hidden_path(path: Path) -> bool:
+    if any(part.startswith(".") for part in path.parts):
+        return True
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    if hasattr(stat, "st_file_attributes"):
+        return bool(stat.st_file_attributes & 0x2)
+    return False
 
 
 def normalize_records(records: Iterable[dict]) -> list[dict]:
@@ -134,6 +149,7 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "size": int(record.get("size") or 0),
                 "extension": extension,
                 "is_dir": bool(record.get("is_dir", False)),
+                "is_hidden": bool(record.get("is_hidden", False)),
                 "content": record.get("content", ""),
                 "acl": record.get("acl") or {},
             }

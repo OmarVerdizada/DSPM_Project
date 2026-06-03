@@ -4,7 +4,7 @@ import json
 import os
 from urllib import request
 
-from backend.store import append_jsonl, tenant_dir
+from backend.store import save_alerts
 
 
 def evaluate_alerts(tenant_id: str, report: dict) -> list[dict]:
@@ -19,7 +19,7 @@ def evaluate_alerts(tenant_id: str, report: dict) -> list[dict]:
             }
         )
     if alerts:
-        append_jsonl(tenant_dir(tenant_id) / "alerts.jsonl", {"scan_id": report.get("scan_id"), "alerts": alerts})
+        save_alerts(tenant_id, report.get("scan_id"), alerts)
         _send_webhook(alerts)
     return alerts
 

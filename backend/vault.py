@@ -5,7 +5,7 @@ import json
 import os
 import secrets
 
-from backend.store import tenant_dir, write_json
+from backend.store import delete_secret, read_secret, save_secret
 
 
 def _fernet():
@@ -26,18 +26,15 @@ class CredentialVault:
         secret_id = secrets.token_urlsafe(16)
         payload = json.dumps({"username": username, "password": password, "domain": domain}, separators=(",", ":")).encode()
         encrypted = _fernet().encrypt(payload).decode("ascii")
-        write_json(tenant_dir(tenant_id) / "secrets" / f"{secret_id}.json", {"ciphertext": encrypted})
+        save_secret(tenant_id, secret_id, encrypted)
         return secret_id
 
     def resolve(self, tenant_id: str, secret_ref: str) -> dict:
-        path = tenant_dir(tenant_id) / "secrets" / f"{secret_ref}.json"
-        if not path.exists():
+        ciphertext = read_secret(tenant_id, secret_ref)
+        if ciphertext is None:
             raise KeyError("Credential reference not found")
-        envelope = json.loads(path.read_text(encoding="utf-8"))
-        decrypted = _fernet().decrypt(envelope["ciphertext"].encode())
+        decrypted = _fernet().decrypt(ciphertext.encode())
         return json.loads(decrypted)
 
     def delete(self, tenant_id: str, secret_ref: str) -> None:
-        path = tenant_dir(tenant_id) / "secrets" / f"{secret_ref}.json"
-        if path.exists():
-            path.unlink()
+        delete_secret(tenant_id, secret_ref)
