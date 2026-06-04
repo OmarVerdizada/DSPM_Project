@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css?v=16" />
+    <link rel="stylesheet" href="/static/styles.css?v=17" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -128,6 +128,7 @@
           <button type="button" class="tab" data-tab="assets">Customer Assets</button>
           <button type="button" class="tab" data-tab="reports">Reports</button>
           <button type="button" class="tab" data-tab="history">History</button>
+          <button type="button" class="tab" data-tab="endpoint">Endpoint Scan</button>
           <button type="button" class="tab" data-tab="tenants">Tenants</button>
           <button type="button" class="tab" data-tab="security">Security</button>
           <button type="button" class="tab" data-tab="integrations">Integrations</button>
@@ -377,6 +378,77 @@
           </div>
         </section>
 
+        <section id="tab-endpoint" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Workstation discovery</p>
+              <h3>Endpoint user profile scan</h3>
+              <p>Use WinRM with an approved admin credential to inspect a user's Desktop, Documents, Downloads, or full profile for sensitive files.</p>
+            </div>
+          </div>
+
+          <section class="visual-panel endpoint-panel">
+            <div class="panel-title">
+              <h4>WinRM target</h4>
+              <span>Test mode</span>
+            </div>
+            <div class="asset-form-grid endpoint-form">
+              <label>
+                Endpoint host / IP
+                <input id="endpoint-host" placeholder="10.10.10.25 or laptop01.domain.local" />
+              </label>
+              <label>
+                Target Windows user
+                <input id="endpoint-target-username" placeholder="j.doe" />
+              </label>
+              <label>
+                Domain
+                <input id="endpoint-domain" value="WORKGROUP" />
+              </label>
+              <label>
+                Admin username
+                <input id="endpoint-username" autocomplete="username" placeholder="Administrator" />
+              </label>
+              <label>
+                Admin password
+                <input id="endpoint-password" type="password" autocomplete="current-password" />
+              </label>
+              <label>
+                Credential ref
+                <input id="endpoint-credential-ref" placeholder="Stored after first credential save" />
+              </label>
+              <label>
+                Path scope
+                <select id="endpoint-path-scope">
+                  <option value="default">Desktop, Documents, Downloads</option>
+                  <option value="desktop">Desktop only</option>
+                  <option value="documents">Documents only</option>
+                  <option value="downloads">Downloads only</option>
+                  <option value="all">All profile</option>
+                  <option value="custom">Custom paths</option>
+                </select>
+              </label>
+              <label>
+                Custom paths
+                <input id="endpoint-custom-paths" placeholder="C:\\Users\\j.doe\\Desktop; C:\\Temp" />
+              </label>
+              <label>
+                Max folder depth
+                <input id="endpoint-max-depth" type="number" min="1" max="12" value="4" />
+              </label>
+              <label class="checkbox-row endpoint-checkbox">
+                <input id="endpoint-read-content" type="checkbox" checked />
+                Read content preview
+              </label>
+            </div>
+            <div class="actions endpoint-actions">
+              <button type="button" id="endpoint-test-btn" class="secondary-btn">Test WinRM</button>
+              <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
+            </div>
+            <p id="endpoint-status" class="save-status">Endpoint scans use WinRM over 5985/5986 and save results to the same tenant history.</p>
+          </section>
+        </section>
+
         <section id="tab-security" class="tab-panel">
           <div class="section-header">
             <div>
@@ -610,6 +682,6 @@
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=18"></script>
+    <script src="/static/app.js?v=19"></script>
   </body>
 </html>

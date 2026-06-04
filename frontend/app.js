@@ -79,6 +79,9 @@ const newTenantId = document.querySelector("#new-tenant-id");
 const newTenantName = document.querySelector("#new-tenant-name");
 const integrationGrid = document.querySelector("#integration-grid");
 const integrationDiagram = document.querySelector("#integration-diagram");
+const endpointTestBtn = document.querySelector("#endpoint-test-btn");
+const endpointScanBtn = document.querySelector("#endpoint-scan-btn");
+const endpointStatus = document.querySelector("#endpoint-status");
 const detailDrawer = document.querySelector("#detail-drawer");
 const detailDrawerEyebrow = detailDrawer.querySelector("#detail-drawer-eyebrow");
 const detailDrawerTitle = detailDrawer.querySelector("#detail-drawer-title");
@@ -182,10 +185,55 @@ function readPayload() {
   };
 }
 
+function readEndpointPayload() {
+  const scope = document.querySelector("#endpoint-path-scope").value;
+  const customPaths = document.querySelector("#endpoint-custom-paths").value
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const pathsByScope = {
+    default: ["desktop", "documents", "downloads"],
+    desktop: ["desktop"],
+    documents: ["documents"],
+    downloads: ["downloads"],
+    all: ["all"],
+    custom: customPaths,
+  };
+  return {
+    host: document.querySelector("#endpoint-host").value.trim(),
+    target_username: document.querySelector("#endpoint-target-username").value.trim(),
+    domain: document.querySelector("#endpoint-domain").value.trim() || "WORKGROUP",
+    username: document.querySelector("#endpoint-username").value.trim(),
+    password: document.querySelector("#endpoint-password").value,
+    credential_ref: document.querySelector("#endpoint-credential-ref").value.trim(),
+    paths: pathsByScope[scope] || pathsByScope.default,
+    max_depth: Number(document.querySelector("#endpoint-max-depth").value || 4),
+    read_content: document.querySelector("#endpoint-read-content").checked,
+    save_report: true,
+    asset_overrides: assetRules,
+  };
+}
+
+async function ensureEndpointCredential(payload) {
+  if (!payload.host || payload.credential_ref || !payload.password) {
+    return payload;
+  }
+  const secret = await api("/api/credentials", {
+    username: payload.username,
+    password: payload.password,
+    domain: payload.domain,
+  });
+  document.querySelector("#endpoint-credential-ref").value = secret.credential_ref;
+  document.querySelector("#endpoint-password").value = "";
+  return { ...payload, credential_ref: secret.credential_ref, password: "" };
+}
+
 function setBusy(isBusy) {
   testBtn.disabled = isBusy;
   scanBtn.disabled = isBusy;
   generateDemoDataBtn.disabled = isBusy;
+  if (endpointTestBtn) endpointTestBtn.disabled = isBusy;
+  if (endpointScanBtn) endpointScanBtn.disabled = isBusy;
 }
 
 function setStatus(message, tone = "muted") {
@@ -2708,6 +2756,57 @@ form.addEventListener("submit", async (event) => {
     showToast("Scan failed", error.message, "danger");
   } finally {
     window.clearInterval(progressTimer);
+    window.setTimeout(() => setScanProgress(false), 700);
+    setBusy(false);
+  }
+});
+
+endpointTestBtn.addEventListener("click", async () => {
+  setBusy(true);
+  endpointStatus.textContent = "Testing WinRM connection...";
+  try {
+    requireAuth();
+    const payload = await ensureEndpointCredential(readEndpointPayload());
+    const result = await api("/api/endpoint/test-connection", payload);
+    endpointStatus.textContent = result.connected
+      ? `Connected to ${result.computer || result.host} as ${result.user || "remote user"}.`
+      : `Connection failed: ${result.message}`;
+    showToast(result.connected ? "Endpoint connected" : "Endpoint test failed", result.message || result.host, result.connected ? "success" : "danger");
+  } catch (error) {
+    endpointStatus.textContent = `Endpoint test failed: ${error.message}`;
+    showToast("Endpoint test failed", error.message, "danger");
+  } finally {
+    setBusy(false);
+  }
+});
+
+endpointScanBtn.addEventListener("click", async () => {
+  setBusy(true);
+  setStatus("Scanning endpoint through WinRM...");
+  endpointStatus.textContent = "Scanning endpoint profile...";
+  renderSkeletonRows();
+  setScanProgress(true, 8, "Preparing endpoint scan...");
+  try {
+    requireAuth();
+    const payload = await ensureEndpointCredential(readEndpointPayload());
+    const report = await api("/api/endpoint/scan", payload);
+    latestReport = report;
+    latestFiles = report.files || [];
+    updateSummaryFromFiles(latestFiles);
+    hasRenderedScanRows = true;
+    renderRows(latestFiles);
+    switchTab("overview");
+    scanMeta.textContent = `${latestFiles.length} endpoint files scanned from ${report.endpoint?.host || report.source} at ${report.timestamp}`;
+    endpointStatus.textContent = `Endpoint scan completed. ${latestFiles.length} files analyzed.`;
+    setStatus("Endpoint scan completed and report.json updated.");
+    setScanProgress(true, 100, "Endpoint scan completed");
+    showToast("Endpoint scan completed", `${latestFiles.length} files found`, latestReport.summary?.critical ? "danger" : "success");
+    await loadHistory();
+  } catch (error) {
+    endpointStatus.textContent = `Endpoint scan failed: ${error.message}`;
+    setStatus(`Endpoint scan failed: ${error.message}`);
+    showToast("Endpoint scan failed", error.message, "danger");
+  } finally {
     window.setTimeout(() => setScanProgress(false), 700);
     setBusy(false);
   }

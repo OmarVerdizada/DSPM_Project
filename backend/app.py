@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -43,6 +44,7 @@ from backend.store import (
     update_user_role,
 )
 from backend.vault import CredentialVault
+from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
 from scripts.generate_enterprise_test_data import generate as generate_enterprise_test_data
@@ -94,6 +96,20 @@ class AssetOverride(BaseModel):
 class ScanRequest(ConnectionRequest):
     save_report: bool = True
     async_scan: bool = False
+    asset_overrides: list[AssetOverride] = Field(default_factory=list)
+
+
+class EndpointScanRequest(BaseModel):
+    host: str = Field(description="Endpoint hostname or IP")
+    target_username: str = Field(default="", description="Windows profile username under C:\\Users")
+    domain: str = "WORKGROUP"
+    username: str = ""
+    password: str = ""
+    credential_ref: str = ""
+    paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"])
+    max_depth: int = Field(default=4, ge=1, le=12)
+    read_content: bool = True
+    save_report: bool = True
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
 
 
@@ -392,6 +408,51 @@ def test_connection(payload: ConnectionRequest, principal: Principal = Depends(r
     return engine.test_connection()
 
 
+@app.post("/api/endpoint/test-connection")
+def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
+    audit(principal.tenant_id, principal.subject, "endpoint.connection.test", {"host": payload.host, "target_username": payload.target_username})
+    return scanner.test_connection()
+
+
+@app.post("/api/endpoint/scan")
+def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    config = _to_endpoint_config(payload, principal.tenant_id)
+    scanner = WinRMEndpointScanner(config)
+    records = scanner.scan()
+    report = DSPMDiscoveryEngine(
+        ScanConfig(
+            server="",
+            use_sample_when_empty=False,
+            asset_overrides=[
+                {
+                    "pattern": item.pattern.strip(),
+                    "level": item.level.strip().upper(),
+                    "reason": item.reason.strip(),
+                }
+                for item in payload.asset_overrides
+                if item.pattern.strip()
+            ],
+        )
+    )
+    analyzed = [report._analyze_record(record) for record in records]
+    data = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "endpoint-winrm",
+        "summary": report._build_summary(analyzed).to_dict(),
+        "files": analyzed,
+        "endpoint": {
+            "host": config.host,
+            "target_username": config.target_username,
+            "paths": config.paths,
+            "max_depth": config.max_depth,
+        },
+    }
+    _persist_scan(data, payload, principal)
+    audit(principal.tenant_id, principal.subject, "endpoint.scan.completed", {"scan_id": data.get("scan_id"), "host": payload.host})
+    return data
+
+
 @app.post("/api/demo-data/generate")
 def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     output = _safe_demo_output(payload.output)
@@ -599,4 +660,26 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
             for item in getattr(payload, "asset_overrides", [])
             if item.pattern.strip()
         ],
+    )
+
+
+def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEndpointConfig:
+    username = payload.username.strip()
+    password = payload.password
+    domain = payload.domain.strip() or "WORKGROUP"
+    if payload.credential_ref:
+        secret = vault.resolve(tenant_id, payload.credential_ref)
+        username = secret.get("username", "")
+        password = secret.get("password", "")
+        domain = secret.get("domain", domain)
+
+    return WinRMEndpointConfig(
+        host=payload.host.strip(),
+        username=username,
+        password=password,
+        domain=domain,
+        target_username=payload.target_username.strip(),
+        paths=[item.strip() for item in payload.paths if item.strip()] or ["desktop", "documents", "downloads"],
+        max_depth=payload.max_depth,
+        read_content=payload.read_content,
     )

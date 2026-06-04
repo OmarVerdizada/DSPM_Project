@@ -5,6 +5,7 @@ pydantic==2.13.4
 
 # SMB/file-server connector
 pysmb==1.2.10
+pywinrm==0.5.0
 
 # Local configuration and encrypted credential vault
 python-dotenv==1.2.2

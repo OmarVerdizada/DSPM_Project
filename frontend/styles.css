@@ -1283,6 +1283,24 @@ tbody tr.row-flash {
   margin-bottom: 12px;
 }
 
+.asset-form-grid.endpoint-form {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.endpoint-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.endpoint-checkbox {
+  align-self: end;
+  min-height: 42px;
+}
+
+.endpoint-actions {
+  justify-content: flex-start;
+}
+
 .save-status {
   margin: 10px 0 0;
   color: var(--muted);
