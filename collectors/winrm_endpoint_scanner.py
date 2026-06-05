@@ -3,9 +3,13 @@ from __future__ import annotations
 import base64
 import json
 import platform
+import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
-from pathlib import PureWindowsPath
+from datetime import datetime, timedelta
+from pathlib import Path, PureWindowsPath
+from uuid import uuid4
 
 from collectors.file_scanner import TEXT_EXTENSIONS, normalize_records
 
@@ -17,11 +21,37 @@ DEFAULT_PROFILE_FOLDERS = {
 }
 
 
-def activate_local_winrm() -> dict:
+def activate_local_winrm(username: str = "", password: str = "", domain: str = "WORKGROUP") -> dict:
     if platform.system().lower() != "windows":
         raise RuntimeError("Local WinRM activation requires the DSPM backend to run on Windows.")
 
-    script = """
+    activation = _run_local_activation_script(require_current_admin=True)
+    if activation.get("activated") or not activation.get("requires_admin") or not username.strip() or not password:
+        return activation
+
+    scheduled = _activate_local_winrm_with_task(username.strip(), password, domain.strip() or "WORKGROUP")
+    if scheduled.get("activated"):
+        return scheduled
+    scheduled["initial_message"] = activation.get("message", "")
+    return scheduled
+
+
+def _run_local_activation_script(require_current_admin: bool) -> dict:
+    script = _local_activation_script(require_current_admin)
+    result = _run_encoded_powershell(script)
+    if result.returncode != 0:
+        return {
+            "activated": False,
+            "message": _clean_error(result.stderr or result.stdout) or "Local WinRM activation failed.",
+        }
+    activation = _read_json(result.stdout)
+    if isinstance(activation, dict):
+        return activation
+    return {"activated": False, "message": _clean_error(result.stdout) or "Local activation command completed."}
+
+
+def _local_activation_script(require_current_admin: bool) -> str:
+    admin_guard = """
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $isAdmin) {
       [PSCustomObject]@{
@@ -34,6 +64,10 @@ def activate_local_winrm() -> dict:
       } | ConvertTo-Json -Compress
       exit 0
     }
+    """ if require_current_admin else ""
+    return """
+    $ProgressPreference = "SilentlyContinue"
+    __ADMIN_GUARD__
     $ErrorActionPreference = "SilentlyContinue"
     Set-Service -Name WinRM -StartupType Automatic
     Start-Service -Name WinRM
@@ -60,22 +94,95 @@ def activate_local_winrm() -> dict:
       requires_admin = $false
       message = if ($service -and $service.Status -eq "Running" -and $portOpen) { "Local WinRM is running and port 5985 is reachable." } else { "Local activation command ran, but WinRM is not fully reachable. Run the backend as Administrator and check local firewall policy." }
     } | ConvertTo-Json -Compress
-    """
+    """.replace("__ADMIN_GUARD__", admin_guard)
+
+
+def _activate_local_winrm_with_task(username: str, password: str, domain: str) -> dict:
+    task_name = f"DSPM_Activate_WinRM_{uuid4().hex}"
+    run_at = (datetime.now() + timedelta(minutes=1)).strftime("%H:%M")
+    script_path = Path(tempfile.gettempdir()) / f"{task_name}.ps1"
+    script_path.write_text(_local_activation_script(False), encoding="utf-8")
+    task_command = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
+    run_as = _format_windows_username(username, domain)
+
+    try:
+        create = subprocess.run(
+            [
+                "schtasks.exe",
+                "/Create",
+                "/TN",
+                task_name,
+                "/SC",
+                "ONCE",
+                "/ST",
+                run_at,
+                "/RL",
+                "HIGHEST",
+                "/RU",
+                run_as,
+                "/RP",
+                password,
+                "/TR",
+                task_command,
+                "/F",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if create.returncode != 0:
+            return {
+                "activated": False,
+                "requires_admin": True,
+                "run_as": run_as,
+                "message": _clean_error(create.stderr or create.stdout) or "Could not create elevated activation task with the supplied admin credential.",
+            }
+
+        run = subprocess.run(["schtasks.exe", "/Run", "/TN", task_name], capture_output=True, text=True, timeout=30, check=False)
+        if run.returncode != 0:
+            return {
+                "activated": False,
+                "requires_admin": True,
+                "run_as": run_as,
+                "message": _clean_error(run.stderr or run.stdout) or "Could not run elevated activation task.",
+            }
+
+        subprocess.run(["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 8"], capture_output=True, text=True, timeout=15, check=False)
+        status = _run_local_activation_script(require_current_admin=False)
+        status["run_as"] = run_as
+        if status.get("activated"):
+            status["message"] = "Local WinRM activated through the supplied admin credential."
+        return status
+    finally:
+        _delete_task(task_name)
+        try:
+            script_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _run_encoded_powershell(script: str) -> subprocess.CompletedProcess:
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-    result = subprocess.run(
+    return subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
         capture_output=True,
         text=True,
         timeout=90,
         check=False,
     )
-    if result.returncode != 0:
-        raise ConnectionError(_clean_error(result.stderr) or "Local WinRM activation failed.")
 
-    activation = _read_json(result.stdout)
-    if isinstance(activation, dict):
-        return activation
-    return {"activated": False, "message": _clean_error(result.stdout) or "Local activation command completed."}
+
+def _delete_task(task_name: str) -> None:
+    subprocess.run(["schtasks.exe", "/Delete", "/TN", task_name, "/F"], capture_output=True, text=True, timeout=30, check=False)
+
+
+def _format_windows_username(username: str, domain: str) -> str:
+    if "\\" in username or "@" in username:
+        return username
+    if domain and domain.upper() != "WORKGROUP":
+        return f"{domain}\\{username}"
+    return username
 
 
 @dataclass(slots=True)
@@ -113,14 +220,7 @@ class WinRMEndpointScanner:
                 "domain": self.config.domain.strip() or "WORKGROUP",
             }
         )
-        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
+        result = _run_encoded_powershell(script)
         if result.returncode != 0:
             return {
                 "activated": False,
@@ -315,6 +415,7 @@ def _activation_script(payload: dict) -> str:
     encoded_remote = base64.b64encode(remote_script.encode("utf-16le")).decode("ascii")
     remote_command = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_remote}"
     return f"""
+    $ProgressPreference = "SilentlyContinue"
     $ErrorActionPreference = "Stop"
     $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_payload}"))
     $payload = ConvertFrom-Json $payloadJson
@@ -325,7 +426,16 @@ def _activation_script(payload: dict) -> str:
     }}
     $securePassword = ConvertTo-SecureString ([string]$payload.password) -AsPlainText -Force
     $credential = New-Object System.Management.Automation.PSCredential($username, $securePassword)
-    $result = Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName ([string]$payload.host) -Credential $credential -ArgumentList @("{remote_command}")
+    try {{
+      $result = Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName ([string]$payload.host) -Credential $credential -ArgumentList @("{remote_command}") -ErrorAction Stop
+    }} catch {{
+      [PSCustomObject]@{{
+        activated = $false
+        host = [string]$payload.host
+        message = "WMI activation failed: $($_.Exception.Message). Verify the credential is a local/domain administrator, DCOM/WMI is allowed by firewall, and LocalAccountTokenFilterPolicy is configured for local accounts."
+      }} | ConvertTo-Json -Compress
+      exit 0
+    }}
     Start-Sleep -Seconds 5
     $portOpen = $false
     try {{
@@ -352,9 +462,22 @@ def _read_json(output: bytes | str) -> object | None:
     text = text.strip()
     if not text:
         return None
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"(\{.*\})", text, flags=re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(1))
 
 
 def _clean_error(output: bytes | str) -> str:
     text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
-    return text.strip() or "Request failed"
+    text = text.strip()
+    if not text:
+        return "Request failed"
+    text = re.sub(r"#< CLIXML.*", "", text, flags=re.DOTALL).strip() or text
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"_x000D__x000A_|&#xD;|&#xA;", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "Request failed"

@@ -113,6 +113,12 @@ class EndpointScanRequest(BaseModel):
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
 
 
+class LocalWinRMActivationRequest(BaseModel):
+    domain: str = "WORKGROUP"
+    username: str = ""
+    password: str = ""
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -416,9 +422,9 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
 
 
 @app.post("/api/endpoint/activate-local-winrm")
-def endpoint_activate_local_winrm(principal: Principal = Depends(require_role("analyst"))) -> dict:
+def endpoint_activate_local_winrm(payload: LocalWinRMActivationRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     try:
-        result = activate_local_winrm()
+        result = activate_local_winrm(payload.username, payload.password, payload.domain)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit(

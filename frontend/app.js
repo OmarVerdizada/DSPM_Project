@@ -236,6 +236,14 @@ function readWinrmActivationPayload() {
   };
 }
 
+function readLocalWinrmPayload() {
+  return {
+    domain: document.querySelector("#local-winrm-domain").value.trim() || "WORKGROUP",
+    username: document.querySelector("#local-winrm-username").value.trim(),
+    password: document.querySelector("#local-winrm-password").value,
+  };
+}
+
 async function ensureEndpointCredential(payload) {
   if (!payload.host || payload.credential_ref || !payload.password) {
     return payload;
@@ -2803,7 +2811,7 @@ localWinrmActivateBtn.addEventListener("click", async () => {
   localWinrmStatus.textContent = "Activating WinRM on the DSPM Windows server...";
   try {
     requireAuth();
-    const result = await api("/api/endpoint/activate-local-winrm", {});
+    const result = await api("/api/endpoint/activate-local-winrm", readLocalWinrmPayload());
     localWinrmStatus.textContent = result.activated
       ? `Server WinRM is active on ${result.host || "this server"}.`
       : `Server activation needs review: ${result.message}`;

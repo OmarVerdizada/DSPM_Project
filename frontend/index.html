@@ -392,10 +392,24 @@
               <h4>1. Windows server WinRM</h4>
               <span>DSPM host preparation</span>
             </div>
+            <div class="asset-form-grid endpoint-form">
+              <label>
+                Domain
+                <input id="local-winrm-domain" value="WORKGROUP" />
+              </label>
+              <label>
+                Admin username
+                <input id="local-winrm-username" autocomplete="username" placeholder="Administrator" />
+              </label>
+              <label>
+                Admin password
+                <input id="local-winrm-password" type="password" autocomplete="current-password" />
+              </label>
+            </div>
             <div class="actions endpoint-actions">
               <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Activate server WinRM</button>
             </div>
-            <p id="local-winrm-status" class="save-status">This runs on the same Windows server as the DSPM backend. Start the backend from Administrator PowerShell before using it.</p>
+            <p id="local-winrm-status" class="save-status">This prepares the Windows server where DSPM runs. If the backend is not already elevated, enter a local or domain admin credential.</p>
           </section>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
