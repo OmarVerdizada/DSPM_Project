@@ -223,7 +223,8 @@ function readEndpointPayload() {
 function readWinrmActivationPayload() {
   return {
     host: document.querySelector("#winrm-activate-host").value.trim(),
-    target_username: "",
+    target_username: document.querySelector("#winrm-target-username").value.trim(),
+    target_password: document.querySelector("#winrm-target-password").value,
     domain: document.querySelector("#winrm-activate-domain").value.trim() || "WORKGROUP",
     username: document.querySelector("#winrm-activate-username").value.trim(),
     password: document.querySelector("#winrm-activate-password").value,
@@ -242,6 +243,15 @@ function readLocalWinrmPayload() {
     username: document.querySelector("#local-winrm-username").value.trim(),
     password: document.querySelector("#local-winrm-password").value,
   };
+}
+
+function syncEndpointScanCredentials(payload) {
+  document.querySelector("#endpoint-host").value = payload.host || "";
+  document.querySelector("#endpoint-target-username").value = payload.target_username || "";
+  document.querySelector("#endpoint-domain").value = payload.domain || "WORKGROUP";
+  document.querySelector("#endpoint-username").value = payload.username || "";
+  document.querySelector("#endpoint-password").value = payload.password || "";
+  document.querySelector("#endpoint-credential-ref").value = "";
 }
 
 async function ensureEndpointCredential(payload) {
@@ -2826,24 +2836,31 @@ localWinrmActivateBtn.addEventListener("click", async () => {
 
 endpointActivateBtn.addEventListener("click", async () => {
   setBusy(true);
-  winrmActivateStatus.textContent = "Activating WinRM on target machine...";
+  winrmActivateStatus.textContent = "Preparing target WinRM, firewall, and verification...";
   try {
     requireAuth();
     const payload = readWinrmActivationPayload();
-    const result = await api("/api/endpoint/activate-winrm", payload);
+    const result = await api("/api/endpoint/repair-winrm", payload);
+    if (result.connected) {
+      syncEndpointScanCredentials(payload);
+    }
+    const serverPrep = result.server_preparation;
+    const serverText = serverPrep
+      ? `Server prep: ${serverPrep.activated ? "ready" : serverPrep.message || "needs review"}. `
+      : "";
     winrmActivateStatus.textContent = result.activated
-      ? `WinRM activated on ${result.computer || result.host}. ${result.connected ? "Connection verified." : result.message || ""}`
-      : `Activation command sent, but verification failed: ${result.connection_message || result.message}`;
-    showToast(result.activated ? "WinRM activated" : "WinRM activation needs review", result.connection_message || result.message || result.host, result.activated ? "success" : "danger");
+      ? `${serverText}Target WinRM ready on ${result.computer || result.host}. ${result.skipped_wmi_activation ? "Existing WinRM connection verified." : result.connected ? "Connection verified." : result.message || ""}`
+      : `${serverText}Target preparation needs review: ${result.connection_message || result.message}`;
+    showToast(result.activated ? "Target WinRM ready" : "Target WinRM needs review", result.connection_message || result.message || result.host, result.activated ? "success" : "danger");
   } catch (error) {
-    winrmActivateStatus.textContent = `WinRM activation failed: ${error.message}`;
-    showToast("WinRM activation failed", error.message, "danger");
+    winrmActivateStatus.textContent = `Target WinRM preparation failed: ${error.message}`;
+    showToast("Target WinRM preparation failed", error.message, "danger");
   } finally {
     setBusy(false);
   }
 });
 
-endpointTestBtn.addEventListener("click", async () => {
+if (endpointTestBtn) endpointTestBtn.addEventListener("click", async () => {
   setBusy(true);
   endpointStatus.textContent = "Testing WinRM connection...";
   try {

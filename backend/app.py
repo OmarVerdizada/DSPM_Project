@@ -102,6 +102,7 @@ class ScanRequest(ConnectionRequest):
 class EndpointScanRequest(BaseModel):
     host: str = Field(description="Endpoint hostname or IP")
     target_username: str = Field(default="", description="Windows profile username under C:\\Users")
+    target_password: str = ""
     domain: str = "WORKGROUP"
     username: str = ""
     password: str = ""
@@ -452,42 +453,68 @@ def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal =
     return result
 
 
+@app.post("/api/endpoint/repair-winrm")
+def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
+    try:
+        local_result = activate_local_winrm(payload.username, payload.password, payload.domain)
+        result = scanner.activate_winrm()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result["server_preparation"] = local_result
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "endpoint.winrm.repair",
+        {
+            "host": payload.host,
+            "server_activated": local_result.get("activated"),
+            "activated": result.get("activated"),
+            "connected": result.get("connected"),
+        },
+    )
+    return result
+
+
 @app.post("/api/endpoint/scan")
 def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
-    config = _to_endpoint_config(payload, principal.tenant_id)
-    scanner = WinRMEndpointScanner(config)
-    records = scanner.scan()
-    report = DSPMDiscoveryEngine(
-        ScanConfig(
-            server="",
-            use_sample_when_empty=False,
-            asset_overrides=[
-                {
-                    "pattern": item.pattern.strip(),
-                    "level": item.level.strip().upper(),
-                    "reason": item.reason.strip(),
-                }
-                for item in payload.asset_overrides
-                if item.pattern.strip()
-            ],
+    try:
+        config = _to_endpoint_config(payload, principal.tenant_id)
+        scanner = WinRMEndpointScanner(config)
+        records = scanner.scan()
+        report = DSPMDiscoveryEngine(
+            ScanConfig(
+                server="",
+                use_sample_when_empty=False,
+                asset_overrides=[
+                    {
+                        "pattern": item.pattern.strip(),
+                        "level": item.level.strip().upper(),
+                        "reason": item.reason.strip(),
+                    }
+                    for item in payload.asset_overrides
+                    if item.pattern.strip()
+                ],
+            )
         )
-    )
-    analyzed = [report._analyze_record(record) for record in records]
-    data = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "source": "endpoint-winrm",
-        "summary": report._build_summary(analyzed).to_dict(),
-        "files": analyzed,
-        "endpoint": {
-            "host": config.host,
-            "target_username": config.target_username,
-            "paths": config.paths,
-            "max_depth": config.max_depth,
-        },
-    }
-    _persist_scan(data, payload, principal)
-    audit(principal.tenant_id, principal.subject, "endpoint.scan.completed", {"scan_id": data.get("scan_id"), "host": payload.host})
-    return data
+        analyzed = [report._analyze_record(record) for record in records]
+        data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "endpoint-winrm",
+            "summary": report._build_summary(analyzed).to_dict(),
+            "files": analyzed,
+            "endpoint": {
+                "host": config.host,
+                "target_username": config.target_username,
+                "paths": config.paths,
+                "max_depth": config.max_depth,
+            },
+        }
+        _persist_scan(data, payload, principal)
+        audit(principal.tenant_id, principal.subject, "endpoint.scan.completed", {"scan_id": data.get("scan_id"), "host": payload.host})
+        return data
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/demo-data/generate")

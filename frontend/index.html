@@ -423,12 +423,20 @@
                 <input id="winrm-activate-host" placeholder="10.10.10.25 or laptop01.domain.local" />
               </label>
               <label>
+                Target Windows user
+                <input id="winrm-target-username" autocomplete="username" placeholder="hr.01" />
+              </label>
+              <label>
+                Target user password
+                <input id="winrm-target-password" type="password" autocomplete="current-password" />
+              </label>
+              <label>
                 Domain
                 <input id="winrm-activate-domain" value="WORKGROUP" />
               </label>
               <label>
                 Admin username
-                <input id="winrm-activate-username" autocomplete="username" placeholder="Administrator" />
+                <input id="winrm-activate-username" autocomplete="username" placeholder="Target admin, e.g. Administrator" />
               </label>
               <label>
                 Admin password
@@ -436,9 +444,9 @@
               </label>
             </div>
             <div class="actions endpoint-actions">
-              <button type="button" id="endpoint-activate-btn" class="secondary-btn">Activate target WinRM</button>
+              <button type="button" id="endpoint-activate-btn" class="secondary-btn">Prepare & Test target WinRM</button>
             </div>
-            <p id="winrm-activate-status" class="save-status">This uses WMI/DCOM with the admin credential to enable WinRM on the machine you want to scan.</p>
+            <p id="winrm-activate-status" class="save-status">Target user is the profile to scan. Admin credential must be an administrator on the target and is used to prepare WinRM.</p>
           </section>
 
           <section class="visual-panel endpoint-panel">
@@ -496,7 +504,6 @@
               </label>
             </div>
             <div class="actions endpoint-actions">
-              <button type="button" id="endpoint-test-btn" class="secondary-btn">Test WinRM</button>
               <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
             </div>
             <p id="endpoint-status" class="save-status">Fill the endpoint scan details after WinRM is active on the workstation.</p>

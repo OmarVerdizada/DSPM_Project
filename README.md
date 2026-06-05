@@ -20,6 +20,7 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - Report center with polished Excel, Word, and print/PDF exports, including KPI cards, SVG charts, department risk, folder heatmap, trend context, and priority file queues.
 - Security operations view with API keys, audit trail, DLP policy export, and credential vault support.
 - SQLite-backed tenant and user management with invitation-code registration, admin role management, password resets, and activity logging.
+- Windows endpoint profile scanning over WinRM, including DSPM host preparation, target WinRM verification, credential vault handoff, and scoped profile scans.
 
 ## Screens
 
@@ -32,6 +33,7 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - `Security`: user management, role management, password reset, API keys, audit, DLP policy export.
 - `Integrations`: connector and response workflow roadmap.
 - `Risk Logic`: severity ranges, scoring formula, detection signals, customer asset context.
+- `Endpoint Scan`: prepares the DSPM Windows server, verifies target workstation WinRM, and scans selected user profile paths.
 
 ## Quick Start
 
@@ -87,6 +89,50 @@ python main.py scan --local-path enterprise_test_data --output report.json
 
 The CLI writes a full JSON report with summary, file findings, permissions, risk reasons, DLP recommendations, and remediation actions.
 
+## Windows Endpoint Scans
+
+Endpoint scans use WinRM to inspect selected paths under a target workstation profile such as `C:\Users\hr.01`. The recommended flow is:
+
+1. In `Windows server WinRM`, prepare the DSPM host. This enables WinRM, WMI/DCOM firewall groups, Remote Administration firewall rules, the HTTP listener on `5985`, and local remote-admin token policy.
+2. In `Target machine WinRM`, enter the target IP, the Windows profile user to scan, and an administrator credential that is valid on the target workstation. The app first verifies existing WinRM; if it is already reachable, it skips WMI bootstrap.
+3. In `Endpoint scan`, choose a focused path scope first, such as `Desktop only` or `Documents only`. Use `All profile` only after the connection is proven because it can traverse large profile trees.
+
+Example target preparation values:
+
+```text
+Target host / IP: 10.10.33.150
+Target Windows user: hr.01
+Domain: PROSOL
+Admin username: Administrator
+Admin password: <domain-admin-password>
+```
+
+If WinRM is already enabled by Group Policy, `Prepare & Test target WinRM` should report that the existing connection is verified. If it reports WMI access denied, the target rejected remote WMI/DCOM changes for that credential; fix this with GPO or a one-time local bootstrap on the target.
+
+### Group Policy For WinRM Targets
+
+For domain workstations, prefer GPO over one-by-one WMI bootstrap:
+
+- Enable `Computer Configuration > Policies > Administrative Templates > Windows Components > Windows Remote Management (WinRM) > WinRM Service > Allow remote server management through WinRM`.
+- Set both IPv4 and IPv6 filters to `*` unless your environment requires a narrower range.
+- Add inbound firewall rules for TCP `5985` on the Domain profile.
+- Enable predefined inbound rules for `Windows Remote Management` and `Windows Management Instrumentation (WMI)`.
+- Set the `Windows Remote Management (WS-Management)` service to Automatic, or create a GPO Preferences service item that starts `WinRM`.
+
+After applying GPO, run this on the target or wait for policy refresh:
+
+```powershell
+gpupdate /force
+```
+
+Validate from the DSPM server:
+
+```powershell
+Test-NetConnection 10.10.33.150 -Port 5985
+```
+
+`TcpTestSucceeded : True` means the network path and WinRM listener are reachable.
+
 ## API Overview
 
 Core endpoints:
@@ -113,6 +159,10 @@ Core endpoints:
 - `POST /api/dlp-policy`
 - `POST /api/api-keys`
 - `POST /api/credentials`
+- `POST /api/endpoint/activate-local-winrm`
+- `POST /api/endpoint/repair-winrm`
+- `POST /api/endpoint/test-connection`
+- `POST /api/endpoint/scan`
 
 Tenant isolation is controlled with the authenticated token and `X-Tenant-ID` header for admin/API-key workflows.
 
@@ -172,6 +222,8 @@ Local runtime data is stored in SQLite at `data/dspm.sqlite` and is ignored by g
 ## Dependencies
 
 Install Python dependencies from `requirements.txt`. SQLite does not need a separate package because the app uses Python's built-in `sqlite3` module. The frontend is static HTML/CSS/JavaScript served by FastAPI, so no Node.js or npm install is required.
+
+WinRM endpoint scanning requires the existing `pywinrm` dependency from `requirements.txt`. No extra package is needed for the GPO-based target preparation flow.
 
 Optional tooling:
 

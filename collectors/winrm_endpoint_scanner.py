@@ -73,8 +73,15 @@ def _local_activation_script(require_current_admin: bool) -> str:
     Start-Service -Name WinRM
     Enable-PSRemoting -Force -SkipNetworkProfileCheck
     winrm quickconfig -quiet
+    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Ole" -Name EnableDCOM -Type String -Value "Y" -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" -Name LocalAccountTokenFilterPolicy -Type DWord -Value 1 -Force
+    winrm create "winrm/config/Listener?Address=*+Transport=HTTP" '@{Port="5985"}' 2>$null
+    winrm set "winrm/config/service" '@{IPv4Filter="*";IPv6Filter="*"}'
     netsh advfirewall firewall set rule group="Windows Remote Management" new enable=yes | Out-Null
-    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    netsh advfirewall firewall set rule group="Windows Management Instrumentation (WMI)" new enable=yes | Out-Null
+    netsh advfirewall firewall set rule group="Remote Administration" new enable=yes | Out-Null
+    netsh advfirewall firewall add rule name="DSPM WinRM HTTP 5985" dir=in action=allow protocol=TCP localport=5985 profile=any | Out-Null
+    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
     $service = Get-Service -Name WinRM -ErrorAction SilentlyContinue
     $portOpen = $false
     try {
@@ -212,6 +219,19 @@ class WinRMEndpointScanner:
         if not self.config.username.strip() or not self.config.password:
             raise ValueError("Admin username and password are required to activate WinRM.")
 
+        existing_connection = self.test_connection()
+        if existing_connection.get("connected"):
+            return {
+                "activated": True,
+                "connected": True,
+                "host": self.config.host,
+                "user": existing_connection.get("user", ""),
+                "computer": existing_connection.get("computer", self.config.host),
+                "message": "WinRM is already reachable and connection verified.",
+                "connection_message": existing_connection.get("message", "Connected successfully"),
+                "skipped_wmi_activation": True,
+            }
+
         script = _activation_script(
             {
                 "host": self.config.host.strip(),
@@ -231,6 +251,11 @@ class WinRMEndpointScanner:
         activation = _read_json(result.stdout)
         if not isinstance(activation, dict):
             activation = {"activated": False, "message": _clean_error(result.stdout) or "Activation command completed."}
+
+        if not activation.get("activated"):
+            activation["connected"] = False
+            activation["connection_message"] = activation.get("message", "")
+            return activation
 
         connection = self.test_connection()
         activation["connected"] = bool(connection.get("connected"))
@@ -280,6 +305,8 @@ class WinRMEndpointScanner:
         raw_records = _read_json(result.std_out)
         if raw_records is None:
             return []
+        if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
+            raw_records = raw_records["records"]
         if isinstance(raw_records, dict):
             raw_records = [raw_records]
 
@@ -397,20 +424,30 @@ def _scan_script(paths: list[str], max_depth: int, read_content: bool, max_read_
         }}) | Out-Null
       }}
     }}
-    $records | ConvertTo-Json -Depth 5 -Compress
+    [PSCustomObject]@{{
+      records = @($records.ToArray())
+    }} | ConvertTo-Json -Depth 6 -Compress
     """
 
 
 def _activation_script(payload: dict) -> str:
     encoded_payload = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
     remote_script = """
+    $ProgressPreference = "SilentlyContinue"
     $ErrorActionPreference = "SilentlyContinue"
+    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Ole" -Name EnableDCOM -Type String -Value "Y" -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" -Name LocalAccountTokenFilterPolicy -Type DWord -Value 1 -Force
     Set-Service -Name WinRM -StartupType Automatic
     Start-Service -Name WinRM
     Enable-PSRemoting -Force -SkipNetworkProfileCheck
     winrm quickconfig -quiet
+    winrm create "winrm/config/Listener?Address=*+Transport=HTTP" '@{Port="5985"}' 2>$null
+    winrm set "winrm/config/service" '@{IPv4Filter="*";IPv6Filter="*"}'
     netsh advfirewall firewall set rule group="Windows Remote Management" new enable=yes | Out-Null
-    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    netsh advfirewall firewall set rule group="Windows Management Instrumentation (WMI)" new enable=yes | Out-Null
+    netsh advfirewall firewall set rule group="Remote Administration" new enable=yes | Out-Null
+    netsh advfirewall firewall add rule name="DSPM WinRM HTTP 5985" dir=in action=allow protocol=TCP localport=5985 profile=any | Out-Null
+    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
     """
     encoded_remote = base64.b64encode(remote_script.encode("utf-16le")).decode("ascii")
     remote_command = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_remote}"
@@ -419,40 +456,108 @@ def _activation_script(payload: dict) -> str:
     $ErrorActionPreference = "Stop"
     $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_payload}"))
     $payload = ConvertFrom-Json $payloadJson
-    $username = [string]$payload.username
-    $domain = [string]$payload.domain
-    if ($domain -and $domain -ne "WORKGROUP" -and $username -notmatch "\\\\" -and $username -notmatch "@") {{
-      $username = "$domain\\$username"
-    }}
     $securePassword = ConvertTo-SecureString ([string]$payload.password) -AsPlainText -Force
-    $credential = New-Object System.Management.Automation.PSCredential($username, $securePassword)
-    try {{
-      $result = Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName ([string]$payload.host) -Credential $credential -ArgumentList @("{remote_command}") -ErrorAction Stop
-    }} catch {{
+    $rawUsername = ([string]$payload.username).Trim()
+    $domain = ([string]$payload.domain).Trim()
+    $credentialNames = New-Object System.Collections.Generic.List[string]
+    if ($rawUsername -match "\\\\" -or $rawUsername -match "@") {{
+      $credentialNames.Add($rawUsername)
+    }} elseif ($domain -and $domain -ne "WORKGROUP") {{
+      $credentialNames.Add("$domain\\$rawUsername")
+      if ($domain -match "\\.") {{
+        $netbiosDomain = ($domain -split "\\.")[0].ToUpperInvariant()
+        $credentialNames.Add("$netbiosDomain\\$rawUsername")
+        $credentialNames.Add("$rawUsername@$domain")
+      }}
+      $credentialNames.Add($rawUsername)
+      $credentialNames.Add(".\\$rawUsername")
+      $credentialNames.Add("$($payload.host)\\$rawUsername")
+    }} else {{
+      $credentialNames.Add($rawUsername)
+      $credentialNames.Add(".\\$rawUsername")
+      $credentialNames.Add("$($payload.host)\\$rawUsername")
+    }}
+
+    $result = $null
+    $credential = $null
+    $credentialName = ""
+    $activationErrors = New-Object System.Collections.Generic.List[string]
+    foreach ($candidateName in @($credentialNames | Select-Object -Unique)) {{
+      try {{
+        $candidateCredential = New-Object System.Management.Automation.PSCredential($candidateName, $securePassword)
+        $candidateResult = Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName ([string]$payload.host) -Credential $candidateCredential -ArgumentList @("{remote_command}") -ErrorAction Stop
+        $result = $candidateResult
+        $credential = $candidateCredential
+        $credentialName = $candidateName
+        break
+      }} catch {{
+        $activationErrors.Add("${{candidateName}}: $($_.Exception.Message)") | Out-Null
+      }}
+    }}
+    if (-not $credential) {{
       [PSCustomObject]@{{
         activated = $false
         host = [string]$payload.host
-        message = "WMI activation failed: $($_.Exception.Message). Verify the credential is a local/domain administrator, DCOM/WMI is allowed by firewall, and LocalAccountTokenFilterPolicy is configured for local accounts."
+        attempted_credentials = @($credentialNames | Select-Object -Unique)
+        message = "Target rejected every admin credential format with Access denied. DSPM server preparation is complete, but Windows will not allow remote WMI/DCOM changes on this workstation. Use a credential that is in the target workstation's local Administrators group, or run the one-time WinRM bootstrap locally/on GPO for this target. Details: $($activationErrors -join ' | ')"
       }} | ConvertTo-Json -Compress
       exit 0
     }}
-    Start-Sleep -Seconds 5
-    $portOpen = $false
+    $serviceState = ""
+    $serviceStartReturnValue = $null
+    $serviceChangeReturnValue = $null
+    $serviceQueryError = ""
     try {{
-      $client = New-Object Net.Sockets.TcpClient
-      $async = $client.BeginConnect(([string]$payload.host), 5985, $null, $null)
-      $portOpen = $async.AsyncWaitHandle.WaitOne(5000, $false)
-      if ($portOpen) {{ $client.EndConnect($async) }}
-      $client.Close()
+      $service = Get-WmiObject -Class Win32_Service -ComputerName ([string]$payload.host) -Credential $credential -Filter "Name='WinRM'" -ErrorAction Stop
+      if ($service) {{
+        $serviceState = [string]$service.State
+        if ($service.StartMode -ne "Auto") {{
+          $serviceChangeReturnValue = $service.ChangeStartMode("Automatic").ReturnValue
+        }}
+        if ($service.State -ne "Running") {{
+          $serviceStartReturnValue = $service.StartService().ReturnValue
+          Start-Sleep -Seconds 5
+          $service = Get-WmiObject -Class Win32_Service -ComputerName ([string]$payload.host) -Credential $credential -Filter "Name='WinRM'" -ErrorAction SilentlyContinue
+          if ($service) {{ $serviceState = [string]$service.State }}
+        }}
+      }}
     }} catch {{
-      $portOpen = $false
+      $serviceQueryError = $_.Exception.Message
+    }}
+
+    $portOpen = $false
+    for ($attempt = 0; $attempt -lt 10 -and -not $portOpen; $attempt++) {{
+      Start-Sleep -Seconds 3
+      try {{
+        $client = New-Object Net.Sockets.TcpClient
+        $async = $client.BeginConnect(([string]$payload.host), 5985, $null, $null)
+        $portOpen = $async.AsyncWaitHandle.WaitOne(5000, $false)
+        if ($portOpen) {{ $client.EndConnect($async) }}
+        $client.Close()
+      }} catch {{
+        $portOpen = $false
+      }}
+    }}
+    $message = if ($portOpen) {{
+      "Activation command sent and WinRM port 5985 is reachable."
+    }} elseif ($serviceState -eq "Running") {{
+      "WinRM service is running on the target, but port 5985 is not reachable from the DSPM server. Check target firewall/GPO, network ACLs, or endpoint security blocking inbound TCP 5985."
+    }} elseif ($serviceQueryError) {{
+      "Activation command was sent, but WinRM port 5985 is not reachable. WMI service check also failed: $serviceQueryError"
+    }} else {{
+      "Activation command was sent, but WinRM service state is '$serviceState' and port 5985 is not reachable. Verify the credential has local administrator rights and target policy allows remote service changes."
     }}
     [PSCustomObject]@{{
       activated = [bool]$portOpen
       host = [string]$payload.host
+      credential_used = $credentialName
       wmi_return_value = $result.ReturnValue
       process_id = $result.ProcessId
-      message = if ($portOpen) {{ "Activation command sent and WinRM port 5985 is reachable." }} else {{ "Activation command was sent, but port 5985 is not reachable yet. Check firewall, UAC remote restrictions, or WMI access." }}
+      service_state = $serviceState
+      service_start_return_value = $serviceStartReturnValue
+      service_change_return_value = $serviceChangeReturnValue
+      service_query_error = $serviceQueryError
+      message = $message
     }} | ConvertTo-Json -Compress
     """
 
@@ -465,10 +570,16 @@ def _read_json(output: bytes | str) -> object | None:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        match = re.search(r"(\{.*\})", text, flags=re.DOTALL)
-        if not match:
-            raise
-        return json.loads(match.group(1))
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char not in "[{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(text[index:])
+                return value
+            except json.JSONDecodeError:
+                continue
+        raise
 
 
 def _clean_error(output: bytes | str) -> str:
