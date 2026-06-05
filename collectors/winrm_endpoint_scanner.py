@@ -22,6 +22,18 @@ def activate_local_winrm() -> dict:
         raise RuntimeError("Local WinRM activation requires the DSPM backend to run on Windows.")
 
     script = """
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) {
+      [PSCustomObject]@{
+        activated = $false
+        host = $env:COMPUTERNAME
+        service_status = ""
+        port_5985_open = $false
+        requires_admin = $true
+        message = "DSPM backend is not running with Administrator privileges. Start PowerShell as Administrator and run the backend again, or run Enable-PSRemoting manually on this server."
+      } | ConvertTo-Json -Compress
+      exit 0
+    }
     $ErrorActionPreference = "SilentlyContinue"
     Set-Service -Name WinRM -StartupType Automatic
     Start-Service -Name WinRM
@@ -45,6 +57,7 @@ def activate_local_winrm() -> dict:
       host = $env:COMPUTERNAME
       service_status = if ($service) { $service.Status.ToString() } else { "Missing" }
       port_5985_open = [bool]$portOpen
+      requires_admin = $false
       message = if ($service -and $service.Status -eq "Running" -and $portOpen) { "Local WinRM is running and port 5985 is reachable." } else { "Local activation command ran, but WinRM is not fully reachable. Run the backend as Administrator and check local firewall policy." }
     } | ConvertTo-Json -Compress
     """
@@ -109,7 +122,11 @@ class WinRMEndpointScanner:
             check=False,
         )
         if result.returncode != 0:
-            raise ConnectionError(_clean_error(result.stderr) or "WinRM activation failed.")
+            return {
+                "activated": False,
+                "host": self.config.host,
+                "message": _clean_error(result.stderr) or "WinRM activation failed.",
+            }
 
         activation = _read_json(result.stdout)
         if not isinstance(activation, dict):

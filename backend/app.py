@@ -417,7 +417,10 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
 
 @app.post("/api/endpoint/activate-local-winrm")
 def endpoint_activate_local_winrm(principal: Principal = Depends(require_role("analyst"))) -> dict:
-    result = activate_local_winrm()
+    try:
+        result = activate_local_winrm()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit(
         principal.tenant_id,
         principal.subject,
@@ -430,7 +433,10 @@ def endpoint_activate_local_winrm(principal: Principal = Depends(require_role("a
 @app.post("/api/endpoint/activate-winrm")
 def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
-    result = scanner.activate_winrm()
+    try:
+        result = scanner.activate_winrm()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit(
         principal.tenant_id,
         principal.subject,
