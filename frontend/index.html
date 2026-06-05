@@ -387,10 +387,39 @@
             </div>
           </div>
 
+          <section class="visual-panel endpoint-panel winrm-activation-panel">
+            <div class="panel-title">
+              <h4>Activate WinRM</h4>
+              <span>Remote preparation</span>
+            </div>
+            <div class="asset-form-grid endpoint-form">
+              <label>
+                Endpoint host / IP
+                <input id="winrm-activate-host" placeholder="10.10.10.25 or laptop01.domain.local" />
+              </label>
+              <label>
+                Domain
+                <input id="winrm-activate-domain" value="WORKGROUP" />
+              </label>
+              <label>
+                Admin username
+                <input id="winrm-activate-username" autocomplete="username" placeholder="Administrator" />
+              </label>
+              <label>
+                Admin password
+                <input id="winrm-activate-password" type="password" autocomplete="current-password" />
+              </label>
+            </div>
+            <div class="actions endpoint-actions">
+              <button type="button" id="endpoint-activate-btn" class="secondary-btn">Activate WinRM</button>
+            </div>
+            <p id="winrm-activate-status" class="save-status">Prepare the endpoint first, then fill the endpoint scan form below.</p>
+          </section>
+
           <section class="visual-panel endpoint-panel">
             <div class="panel-title">
-              <h4>WinRM target</h4>
-              <span>Test mode</span>
+              <h4>Endpoint scan</h4>
+              <span>WinRM discovery</span>
             </div>
             <div class="asset-form-grid endpoint-form">
               <label>
@@ -430,7 +459,7 @@
               </label>
               <label>
                 Custom paths
-                <input id="endpoint-custom-paths" placeholder="C:\\Users\\j.doe\\Desktop; C:\\Temp" />
+                <input id="endpoint-custom-paths" placeholder="C:\\Users\\j.doe\\Desktop; C:\\Temp" disabled />
               </label>
               <label>
                 Max folder depth
@@ -445,7 +474,7 @@
               <button type="button" id="endpoint-test-btn" class="secondary-btn">Test WinRM</button>
               <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
             </div>
-            <p id="endpoint-status" class="save-status">Endpoint scans use WinRM over 5985/5986 and save results to the same tenant history.</p>
+            <p id="endpoint-status" class="save-status">Fill the endpoint scan details after WinRM is active on the workstation.</p>
           </section>
         </section>
 

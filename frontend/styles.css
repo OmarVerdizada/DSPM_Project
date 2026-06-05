@@ -1292,6 +1292,10 @@ tbody tr.row-flash {
   gap: 14px;
 }
 
+.winrm-activation-panel {
+  margin-bottom: 16px;
+}
+
 .endpoint-checkbox {
   align-self: end;
   min-height: 42px;

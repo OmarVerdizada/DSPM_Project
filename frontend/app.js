@@ -79,9 +79,13 @@ const newTenantId = document.querySelector("#new-tenant-id");
 const newTenantName = document.querySelector("#new-tenant-name");
 const integrationGrid = document.querySelector("#integration-grid");
 const integrationDiagram = document.querySelector("#integration-diagram");
+const endpointActivateBtn = document.querySelector("#endpoint-activate-btn");
 const endpointTestBtn = document.querySelector("#endpoint-test-btn");
 const endpointScanBtn = document.querySelector("#endpoint-scan-btn");
 const endpointStatus = document.querySelector("#endpoint-status");
+const winrmActivateStatus = document.querySelector("#winrm-activate-status");
+const endpointPathScope = document.querySelector("#endpoint-path-scope");
+const endpointCustomPaths = document.querySelector("#endpoint-custom-paths");
 const detailDrawer = document.querySelector("#detail-drawer");
 const detailDrawerEyebrow = detailDrawer.querySelector("#detail-drawer-eyebrow");
 const detailDrawerTitle = detailDrawer.querySelector("#detail-drawer-title");
@@ -186,8 +190,8 @@ function readPayload() {
 }
 
 function readEndpointPayload() {
-  const scope = document.querySelector("#endpoint-path-scope").value;
-  const customPaths = document.querySelector("#endpoint-custom-paths").value
+  const scope = endpointPathScope.value;
+  const customPaths = endpointCustomPaths.value
     .split(";")
     .map((item) => item.trim())
     .filter(Boolean);
@@ -214,6 +218,22 @@ function readEndpointPayload() {
   };
 }
 
+function readWinrmActivationPayload() {
+  return {
+    host: document.querySelector("#winrm-activate-host").value.trim(),
+    target_username: "",
+    domain: document.querySelector("#winrm-activate-domain").value.trim() || "WORKGROUP",
+    username: document.querySelector("#winrm-activate-username").value.trim(),
+    password: document.querySelector("#winrm-activate-password").value,
+    credential_ref: "",
+    paths: ["desktop", "documents", "downloads"],
+    max_depth: 1,
+    read_content: false,
+    save_report: false,
+    asset_overrides: [],
+  };
+}
+
 async function ensureEndpointCredential(payload) {
   if (!payload.host || payload.credential_ref || !payload.password) {
     return payload;
@@ -232,8 +252,10 @@ function setBusy(isBusy) {
   testBtn.disabled = isBusy;
   scanBtn.disabled = isBusy;
   generateDemoDataBtn.disabled = isBusy;
+  if (endpointActivateBtn) endpointActivateBtn.disabled = isBusy;
   if (endpointTestBtn) endpointTestBtn.disabled = isBusy;
   if (endpointScanBtn) endpointScanBtn.disabled = isBusy;
+  updateEndpointCustomPathState(isBusy);
 }
 
 function setStatus(message, tone = "muted") {
@@ -279,6 +301,18 @@ function showToast(title, message = "", tone = "info") {
   toastHost.appendChild(toast);
   window.setTimeout(() => toast.classList.add("leaving"), 4200);
   window.setTimeout(() => toast.remove(), 4800);
+}
+
+function updateEndpointCustomPathState(isBusy = false) {
+  if (!endpointPathScope || !endpointCustomPaths) {
+    return;
+  }
+  const customSelected = endpointPathScope.value === "custom";
+  endpointCustomPaths.disabled = isBusy || !customSelected;
+  endpointCustomPaths.required = customSelected;
+  if (!customSelected) {
+    endpointCustomPaths.value = "";
+  }
 }
 
 function renderSkeletonRows(count = 6) {
@@ -2761,6 +2795,25 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
+endpointActivateBtn.addEventListener("click", async () => {
+  setBusy(true);
+  winrmActivateStatus.textContent = "Activating WinRM on endpoint...";
+  try {
+    requireAuth();
+    const payload = readWinrmActivationPayload();
+    const result = await api("/api/endpoint/activate-winrm", payload);
+    winrmActivateStatus.textContent = result.activated
+      ? `WinRM activated on ${result.computer || result.host}. ${result.connected ? "Connection verified." : result.message || ""}`
+      : `Activation command sent, but verification failed: ${result.connection_message || result.message}`;
+    showToast(result.activated ? "WinRM activated" : "WinRM activation needs review", result.connection_message || result.message || result.host, result.activated ? "success" : "danger");
+  } catch (error) {
+    winrmActivateStatus.textContent = `WinRM activation failed: ${error.message}`;
+    showToast("WinRM activation failed", error.message, "danger");
+  } finally {
+    setBusy(false);
+  }
+});
+
 endpointTestBtn.addEventListener("click", async () => {
   setBusy(true);
   endpointStatus.textContent = "Testing WinRM connection...";
@@ -2811,6 +2864,8 @@ endpointScanBtn.addEventListener("click", async () => {
     setBusy(false);
   }
 });
+
+endpointPathScope.addEventListener("change", () => updateEndpointCustomPathState());
 
 filterInput.addEventListener("input", () => renderRows(latestFiles));
 
@@ -3065,6 +3120,7 @@ renderAssetRules();
 renderReportPreview();
 renderExecutiveExperience();
 renderIntegrations();
+updateEndpointCustomPathState();
 
 fetch("/api/health")
   .then((response) => response.json())

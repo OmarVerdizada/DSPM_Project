@@ -415,6 +415,19 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
     return scanner.test_connection()
 
 
+@app.post("/api/endpoint/activate-winrm")
+def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
+    result = scanner.activate_winrm()
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "endpoint.winrm.activate",
+        {"host": payload.host, "activated": result.get("activated"), "connected": result.get("connected")},
+    )
+    return result
+
+
 @app.post("/api/endpoint/scan")
 def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     config = _to_endpoint_config(payload, principal.tenant_id)

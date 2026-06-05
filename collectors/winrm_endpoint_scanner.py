@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import platform
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import PureWindowsPath
 
@@ -33,6 +35,47 @@ class WinRMEndpointConfig:
 class WinRMEndpointScanner:
     def __init__(self, config: WinRMEndpointConfig):
         self.config = config
+
+    def activate_winrm(self) -> dict:
+        if platform.system().lower() != "windows":
+            raise RuntimeError("WinRM activation requires the DSPM backend to run on Windows with WMI tools available.")
+        if not self.config.host.strip():
+            raise ValueError("Endpoint host is required.")
+        if not self.config.username.strip() or not self.config.password:
+            raise ValueError("Admin username and password are required to activate WinRM.")
+
+        script = _activation_script(
+            {
+                "host": self.config.host.strip(),
+                "username": self.config.username.strip(),
+                "password": self.config.password,
+                "domain": self.config.domain.strip() or "WORKGROUP",
+            }
+        )
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ConnectionError(_clean_error(result.stderr) or "WinRM activation failed.")
+
+        activation = _read_json(result.stdout)
+        if not isinstance(activation, dict):
+            activation = {"activated": False, "message": _clean_error(result.stdout) or "Activation command completed."}
+
+        connection = self.test_connection()
+        activation["connected"] = bool(connection.get("connected"))
+        activation["connection_message"] = connection.get("message", "")
+        activation["user"] = connection.get("user", "")
+        activation["computer"] = connection.get("computer", "")
+        if activation["connected"]:
+            activation["activated"] = True
+            activation["message"] = "WinRM activated and connection verified."
+        return activation
 
     def test_connection(self) -> dict:
         try:
@@ -190,6 +233,52 @@ def _scan_script(paths: list[str], max_depth: int, read_content: bool, max_read_
       }}
     }}
     $records | ConvertTo-Json -Depth 5 -Compress
+    """
+
+
+def _activation_script(payload: dict) -> str:
+    encoded_payload = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    remote_script = """
+    $ErrorActionPreference = "SilentlyContinue"
+    Set-Service -Name WinRM -StartupType Automatic
+    Start-Service -Name WinRM
+    Enable-PSRemoting -Force -SkipNetworkProfileCheck
+    winrm quickconfig -quiet
+    netsh advfirewall firewall set rule group="Windows Remote Management" new enable=yes | Out-Null
+    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    """
+    encoded_remote = base64.b64encode(remote_script.encode("utf-16le")).decode("ascii")
+    remote_command = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_remote}"
+    return f"""
+    $ErrorActionPreference = "Stop"
+    $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_payload}"))
+    $payload = ConvertFrom-Json $payloadJson
+    $username = [string]$payload.username
+    $domain = [string]$payload.domain
+    if ($domain -and $domain -ne "WORKGROUP" -and $username -notmatch "\\\\" -and $username -notmatch "@") {{
+      $username = "$domain\\$username"
+    }}
+    $securePassword = ConvertTo-SecureString ([string]$payload.password) -AsPlainText -Force
+    $credential = New-Object System.Management.Automation.PSCredential($username, $securePassword)
+    $result = Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName ([string]$payload.host) -Credential $credential -ArgumentList @("{remote_command}")
+    Start-Sleep -Seconds 5
+    $portOpen = $false
+    try {{
+      $client = New-Object Net.Sockets.TcpClient
+      $async = $client.BeginConnect(([string]$payload.host), 5985, $null, $null)
+      $portOpen = $async.AsyncWaitHandle.WaitOne(5000, $false)
+      if ($portOpen) {{ $client.EndConnect($async) }}
+      $client.Close()
+    }} catch {{
+      $portOpen = $false
+    }}
+    [PSCustomObject]@{{
+      activated = [bool]$portOpen
+      host = [string]$payload.host
+      wmi_return_value = $result.ReturnValue
+      process_id = $result.ProcessId
+      message = if ($portOpen) {{ "Activation command sent and WinRM port 5985 is reachable." }} else {{ "Activation command was sent, but port 5985 is not reachable yet. Check firewall, UAC remote restrictions, or WMI access." }}
+    }} | ConvertTo-Json -Compress
     """
 
 
