@@ -79,6 +79,8 @@ const newTenantId = document.querySelector("#new-tenant-id");
 const newTenantName = document.querySelector("#new-tenant-name");
 const integrationGrid = document.querySelector("#integration-grid");
 const integrationDiagram = document.querySelector("#integration-diagram");
+const localWinrmActivateBtn = document.querySelector("#local-winrm-activate-btn");
+const localWinrmStatus = document.querySelector("#local-winrm-status");
 const endpointActivateBtn = document.querySelector("#endpoint-activate-btn");
 const endpointTestBtn = document.querySelector("#endpoint-test-btn");
 const endpointScanBtn = document.querySelector("#endpoint-scan-btn");
@@ -252,6 +254,7 @@ function setBusy(isBusy) {
   testBtn.disabled = isBusy;
   scanBtn.disabled = isBusy;
   generateDemoDataBtn.disabled = isBusy;
+  if (localWinrmActivateBtn) localWinrmActivateBtn.disabled = isBusy;
   if (endpointActivateBtn) endpointActivateBtn.disabled = isBusy;
   if (endpointTestBtn) endpointTestBtn.disabled = isBusy;
   if (endpointScanBtn) endpointScanBtn.disabled = isBusy;
@@ -2795,9 +2798,27 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
+localWinrmActivateBtn.addEventListener("click", async () => {
+  setBusy(true);
+  localWinrmStatus.textContent = "Activating WinRM on the DSPM Windows server...";
+  try {
+    requireAuth();
+    const result = await api("/api/endpoint/activate-local-winrm", {});
+    localWinrmStatus.textContent = result.activated
+      ? `Server WinRM is active on ${result.host || "this server"}.`
+      : `Server activation needs review: ${result.message}`;
+    showToast(result.activated ? "Server WinRM activated" : "Server WinRM needs review", result.message || result.host || "", result.activated ? "success" : "danger");
+  } catch (error) {
+    localWinrmStatus.textContent = `Server WinRM activation failed: ${error.message}`;
+    showToast("Server WinRM activation failed", error.message, "danger");
+  } finally {
+    setBusy(false);
+  }
+});
+
 endpointActivateBtn.addEventListener("click", async () => {
   setBusy(true);
-  winrmActivateStatus.textContent = "Activating WinRM on endpoint...";
+  winrmActivateStatus.textContent = "Activating WinRM on target machine...";
   try {
     requireAuth();
     const payload = readWinrmActivationPayload();

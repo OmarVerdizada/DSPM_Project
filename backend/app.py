@@ -44,7 +44,7 @@ from backend.store import (
     update_user_role,
 )
 from backend.vault import CredentialVault
-from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner
+from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner, activate_local_winrm
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
 from scripts.generate_enterprise_test_data import generate as generate_enterprise_test_data
@@ -413,6 +413,18 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     audit(principal.tenant_id, principal.subject, "endpoint.connection.test", {"host": payload.host, "target_username": payload.target_username})
     return scanner.test_connection()
+
+
+@app.post("/api/endpoint/activate-local-winrm")
+def endpoint_activate_local_winrm(principal: Principal = Depends(require_role("analyst"))) -> dict:
+    result = activate_local_winrm()
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "endpoint.winrm.activate_local",
+        {"host": result.get("host"), "activated": result.get("activated")},
+    )
+    return result
 
 
 @app.post("/api/endpoint/activate-winrm")

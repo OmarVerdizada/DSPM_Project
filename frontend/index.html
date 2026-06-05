@@ -383,18 +383,29 @@
             <div>
               <p class="eyebrow">Workstation discovery</p>
               <h3>Endpoint user profile scan</h3>
-              <p>Use WinRM with an approved admin credential to inspect a user's Desktop, Documents, Downloads, or full profile for sensitive files.</p>
+              <p>Prepare the DSPM Windows server, prepare the target workstation, then scan the selected user profile paths.</p>
             </div>
           </div>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
             <div class="panel-title">
-              <h4>Activate WinRM</h4>
+              <h4>1. Windows server WinRM</h4>
+              <span>DSPM host preparation</span>
+            </div>
+            <div class="actions endpoint-actions">
+              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Activate server WinRM</button>
+            </div>
+            <p id="local-winrm-status" class="save-status">Run this on the Windows server where the DSPM backend is running.</p>
+          </section>
+
+          <section class="visual-panel endpoint-panel winrm-activation-panel">
+            <div class="panel-title">
+              <h4>2. Target machine WinRM</h4>
               <span>Remote preparation</span>
             </div>
             <div class="asset-form-grid endpoint-form">
               <label>
-                Endpoint host / IP
+                Target host / IP
                 <input id="winrm-activate-host" placeholder="10.10.10.25 or laptop01.domain.local" />
               </label>
               <label>
@@ -411,14 +422,14 @@
               </label>
             </div>
             <div class="actions endpoint-actions">
-              <button type="button" id="endpoint-activate-btn" class="secondary-btn">Activate WinRM</button>
+              <button type="button" id="endpoint-activate-btn" class="secondary-btn">Activate target WinRM</button>
             </div>
-            <p id="winrm-activate-status" class="save-status">Prepare the endpoint first, then fill the endpoint scan form below.</p>
+            <p id="winrm-activate-status" class="save-status">Use an admin credential for the client or Windows server you want to scan.</p>
           </section>
 
           <section class="visual-panel endpoint-panel">
             <div class="panel-title">
-              <h4>Endpoint scan</h4>
+              <h4>3. Endpoint scan</h4>
               <span>WinRM discovery</span>
             </div>
             <div class="asset-form-grid endpoint-form">

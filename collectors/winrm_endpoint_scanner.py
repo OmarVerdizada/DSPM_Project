@@ -17,6 +17,54 @@ DEFAULT_PROFILE_FOLDERS = {
 }
 
 
+def activate_local_winrm() -> dict:
+    if platform.system().lower() != "windows":
+        raise RuntimeError("Local WinRM activation requires the DSPM backend to run on Windows.")
+
+    script = """
+    $ErrorActionPreference = "SilentlyContinue"
+    Set-Service -Name WinRM -StartupType Automatic
+    Start-Service -Name WinRM
+    Enable-PSRemoting -Force -SkipNetworkProfileCheck
+    winrm quickconfig -quiet
+    netsh advfirewall firewall set rule group="Windows Remote Management" new enable=yes | Out-Null
+    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+    $service = Get-Service -Name WinRM -ErrorAction SilentlyContinue
+    $portOpen = $false
+    try {
+      $client = New-Object Net.Sockets.TcpClient
+      $async = $client.BeginConnect("127.0.0.1", 5985, $null, $null)
+      $portOpen = $async.AsyncWaitHandle.WaitOne(3000, $false)
+      if ($portOpen) { $client.EndConnect($async) }
+      $client.Close()
+    } catch {
+      $portOpen = $false
+    }
+    [PSCustomObject]@{
+      activated = [bool]($service -and $service.Status -eq "Running" -and $portOpen)
+      host = $env:COMPUTERNAME
+      service_status = if ($service) { $service.Status.ToString() } else { "Missing" }
+      port_5985_open = [bool]$portOpen
+      message = if ($service -and $service.Status -eq "Running" -and $portOpen) { "Local WinRM is running and port 5985 is reachable." } else { "Local activation command ran, but WinRM is not fully reachable. Run the backend as Administrator and check local firewall policy." }
+    } | ConvertTo-Json -Compress
+    """
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ConnectionError(_clean_error(result.stderr) or "Local WinRM activation failed.")
+
+    activation = _read_json(result.stdout)
+    if isinstance(activation, dict):
+        return activation
+    return {"activated": False, "message": _clean_error(result.stdout) or "Local activation command completed."}
+
+
 @dataclass(slots=True)
 class WinRMEndpointConfig:
     host: str
