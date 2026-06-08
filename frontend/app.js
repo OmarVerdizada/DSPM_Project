@@ -8,6 +8,8 @@ const statusBox = document.querySelector("#connection-status");
 const scanProgress = document.querySelector("#scan-progress");
 const scanProgressLabel = document.querySelector("#scan-progress-label");
 const scanProgressBar = document.querySelector("#scan-progress-bar");
+const allowedExtensionsList = document.querySelector("#allowed_extensions");
+const extensionSearch = document.querySelector("#extension-search");
 const toastHost = document.querySelector("#toast-host");
 const health = document.querySelector("#health");
 const filterInput = document.querySelector("#filter");
@@ -126,6 +128,165 @@ const RISK_SCORE_BANDS = [
   },
 ];
 
+const FILE_EXTENSION_OPTIONS = [
+  ["__hidden__", "Hidden files"],
+  ["__system__", "System files"],
+  [".txt", "Text document"],
+  [".log", "Log file"],
+  [".csv", "CSV export"],
+  [".tsv", "TSV export"],
+  [".json", "JSON data"],
+  [".xml", "XML data"],
+  [".yaml", "YAML config"],
+  [".yml", "YML config"],
+  [".toml", "TOML config"],
+  [".ini", "INI config"],
+  [".cfg", "CFG config"],
+  [".conf", "CONF config"],
+  [".config", "App config"],
+  [".properties", "Properties config"],
+  [".env", "Environment secrets"],
+  [".pem", "PEM key/cert"],
+  [".key", "Key file"],
+  [".crt", "Certificate"],
+  [".cer", "Certificate"],
+  [".pfx", "PFX certificate"],
+  [".p12", "PKCS12 certificate"],
+  [".kdbx", "KeePass database"],
+  [".sql", "SQL dump"],
+  [".dump", "Database dump"],
+  [".bak", "Backup"],
+  [".backup", "Backup"],
+  [".db", "Database"],
+  [".sqlite", "SQLite database"],
+  [".sqlite3", "SQLite database"],
+  [".mdb", "Access database"],
+  [".accdb", "Access database"],
+  [".pst", "Outlook archive"],
+  [".ost", "Outlook cache"],
+  [".msg", "Outlook message"],
+  [".eml", "Email message"],
+  [".mbox", "Mailbox archive"],
+  [".ics", "Calendar data"],
+  [".doc", "Word legacy"],
+  [".docx", "Word document"],
+  [".docm", "Word macro document"],
+  [".dotx", "Word template"],
+  [".dotm", "Word macro template"],
+  [".rtf", "Rich text"],
+  [".odt", "OpenDocument text"],
+  [".ott", "OpenDocument template"],
+  [".pages", "Apple Pages"],
+  [".xls", "Excel legacy"],
+  [".xlsx", "Excel workbook"],
+  [".xlsm", "Excel macro workbook"],
+  [".xlsb", "Excel binary workbook"],
+  [".ods", "OpenDocument sheet"],
+  [".ots", "OpenDocument sheet template"],
+  [".numbers", "Apple Numbers"],
+  [".ppt", "PowerPoint legacy"],
+  [".pptx", "PowerPoint deck"],
+  [".pptm", "PowerPoint macro deck"],
+  [".odp", "OpenDocument deck"],
+  [".otp", "OpenDocument deck template"],
+  [".keynote", "Apple Keynote"],
+  [".pdf", "PDF document"],
+  [".one", "OneNote notebook"],
+  [".pub", "Publisher document"],
+  [".vsd", "Visio legacy"],
+  [".vsdx", "Visio drawing"],
+  [".dwg", "AutoCAD drawing"],
+  [".dxf", "CAD exchange"],
+  [".zip", "ZIP archive"],
+  [".7z", "7-Zip archive"],
+  [".rar", "RAR archive"],
+  [".tar", "TAR archive"],
+  [".gz", "GZip archive"],
+  [".tgz", "TAR GZip archive"],
+  [".bz2", "BZip archive"],
+  [".xz", "XZ archive"],
+  [".cab", "Cabinet archive"],
+  [".jar", "Java archive"],
+  [".ps1", "PowerShell script"],
+  [".psm1", "PowerShell module"],
+  [".psd1", "PowerShell data"],
+  [".bat", "Batch script"],
+  [".cmd", "Command script"],
+  [".sh", "Shell script"],
+  [".py", "Python code"],
+  [".js", "JavaScript code"],
+  [".ts", "TypeScript code"],
+  [".tsx", "TSX code"],
+  [".jsx", "JSX code"],
+  [".html", "HTML file"],
+  [".htm", "HTML file"],
+  [".css", "CSS file"],
+  [".scss", "SCSS file"],
+  [".java", "Java code"],
+  [".cs", "C# code"],
+  [".go", "Go code"],
+  [".rb", "Ruby code"],
+  [".php", "PHP code"],
+  [".c", "C source"],
+  [".cpp", "C++ source"],
+  [".h", "Header file"],
+  [".hpp", "C++ header"],
+  [".md", "Markdown"],
+  [".adoc", "AsciiDoc"],
+  [".rst", "reStructuredText"],
+  [".yara", "YARA rule"],
+  [".reg", "Registry export"],
+  [".rdp", "Remote Desktop profile"],
+  [".ovpn", "VPN profile"],
+  [".pcf", "VPN profile"],
+  [".mobileconfig", "Mobile config"],
+  [".tf", "Terraform config"],
+  [".tfvars", "Terraform variables"],
+  [".hcl", "HCL config"],
+  [".dockerfile", "Dockerfile"],
+  [".tfstate", "Terraform state"],
+  [".npmrc", "NPM config"],
+  [".pypirc", "Python package config"],
+  [".netrc", "Network credential file"],
+  [".aws", "AWS config"],
+  [".gpg", "GPG encrypted file"],
+  [".pgp", "PGP encrypted file"],
+  [".sys", "System driver"],
+  [".dll", "Windows library"],
+  [".exe", "Executable"],
+  [".msi", "Windows installer"],
+  [".lnk", "Windows shortcut"],
+  [".tmp", "Temporary file"],
+  [".temp", "Temporary file"],
+  [".old", "Old copy"],
+  [".swp", "Swap file"],
+  [".dat", "Data file"],
+  [".bin", "Binary data"],
+  [".iso", "Disk image"],
+  [".vhd", "Virtual disk"],
+  [".vhdx", "Virtual disk"],
+  [".jpg", "JPEG image"],
+  [".jpeg", "JPEG image"],
+  [".png", "PNG image"],
+  [".gif", "GIF image"],
+  [".bmp", "Bitmap image"],
+  [".tif", "TIFF image"],
+  [".tiff", "TIFF image"],
+  [".heic", "HEIC image"],
+  [".svg", "SVG image"],
+  [".mp3", "Audio file"],
+  [".wav", "Audio file"],
+  [".mp4", "Video file"],
+  [".mov", "Video file"],
+  [".avi", "Video file"],
+  [".mkv", "Video file"],
+];
+
+const EXTENSION_PRESETS = {
+  all: FILE_EXTENSION_OPTIONS.filter(([extension]) => extension.startsWith(".")).map(([extension]) => extension),
+  clear: [],
+};
+
 let accessToken = safeSessionGet("dspm-access-token") || "";
 let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
 let currentUser = safeSessionGet("dspm-user") || "admin";
@@ -178,6 +339,8 @@ function authHeaders() {
 
 function readPayload() {
   const data = new FormData(form);
+  const selectedExtensions = readSelectedExtensions();
+  const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
   return {
     server: data.get("server") || "",
     domain: data.get("domain") || "WORKGROUP",
@@ -186,9 +349,52 @@ function readPayload() {
     credential_ref: data.get("credential_ref") || "",
     local_path: data.get("local_path") || "enterprise_test_data",
     max_depth: Number(data.get("max_depth") || 4),
+    allowed_extensions: selectedFileExtensions,
+    extension_filter_enabled: selectedFileExtensions.length > 0,
+    include_hidden: selectedExtensions.includes("__hidden__"),
+    include_system: selectedExtensions.includes("__system__"),
+    hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
+    system_filter_enabled: selectedExtensions.includes("__system__"),
     async_scan: Boolean(data.get("async_scan")),
     asset_overrides: assetRules,
   };
+}
+
+function readSelectedExtensions() {
+  return [...allowedExtensionsList.querySelectorAll("input[type='checkbox']:checked")].map((input) => input.value);
+}
+
+function renderExtensionFilter() {
+  if (!allowedExtensionsList) return;
+  const scopeOptions = FILE_EXTENSION_OPTIONS.filter(([value]) => !value.startsWith("."));
+  const extensionOptions = FILE_EXTENSION_OPTIONS
+    .filter(([value]) => value.startsWith("."))
+    .sort(([first], [second]) => first.localeCompare(second));
+  allowedExtensionsList.innerHTML = [...scopeOptions, ...extensionOptions].map(
+    ([extension, label]) => `
+      <label class="extension-option" data-extension-label="${escapeHtml(`${extension} ${label}`.toLowerCase())}">
+        <input type="checkbox" value="${extension}" />
+        <span>${extension.startsWith(".") ? `${escapeHtml(extension)} - ` : ""}${escapeHtml(label)}</span>
+      </label>
+    `
+  ).join("");
+  applyExtensionPreset("clear");
+}
+
+function applyExtensionPreset(name) {
+  if (!allowedExtensionsList) return;
+  const selected = new Set(EXTENSION_PRESETS[name] || []);
+  [...allowedExtensionsList.querySelectorAll("input[type='checkbox']")].forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+}
+
+function filterExtensionList() {
+  if (!allowedExtensionsList || !extensionSearch) return;
+  const query = extensionSearch.value.trim().toLowerCase();
+  allowedExtensionsList.querySelectorAll(".extension-option").forEach((option) => {
+    option.classList.toggle("hidden", query && !option.dataset.extensionLabel.includes(query));
+  });
 }
 
 function readEndpointPayload() {
@@ -2749,6 +2955,11 @@ function renderIntegrations() {
     .join("");
 }
 
+document.querySelectorAll("[data-extension-preset]").forEach((button) => {
+  button.addEventListener("click", () => applyExtensionPreset(button.dataset.extensionPreset));
+});
+extensionSearch?.addEventListener("input", filterExtensionList);
+
 testBtn.addEventListener("click", async () => {
   setBusy(true);
   setStatus("Testing connection...");
@@ -3161,6 +3372,7 @@ msspPortfolio.addEventListener("click", async (event) => {
 
 applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
+renderExtensionFilter();
 renderProfile();
 renderAssetRules();
 renderReportPreview();

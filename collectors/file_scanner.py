@@ -48,6 +48,18 @@ TEXT_EXTENSIONS = {
 SCANNABLE_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS
 
 
+def normalize_extension_filter(extensions: Iterable[str] | None) -> set[str]:
+    normalized: set[str] = set()
+    for item in extensions or []:
+        extension = item.strip().lower()
+        if not extension:
+            continue
+        if not extension.startswith("."):
+            extension = f".{extension}"
+        normalized.add(extension)
+    return normalized
+
+
 @dataclass(slots=True)
 class FileRecord:
     source: str
@@ -92,15 +104,37 @@ def read_text_preview(path: Path, max_bytes: int = 1024 * 256) -> str:
         return ""
 
 
-def scan_directory(path: str | Path) -> list[dict]:
+def scan_directory(
+    path: str | Path,
+    allowed_extensions: Iterable[str] | None = None,
+    extension_filter_enabled: bool = False,
+    include_hidden: bool = True,
+    include_system: bool = False,
+    hidden_filter_enabled: bool = False,
+    system_filter_enabled: bool = False,
+) -> list[dict]:
     root_path = Path(path).expanduser().resolve()
     if not root_path.exists():
         raise FileNotFoundError(f"Scan path does not exist: {root_path}")
 
+    extension_filter = normalize_extension_filter(allowed_extensions)
     records: list[FileRecord] = []
     for item in root_path.rglob("*"):
         if not item.is_file():
             continue
+        extension = item.suffix.lower()
+        if extension_filter_enabled and extension not in extension_filter:
+            continue
+        is_hidden = is_hidden_path(item)
+        is_system = is_system_path(item)
+        if hidden_filter_enabled or system_filter_enabled:
+            if not ((hidden_filter_enabled and is_hidden) or (system_filter_enabled and is_system)):
+                continue
+        else:
+            if is_hidden and not include_hidden:
+                continue
+            if is_system and not include_system:
+                continue
 
         try:
             stat = item.stat()
@@ -113,8 +147,8 @@ def scan_directory(path: str | Path) -> list[dict]:
                 path=str(item),
                 name=item.name,
                 size=stat.st_size,
-                extension=item.suffix.lower(),
-                is_hidden=is_hidden_path(item),
+                extension=extension,
+                is_hidden=is_hidden,
                 content=read_text_preview(item),
             )
         )
@@ -132,6 +166,17 @@ def is_hidden_path(path: Path) -> bool:
     if hasattr(stat, "st_file_attributes"):
         return bool(stat.st_file_attributes & 0x2)
     return False
+
+
+def is_system_path(path: Path) -> bool:
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    if hasattr(stat, "st_file_attributes"):
+        return bool(stat.st_file_attributes & 0x4)
+    system_parts = {"$recycle.bin", "system volume information", "windows", "program files", "program files (x86)"}
+    return any(part.lower() in system_parts for part in path.parts)
 
 
 def normalize_records(records: Iterable[dict]) -> list[dict]:

@@ -13,6 +13,11 @@ logger = get_logger(__name__)
 
 
 def run_scan(args: argparse.Namespace) -> None:
+    allowed_extensions = [
+        item.strip()
+        for item in (args.extensions or "").split(",")
+        if item.strip()
+    ]
     config = ScanConfig(
         server=args.server,
         username=args.username,
@@ -20,6 +25,12 @@ def run_scan(args: argparse.Namespace) -> None:
         domain=args.domain,
         local_path=args.local_path,
         max_depth=args.max_depth,
+        allowed_extensions=allowed_extensions,
+        extension_filter_enabled=bool(allowed_extensions),
+        include_hidden=args.include_hidden,
+        include_system=args.include_system,
+        hidden_filter_enabled=args.only_hidden,
+        system_filter_enabled=args.only_system,
     )
     engine = DSPMDiscoveryEngine(config)
     report = engine.run()
@@ -46,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--domain", default="WORKGROUP", help="AD domain or workgroup.")
     scan_parser.add_argument("--local-path", default="enterprise_test_data", help="Local folder fallback/sample data path.")
     scan_parser.add_argument("--max-depth", type=int, default=4, help="Maximum recursive SMB folder depth.")
+    scan_parser.add_argument("--extensions", default="", help="Comma-separated extensions to scan, e.g. .py,.docx,.pdf.")
+    scan_parser.add_argument("--include-hidden", action="store_true", help="Include hidden files in an unrestricted scan.")
+    scan_parser.add_argument("--include-system", action="store_true", help="Include system files in an unrestricted scan.")
+    scan_parser.add_argument("--only-hidden", action="store_true", help="Scan only hidden files, optionally combined with --extensions.")
+    scan_parser.add_argument("--only-system", action="store_true", help="Scan only system files, optionally combined with --extensions.")
     scan_parser.add_argument("--output", default="report.json", help="Output report JSON path.")
     scan_parser.set_defaults(func=run_scan)
 

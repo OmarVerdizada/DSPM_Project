@@ -23,6 +23,12 @@ class ScanConfig:
     max_depth: int = 4
     use_sample_when_empty: bool = True
     asset_overrides: list[dict] = field(default_factory=list)
+    allowed_extensions: list[str] = field(default_factory=list)
+    extension_filter_enabled: bool = False
+    include_hidden: bool = False
+    include_system: bool = False
+    hidden_filter_enabled: bool = False
+    system_filter_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -84,6 +90,12 @@ class DSPMDiscoveryEngine:
                 password=self.config.password,
                 domain=self.config.domain,
                 max_depth=self.config.max_depth,
+                allowed_extensions=self.config.allowed_extensions,
+                extension_filter_enabled=self.config.extension_filter_enabled,
+                include_hidden=self.config.include_hidden,
+                include_system=self.config.include_system,
+                hidden_filter_enabled=self.config.hidden_filter_enabled,
+                system_filter_enabled=self.config.system_filter_enabled,
             )
         )
         return scanner.test_connection()
@@ -109,12 +121,26 @@ class DSPMDiscoveryEngine:
                     password=self.config.password,
                     domain=self.config.domain,
                     max_depth=self.config.max_depth,
+                    allowed_extensions=self.config.allowed_extensions,
+                    extension_filter_enabled=self.config.extension_filter_enabled,
+                    include_hidden=self.config.include_hidden,
+                    include_system=self.config.include_system,
+                    hidden_filter_enabled=self.config.hidden_filter_enabled,
+                    system_filter_enabled=self.config.system_filter_enabled,
                 )
             )
             return scanner.scan()
 
         if self.config.use_sample_when_empty:
-            return scan_directory(self.config.local_path)
+            return scan_directory(
+                self.config.local_path,
+                allowed_extensions=self.config.allowed_extensions,
+                extension_filter_enabled=self.config.extension_filter_enabled,
+                include_hidden=self.config.include_hidden,
+                include_system=self.config.include_system,
+                hidden_filter_enabled=self.config.hidden_filter_enabled,
+                system_filter_enabled=self.config.system_filter_enabled,
+            )
 
         return []
 

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css?v=17" />
+    <link rel="stylesheet" href="/static/styles.css?v=18" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -52,6 +52,15 @@
             Max folder depth
             <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
           </label>
+          <div class="extension-filter">
+            <label for="extension-search">Extension filter</label>
+            <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+            <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
+            <div class="extension-actions" aria-label="Extension presets">
+              <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
+              <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
+            </div>
+          </div>
           <label class="checkbox-row">
             <input id="async_scan" name="async_scan" type="checkbox" checked />
             Run through async queue
@@ -743,6 +752,6 @@
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=19"></script>
+    <script src="/static/app.js?v=20"></script>
   </body>
 </html>

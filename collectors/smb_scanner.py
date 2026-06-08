@@ -4,7 +4,7 @@ import socket
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from collectors.file_scanner import TEXT_EXTENSIONS
+from collectors.file_scanner import TEXT_EXTENSIONS, normalize_extension_filter
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
@@ -23,13 +23,19 @@ class SMBConfig:
     max_depth: int = 4
     read_content: bool = True
     include_hidden: bool = True
+    include_system: bool = False
+    hidden_filter_enabled: bool = False
+    system_filter_enabled: bool = False
     max_read_bytes: int = 1024 * 256
+    allowed_extensions: list[str] | None = None
+    extension_filter_enabled: bool = False
 
 
 class SMBScanner:
     def __init__(self, config: SMBConfig):
         self.config = config
         self.connection = None
+        self.extension_filter = normalize_extension_filter(config.allowed_extensions)
 
     def connect(self) -> bool:
         try:
@@ -125,14 +131,26 @@ class SMBScanner:
             remote_path = str(PurePosixPath(folder) / entry.filename)
             is_dir = bool(entry.isDirectory)
             is_hidden = bool(getattr(entry, "isHidden", False))
-            if is_hidden and not self.config.include_hidden:
-                continue
+            is_system = bool(getattr(entry, "isSystem", False))
+            if self.config.hidden_filter_enabled or self.config.system_filter_enabled:
+                if not (
+                    (self.config.hidden_filter_enabled and is_hidden)
+                    or (self.config.system_filter_enabled and is_system)
+                ):
+                    continue
+            else:
+                if is_hidden and not self.config.include_hidden:
+                    continue
+                if is_system and not self.config.include_system:
+                    continue
 
             if is_dir:
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
                 continue
 
             extension = PurePosixPath(remote_path).suffix.lower()
+            if self.config.extension_filter_enabled and extension not in self.extension_filter:
+                continue
             records.append(
                 {
                     "source": "smb",

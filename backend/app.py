@@ -85,6 +85,12 @@ class ConnectionRequest(BaseModel):
     domain: str = "WORKGROUP"
     local_path: str = "enterprise_test_data"
     max_depth: int = Field(default=4, ge=1, le=12)
+    allowed_extensions: list[str] = Field(default_factory=list)
+    extension_filter_enabled: bool = False
+    include_hidden: bool = False
+    include_system: bool = False
+    hidden_filter_enabled: bool = False
+    system_filter_enabled: bool = False
 
 
 class AssetOverride(BaseModel):
@@ -715,6 +721,12 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         domain=domain,
         local_path=payload.local_path.strip() or "enterprise_test_data",
         max_depth=payload.max_depth,
+        allowed_extensions=payload.allowed_extensions,
+        extension_filter_enabled=payload.extension_filter_enabled,
+        include_hidden=payload.include_hidden,
+        include_system=payload.include_system,
+        hidden_filter_enabled=payload.hidden_filter_enabled,
+        system_filter_enabled=payload.system_filter_enabled,
         asset_overrides=[
             {
                 "pattern": item.pattern.strip(),

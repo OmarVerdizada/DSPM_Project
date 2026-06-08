@@ -328,6 +328,65 @@ select {
   width: auto;
 }
 
+.extension-filter {
+  display: grid;
+  gap: 7px;
+}
+
+.extension-filter label {
+  display: block;
+}
+
+.extension-list {
+  display: grid;
+  max-height: 230px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 6px;
+}
+
+.extension-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+  border-radius: 5px;
+  padding: 5px 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.extension-option:hover {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.extension-option input {
+  width: auto;
+}
+
+.extension-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.extension-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.extension-actions .mini-btn {
+  min-height: 30px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
 input:focus,
 select:focus {
   border-color: var(--accent);
