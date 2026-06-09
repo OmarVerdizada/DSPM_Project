@@ -10,6 +10,8 @@ const scanProgressLabel = document.querySelector("#scan-progress-label");
 const scanProgressBar = document.querySelector("#scan-progress-bar");
 const allowedExtensionsList = document.querySelector("#allowed_extensions");
 const extensionSearch = document.querySelector("#extension-search");
+const endpointAllowedExtensionsList = document.querySelector("#endpoint_allowed_extensions");
+const endpointExtensionSearch = document.querySelector("#endpoint-extension-search");
 const toastHost = document.querySelector("#toast-host");
 const health = document.querySelector("#health");
 const filterInput = document.querySelector("#filter");
@@ -86,6 +88,7 @@ const localWinrmStatus = document.querySelector("#local-winrm-status");
 const endpointActivateBtn = document.querySelector("#endpoint-activate-btn");
 const endpointTestBtn = document.querySelector("#endpoint-test-btn");
 const endpointScanBtn = document.querySelector("#endpoint-scan-btn");
+const endpointViewOverviewBtn = document.querySelector("#endpoint-view-overview-btn");
 const endpointStatus = document.querySelector("#endpoint-status");
 const winrmActivateStatus = document.querySelector("#winrm-activate-status");
 const endpointPathScope = document.querySelector("#endpoint-path-scope");
@@ -310,7 +313,14 @@ async function api(path, payload, method = "POST") {
   });
 
   if (!response.ok) {
-    throw new Error(`${response.status}: ${await readErrorMessage(response)}`);
+    const message = await readErrorMessage(response);
+    if (response.status === 401) {
+      accessToken = "";
+      safeSessionSet("dspm-access-token", "");
+      showToast("Session expired", "Please sign in again.", "danger");
+      window.setTimeout(() => window.location.replace("/login"), 900);
+    }
+    throw new Error(`${response.status}: ${message}`);
   }
 
   return response.json();
@@ -360,17 +370,18 @@ function readPayload() {
   };
 }
 
-function readSelectedExtensions() {
-  return [...allowedExtensionsList.querySelectorAll("input[type='checkbox']:checked")].map((input) => input.value);
+function readSelectedExtensions(list = allowedExtensionsList) {
+  if (!list) return [];
+  return [...list.querySelectorAll("input[type='checkbox']:checked")].map((input) => input.value);
 }
 
-function renderExtensionFilter() {
-  if (!allowedExtensionsList) return;
+function renderExtensionFilter(list = allowedExtensionsList, search = extensionSearch) {
+  if (!list) return;
   const scopeOptions = FILE_EXTENSION_OPTIONS.filter(([value]) => !value.startsWith("."));
   const extensionOptions = FILE_EXTENSION_OPTIONS
     .filter(([value]) => value.startsWith("."))
     .sort(([first], [second]) => first.localeCompare(second));
-  allowedExtensionsList.innerHTML = [...scopeOptions, ...extensionOptions].map(
+  list.innerHTML = [...scopeOptions, ...extensionOptions].map(
     ([extension, label]) => `
       <label class="extension-option" data-extension-label="${escapeHtml(`${extension} ${label}`.toLowerCase())}">
         <input type="checkbox" value="${extension}" />
@@ -378,26 +389,47 @@ function renderExtensionFilter() {
       </label>
     `
   ).join("");
-  applyExtensionPreset("clear");
+  applyExtensionPreset("clear", list, search);
 }
 
-function applyExtensionPreset(name) {
-  if (!allowedExtensionsList) return;
+function applyExtensionPreset(name, list = allowedExtensionsList, search = extensionSearch) {
+  if (!list) return;
   const selected = new Set(EXTENSION_PRESETS[name] || []);
-  [...allowedExtensionsList.querySelectorAll("input[type='checkbox']")].forEach((input) => {
+  [...list.querySelectorAll("input[type='checkbox']")].forEach((input) => {
     input.checked = selected.has(input.value);
   });
+  reorderExtensionOptions(list);
+  filterExtensionList(list, search);
 }
 
-function filterExtensionList() {
-  if (!allowedExtensionsList || !extensionSearch) return;
-  const query = extensionSearch.value.trim().toLowerCase();
-  allowedExtensionsList.querySelectorAll(".extension-option").forEach((option) => {
+function filterExtensionList(list = allowedExtensionsList, search = extensionSearch) {
+  if (!list || !search) return;
+  const query = search.value.trim().toLowerCase();
+  list.querySelectorAll(".extension-option").forEach((option) => {
     option.classList.toggle("hidden", query && !option.dataset.extensionLabel.includes(query));
   });
 }
 
+function reorderExtensionOptions(list = allowedExtensionsList) {
+  if (!list) return;
+  const options = [...list.querySelectorAll(".extension-option")];
+  options
+    .sort((first, second) => {
+      const firstInput = first.querySelector("input");
+      const secondInput = second.querySelector("input");
+      const checkedDiff = Number(secondInput.checked) - Number(firstInput.checked);
+      if (checkedDiff) return checkedDiff;
+      const firstScope = firstInput.value.startsWith(".") ? 1 : 0;
+      const secondScope = secondInput.value.startsWith(".") ? 1 : 0;
+      if (firstScope !== secondScope) return firstScope - secondScope;
+      return firstInput.value.localeCompare(secondInput.value);
+    })
+    .forEach((option) => list.appendChild(option));
+}
+
 function readEndpointPayload() {
+  const selectedExtensions = readSelectedExtensions(endpointAllowedExtensionsList);
+  const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
   const scope = endpointPathScope.value;
   const customPaths = endpointCustomPaths.value
     .split(";")
@@ -421,6 +453,12 @@ function readEndpointPayload() {
     paths: pathsByScope[scope] || pathsByScope.default,
     max_depth: Number(document.querySelector("#endpoint-max-depth").value || 4),
     read_content: document.querySelector("#endpoint-read-content").checked,
+    allowed_extensions: selectedFileExtensions,
+    extension_filter_enabled: selectedFileExtensions.length > 0,
+    include_hidden: selectedExtensions.includes("__hidden__"),
+    include_system: selectedExtensions.includes("__system__"),
+    hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
+    system_filter_enabled: selectedExtensions.includes("__system__"),
     save_report: true,
     asset_overrides: assetRules,
   };
@@ -482,6 +520,7 @@ function setBusy(isBusy) {
   if (endpointActivateBtn) endpointActivateBtn.disabled = isBusy;
   if (endpointTestBtn) endpointTestBtn.disabled = isBusy;
   if (endpointScanBtn) endpointScanBtn.disabled = isBusy;
+  if (endpointViewOverviewBtn) endpointViewOverviewBtn.disabled = isBusy;
   updateEndpointCustomPathState(isBusy);
 }
 
@@ -519,6 +558,12 @@ function setScanProgress(active, progress = 0, label = "Scanning...") {
   scanProgress.classList.toggle("active", active);
   scanProgressLabel.textContent = label;
   scanProgressBar.style.width = `${Math.max(4, Math.min(100, Number(progress) || 0))}%`;
+}
+
+function clearResultsFilter() {
+  if (filterInput) {
+    filterInput.value = "";
+  }
 }
 
 function showToast(title, message = "", tone = "info") {
@@ -664,6 +709,10 @@ function renderRows(files) {
       const key = fileKey(file);
       const preview = renderPreview(file.preview);
       const flash = hasRenderedScanRows && !lastRenderedFileKeys.has(key) ? " row-flash" : "";
+      const fileFlags = [
+        file.is_hidden ? "Hidden" : "",
+        file.is_system ? "System" : "",
+      ].filter(Boolean);
 
       return `
         <tr class="${flash}" data-file-key="${escapeHtml(key)}">
@@ -672,6 +721,7 @@ function renderRows(files) {
               <button type="button" class="preview-toggle" data-preview="${escapeHtml(key)}" title="Show file preview">v</button>
               <span class="file-path">${escapeHtml(file.name || file.path)}</span>
             </div>
+            ${fileFlags.length ? `<div class="file-flags">${fileFlags.map((flag) => `<span>${escapeHtml(flag)}</span>`).join("")}</div>` : ""}
             <div class="subtext">${escapeHtml(file.path || "")}</div>
             ${preview}
           </td>
@@ -2956,9 +3006,23 @@ function renderIntegrations() {
 }
 
 document.querySelectorAll("[data-extension-preset]").forEach((button) => {
-  button.addEventListener("click", () => applyExtensionPreset(button.dataset.extensionPreset));
+  button.addEventListener("click", () => applyExtensionPreset(button.dataset.extensionPreset, allowedExtensionsList, extensionSearch));
 });
-extensionSearch?.addEventListener("input", filterExtensionList);
+document.querySelectorAll("[data-endpoint-extension-preset]").forEach((button) => {
+  button.addEventListener("click", () => applyExtensionPreset(button.dataset.endpointExtensionPreset, endpointAllowedExtensionsList, endpointExtensionSearch));
+});
+extensionSearch?.addEventListener("input", () => filterExtensionList(allowedExtensionsList, extensionSearch));
+endpointExtensionSearch?.addEventListener("input", () => filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch));
+allowedExtensionsList?.addEventListener("change", (event) => {
+  if (!event.target.matches("input[type='checkbox']")) return;
+  reorderExtensionOptions(allowedExtensionsList);
+  filterExtensionList(allowedExtensionsList, extensionSearch);
+});
+endpointAllowedExtensionsList?.addEventListener("change", (event) => {
+  if (!event.target.matches("input[type='checkbox']")) return;
+  reorderExtensionOptions(endpointAllowedExtensionsList);
+  filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
+});
 
 testBtn.addEventListener("click", async () => {
   setBusy(true);
@@ -2993,6 +3057,7 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   setBusy(true);
   setStatus("Fetching and assessing data...");
+  clearResultsFilter();
   renderSkeletonRows();
   setScanProgress(true, 8, "Preparing scan...");
   let simulatedProgress = 8;
@@ -3094,6 +3159,8 @@ endpointScanBtn.addEventListener("click", async () => {
   setBusy(true);
   setStatus("Scanning endpoint through WinRM...");
   endpointStatus.textContent = "Scanning endpoint profile...";
+  if (endpointViewOverviewBtn) endpointViewOverviewBtn.classList.add("hidden");
+  clearResultsFilter();
   renderSkeletonRows();
   setScanProgress(true, 8, "Preparing endpoint scan...");
   try {
@@ -3105,9 +3172,9 @@ endpointScanBtn.addEventListener("click", async () => {
     updateSummaryFromFiles(latestFiles);
     hasRenderedScanRows = true;
     renderRows(latestFiles);
-    switchTab("overview");
     scanMeta.textContent = `${latestFiles.length} endpoint files scanned from ${report.endpoint?.host || report.source} at ${report.timestamp}`;
     endpointStatus.textContent = `Endpoint scan completed. ${latestFiles.length} files analyzed.`;
+    if (endpointViewOverviewBtn) endpointViewOverviewBtn.classList.remove("hidden");
     setStatus("Endpoint scan completed and report.json updated.");
     setScanProgress(true, 100, "Endpoint scan completed");
     showToast("Endpoint scan completed", `${latestFiles.length} files found`, latestReport.summary?.critical ? "danger" : "success");
@@ -3372,7 +3439,8 @@ msspPortfolio.addEventListener("click", async (event) => {
 
 applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
-renderExtensionFilter();
+renderExtensionFilter(allowedExtensionsList, extensionSearch);
+renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
 renderProfile();
 renderAssetRules();
 renderReportPreview();

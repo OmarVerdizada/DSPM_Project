@@ -8,6 +8,11 @@ from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_t
 
 
 TEXT_EXTENSIONS = {
+    ".adoc",
+    ".aws",
+    ".c",
+    ".config",
+    ".cpp",
     ".txt",
     ".log",
     ".csv",
@@ -25,7 +30,14 @@ TEXT_EXTENSIONS = {
     ".bak",
     ".sql",
     ".dump",
+    ".backup",
+    ".dockerfile",
+    ".h",
+    ".hcl",
+    ".hpp",
     ".ps1",
+    ".psm1",
+    ".psd1",
     ".sh",
     ".bat",
     ".cmd",
@@ -42,10 +54,105 @@ TEXT_EXTENSIONS = {
     ".html",
     ".css",
     ".scss",
+    ".htm",
     ".md",
+    ".mobileconfig",
+    ".netrc",
+    ".npmrc",
+    ".ovpn",
+    ".pcf",
+    ".pypirc",
+    ".rdp",
+    ".reg",
+    ".rst",
+    ".tf",
+    ".tfstate",
+    ".tfvars",
+    ".yara",
 }
 
-SCANNABLE_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS
+METADATA_EXTENSIONS = {
+    ".7z",
+    ".accdb",
+    ".avi",
+    ".bin",
+    ".bmp",
+    ".bz2",
+    ".cab",
+    ".cer",
+    ".crt",
+    ".dat",
+    ".db",
+    ".dll",
+    ".doc",
+    ".dwg",
+    ".dxf",
+    ".eml",
+    ".exe",
+    ".gif",
+    ".gpg",
+    ".gz",
+    ".heic",
+    ".ics",
+    ".iso",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".kdbx",
+    ".key",
+    ".keynote",
+    ".lnk",
+    ".mbox",
+    ".mdb",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".msg",
+    ".msi",
+    ".numbers",
+    ".odp",
+    ".ods",
+    ".old",
+    ".one",
+    ".ost",
+    ".ott",
+    ".ots",
+    ".p12",
+    ".pages",
+    ".pcf",
+    ".pem",
+    ".pfx",
+    ".pgp",
+    ".png",
+    ".pst",
+    ".ppt",
+    ".pub",
+    ".rar",
+    ".rtf",
+    ".sqlite",
+    ".sqlite3",
+    ".svg",
+    ".swp",
+    ".sys",
+    ".tar",
+    ".temp",
+    ".tif",
+    ".tiff",
+    ".tgz",
+    ".tmp",
+    ".vhd",
+    ".vhdx",
+    ".vsd",
+    ".vsdx",
+    ".wav",
+    ".xls",
+    ".xlsb",
+    ".xz",
+    ".zip",
+}
+
+SCANNABLE_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS | METADATA_EXTENSIONS
 
 
 def normalize_extension_filter(extensions: Iterable[str] | None) -> set[str]:
@@ -60,6 +167,51 @@ def normalize_extension_filter(extensions: Iterable[str] | None) -> set[str]:
     return normalized
 
 
+def detect_extension(path: str | Path) -> str:
+    file_path = Path(path)
+    suffix = file_path.suffix.lower()
+    if suffix:
+        return suffix
+    name = file_path.name.lower()
+    if name.startswith("."):
+        return name
+    if name == "dockerfile":
+        return ".dockerfile"
+    return ""
+
+
+def matches_scan_filters(
+    extension: str,
+    is_hidden: bool,
+    is_system: bool,
+    extension_filter: set[str],
+    extension_filter_enabled: bool,
+    include_hidden: bool,
+    include_system: bool,
+    hidden_filter_enabled: bool,
+    system_filter_enabled: bool,
+) -> bool:
+    active_filters = extension_filter_enabled or hidden_filter_enabled or system_filter_enabled
+    if active_filters:
+        matches_extension = extension_filter_enabled and extension in extension_filter
+        matches_hidden = hidden_filter_enabled and is_hidden
+        matches_system = system_filter_enabled and is_system
+        if not (matches_extension or matches_hidden or matches_system):
+            return False
+
+        if is_hidden and not (include_hidden or hidden_filter_enabled):
+            return False
+        if is_system and not (include_system or system_filter_enabled):
+            return False
+        return True
+
+    if is_hidden and not include_hidden:
+        return False
+    if is_system and not include_system:
+        return False
+    return True
+
+
 @dataclass(slots=True)
 class FileRecord:
     source: str
@@ -69,6 +221,7 @@ class FileRecord:
     extension: str
     is_dir: bool = False
     is_hidden: bool = False
+    is_system: bool = False
     share: str | None = None
     content: str = ""
     acl: dict | None = None
@@ -83,13 +236,14 @@ class FileRecord:
             "extension": self.extension,
             "is_dir": self.is_dir,
             "is_hidden": self.is_hidden,
+            "is_system": self.is_system,
             "content": self.content,
             "acl": self.acl or {},
         }
 
 
 def read_text_preview(path: Path, max_bytes: int = 1024 * 256) -> str:
-    extension = path.suffix.lower()
+    extension = detect_extension(path)
     if extension in BINARY_TEXT_EXTENSIONS:
         return extract_binary_text(path)
 
@@ -122,19 +276,21 @@ def scan_directory(
     for item in root_path.rglob("*"):
         if not item.is_file():
             continue
-        extension = item.suffix.lower()
-        if extension_filter_enabled and extension not in extension_filter:
-            continue
+        extension = detect_extension(item)
         is_hidden = is_hidden_path(item)
         is_system = is_system_path(item)
-        if hidden_filter_enabled or system_filter_enabled:
-            if not ((hidden_filter_enabled and is_hidden) or (system_filter_enabled and is_system)):
-                continue
-        else:
-            if is_hidden and not include_hidden:
-                continue
-            if is_system and not include_system:
-                continue
+        if not matches_scan_filters(
+            extension,
+            is_hidden,
+            is_system,
+            extension_filter,
+            extension_filter_enabled,
+            include_hidden,
+            include_system,
+            hidden_filter_enabled,
+            system_filter_enabled,
+        ):
+            continue
 
         try:
             stat = item.stat()
@@ -149,6 +305,7 @@ def scan_directory(
                 size=stat.st_size,
                 extension=extension,
                 is_hidden=is_hidden,
+                is_system=is_system,
                 content=read_text_preview(item),
             )
         )
@@ -169,13 +326,13 @@ def is_hidden_path(path: Path) -> bool:
 
 
 def is_system_path(path: Path) -> bool:
+    system_parts = {"$recycle.bin", "system volume information", "windows", "program files", "program files (x86)"}
     try:
         stat = path.stat()
     except OSError:
         return False
     if hasattr(stat, "st_file_attributes"):
-        return bool(stat.st_file_attributes & 0x4)
-    system_parts = {"$recycle.bin", "system volume information", "windows", "program files", "program files (x86)"}
+        return bool(stat.st_file_attributes & 0x4) or any(part.lower() in system_parts for part in path.parts)
     return any(part.lower() in system_parts for part in path.parts)
 
 
@@ -184,7 +341,7 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
     for record in records:
         path = str(record.get("path", ""))
         name = record.get("name") or Path(path).name
-        extension = record.get("extension") or Path(path).suffix.lower()
+        extension = record.get("extension") or detect_extension(path)
         normalized.append(
             {
                 "source": record.get("source", "unknown"),
@@ -195,6 +352,7 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "extension": extension,
                 "is_dir": bool(record.get("is_dir", False)),
                 "is_hidden": bool(record.get("is_hidden", False)),
+                "is_system": bool(record.get("is_system", False)),
                 "content": record.get("content", ""),
                 "acl": record.get("acl") or {},
             }

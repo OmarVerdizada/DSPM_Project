@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,6 +55,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 vault = CredentialVault()
 PROTECTED_USERS = {"admin"}
+DEFAULT_CORS_ORIGINS = [
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+]
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("DSPM_CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS)).split(",")
+    if origin.strip()
+]
 
 app = FastAPI(
     title="DSPM DLP Discovery API",
@@ -63,7 +75,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -116,6 +128,12 @@ class EndpointScanRequest(BaseModel):
     paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"])
     max_depth: int = Field(default=4, ge=1, le=12)
     read_content: bool = True
+    allowed_extensions: list[str] = Field(default_factory=list)
+    extension_filter_enabled: bool = False
+    include_hidden: bool = False
+    include_system: bool = False
+    hidden_filter_enabled: bool = False
+    system_filter_enabled: bool = False
     save_report: bool = True
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
 
@@ -758,4 +776,10 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         paths=[item.strip() for item in payload.paths if item.strip()] or ["desktop", "documents", "downloads"],
         max_depth=payload.max_depth,
         read_content=payload.read_content,
+        allowed_extensions=payload.allowed_extensions,
+        extension_filter_enabled=payload.extension_filter_enabled,
+        include_hidden=payload.include_hidden,
+        include_system=payload.include_system,
+        hidden_filter_enabled=payload.hidden_filter_enabled,
+        system_filter_enabled=payload.system_filter_enabled,
     )

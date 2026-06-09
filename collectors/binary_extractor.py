@@ -6,18 +6,34 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 
-BINARY_TEXT_EXTENSIONS = {".docx", ".xlsx", ".pptx", ".pdf"}
+BINARY_TEXT_EXTENSIONS = {
+    ".docm",
+    ".docx",
+    ".dotm",
+    ".dotx",
+    ".odp",
+    ".ods",
+    ".odt",
+    ".otp",
+    ".pdf",
+    ".pptm",
+    ".pptx",
+    ".xlsm",
+    ".xlsx",
+}
 
 
 def extract_binary_text(path: Path, max_chars: int = 120_000) -> str:
     suffix = path.suffix.lower()
     try:
-        if suffix == ".docx":
+        if suffix in {".docm", ".docx", ".dotm", ".dotx"}:
             return _extract_docx(path, max_chars)
-        if suffix == ".xlsx":
+        if suffix in {".xlsm", ".xlsx"}:
             return _extract_xlsx(path, max_chars)
-        if suffix == ".pptx":
+        if suffix in {".pptm", ".pptx"}:
             return _extract_pptx(path, max_chars)
+        if suffix in {".odp", ".ods", ".odt", ".otp"}:
+            return _extract_odt(path, max_chars)
         if suffix == ".pdf":
             return _extract_pdf_light(path, max_chars)
     except Exception:
@@ -45,6 +61,12 @@ def _extract_xlsx(path: Path, max_chars: int) -> str:
 def _extract_pptx(path: Path, max_chars: int) -> str:
     with zipfile.ZipFile(path) as archive:
         parts = [name for name in archive.namelist() if name.startswith("ppt/slides/") and name.endswith(".xml")]
+        return "\n".join(_xml_text(archive.read(name)) for name in parts)[:max_chars]
+
+
+def _extract_odt(path: Path, max_chars: int) -> str:
+    with zipfile.ZipFile(path) as archive:
+        parts = [name for name in archive.namelist() if name.endswith(".xml")]
         return "\n".join(_xml_text(archive.read(name)) for name in parts)[:max_chars]
 
 

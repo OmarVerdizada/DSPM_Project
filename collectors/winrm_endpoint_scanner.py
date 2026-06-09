@@ -11,7 +11,8 @@ from datetime import datetime, timedelta
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
-from collectors.file_scanner import TEXT_EXTENSIONS, normalize_records
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
+from collectors.file_scanner import TEXT_EXTENSIONS, detect_extension, normalize_extension_filter, normalize_records
 
 
 DEFAULT_PROFILE_FOLDERS = {
@@ -205,6 +206,12 @@ class WinRMEndpointConfig:
     max_read_bytes: int = 1024 * 256
     use_ssl: bool = False
     port: int | None = None
+    allowed_extensions: list[str] | None = None
+    extension_filter_enabled: bool = False
+    include_hidden: bool = True
+    include_system: bool = False
+    hidden_filter_enabled: bool = False
+    system_filter_enabled: bool = False
 
 
 class WinRMEndpointScanner:
@@ -297,6 +304,12 @@ class WinRMEndpointScanner:
             max_depth=self.config.max_depth,
             read_content=self.config.read_content,
             max_read_bytes=self.config.max_read_bytes,
+            allowed_extensions=sorted(normalize_extension_filter(self.config.allowed_extensions)),
+            extension_filter_enabled=self.config.extension_filter_enabled,
+            include_hidden=self.config.include_hidden,
+            include_system=self.config.include_system,
+            hidden_filter_enabled=self.config.hidden_filter_enabled,
+            system_filter_enabled=self.config.system_filter_enabled,
         )
         result = self._run_ps(ps_script)
         if result.status_code != 0:
@@ -313,7 +326,7 @@ class WinRMEndpointScanner:
         records = []
         for item in raw_records:
             path = item.get("path", "")
-            extension = PureWindowsPath(path).suffix.lower()
+            extension = item.get("extension") or detect_extension(path)
             records.append(
                 {
                     "source": "endpoint-winrm",
@@ -324,6 +337,7 @@ class WinRMEndpointScanner:
                     "extension": extension,
                     "is_dir": False,
                     "is_hidden": bool(item.get("is_hidden", False)),
+                    "is_system": bool(item.get("is_system", False)),
                     "content": item.get("content", ""),
                     "acl": {
                         "owner": item.get("owner", ""),
@@ -371,15 +385,36 @@ class WinRMEndpointScanner:
         return session.run_ps(script)
 
 
-def _scan_script(paths: list[str], max_depth: int, read_content: bool, max_read_bytes: int) -> str:
+def _scan_script(
+    paths: list[str],
+    max_depth: int,
+    read_content: bool,
+    max_read_bytes: int,
+    allowed_extensions: list[str],
+    extension_filter_enabled: bool,
+    include_hidden: bool,
+    include_system: bool,
+    hidden_filter_enabled: bool,
+    system_filter_enabled: bool,
+) -> str:
     encoded_paths = base64.b64encode(json.dumps(paths).encode("utf-8")).decode("ascii")
+    encoded_extensions = base64.b64encode(json.dumps(allowed_extensions).encode("utf-8")).decode("ascii")
     read_content_value = "$true" if read_content else "$false"
+    extension_filter_value = "$true" if extension_filter_enabled else "$false"
+    include_hidden_value = "$true" if include_hidden else "$false"
+    include_system_value = "$true" if include_system else "$false"
+    hidden_filter_value = "$true" if hidden_filter_enabled else "$false"
+    system_filter_value = "$true" if system_filter_enabled else "$false"
     text_extensions = ",".join(f'"{item}"' for item in sorted(TEXT_EXTENSIONS))
+    binary_extensions = ",".join(f'"{item}"' for item in sorted(BINARY_TEXT_EXTENSIONS))
     return f"""
     $ErrorActionPreference = "SilentlyContinue"
     $pathsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_paths}"))
     $targetPaths = ConvertFrom-Json $pathsJson
+    $extensionsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_extensions}"))
+    $allowedExtensions = @(ConvertFrom-Json $extensionsJson)
     $textExtensions = @({text_extensions})
+    $binaryExtensions = @({binary_extensions})
     $records = New-Object System.Collections.Generic.List[object]
 
     function Get-RelativeDepth($root, $path) {{
@@ -388,32 +423,106 @@ def _scan_script(paths: list[str], max_depth: int, read_content: bool, max_read_
       return ($relative -split "\\\\").Count
     }}
 
+    function Get-DspmExtension($file) {{
+      if ($file.Extension) {{ return $file.Extension.ToLowerInvariant() }}
+      $name = $file.Name.ToLowerInvariant()
+      if ($name.StartsWith(".")) {{ return $name }}
+      if ($name -eq "dockerfile") {{ return ".dockerfile" }}
+      return ""
+    }}
+
+    function Read-PlainText($path, $maxBytes) {{
+      try {{
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {{
+          $buffer = New-Object byte[] $maxBytes
+          $read = $stream.Read($buffer, 0, $buffer.Length)
+          return [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+        }} finally {{
+          $stream.Close()
+        }}
+      }} catch {{
+        return ""
+      }}
+    }}
+
+    function Read-ZipXmlText($path, $prefix) {{
+      try {{
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($path)
+        try {{
+          $parts = New-Object System.Collections.Generic.List[string]
+          foreach ($entry in $archive.Entries) {{
+            if ($entry.FullName.StartsWith($prefix) -and $entry.FullName.EndsWith(".xml")) {{
+              $reader = New-Object System.IO.StreamReader($entry.Open())
+              try {{
+                $xml = $reader.ReadToEnd()
+                $parts.Add(($xml -replace "<[^>]+>", " " -replace "\\s+", " ")) | Out-Null
+              }} finally {{
+                $reader.Close()
+              }}
+            }}
+          }}
+          return ($parts -join "`n").Substring(0, [Math]::Min(120000, ($parts -join "`n").Length))
+        }} finally {{
+          $archive.Dispose()
+        }}
+      }} catch {{
+        return ""
+      }}
+    }}
+
+    function Read-BinaryText($path, $extension, $maxBytes) {{
+      if (@(".docm", ".docx", ".dotm", ".dotx") -contains $extension) {{ return Read-ZipXmlText $path "word/" }}
+      if (@(".xlsm", ".xlsx") -contains $extension) {{ return Read-ZipXmlText $path "xl/" }}
+      if (@(".pptm", ".pptx") -contains $extension) {{ return Read-ZipXmlText $path "ppt/slides/" }}
+      if (@(".odp", ".ods", ".odt", ".otp") -contains $extension) {{ return Read-ZipXmlText $path "" }}
+      if ($extension -eq ".pdf") {{
+        try {{
+          $bytes = [System.IO.File]::ReadAllBytes($path)
+          $limit = [Math]::Min($bytes.Length, $maxBytes * 4)
+          $text = [Text.Encoding]::GetEncoding("iso-8859-1").GetString($bytes, 0, $limit)
+          return (($text | Select-String -Pattern "\\(([^()]*)\\)" -AllMatches).Matches | ForEach-Object {{ $_.Groups[1].Value }}) -join "`n"
+        }} catch {{
+          return ""
+        }}
+      }}
+      return ""
+    }}
+
     foreach ($root in $targetPaths) {{
       if (-not (Test-Path -LiteralPath $root)) {{ continue }}
       Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {{
         if ((Get-RelativeDepth $root $_.FullName) -gt {int(max_depth)}) {{ return }}
+        $extension = Get-DspmExtension $_
+        $isHidden = [bool]($_.Attributes -band [IO.FileAttributes]::Hidden)
+        $isSystem = [bool]($_.Attributes -band [IO.FileAttributes]::System)
+        $hasActiveFilters = {extension_filter_value} -or {hidden_filter_value} -or {system_filter_value}
+        if ($hasActiveFilters) {{
+          $matchesExtension = {extension_filter_value} -and ($allowedExtensions -contains $extension)
+          $matchesHidden = {hidden_filter_value} -and $isHidden
+          $matchesSystem = {system_filter_value} -and $isSystem
+          if (-not ($matchesExtension -or $matchesHidden -or $matchesSystem)) {{ return }}
+          if ($isHidden -and -not ({include_hidden_value} -or {hidden_filter_value})) {{ return }}
+          if ($isSystem -and -not ({include_system_value} -or {system_filter_value})) {{ return }}
+        }} else {{
+          if ($isHidden -and -not {include_hidden_value}) {{ return }}
+          if ($isSystem -and -not {include_system_value}) {{ return }}
+        }}
         $acl = Get-Acl -LiteralPath $_.FullName -ErrorAction SilentlyContinue
         $content = ""
-        if ({read_content_value} -and ($textExtensions -contains $_.Extension.ToLowerInvariant())) {{
-          try {{
-            $stream = [System.IO.File]::Open($_.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-            try {{
-              $buffer = New-Object byte[] {int(max_read_bytes)}
-              $read = $stream.Read($buffer, 0, $buffer.Length)
-              $content = [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
-            }} finally {{
-              $stream.Close()
-            }}
-          }} catch {{
-            $content = ""
-          }}
+        if ({read_content_value} -and ($textExtensions -contains $extension)) {{
+          $content = Read-PlainText $_.FullName {int(max_read_bytes)}
+        }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
+          $content = Read-BinaryText $_.FullName $extension {int(max_read_bytes)}
         }}
         $records.Add([PSCustomObject]@{{
           path = $_.FullName
           name = $_.Name
           size = $_.Length
-          extension = $_.Extension.ToLowerInvariant()
-          is_hidden = [bool]($_.Attributes -band [IO.FileAttributes]::Hidden)
+          extension = $extension
+          is_hidden = $isHidden
+          is_system = $isSystem
           created_at = $_.CreationTimeUtc.ToString("o")
           modified_at = $_.LastWriteTimeUtc.ToString("o")
           accessed_at = $_.LastAccessTimeUtc.ToString("o")

@@ -512,8 +512,18 @@
                 Read content preview
               </label>
             </div>
+            <div class="extension-filter endpoint-extension-filter">
+              <label for="endpoint-extension-search">Endpoint extension filter</label>
+              <input id="endpoint-extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+              <div id="endpoint_allowed_extensions" class="extension-list" role="group" aria-label="Endpoint extension filter"></div>
+              <div class="extension-actions" aria-label="Endpoint extension presets">
+                <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="all">All</button>
+                <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="clear">Clear</button>
+              </div>
+            </div>
             <div class="actions endpoint-actions">
               <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
+              <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
             </div>
             <p id="endpoint-status" class="save-status">Fill the endpoint scan details after WinRM is active on the workstation.</p>
           </section>

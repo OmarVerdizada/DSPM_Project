@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import socket
+import tempfile
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from collectors.file_scanner import TEXT_EXTENSIONS, normalize_extension_filter
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
+from collectors.file_scanner import TEXT_EXTENSIONS, detect_extension, matches_scan_filters, normalize_extension_filter
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
@@ -132,24 +134,27 @@ class SMBScanner:
             is_dir = bool(entry.isDirectory)
             is_hidden = bool(getattr(entry, "isHidden", False))
             is_system = bool(getattr(entry, "isSystem", False))
-            if self.config.hidden_filter_enabled or self.config.system_filter_enabled:
-                if not (
-                    (self.config.hidden_filter_enabled and is_hidden)
-                    or (self.config.system_filter_enabled and is_system)
-                ):
-                    continue
-            else:
-                if is_hidden and not self.config.include_hidden:
-                    continue
-                if is_system and not self.config.include_system:
-                    continue
 
             if is_dir:
+                if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
+                    continue
+                if is_system and not (self.config.include_system or self.config.system_filter_enabled):
+                    continue
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
                 continue
 
-            extension = PurePosixPath(remote_path).suffix.lower()
-            if self.config.extension_filter_enabled and extension not in self.extension_filter:
+            extension = detect_extension(remote_path)
+            if not matches_scan_filters(
+                extension,
+                is_hidden,
+                is_system,
+                self.extension_filter,
+                self.config.extension_filter_enabled,
+                self.config.include_hidden,
+                self.config.include_system,
+                self.config.hidden_filter_enabled,
+                self.config.system_filter_enabled,
+            ):
                 continue
             records.append(
                 {
@@ -161,6 +166,7 @@ class SMBScanner:
                     "extension": extension,
                     "is_dir": False,
                     "is_hidden": is_hidden,
+                    "is_system": is_system,
                     "content": self._read_file_preview(share_name, remote_path, extension),
                     "acl": {},
                 }
@@ -169,7 +175,9 @@ class SMBScanner:
         return records
 
     def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
-        if self.connection is None or not self.config.read_content or extension not in TEXT_EXTENSIONS:
+        if self.connection is None or not self.config.read_content:
+            return ""
+        if extension not in TEXT_EXTENSIONS and extension not in BINARY_TEXT_EXTENSIONS:
             return ""
 
         try:
@@ -183,7 +191,22 @@ class SMBScanner:
                 offset=0,
                 max_length=self.config.max_read_bytes,
             )
-            return buffer.getvalue().decode("utf-8", errors="replace")
+            data = buffer.getvalue()
+            if extension in BINARY_TEXT_EXTENSIONS:
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+                        temp_file.write(data)
+                        temp_path = temp_file.name
+                    from pathlib import Path
+
+                    return extract_binary_text(Path(temp_path))
+                finally:
+                    if temp_path:
+                        from pathlib import Path
+
+                        Path(temp_path).unlink(missing_ok=True)
+            return data.decode("utf-8", errors="replace")
         except Exception as exc:
             logger.debug("Could not read preview for %s:%s: %s", share_name, path, exc)
             return ""
