@@ -120,13 +120,12 @@ class ScanRequest(ConnectionRequest):
 class EndpointScanRequest(BaseModel):
     host: str = Field(description="Endpoint hostname or IP")
     target_username: str = Field(default="", description="Windows profile username under C:\\Users")
-    target_password: str = ""
     domain: str = "WORKGROUP"
     username: str = ""
     password: str = ""
     credential_ref: str = ""
     paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"])
-    max_depth: int = Field(default=4, ge=1, le=12)
+    max_depth: int = Field(default=12, ge=1, le=12)
     read_content: bool = True
     allowed_extensions: list[str] = Field(default_factory=list)
     extension_filter_enabled: bool = False
@@ -522,6 +521,10 @@ def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(r
             )
         )
         analyzed = [report._analyze_record(record) for record in records]
+        extension_counts: dict[str, int] = {}
+        for record in records:
+            extension = str(record.get("extension") or "no extension").lower()
+            extension_counts[extension] = extension_counts.get(extension, 0) + 1
         data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "endpoint-winrm",
@@ -532,6 +535,15 @@ def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(r
                 "target_username": config.target_username,
                 "paths": config.paths,
                 "max_depth": config.max_depth,
+                "allowed_extensions": config.allowed_extensions or [],
+                "extension_filter_enabled": config.extension_filter_enabled,
+                "include_hidden": config.include_hidden,
+                "include_system": config.include_system,
+                "hidden_filter_enabled": config.hidden_filter_enabled,
+                "system_filter_enabled": config.system_filter_enabled,
+                "raw_record_count": len(records),
+                "extension_counts": extension_counts,
+                "scan_diagnostics": scanner.last_scan_diagnostics,
             },
         }
         _persist_scan(data, payload, principal)

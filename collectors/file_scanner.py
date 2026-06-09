@@ -198,11 +198,6 @@ def matches_scan_filters(
         matches_system = system_filter_enabled and is_system
         if not (matches_extension or matches_hidden or matches_system):
             return False
-
-        if is_hidden and not (include_hidden or hidden_filter_enabled):
-            return False
-        if is_system and not (include_system or system_filter_enabled):
-            return False
         return True
 
     if is_hidden and not include_hidden:

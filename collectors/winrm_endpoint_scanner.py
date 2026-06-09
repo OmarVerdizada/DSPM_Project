@@ -201,7 +201,7 @@ class WinRMEndpointConfig:
     domain: str = "WORKGROUP"
     target_username: str = ""
     paths: list[str] = field(default_factory=lambda: ["desktop", "documents", "downloads"])
-    max_depth: int = 4
+    max_depth: int = 12
     read_content: bool = True
     max_read_bytes: int = 1024 * 256
     use_ssl: bool = False
@@ -217,6 +217,7 @@ class WinRMEndpointConfig:
 class WinRMEndpointScanner:
     def __init__(self, config: WinRMEndpointConfig):
         self.config = config
+        self.last_scan_diagnostics: dict = {}
 
     def activate_winrm(self) -> dict:
         if platform.system().lower() != "windows":
@@ -311,16 +312,19 @@ class WinRMEndpointScanner:
             hidden_filter_enabled=self.config.hidden_filter_enabled,
             system_filter_enabled=self.config.system_filter_enabled,
         )
-        result = self._run_ps(ps_script)
+        result = self._run_ps_file(ps_script)
         if result.status_code != 0:
             raise ConnectionError(_clean_error(result.std_err) or f"WinRM scan failed on {self.config.host}")
 
         raw_records = _read_json(result.std_out)
         if raw_records is None:
+            self.last_scan_diagnostics = {}
             return []
         if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
+            self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
             raw_records = raw_records["records"]
         if isinstance(raw_records, dict):
+            self.last_scan_diagnostics = {}
             raw_records = [raw_records]
 
         records = []
@@ -384,6 +388,74 @@ class WinRMEndpointScanner:
         session = winrm.Session(endpoint, auth=(username, self.config.password), transport="ntlm")
         return session.run_ps(script)
 
+    def _run_ps_file(self, script: str):
+        try:
+            import winrm
+        except ModuleNotFoundError as exc:
+            raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
+
+        endpoint = f"http{'s' if self.config.use_ssl else ''}://{self.config.host}:{self.config.port or (5986 if self.config.use_ssl else 5985)}/wsman"
+        username = self.config.username.strip()
+        if self.config.domain.strip() and "\\" not in username and "@" not in username:
+            username = f"{self.config.domain.strip()}\\{username}"
+        session = winrm.Session(endpoint, auth=(username, self.config.password), transport="ntlm")
+
+        token = uuid4().hex
+        b64_name = f"dspm_{token}.b64"
+        encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
+        chunk_size = 1800
+
+        def run_short(command: str):
+            encoded_command = base64.b64encode(command.encode("utf-16le")).decode("ascii")
+            return session.run_cmd(
+                "powershell.exe",
+                ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_command],
+            )
+
+        temp_path = f"$p = Join-Path $env:TEMP '{b64_name}'; "
+        init = run_short(temp_path + "Set-Content -LiteralPath $p -Value '' -Encoding ASCII")
+        if init.status_code != 0:
+            return init
+
+        for index in range(0, len(encoded_script), chunk_size):
+            chunk = encoded_script[index : index + chunk_size]
+            append = run_short(temp_path + f"Add-Content -LiteralPath $p -Value '{chunk}' -Encoding ASCII")
+            if append.status_code != 0:
+                run_short(temp_path + "Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue")
+                return append
+
+        materialize = (
+            "$ErrorActionPreference = 'Stop'; "
+            f"$b64 = Join-Path $env:TEMP '{b64_name}'; "
+            "$raw = (Get-Content -LiteralPath $b64 -Raw).Trim(); "
+            "$script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw)); "
+            "$null = [ScriptBlock]::Create($script)"
+        )
+        materialized = run_short(materialize)
+        if materialized.status_code != 0:
+            run_short(temp_path + "Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue")
+            return materialized
+
+        execute = (
+            "$ErrorActionPreference = 'Stop'; "
+            f"$b64 = Join-Path $env:TEMP '{b64_name}'; "
+            "$raw = (Get-Content -LiteralPath $b64 -Raw).Trim(); "
+            "$script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw)); "
+            "$scriptBlock = [ScriptBlock]::Create($script); "
+            "$exitCode = 0; "
+            "try { "
+            "& $scriptBlock; "
+            "if ($LASTEXITCODE -ne $null) { $exitCode = $LASTEXITCODE } "
+            "} catch { "
+            "Write-Error $_; "
+            "$exitCode = 1 "
+            "} finally { "
+            "Remove-Item -LiteralPath $b64 -Force -ErrorAction SilentlyContinue "
+            "} "
+            "exit $exitCode"
+        )
+        return run_short(execute)
+
 
 def _scan_script(
     paths: list[str],
@@ -412,10 +484,34 @@ def _scan_script(
     $pathsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_paths}"))
     $targetPaths = ConvertFrom-Json $pathsJson
     $extensionsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_extensions}"))
-    $allowedExtensions = @(ConvertFrom-Json $extensionsJson)
+    $rawAllowedExtensions = @(ConvertFrom-Json $extensionsJson)
+    $allowedSet = @{{}}
+    foreach ($rawExtension in $rawAllowedExtensions) {{
+      foreach ($piece in (([string]$rawExtension) -split "[,;\\s]+")) {{
+        $item = $piece.Trim().ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($item)) {{ continue }}
+        if (-not $item.StartsWith(".")) {{ $item = ".$item" }}
+        $allowedSet[$item] = $true
+      }}
+    }}
+    $allowedExtensions = @($allowedSet.Keys | Sort-Object)
     $textExtensions = @({text_extensions})
     $binaryExtensions = @({binary_extensions})
     $records = New-Object System.Collections.Generic.List[object]
+    $extensionHistogram = @{{}}
+    $diagnostics = [ordered]@{{
+      requested_roots = @($targetPaths)
+      resolved_roots = @()
+      missing_roots = @()
+      visited_files = 0
+      matched_files = 0
+      allowed_extensions = @($allowedExtensions)
+      extension_histogram = @{{}}
+      selected_extension_counts = @{{}}
+      extension_filter_enabled = {extension_filter_value}
+      hidden_filter_enabled = {hidden_filter_value}
+      system_filter_enabled = {system_filter_value}
+    }}
 
     function Get-RelativeDepth($root, $path) {{
       $relative = $path.Substring([Math]::Min($root.Length, $path.Length)).Trim("\\")
@@ -429,6 +525,65 @@ def _scan_script(
       if ($name.StartsWith(".")) {{ return $name }}
       if ($name -eq "dockerfile") {{ return ".dockerfile" }}
       return ""
+    }}
+
+    function Test-DspmSkippedPath($path) {{
+      $normalized = $path.ToLowerInvariant()
+      $skipFragments = @(
+        "\\.codex\\",
+        "\\.git\\",
+        "\\.vscode\\",
+        "\\node_modules\\",
+        "\\appdata\\local\\temp\\",
+        "\\appdata\\local\\microsoft\\edge\\",
+        "\\appdata\\local\\google\\chrome\\",
+        "\\appdata\\local\\packages\\",
+        "\\appdata\\roaming\\microsoft\\windows\\recent\\"
+      )
+      foreach ($fragment in $skipFragments) {{
+        if ($normalized.Contains($fragment)) {{ return $true }}
+      }}
+      return $false
+    }}
+
+    function Resolve-DspmRoot($root) {{
+      $roots = New-Object System.Collections.Generic.List[string]
+      if (Test-Path -LiteralPath $root) {{
+        $roots.Add($root) | Out-Null
+        return @($roots.ToArray())
+      }}
+
+      try {{
+        $usersRoot = "C:\\Users"
+        if (-not $root.StartsWith($usersRoot, [System.StringComparison]::OrdinalIgnoreCase)) {{
+          return @()
+        }}
+        $relative = $root.Substring($usersRoot.Length).Trim("\\")
+        if ([string]::IsNullOrWhiteSpace($relative)) {{
+          return @()
+        }}
+        $parts = $relative -split "\\\\"
+        $profileName = $parts[0]
+        $suffix = if ($parts.Count -gt 1) {{ ($parts[1..($parts.Count - 1)] -join "\\") }} else {{ "" }}
+        $profileNameLower = $profileName.ToLowerInvariant()
+        $candidates = Get-ChildItem -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+          $name = $_.Name.ToLowerInvariant()
+          $name -eq $profileNameLower -or
+          $name.StartsWith("$profileNameLower.") -or
+          $name.StartsWith("$profileNameLower_") -or
+          $name.EndsWith(".$profileNameLower") -or
+          $name -like "*$profileNameLower*"
+        }}
+        foreach ($candidate in $candidates) {{
+          $candidatePath = if ($suffix) {{ Join-Path $candidate.FullName $suffix }} else {{ $candidate.FullName }}
+          if (Test-Path -LiteralPath $candidatePath) {{
+            $roots.Add($candidatePath) | Out-Null
+          }}
+        }}
+      }} catch {{
+        return @()
+      }}
+      return @($roots.ToArray())
     }}
 
     function Read-PlainText($path, $maxBytes) {{
@@ -457,13 +612,16 @@ def _scan_script(
               $reader = New-Object System.IO.StreamReader($entry.Open())
               try {{
                 $xml = $reader.ReadToEnd()
-                $parts.Add(($xml -replace "<[^>]+>", " " -replace "\\s+", " ")) | Out-Null
+                $clean = $xml -replace "<[^>]+>", " "
+                $clean = $clean -replace "\\s+", " "
+                $parts.Add($clean) | Out-Null
               }} finally {{
                 $reader.Close()
               }}
             }}
           }}
-          return ($parts -join "`n").Substring(0, [Math]::Min(120000, ($parts -join "`n").Length))
+          $joined = $parts -join "`n"
+          return $joined.Substring(0, [Math]::Min(120000, $joined.Length))
         }} finally {{
           $archive.Dispose()
         }}
@@ -490,25 +648,46 @@ def _scan_script(
       return ""
     }}
 
-    foreach ($root in $targetPaths) {{
-      if (-not (Test-Path -LiteralPath $root)) {{ continue }}
+    foreach ($requestedRoot in $targetPaths) {{
+      $resolvedRoots = @(Resolve-DspmRoot $requestedRoot)
+      if (-not $resolvedRoots -or $resolvedRoots.Count -eq 0) {{
+        $diagnostics.missing_roots += $requestedRoot
+        continue
+      }}
+      foreach ($root in $resolvedRoots) {{
+      $diagnostics.resolved_roots += $root
       Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {{
+        $diagnostics.visited_files += 1
+        if (Test-DspmSkippedPath $_.FullName) {{ return }}
         if ((Get-RelativeDepth $root $_.FullName) -gt {int(max_depth)}) {{ return }}
         $extension = Get-DspmExtension $_
         $isHidden = [bool]($_.Attributes -band [IO.FileAttributes]::Hidden)
         $isSystem = [bool]($_.Attributes -band [IO.FileAttributes]::System)
         $hasActiveFilters = {extension_filter_value} -or {hidden_filter_value} -or {system_filter_value}
+        $extensionKey = if ($extension) {{ $extension }} else {{ "no extension" }}
+        if ($extensionHistogram.ContainsKey($extensionKey)) {{
+          $extensionHistogram[$extensionKey] += 1
+        }} else {{
+          $extensionHistogram[$extensionKey] = 1
+        }}
+        if ({extension_filter_value} -and $extension -and $allowedSet.ContainsKey($extension.ToLowerInvariant())) {{
+          $selectedKey = $extension.ToLowerInvariant()
+          if ($diagnostics.selected_extension_counts.ContainsKey($selectedKey)) {{
+            $diagnostics.selected_extension_counts[$selectedKey] += 1
+          }} else {{
+            $diagnostics.selected_extension_counts[$selectedKey] = 1
+          }}
+        }}
         if ($hasActiveFilters) {{
-          $matchesExtension = {extension_filter_value} -and ($allowedExtensions -contains $extension)
+          $matchesExtension = {extension_filter_value} -and $extension -and $allowedSet.ContainsKey($extension.ToLowerInvariant())
           $matchesHidden = {hidden_filter_value} -and $isHidden
           $matchesSystem = {system_filter_value} -and $isSystem
           if (-not ($matchesExtension -or $matchesHidden -or $matchesSystem)) {{ return }}
-          if ($isHidden -and -not ({include_hidden_value} -or {hidden_filter_value})) {{ return }}
-          if ($isSystem -and -not ({include_system_value} -or {system_filter_value})) {{ return }}
         }} else {{
           if ($isHidden -and -not {include_hidden_value}) {{ return }}
           if ($isSystem -and -not {include_system_value}) {{ return }}
         }}
+        $diagnostics.matched_files += 1
         $acl = Get-Acl -LiteralPath $_.FullName -ErrorAction SilentlyContinue
         $content = ""
         if ({read_content_value} -and ($textExtensions -contains $extension)) {{
@@ -532,9 +711,12 @@ def _scan_script(
           content = $content
         }}) | Out-Null
       }}
+      }}
     }}
+    $diagnostics.extension_histogram = $extensionHistogram
     [PSCustomObject]@{{
       records = @($records.ToArray())
+      diagnostics = $diagnostics
     }} | ConvertTo-Json -Depth 6 -Compress
     """
 

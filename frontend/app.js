@@ -375,6 +375,12 @@ function readSelectedExtensions(list = allowedExtensionsList) {
   return [...list.querySelectorAll("input[type='checkbox']:checked")].map((input) => input.value);
 }
 
+function readSearchExtension(search) {
+  const value = search?.value?.trim().toLowerCase() || "";
+  if (!value || value.includes(" ") || value.includes(",")) return "";
+  return value.startsWith(".") ? value : `.${value}`;
+}
+
 function renderExtensionFilter(list = allowedExtensionsList, search = extensionSearch) {
   if (!list) return;
   const scopeOptions = FILE_EXTENSION_OPTIONS.filter(([value]) => !value.startsWith("."));
@@ -429,6 +435,10 @@ function reorderExtensionOptions(list = allowedExtensionsList) {
 
 function readEndpointPayload() {
   const selectedExtensions = readSelectedExtensions(endpointAllowedExtensionsList);
+  const searchedExtension = readSearchExtension(endpointExtensionSearch);
+  if (searchedExtension && !selectedExtensions.includes(searchedExtension)) {
+    selectedExtensions.push(searchedExtension);
+  }
   const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
   const scope = endpointPathScope.value;
   const customPaths = endpointCustomPaths.value
@@ -451,7 +461,7 @@ function readEndpointPayload() {
     password: document.querySelector("#endpoint-password").value,
     credential_ref: document.querySelector("#endpoint-credential-ref").value.trim(),
     paths: pathsByScope[scope] || pathsByScope.default,
-    max_depth: Number(document.querySelector("#endpoint-max-depth").value || 4),
+    max_depth: Number(document.querySelector("#endpoint-max-depth").value || 12),
     read_content: document.querySelector("#endpoint-read-content").checked,
     allowed_extensions: selectedFileExtensions,
     extension_filter_enabled: selectedFileExtensions.length > 0,
@@ -468,7 +478,6 @@ function readWinrmActivationPayload() {
   return {
     host: document.querySelector("#winrm-activate-host").value.trim(),
     target_username: document.querySelector("#winrm-target-username").value.trim(),
-    target_password: document.querySelector("#winrm-target-password").value,
     domain: document.querySelector("#winrm-activate-domain").value.trim() || "WORKGROUP",
     username: document.querySelector("#winrm-activate-username").value.trim(),
     password: document.querySelector("#winrm-activate-password").value,
@@ -564,6 +573,51 @@ function clearResultsFilter() {
   if (filterInput) {
     filterInput.value = "";
   }
+}
+
+function summarizeExtensions(files = [], backendCounts = null) {
+  const counts = backendCounts || {};
+  if (!backendCounts) {
+    files.forEach((file) => {
+      const extension = String(file.extension || "no extension").toLowerCase();
+      counts[extension] = (counts[extension] || 0) + 1;
+    });
+  }
+  const top = Object.entries(counts)
+    .filter(([extension]) => extension !== "no extension")
+    .sort(([, firstCount], [, secondCount]) => secondCount - firstCount)
+    .slice(0, 8)
+    .map(([extension, count]) => `${extension}: ${count}`)
+    .join(", ");
+  return top ? `Extensions: ${top}.` : "";
+}
+
+function summarizeEndpointDiagnostics(endpoint = {}) {
+  const diagnostics = endpoint.scan_diagnostics || {};
+  const visited = Number(diagnostics.visited_files || 0);
+  const matched = Number(diagnostics.matched_files || 0);
+  const resolved = (diagnostics.resolved_roots || []).slice(0, 3).join("; ");
+  const missing = (diagnostics.missing_roots || []).slice(0, 3).join("; ");
+  const allowed = (diagnostics.allowed_extensions || endpoint.allowed_extensions || []).join(", ");
+  const histogram = diagnostics.extension_histogram || {};
+  const selectedCounts = diagnostics.selected_extension_counts || {};
+  const selectedSeen = Object.entries(selectedCounts)
+    .sort(([firstExtension], [secondExtension]) => firstExtension.localeCompare(secondExtension))
+    .map(([extension, count]) => `${extension}: ${count}`)
+    .join(", ");
+  const topSeen = Object.entries(histogram)
+    .filter(([extension]) => extension !== "no extension")
+    .sort(([, firstCount], [, secondCount]) => Number(secondCount) - Number(firstCount))
+    .slice(0, 8)
+    .map(([extension, count]) => `${extension}: ${count}`)
+    .join(", ");
+  const parts = [`Visited: ${visited}`, `Matched: ${matched}`];
+  if (allowed) parts.push(`Allowed: ${allowed}`);
+  if (selectedSeen) parts.push(`Selected seen: ${selectedSeen}`);
+  if (topSeen) parts.push(`Seen: ${topSeen}`);
+  if (resolved) parts.push(`Roots: ${resolved}`);
+  if (missing) parts.push(`Missing: ${missing}`);
+  return parts.join(". ");
 }
 
 function showToast(title, message = "", tone = "info") {
@@ -721,6 +775,7 @@ function renderRows(files) {
               <button type="button" class="preview-toggle" data-preview="${escapeHtml(key)}" title="Show file preview">v</button>
               <span class="file-path">${escapeHtml(file.name || file.path)}</span>
             </div>
+            ${file.extension ? `<div class="subtext">${escapeHtml(file.extension)}</div>` : ""}
             ${fileFlags.length ? `<div class="file-flags">${fileFlags.map((flag) => `<span>${escapeHtml(flag)}</span>`).join("")}</div>` : ""}
             <div class="subtext">${escapeHtml(file.path || "")}</div>
             ${preview}
@@ -3173,7 +3228,9 @@ endpointScanBtn.addEventListener("click", async () => {
     hasRenderedScanRows = true;
     renderRows(latestFiles);
     scanMeta.textContent = `${latestFiles.length} endpoint files scanned from ${report.endpoint?.host || report.source} at ${report.timestamp}`;
-    endpointStatus.textContent = `Endpoint scan completed. ${latestFiles.length} files analyzed.`;
+    const extensionCounts = summarizeExtensions(latestFiles, report.endpoint?.extension_counts);
+    const diagnostics = summarizeEndpointDiagnostics(report.endpoint);
+    endpointStatus.textContent = `Endpoint scan completed. ${latestFiles.length} files analyzed. ${extensionCounts} ${diagnostics}`;
     if (endpointViewOverviewBtn) endpointViewOverviewBtn.classList.remove("hidden");
     setStatus("Endpoint scan completed and report.json updated.");
     setScanProgress(true, 100, "Endpoint scan completed");
