@@ -212,6 +212,8 @@ class WinRMEndpointConfig:
     include_system: bool = False
     hidden_filter_enabled: bool = False
     system_filter_enabled: bool = False
+    read_acl: bool = False
+    inspect_archives: bool = False
 
 
 class WinRMEndpointScanner:
@@ -311,6 +313,8 @@ class WinRMEndpointScanner:
             include_system=self.config.include_system,
             hidden_filter_enabled=self.config.hidden_filter_enabled,
             system_filter_enabled=self.config.system_filter_enabled,
+            read_acl=self.config.read_acl,
+            inspect_archives=self.config.inspect_archives,
         )
         result = self._run_ps_file(ps_script)
         if result.status_code != 0:
@@ -431,7 +435,7 @@ class WinRMEndpointScanner:
             chunk = encoded_script[index : index + chunk_size]
             append = run_short(temp_path + f"Add-Content -LiteralPath $p -Value '{chunk}' -Encoding ASCII")
             if append.status_code != 0:
-                run_short(temp_path + "if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }")
+                run_short(temp_path + "try { if ($p -and (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } } catch { }")
                 return append
 
         materialize = (
@@ -446,7 +450,7 @@ class WinRMEndpointScanner:
         )
         materialized = run_short(materialize)
         if materialized.status_code != 0:
-            run_short(temp_path + "if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }")
+            run_short(temp_path + "try { if ($p -and (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } } catch { }")
             return materialized
 
         execute = (
@@ -466,7 +470,7 @@ class WinRMEndpointScanner:
             "Write-Error $_; "
             "$exitCode = 1 "
             "} finally { "
-            "if (Test-Path -LiteralPath $b64) { Remove-Item -LiteralPath $b64 -Force -ErrorAction SilentlyContinue } "
+            "try { if ($b64 -and (Test-Path -LiteralPath $b64 -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $b64 -Force -ErrorAction SilentlyContinue } } catch { } "
             "} "
             "exit $exitCode"
         )
@@ -484,6 +488,8 @@ def _scan_script(
     include_system: bool,
     hidden_filter_enabled: bool,
     system_filter_enabled: bool,
+    read_acl: bool,
+    inspect_archives: bool,
 ) -> str:
     encoded_paths = base64.b64encode(json.dumps(paths).encode("utf-8")).decode("ascii")
     encoded_extensions = base64.b64encode(json.dumps(allowed_extensions).encode("utf-8")).decode("ascii")
@@ -493,6 +499,8 @@ def _scan_script(
     include_system_value = "$true" if include_system else "$false"
     hidden_filter_value = "$true" if hidden_filter_enabled else "$false"
     system_filter_value = "$true" if system_filter_enabled else "$false"
+    read_acl_value = "$true" if read_acl else "$false"
+    inspect_archives_value = "$true" if inspect_archives else "$false"
     text_extensions = ",".join(f'"{item}"' for item in sorted(TEXT_EXTENSIONS))
     binary_extensions = ",".join(f'"{item}"' for item in sorted(BINARY_TEXT_EXTENSIONS))
     return f"""
@@ -513,6 +521,16 @@ def _scan_script(
     $allowedExtensions = @($allowedSet.Keys | Sort-Object)
     $textExtensions = @({text_extensions})
     $binaryExtensions = @({binary_extensions})
+    $archiveExtensions = @(".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip")
+    $scanArchiveEntries = $false
+    if ({inspect_archives_value} -and {extension_filter_value}) {{
+      foreach ($allowedExtension in $allowedExtensions) {{
+        if (-not ($archiveExtensions -contains $allowedExtension)) {{
+          $scanArchiveEntries = $true
+          break
+        }}
+      }}
+    }}
     $records = New-Object System.Collections.Generic.List[object]
     $extensionHistogram = @{{}}
     $diagnostics = [ordered]@{{
@@ -521,6 +539,10 @@ def _scan_script(
       missing_roots = @()
       visited_files = 0
       matched_files = 0
+      archive_files = 0
+      archive_entries = 0
+      archive_errors = @()
+      skipped_dirs = 0
       allowed_extensions = @($allowedExtensions)
       extension_histogram = @{{}}
       selected_extension_counts = @{{}}
@@ -543,8 +565,49 @@ def _scan_script(
       return ""
     }}
 
+    function Get-DspmExtensionFromName($name) {{
+      $fileName = [System.IO.Path]::GetFileName([string]$name)
+      $extension = [System.IO.Path]::GetExtension($fileName)
+      if ($extension) {{ return $extension.ToLowerInvariant() }}
+      $lower = $fileName.ToLowerInvariant()
+      if ($lower.StartsWith(".")) {{ return $lower }}
+      if ($lower -eq "dockerfile") {{ return ".dockerfile" }}
+      return ""
+    }}
+
+    function Add-DspmExtensionStat($extension) {{
+      $extensionKey = if ($extension) {{ $extension }} else {{ "no extension" }}
+      if ($extensionHistogram.ContainsKey($extensionKey)) {{
+        $extensionHistogram[$extensionKey] += 1
+      }} else {{
+        $extensionHistogram[$extensionKey] = 1
+      }}
+      if ({extension_filter_value} -and $extension -and $allowedSet.ContainsKey($extension.ToLowerInvariant())) {{
+        $selectedKey = $extension.ToLowerInvariant()
+        if ($diagnostics.selected_extension_counts.ContainsKey($selectedKey)) {{
+          $diagnostics.selected_extension_counts[$selectedKey] += 1
+        }} else {{
+          $diagnostics.selected_extension_counts[$selectedKey] = 1
+        }}
+      }}
+    }}
+
+    function Test-DspmRecordIncluded($extension, $isHidden, $isSystem) {{
+      $hasActiveFilters = {extension_filter_value} -or {hidden_filter_value} -or {system_filter_value}
+      if ($hasActiveFilters) {{
+        $matchesExtension = {extension_filter_value} -and $extension -and $allowedSet.ContainsKey($extension.ToLowerInvariant())
+        $matchesHidden = {hidden_filter_value} -and $isHidden
+        $matchesSystem = {system_filter_value} -and $isSystem
+        return ($matchesExtension -or $matchesHidden -or $matchesSystem)
+      }}
+      if ($isHidden -and -not {include_hidden_value}) {{ return $false }}
+      if ($isSystem -and -not {include_system_value}) {{ return $false }}
+      return $true
+    }}
+
     function Test-DspmSkippedPath($path) {{
       $normalized = $path.ToLowerInvariant()
+      if (-not $normalized.EndsWith([string][char]92)) {{ $normalized = $normalized + [string][char]92 }}
       $skipFragments = @(
         "\\.codex\\",
         "\\.git\\",
@@ -564,12 +627,15 @@ def _scan_script(
 
     function Resolve-DspmRoot($root) {{
       $roots = New-Object System.Collections.Generic.List[string]
+      if ($root -match "^[A-Za-z]:$") {{
+        $root = ([string]$root) + [string][char]92
+      }}
       if ($root -eq "__DSPM_FIXED_DRIVES__") {{
         try {{
           $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue
           foreach ($drive in $drives) {{
             if ($drive.DeviceID) {{
-              $driveRoot = "$($drive.DeviceID)\"
+              $driveRoot = ([string]$drive.DeviceID) + [string][char]92
               if (Test-Path -LiteralPath $driveRoot) {{
                 $roots.Add($driveRoot) | Out-Null
               }}
@@ -685,6 +751,173 @@ def _scan_script(
       return ""
     }}
 
+    function Read-ZipEntryText($entry, $extension, $maxBytes) {{
+      if (-not ($textExtensions -contains $extension)) {{ return "" }}
+      try {{
+        $stream = $entry.Open()
+        try {{
+          $buffer = New-Object byte[] $maxBytes
+          $read = $stream.Read($buffer, 0, $buffer.Length)
+          return [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+        }} finally {{
+          $stream.Close()
+        }}
+      }} catch {{
+        return ""
+      }}
+    }}
+
+    function Copy-ZipEntryToMemory($entry, $maxBytes) {{
+      try {{
+        $inputStream = $entry.Open()
+        try {{
+          $memory = New-Object System.IO.MemoryStream
+          $buffer = New-Object byte[] 65536
+          $total = 0
+          while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {{
+            $total += $read
+            if ($total -gt $maxBytes) {{
+              $memory.Dispose()
+              return $null
+            }}
+            $memory.Write($buffer, 0, $read)
+          }}
+          $memory.Position = 0
+          return $memory
+        }} finally {{
+          $inputStream.Close()
+        }}
+      }} catch {{
+        return $null
+      }}
+    }}
+
+    function Add-ZipEntries($archive, $archivePath, $isHidden, $isSystem, $depth) {{
+      if ($depth -gt 2) {{ return }}
+      foreach ($entry in $archive.Entries) {{
+        if ([string]::IsNullOrWhiteSpace($entry.Name)) {{ continue }}
+        $entryPath = "$archivePath::$($entry.FullName)"
+        $entryExtension = Get-DspmExtensionFromName $entry.FullName
+        Add-DspmExtensionStat $entryExtension
+        $includeEntry = Test-DspmRecordIncluded $entryExtension $isHidden $isSystem
+        if ($includeEntry) {{
+          $diagnostics.archive_entries += 1
+          $diagnostics.matched_files += 1
+          $entryContent = ""
+          if ({read_content_value}) {{
+            $entryContent = Read-ZipEntryText $entry $entryExtension {int(max_read_bytes)}
+          }}
+          $records.Add([PSCustomObject]@{{
+            path = $entryPath
+            name = $entry.Name
+            size = $entry.Length
+            extension = $entryExtension
+            is_hidden = $isHidden
+            is_system = $isSystem
+            created_at = ""
+            modified_at = if ($entry.LastWriteTime) {{ $entry.LastWriteTime.UtcDateTime.ToString("o") }} else {{ "" }}
+            accessed_at = ""
+            owner = ""
+            principals = @()
+            permissions = @()
+            content = $entryContent
+          }}) | Out-Null
+        }}
+        if ($entryExtension -eq ".zip") {{
+          $memory = Copy-ZipEntryToMemory $entry 52428800
+          if ($memory) {{
+            try {{
+              $nestedArchive = New-Object -TypeName System.IO.Compression.ZipArchive -ArgumentList $memory, ([System.IO.Compression.ZipArchiveMode]::Read)
+              try {{
+                Add-ZipEntries $nestedArchive $entryPath $isHidden $isSystem ($depth + 1)
+              }} finally {{
+                $nestedArchive.Dispose()
+              }}
+            }} catch {{
+            }} finally {{
+              $memory.Dispose()
+            }}
+          }}
+        }}
+      }}
+    }}
+
+    function Add-ZipFileEntries($path, $isHidden, $isSystem) {{
+      $stream = $null
+      $archive = $null
+      try {{
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+        $diagnostics.archive_files += 1
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $archive = New-Object -TypeName System.IO.Compression.ZipArchive -ArgumentList $stream, ([System.IO.Compression.ZipArchiveMode]::Read), $false
+        Add-ZipEntries $archive $path $isHidden $isSystem 0
+      }} catch {{
+        $diagnostics.archive_errors += "$($path): $($_.Exception.Message)"
+      }} finally {{
+        if ($archive) {{ $archive.Dispose() }}
+        if ($stream) {{ $stream.Dispose() }}
+      }}
+    }}
+
+    function Add-DspmFileRecord($file, $root) {{
+      $diagnostics.visited_files += 1
+      $extension = Get-DspmExtension $file
+      $isHidden = [bool]($file.Attributes -band [IO.FileAttributes]::Hidden)
+      $isSystem = [bool]($file.Attributes -band [IO.FileAttributes]::System)
+      Add-DspmExtensionStat $extension
+      $includeRecord = Test-DspmRecordIncluded $extension $isHidden $isSystem
+      if ($scanArchiveEntries -and $extension -eq ".zip") {{ Add-ZipFileEntries $file.FullName $isHidden $isSystem }}
+      if (-not $includeRecord) {{ return }}
+      $diagnostics.matched_files += 1
+      $acl = if ({read_acl_value}) {{ Get-Acl -LiteralPath $file.FullName -ErrorAction SilentlyContinue }} else {{ $null }}
+      $content = ""
+      if ({read_content_value} -and ($textExtensions -contains $extension)) {{
+        $content = Read-PlainText $file.FullName {int(max_read_bytes)}
+      }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
+        $content = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
+      }}
+      $records.Add([PSCustomObject]@{{
+        path = $file.FullName
+        name = $file.Name
+        size = $file.Length
+        extension = $extension
+        is_hidden = $isHidden
+        is_system = $isSystem
+        created_at = $file.CreationTimeUtc.ToString("o")
+        modified_at = $file.LastWriteTimeUtc.ToString("o")
+        accessed_at = $file.LastAccessTimeUtc.ToString("o")
+        owner = if ($acl) {{ $acl.Owner }} else {{ "" }}
+        principals = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }}) }} else {{ @() }}
+        permissions = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }}) }} else {{ @() }}
+        content = $content
+      }}) | Out-Null
+    }}
+
+    function Walk-DspmDirectory($root, $current, $depth) {{
+      if ($depth -gt {int(max_depth)}) {{ return }}
+      if (Test-DspmSkippedPath $current) {{
+        $diagnostics.skipped_dirs += 1
+        return
+      }}
+      $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue)
+      foreach ($entry in $entries) {{
+        if ($entry.PSIsContainer) {{
+          $dirHidden = [bool]($entry.Attributes -band [IO.FileAttributes]::Hidden)
+          if (Test-DspmSkippedPath $entry.FullName) {{
+            $diagnostics.skipped_dirs += 1
+            continue
+          }}
+          if ($dirHidden -and -not ({include_hidden_value} -or {hidden_filter_value})) {{
+            $diagnostics.skipped_dirs += 1
+            continue
+          }}
+          Walk-DspmDirectory $root $entry.FullName ($depth + 1)
+          continue
+        }}
+        Add-DspmFileRecord $entry $root
+      }}
+    }}
+
     foreach ($requestedRoot in $targetPaths) {{
       $resolvedRoots = @(Resolve-DspmRoot $requestedRoot)
       if (-not $resolvedRoots -or $resolvedRoots.Count -eq 0) {{
@@ -692,62 +925,13 @@ def _scan_script(
         continue
       }}
       foreach ($root in $resolvedRoots) {{
-      $diagnostics.resolved_roots += $root
-      Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object {{
-        $diagnostics.visited_files += 1
-        if (Test-DspmSkippedPath $_.FullName) {{ return }}
-        if ((Get-RelativeDepth $root $_.FullName) -gt {int(max_depth)}) {{ return }}
-        $extension = Get-DspmExtension $_
-        $isHidden = [bool]($_.Attributes -band [IO.FileAttributes]::Hidden)
-        $isSystem = [bool]($_.Attributes -band [IO.FileAttributes]::System)
-        $hasActiveFilters = {extension_filter_value} -or {hidden_filter_value} -or {system_filter_value}
-        $extensionKey = if ($extension) {{ $extension }} else {{ "no extension" }}
-        if ($extensionHistogram.ContainsKey($extensionKey)) {{
-          $extensionHistogram[$extensionKey] += 1
+        $diagnostics.resolved_roots += $root
+        if ((Get-Item -LiteralPath $root -ErrorAction SilentlyContinue).PSIsContainer) {{
+          Walk-DspmDirectory $root $root 0
         }} else {{
-          $extensionHistogram[$extensionKey] = 1
+          $file = Get-Item -LiteralPath $root -ErrorAction SilentlyContinue
+          if ($file) {{ Add-DspmFileRecord $file $root }}
         }}
-        if ({extension_filter_value} -and $extension -and $allowedSet.ContainsKey($extension.ToLowerInvariant())) {{
-          $selectedKey = $extension.ToLowerInvariant()
-          if ($diagnostics.selected_extension_counts.ContainsKey($selectedKey)) {{
-            $diagnostics.selected_extension_counts[$selectedKey] += 1
-          }} else {{
-            $diagnostics.selected_extension_counts[$selectedKey] = 1
-          }}
-        }}
-        if ($hasActiveFilters) {{
-          $matchesExtension = {extension_filter_value} -and $extension -and $allowedSet.ContainsKey($extension.ToLowerInvariant())
-          $matchesHidden = {hidden_filter_value} -and $isHidden
-          $matchesSystem = {system_filter_value} -and $isSystem
-          if (-not ($matchesExtension -or $matchesHidden -or $matchesSystem)) {{ return }}
-        }} else {{
-          if ($isHidden -and -not {include_hidden_value}) {{ return }}
-          if ($isSystem -and -not {include_system_value}) {{ return }}
-        }}
-        $diagnostics.matched_files += 1
-        $acl = Get-Acl -LiteralPath $_.FullName -ErrorAction SilentlyContinue
-        $content = ""
-        if ({read_content_value} -and ($textExtensions -contains $extension)) {{
-          $content = Read-PlainText $_.FullName {int(max_read_bytes)}
-        }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
-          $content = Read-BinaryText $_.FullName $extension {int(max_read_bytes)}
-        }}
-        $records.Add([PSCustomObject]@{{
-          path = $_.FullName
-          name = $_.Name
-          size = $_.Length
-          extension = $extension
-          is_hidden = $isHidden
-          is_system = $isSystem
-          created_at = $_.CreationTimeUtc.ToString("o")
-          modified_at = $_.LastWriteTimeUtc.ToString("o")
-          accessed_at = $_.LastAccessTimeUtc.ToString("o")
-          owner = if ($acl) {{ $acl.Owner }} else {{ "" }}
-          principals = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }}) }} else {{ @() }}
-          permissions = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }}) }} else {{ @() }}
-          content = $content
-        }}) | Out-Null
-      }}
       }}
     }}
     $diagnostics.extension_histogram = $extensionHistogram

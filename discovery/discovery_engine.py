@@ -143,6 +143,7 @@ class DSPMDiscoveryEngine:
                 include_system=self.config.include_system,
                 hidden_filter_enabled=self.config.hidden_filter_enabled,
                 system_filter_enabled=self.config.system_filter_enabled,
+                max_depth=self.config.max_depth,
             )
 
         return []

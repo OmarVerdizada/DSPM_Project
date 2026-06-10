@@ -402,8 +402,8 @@
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
             <div class="panel-title">
-              <h4>1. Management server WinRM</h4>
-              <span>DSPM host preparation</span>
+              <h4>1. Optional local readiness</h4>
+              <span>Backend host only</span>
             </div>
             <div class="asset-form-grid endpoint-form">
               <label>
@@ -412,7 +412,7 @@
               </label>
               <label>
                 Admin username
-                <input id="local-winrm-username" autocomplete="username" placeholder="Administrator" />
+                <input id="local-winrm-username" autocomplete="username" placeholder="Local admin on this backend host" />
               </label>
               <label>
                 Admin password
@@ -420,9 +420,9 @@
               </label>
             </div>
             <div class="actions endpoint-actions">
-              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Activate management WinRM</button>
+              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Prepare local backend WinRM</button>
             </div>
-            <p id="local-winrm-status" class="save-status">This prepares the management server where DSPM runs. Use a management-server admin credential only if the backend is not already elevated.</p>
+            <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows host running this backend. Target endpoint local-admin credentials are entered in the next section.</p>
           </section>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
@@ -507,11 +507,23 @@
               </label>
               <label>
                 Max folder depth
-                <input id="endpoint-max-depth" type="number" min="1" max="12" value="12" />
+                <input id="endpoint-max-depth" type="number" min="1" max="12" value="6" />
               </label>
               <label class="checkbox-row endpoint-checkbox">
                 <input id="endpoint-read-content" type="checkbox" checked />
                 Read content preview
+              </label>
+              <label class="checkbox-row endpoint-checkbox">
+                <input id="endpoint-read-acl" type="checkbox" />
+                Read permissions / ACL
+              </label>
+              <label class="checkbox-row endpoint-checkbox">
+                <input id="endpoint-inspect-archives" type="checkbox" />
+                Inspect archive contents
+              </label>
+              <label class="checkbox-row endpoint-checkbox">
+                <input id="endpoint-async-scan" type="checkbox" checked />
+                Run as cancellable job
               </label>
             </div>
             <div class="extension-filter endpoint-extension-filter">
@@ -525,6 +537,7 @@
             </div>
             <div class="actions endpoint-actions">
               <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
+              <button type="button" id="endpoint-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
               <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
             </div>
             <div id="endpoint-scan-progress" class="scan-progress endpoint-scan-progress hidden" aria-live="polite">
@@ -771,6 +784,6 @@
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=29"></script>
+    <script src="/static/app.js?v=33"></script>
   </body>
 </html>

@@ -261,6 +261,7 @@ def scan_directory(
     include_system: bool = False,
     hidden_filter_enabled: bool = False,
     system_filter_enabled: bool = False,
+    max_depth: int = 4,
 ) -> list[dict]:
     root_path = Path(path).expanduser().resolve()
     if not root_path.exists():
@@ -268,9 +269,8 @@ def scan_directory(
 
     extension_filter = normalize_extension_filter(allowed_extensions)
     records: list[FileRecord] = []
-    for item in root_path.rglob("*"):
-        if not item.is_file():
-            continue
+
+    def add_file(item: Path) -> None:
         extension = detect_extension(item)
         is_hidden = is_hidden_path(item)
         is_system = is_system_path(item)
@@ -285,12 +285,12 @@ def scan_directory(
             hidden_filter_enabled,
             system_filter_enabled,
         ):
-            continue
+            return
 
         try:
             stat = item.stat()
         except OSError:
-            continue
+            return
 
         records.append(
             FileRecord(
@@ -305,6 +305,42 @@ def scan_directory(
             )
         )
 
+    def walk(folder: Path, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if is_skipped_scan_path(folder):
+            return
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            return
+
+        for item in entries:
+            try:
+                is_dir = item.is_dir()
+                is_file = item.is_file()
+            except OSError:
+                continue
+
+            if is_dir:
+                if is_skipped_scan_path(item):
+                    continue
+                is_hidden_dir = is_hidden_path(item)
+                if is_hidden_dir and not (include_hidden or hidden_filter_enabled):
+                    continue
+                walk(item, depth + 1)
+                continue
+
+            if not is_file:
+                continue
+
+            add_file(item)
+
+    if root_path.is_file():
+        add_file(root_path)
+    else:
+        walk(root_path, 0)
+
     return [record.to_dict() for record in records]
 
 
@@ -318,6 +354,24 @@ def is_hidden_path(path: Path) -> bool:
     if hasattr(stat, "st_file_attributes"):
         return bool(stat.st_file_attributes & 0x2)
     return False
+
+
+def is_skipped_scan_path(path: Path) -> bool:
+    normalized = str(path).replace("/", "\\").lower()
+    if not normalized.endswith("\\"):
+        normalized = f"{normalized}\\"
+    skip_fragments = (
+        "\\.codex\\",
+        "\\.git\\",
+        "\\.vscode\\",
+        "\\node_modules\\",
+        "\\appdata\\local\\temp\\",
+        "\\appdata\\local\\microsoft\\edge\\",
+        "\\appdata\\local\\google\\chrome\\",
+        "\\appdata\\local\\packages\\",
+        "\\appdata\\roaming\\microsoft\\windows\\recent\\",
+    )
+    return any(fragment in normalized for fragment in skip_fragments)
 
 
 def is_system_path(path: Path) -> bool:

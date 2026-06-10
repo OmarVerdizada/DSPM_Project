@@ -168,6 +168,8 @@ class SMBScanner:
     def _walk_share(self, share_name: str, folder: str, depth: int) -> list[dict]:
         if self.connection is None or depth > self.config.max_depth:
             return []
+        if self._skip_path(folder):
+            return []
 
         records: list[dict] = []
         try:
@@ -181,14 +183,14 @@ class SMBScanner:
                 continue
 
             remote_path = str(PurePosixPath(folder) / entry.filename)
+            if self._skip_path(remote_path):
+                continue
             is_dir = bool(entry.isDirectory)
             is_hidden = bool(getattr(entry, "isHidden", False))
             is_system = bool(getattr(entry, "isSystem", False))
 
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
-                    continue
-                if is_system and not (self.config.include_system or self.config.system_filter_enabled):
                     continue
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
                 continue
@@ -223,6 +225,23 @@ class SMBScanner:
             )
 
         return records
+
+    def _skip_path(self, path: str) -> bool:
+        normalized = path.replace("/", "\\").lower()
+        if not normalized.endswith("\\"):
+            normalized = f"{normalized}\\"
+        skip_fragments = (
+            "\\.codex\\",
+            "\\.git\\",
+            "\\.vscode\\",
+            "\\node_modules\\",
+            "\\appdata\\local\\temp\\",
+            "\\appdata\\local\\microsoft\\edge\\",
+            "\\appdata\\local\\google\\chrome\\",
+            "\\appdata\\local\\packages\\",
+            "\\appdata\\roaming\\microsoft\\windows\\recent\\",
+        )
+        return any(fragment in normalized for fragment in skip_fragments)
 
     def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
         if self.connection is None or not self.config.read_content:

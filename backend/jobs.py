@@ -43,10 +43,14 @@ class ScanJob:
 
 
 def create_scan_job(tenant_id: str, config: ScanConfig, on_complete: Callable[[dict], None]) -> ScanJob:
+    return create_job(tenant_id, lambda job: _run_scan_job(job, config, on_complete))
+
+
+def create_job(tenant_id: str, runner: Callable[[ScanJob], dict]) -> ScanJob:
     job = ScanJob(id=str(uuid.uuid4()), tenant_id=tenant_id)
     with _lock:
         _jobs[job.id] = job
-    executor.submit(_run_job, job, config, on_complete)
+    executor.submit(_run_custom_job, job, runner)
     return job
 
 
@@ -66,28 +70,41 @@ def cancel_job(job_id: str) -> bool:
     return True
 
 
-def _run_job(job: ScanJob, config: ScanConfig, on_complete: Callable[[dict], None]) -> None:
+def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
     if job.cancel_requested:
         return
     try:
         job.status = "running"
-        job.progress = 10
-        job.message = "Collecting files"
-        engine = DSPMDiscoveryEngine(config)
-        report = engine.run()
-        data = report.to_dict()
+        job.progress = max(job.progress, 5)
+        job.message = job.message if job.message != "Queued" else "Running"
+        data = runner(job)
         if job.cancel_requested:
             return
-        job.progress = 95
-        job.message = "Saving report"
-        on_complete(data)
         job.result = data
         job.status = "completed"
         job.progress = 100
         job.message = "Completed"
     except Exception as exc:
+        if job.cancel_requested:
+            return
         job.status = "failed"
         job.error = str(exc)
         job.message = "Failed"
     finally:
         job.finished_at = datetime.now(timezone.utc).isoformat()
+
+
+def _run_scan_job(job: ScanJob, config: ScanConfig, on_complete: Callable[[dict], None]) -> dict:
+    if job.cancel_requested:
+        raise RuntimeError("Scan cancelled")
+    job.progress = 10
+    job.message = "Collecting files"
+    engine = DSPMDiscoveryEngine(config)
+    report = engine.run()
+    data = report.to_dict()
+    if job.cancel_requested:
+        raise RuntimeError("Scan cancelled")
+    job.progress = 95
+    job.message = "Saving report"
+    on_complete(data)
+    return data

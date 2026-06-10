@@ -88,6 +88,7 @@ const localWinrmStatus = document.querySelector("#local-winrm-status");
 const endpointActivateBtn = document.querySelector("#endpoint-activate-btn");
 const endpointTestBtn = document.querySelector("#endpoint-test-btn");
 const endpointScanBtn = document.querySelector("#endpoint-scan-btn");
+const endpointCancelBtn = document.querySelector("#endpoint-cancel-btn");
 const endpointViewOverviewBtn = document.querySelector("#endpoint-view-overview-btn");
 const endpointStatus = document.querySelector("#endpoint-status");
 const winrmActivateStatus = document.querySelector("#winrm-activate-status");
@@ -307,6 +308,12 @@ let tenantPortfolio = [];
 let latestRiskRules = [];
 let lastRenderedFileKeys = new Set();
 let hasRenderedScanRows = false;
+let renderedRowsLimit = 200;
+let activeEndpointJobId = "";
+let fileSearchIndex = new WeakMap();
+
+const ROW_PAGE_SIZE = 200;
+const ARCHIVE_EXTENSIONS = new Set([".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"]);
 
 async function api(path, payload, method = "POST") {
   const response = await fetch(path, {
@@ -415,8 +422,14 @@ function applyExtensionPreset(name, list = allowedExtensionsList, search = exten
 function filterExtensionList(list = allowedExtensionsList, search = extensionSearch) {
   if (!list || !search) return;
   const query = search.value.trim().toLowerCase();
+  const hasChecked = Boolean(list.querySelector("input[type='checkbox']:checked"));
   list.querySelectorAll(".extension-option").forEach((option) => {
-    option.classList.toggle("hidden", query && !option.dataset.extensionLabel.includes(query));
+    const input = option.querySelector("input");
+    const matchesQuery = !query || option.dataset.extensionLabel.includes(query);
+    const keepChecked = hasChecked && input?.checked;
+    const hideForQuery = query && !matchesQuery && !keepChecked;
+    const hideUnselectedAfterChoice = !query && hasChecked && !input?.checked;
+    option.classList.toggle("hidden", Boolean(hideForQuery || hideUnselectedAfterChoice));
   });
 }
 
@@ -444,6 +457,7 @@ function readEndpointPayload() {
     selectedExtensions.push(searchedExtension);
   }
   const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
+  const archiveOnlyFilter = selectedFileExtensions.length > 0 && selectedFileExtensions.every((extension) => ARCHIVE_EXTENSIONS.has(extension));
   const scope = endpointPathScope.value;
   const customPaths = endpointCustomPaths.value
     .split(";")
@@ -468,7 +482,10 @@ function readEndpointPayload() {
     credential_ref: document.querySelector("#endpoint-credential-ref").value.trim(),
     paths: pathsByScope[scope] || pathsByScope.default,
     max_depth: Number(document.querySelector("#endpoint-max-depth").value || 12),
-    read_content: document.querySelector("#endpoint-read-content").checked,
+    read_content: document.querySelector("#endpoint-read-content").checked && !archiveOnlyFilter,
+    read_acl: document.querySelector("#endpoint-read-acl")?.checked || false,
+    inspect_archives: document.querySelector("#endpoint-inspect-archives")?.checked || false,
+    async_scan: document.querySelector("#endpoint-async-scan")?.checked || false,
     allowed_extensions: selectedFileExtensions,
     extension_filter_enabled: selectedFileExtensions.length > 0,
     include_hidden: selectedExtensions.includes("__hidden__"),
@@ -535,6 +552,7 @@ function setBusy(isBusy) {
   if (endpointActivateBtn) endpointActivateBtn.disabled = isBusy;
   if (endpointTestBtn) endpointTestBtn.disabled = isBusy;
   if (endpointScanBtn) endpointScanBtn.disabled = isBusy;
+  if (endpointCancelBtn) endpointCancelBtn.disabled = !activeEndpointJobId;
   if (endpointViewOverviewBtn) endpointViewOverviewBtn.disabled = isBusy;
   updateEndpointCustomPathState(isBusy);
 }
@@ -610,27 +628,20 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
   const diagnostics = endpoint.scan_diagnostics || {};
   const visited = Number(diagnostics.visited_files || 0);
   const matched = Number(diagnostics.matched_files || 0);
+  const archiveFiles = Number(diagnostics.archive_files || 0);
+  const archiveEntries = Number(diagnostics.archive_entries || 0);
+  const skippedDirs = Number(diagnostics.skipped_dirs || 0);
   const resolved = (diagnostics.resolved_roots || []).slice(0, 3).join("; ");
   const missing = (diagnostics.missing_roots || []).slice(0, 3).join("; ");
+  const archiveErrors = (diagnostics.archive_errors || []).slice(0, 2).join("; ");
   const allowed = (diagnostics.allowed_extensions || endpoint.allowed_extensions || []).join(", ");
-  const histogram = diagnostics.extension_histogram || {};
-  const selectedCounts = diagnostics.selected_extension_counts || {};
-  const selectedSeen = Object.entries(selectedCounts)
-    .sort(([firstExtension], [secondExtension]) => firstExtension.localeCompare(secondExtension))
-    .map(([extension, count]) => `${extension}: ${count}`)
-    .join(", ");
-  const topSeen = Object.entries(histogram)
-    .filter(([extension]) => extension !== "no extension")
-    .sort(([, firstCount], [, secondCount]) => Number(secondCount) - Number(firstCount))
-    .slice(0, 8)
-    .map(([extension, count]) => `${extension}: ${count}`)
-    .join(", ");
   const parts = [`Visited: ${visited}`, `Matched: ${matched}`];
+  if (skippedDirs) parts.push(`Skipped dirs: ${skippedDirs}`);
+  if (archiveFiles || archiveEntries) parts.push(`Archives: ${archiveFiles}`, `Archive entries: ${archiveEntries}`);
   if (allowed) parts.push(`Allowed: ${allowed}`);
-  if (selectedSeen) parts.push(`Selected seen: ${selectedSeen}`);
-  if (topSeen) parts.push(`Seen: ${topSeen}`);
   if (resolved) parts.push(`Roots: ${resolved}`);
   if (missing) parts.push(`Missing: ${missing}`);
+  if (archiveErrors) parts.push(`Archive errors: ${archiveErrors}`);
   return parts.join(". ");
 }
 
@@ -652,6 +663,23 @@ function updateEndpointCustomPathState(isBusy = false) {
   endpointCustomPaths.required = customSelected;
   if (!customSelected) {
     endpointCustomPaths.value = "";
+  }
+}
+
+function tuneEndpointScanDefaults() {
+  const depthInput = document.querySelector("#endpoint-max-depth");
+  const readContent = document.querySelector("#endpoint-read-content");
+  if (depthInput && ["c_drive", "all_fixed_drives"].includes(endpointPathScope?.value) && Number(depthInput.value || 0) > 4) {
+    depthInput.value = "4";
+  }
+  const selectedExtensions = readSelectedExtensions(endpointAllowedExtensionsList).filter((item) => item.startsWith("."));
+  const searchedExtension = readSearchExtension(endpointExtensionSearch);
+  if (searchedExtension && !selectedExtensions.includes(searchedExtension)) {
+    selectedExtensions.push(searchedExtension);
+  }
+  const archiveOnlyFilter = selectedExtensions.length > 0 && selectedExtensions.every((extension) => ARCHIVE_EXTENSIONS.has(extension));
+  if (readContent && archiveOnlyFilter) {
+    readContent.checked = false;
   }
 }
 
@@ -756,8 +784,9 @@ function detailButton(items, file, type, label, emptyText) {
 
 function renderRows(files) {
   const query = filterInput.value.trim().toLowerCase();
-  const visible = files.filter((file) => JSON.stringify(file).toLowerCase().includes(query));
-  const currentKeys = new Set(visible.map((file) => fileKey(file)));
+  const visible = query ? files.filter((file) => getFileSearchText(file).includes(query)) : files;
+  const page = visible.slice(0, renderedRowsLimit);
+  const currentKeys = new Set(page.map((file) => fileKey(file)));
 
   if (visible.length === 0) {
     resultsBody.innerHTML = '<tr><td colspan="7" class="empty">No matching files.</td></tr>';
@@ -766,7 +795,7 @@ function renderRows(files) {
     return;
   }
 
-  resultsBody.innerHTML = visible
+  const rows = page
     .map((file) => {
       const findings = (file.findings || []).map((finding) => `${finding.type}: ${finding.count}`);
       const recommendations = file.risk?.dlp_recommendations || [];
@@ -815,8 +844,32 @@ function renderRows(files) {
       `;
     })
     .join("");
+  const moreRow = visible.length > page.length
+    ? `<tr><td colspan="7" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
+    : "";
+  resultsBody.innerHTML = rows + moreRow;
   lastRenderedFileKeys = currentKeys;
   hasRenderedScanRows = true;
+}
+
+function getFileSearchText(file) {
+  const cached = fileSearchIndex.get(file);
+  if (cached) return cached;
+  const text = [
+    file.name,
+    file.path,
+    file.source,
+    file.share,
+    file.extension,
+    file.risk?.level,
+    file.risk?.score,
+    ...(file.findings || []).map((finding) => `${finding.type} ${finding.description || ""}`),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  fileSearchIndex.set(file, text);
+  return text;
 }
 
 function switchTab(tabName) {
@@ -2670,6 +2723,29 @@ async function runQueuedScan(payload) {
   return pollScan(job.id);
 }
 
+async function runQueuedEndpointScan(payload) {
+  const job = await api("/api/endpoint/scan", { ...payload, async_scan: true, save_report: true });
+  activeEndpointJobId = job.id;
+  if (endpointCancelBtn) {
+    endpointCancelBtn.classList.remove("hidden");
+    endpointCancelBtn.disabled = false;
+  }
+  endpointStatus.textContent = `Endpoint scan queued: ${job.id}`;
+  setEndpointScanProgress(true, job.progress || 5, "Endpoint scan queued...");
+  try {
+    return await pollScan(job.id, (polledJob) => {
+      endpointStatus.textContent = `${polledJob.message} (${polledJob.progress || 0}%)`;
+      setEndpointScanProgress(true, polledJob.progress || 0, polledJob.message || "Scanning endpoint...");
+    });
+  } finally {
+    activeEndpointJobId = "";
+    if (endpointCancelBtn) {
+      endpointCancelBtn.classList.add("hidden");
+      endpointCancelBtn.disabled = true;
+    }
+  }
+}
+
 async function generateDemoData() {
   requireAuth();
   const output = document.querySelector("#local_path").value.trim() || "enterprise_test_data";
@@ -2685,13 +2761,21 @@ async function generateDemoData() {
   await loadAudit().catch(() => {});
 }
 
-async function pollScan(jobId) {
+async function pollScan(jobId, onProgress = null) {
   while (true) {
     const job = await api(`/api/scans/${jobId}`, null, "GET");
-    setStatus(`${job.message} (${job.progress || 0}%)`);
-    setScanProgress(true, job.progress || 0, job.message || "Scanning...");
+    if (onProgress) {
+      onProgress(job);
+    } else {
+      setStatus(`${job.message} (${job.progress || 0}%)`);
+      setScanProgress(true, job.progress || 0, job.message || "Scanning...");
+    }
     if (job.status === "completed") {
-      setScanProgress(true, 100, "Scan completed");
+      if (onProgress) {
+        onProgress({ ...job, progress: 100, message: "Completed" });
+      } else {
+        setScanProgress(true, 100, "Scan completed");
+      }
       return job.result;
     }
     if (job.status === "failed" || job.status === "cancelled") {
@@ -3081,7 +3165,10 @@ document.querySelectorAll("[data-endpoint-extension-preset]").forEach((button) =
   button.addEventListener("click", () => applyExtensionPreset(button.dataset.endpointExtensionPreset, endpointAllowedExtensionsList, endpointExtensionSearch));
 });
 extensionSearch?.addEventListener("input", () => filterExtensionList(allowedExtensionsList, extensionSearch));
-endpointExtensionSearch?.addEventListener("input", () => filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch));
+endpointExtensionSearch?.addEventListener("input", () => {
+  filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
+  tuneEndpointScanDefaults();
+});
 allowedExtensionsList?.addEventListener("change", (event) => {
   if (!event.target.matches("input[type='checkbox']")) return;
   reorderExtensionOptions(allowedExtensionsList);
@@ -3091,6 +3178,7 @@ endpointAllowedExtensionsList?.addEventListener("change", (event) => {
   if (!event.target.matches("input[type='checkbox']")) return;
   reorderExtensionOptions(endpointAllowedExtensionsList);
   filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
+  tuneEndpointScanDefaults();
 });
 
 testBtn.addEventListener("click", async () => {
@@ -3140,6 +3228,8 @@ form.addEventListener("submit", async (event) => {
     const report = payload.async_scan ? await runQueuedScan(payload) : await api("/api/scan", { ...payload, save_report: true });
     latestReport = report;
     latestFiles = report.files || [];
+    fileSearchIndex = new WeakMap();
+    renderedRowsLimit = ROW_PAGE_SIZE;
     updateSummaryFromFiles(latestFiles);
     hasRenderedScanRows = true;
     renderRows(latestFiles);
@@ -3163,17 +3253,17 @@ form.addEventListener("submit", async (event) => {
 
 localWinrmActivateBtn.addEventListener("click", async () => {
   setBusy(true);
-  localWinrmStatus.textContent = "Activating WinRM on the DSPM management server...";
+  localWinrmStatus.textContent = "Preparing WinRM on this backend host only...";
   try {
     requireAuth();
     const result = await api("/api/endpoint/activate-local-winrm", readLocalWinrmPayload());
     localWinrmStatus.textContent = result.activated
-      ? `Management server WinRM is active on ${result.host || "this server"}.`
-      : `Management server activation needs review: ${result.message}`;
-    showToast(result.activated ? "Management WinRM activated" : "Management WinRM needs review", result.message || result.host || "", result.activated ? "success" : "danger");
+      ? `Local backend WinRM is active on ${result.host || "this host"}. Continue with target local-admin credentials below.`
+      : `Local backend readiness needs review: ${result.message}`;
+    showToast(result.activated ? "Local backend WinRM ready" : "Local backend readiness needs review", result.message || result.host || "", result.activated ? "success" : "danger");
   } catch (error) {
-    localWinrmStatus.textContent = `Management WinRM activation failed: ${error.message}`;
-    showToast("Management WinRM activation failed", error.message, "danger");
+    localWinrmStatus.textContent = `Local backend WinRM preparation failed: ${error.message}`;
+    showToast("Local backend WinRM failed", error.message, "danger");
   } finally {
     setBusy(false);
   }
@@ -3220,6 +3310,18 @@ if (endpointTestBtn) endpointTestBtn.addEventListener("click", async () => {
   }
 });
 
+if (endpointCancelBtn) endpointCancelBtn.addEventListener("click", async () => {
+  if (!activeEndpointJobId) return;
+  endpointCancelBtn.disabled = true;
+  try {
+    await api(`/api/scans/${activeEndpointJobId}/cancel`, {}, "POST");
+    endpointStatus.textContent = "Endpoint scan cancellation requested.";
+    setEndpointScanProgress(false);
+  } catch (error) {
+    endpointStatus.textContent = `Endpoint scan cancel failed: ${error.message}`;
+  }
+});
+
 endpointScanBtn.addEventListener("click", async () => {
   setBusy(true);
   setStatus("Scanning endpoint through WinRM...");
@@ -3235,9 +3337,14 @@ endpointScanBtn.addEventListener("click", async () => {
   try {
     requireAuth();
     const payload = await ensureEndpointCredential(readEndpointPayload());
-    const report = await api("/api/endpoint/scan", payload);
+    if (payload.async_scan) {
+      window.clearInterval(endpointProgressTimer);
+    }
+    const report = payload.async_scan ? await runQueuedEndpointScan(payload) : await api("/api/endpoint/scan", payload);
     latestReport = report;
     latestFiles = report.files || [];
+    fileSearchIndex = new WeakMap();
+    renderedRowsLimit = ROW_PAGE_SIZE;
     updateSummaryFromFiles(latestFiles);
     hasRenderedScanRows = true;
     renderRows(latestFiles);
@@ -3261,11 +3368,22 @@ endpointScanBtn.addEventListener("click", async () => {
   }
 });
 
-endpointPathScope.addEventListener("change", () => updateEndpointCustomPathState());
+endpointPathScope.addEventListener("change", () => {
+  updateEndpointCustomPathState();
+  tuneEndpointScanDefaults();
+});
 
-filterInput.addEventListener("input", () => renderRows(latestFiles));
+filterInput.addEventListener("input", () => {
+  renderedRowsLimit = ROW_PAGE_SIZE;
+  renderRows(latestFiles);
+});
 
 document.addEventListener("click", (event) => {
+  if (event.target.closest("#load-more-results")) {
+    renderedRowsLimit += ROW_PAGE_SIZE;
+    renderRows(latestFiles);
+    return;
+  }
   const tabButton = event.target.closest(".tab[data-tab]");
   const tabJump = event.target.closest("[data-tab-jump]");
   if (tabButton) {
@@ -3488,6 +3606,7 @@ tenantSwitcher.addEventListener("change", async () => {
   currentTenant = tenantSwitcher.value || "default";
   safeSessionSet("dspm-tenant-id", currentTenant);
   latestFiles = [];
+  fileSearchIndex = new WeakMap();
   latestReport = null;
   latestDashboard = null;
   rowOverrides = loadRowOverrides();

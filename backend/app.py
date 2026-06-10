@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from backend.alerts import evaluate_alerts
-from backend.jobs import cancel_job, create_scan_job, get_job
+from backend.jobs import cancel_job, create_job, create_scan_job, get_job
 from backend.security import (
     Principal,
     authenticate_user,
@@ -128,6 +128,9 @@ class EndpointScanRequest(BaseModel):
     paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"])
     max_depth: int = Field(default=12, ge=1, le=12)
     read_content: bool = True
+    read_acl: bool = False
+    inspect_archives: bool = False
+    async_scan: bool = False
     allowed_extensions: list[str] = Field(default_factory=list)
     extension_filter_enabled: bool = False
     include_hidden: bool = False
@@ -501,50 +504,12 @@ def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = D
 def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     try:
         config = _to_endpoint_config(payload, principal.tenant_id)
-        scanner = WinRMEndpointScanner(config)
-        records = scanner.scan()
-        report = DSPMDiscoveryEngine(
-            ScanConfig(
-                server="",
-                use_sample_when_empty=False,
-                asset_overrides=[
-                    {
-                        "pattern": item.pattern.strip(),
-                        "level": item.level.strip().upper(),
-                        "reason": item.reason.strip(),
-                    }
-                    for item in payload.asset_overrides
-                    if item.pattern.strip()
-                ],
-            )
-        )
-        analyzed = [report._analyze_record(record) for record in records]
-        extension_counts: dict[str, int] = {}
-        for record in records:
-            extension = str(record.get("extension") or "no extension").lower()
-            extension_counts[extension] = extension_counts.get(extension, 0) + 1
-        data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "endpoint-winrm",
-            "summary": report._build_summary(analyzed).to_dict(),
-            "files": analyzed,
-            "endpoint": {
-                "host": config.host,
-                "target_username": config.target_username,
-                "paths": config.paths,
-                "max_depth": config.max_depth,
-                "allowed_extensions": config.allowed_extensions or [],
-                "extension_filter_enabled": config.extension_filter_enabled,
-                "include_hidden": config.include_hidden,
-                "include_system": config.include_system,
-                "hidden_filter_enabled": config.hidden_filter_enabled,
-                "system_filter_enabled": config.system_filter_enabled,
-                "raw_record_count": len(records),
-                "extension_counts": extension_counts,
-                "scan_diagnostics": scanner.last_scan_diagnostics,
-            },
-        }
-        _persist_scan(data, payload, principal)
+        if payload.async_scan:
+            job = create_job(principal.tenant_id, lambda job: _run_endpoint_scan_payload(config, payload, principal, job))
+            audit(principal.tenant_id, principal.subject, "endpoint.scan.queued", {"job_id": job.id, "host": payload.host})
+            return job.to_dict()
+
+        data = _run_endpoint_scan_payload(config, payload, principal)
         audit(principal.tenant_id, principal.subject, "endpoint.scan.completed", {"scan_id": data.get("scan_id"), "host": payload.host})
         return data
     except Exception as exc:
@@ -595,6 +560,9 @@ def scan_job(job_id: str, principal: Principal = Depends(require_role("viewer"))
 
 @app.post("/api/scans/{job_id}/cancel")
 def stop_scan(job_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    job = get_job(job_id)
+    if job is None or job.tenant_id != principal.tenant_id:
+        raise HTTPException(status_code=404, detail="Scan job not found")
     stopped = cancel_job(job_id)
     audit(principal.tenant_id, principal.subject, "scan.cancel", {"job_id": job_id, "stopped": stopped})
     return {"cancelled": stopped}
@@ -723,13 +691,80 @@ def export_dlp_policy(payload: ScanRequest, principal: Principal = Depends(requi
     }
 
 
-def _persist_scan(data: dict, payload: ScanRequest, principal: Principal) -> None:
+def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, principal: Principal) -> None:
     scan_id = save_scan_history(principal.tenant_id, data)
     data["scan_id"] = scan_id
     alerts = evaluate_alerts(principal.tenant_id, data)
     data["alerts"] = alerts
     if payload.save_report:
         generate_report(data, BASE_DIR / "report.json")
+
+
+def _run_endpoint_scan_payload(
+    config: WinRMEndpointConfig,
+    payload: EndpointScanRequest,
+    principal: Principal,
+    job=None,
+) -> dict:
+    if job:
+        job.progress = 8
+        job.message = "Connecting to endpoint"
+    scanner = WinRMEndpointScanner(config)
+    records = scanner.scan()
+    if job:
+        if job.cancel_requested:
+            raise RuntimeError("Scan cancelled")
+        job.progress = 70
+        job.message = "Analyzing endpoint files"
+    report = DSPMDiscoveryEngine(
+        ScanConfig(
+            server="",
+            use_sample_when_empty=False,
+            asset_overrides=[
+                {
+                    "pattern": item.pattern.strip(),
+                    "level": item.level.strip().upper(),
+                    "reason": item.reason.strip(),
+                }
+                for item in payload.asset_overrides
+                if item.pattern.strip()
+            ],
+        )
+    )
+    analyzed = [report._analyze_record(record) for record in records]
+    extension_counts: dict[str, int] = {}
+    for record in records:
+        extension = str(record.get("extension") or "no extension").lower()
+        extension_counts[extension] = extension_counts.get(extension, 0) + 1
+    data = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "endpoint-winrm",
+        "summary": report._build_summary(analyzed).to_dict(),
+        "files": analyzed,
+        "endpoint": {
+            "host": config.host,
+            "target_username": config.target_username,
+            "paths": config.paths,
+            "max_depth": config.max_depth,
+            "allowed_extensions": config.allowed_extensions or [],
+            "extension_filter_enabled": config.extension_filter_enabled,
+            "include_hidden": config.include_hidden,
+            "include_system": config.include_system,
+            "hidden_filter_enabled": config.hidden_filter_enabled,
+            "system_filter_enabled": config.system_filter_enabled,
+            "read_content": config.read_content,
+            "read_acl": config.read_acl,
+            "inspect_archives": config.inspect_archives,
+            "raw_record_count": len(records),
+            "extension_counts": extension_counts,
+            "scan_diagnostics": scanner.last_scan_diagnostics,
+        },
+    }
+    if job:
+        job.progress = 92
+        job.message = "Saving endpoint report"
+    _persist_scan(data, payload, principal)
+    return data
 
 
 def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
@@ -793,4 +828,6 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         include_system=payload.include_system,
         hidden_filter_enabled=payload.hidden_filter_enabled,
         system_filter_enabled=payload.system_filter_enabled,
+        read_acl=payload.read_acl,
+        inspect_archives=payload.inspect_archives,
     )
