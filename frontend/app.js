@@ -93,6 +93,9 @@ const endpointStatus = document.querySelector("#endpoint-status");
 const winrmActivateStatus = document.querySelector("#winrm-activate-status");
 const endpointPathScope = document.querySelector("#endpoint-path-scope");
 const endpointCustomPaths = document.querySelector("#endpoint-custom-paths");
+const endpointScanProgress = document.querySelector("#endpoint-scan-progress");
+const endpointScanProgressLabel = document.querySelector("#endpoint-scan-progress-label");
+const endpointScanProgressBar = document.querySelector("#endpoint-scan-progress-bar");
 const detailDrawer = document.querySelector("#detail-drawer");
 const detailDrawerEyebrow = detailDrawer.querySelector("#detail-drawer-eyebrow");
 const detailDrawerTitle = detailDrawer.querySelector("#detail-drawer-title");
@@ -365,6 +368,7 @@ function readPayload() {
     include_system: selectedExtensions.includes("__system__"),
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
     system_filter_enabled: selectedExtensions.includes("__system__"),
+    include_admin_shares: Boolean(data.get("include_admin_shares")),
     async_scan: Boolean(data.get("async_scan")),
     asset_overrides: assetRules,
   };
@@ -451,6 +455,8 @@ function readEndpointPayload() {
     documents: ["documents"],
     downloads: ["downloads"],
     all: ["all"],
+    c_drive: ["c_drive"],
+    all_fixed_drives: ["all_fixed_drives"],
     custom: customPaths,
   };
   return {
@@ -567,6 +573,14 @@ function setScanProgress(active, progress = 0, label = "Scanning...") {
   scanProgress.classList.toggle("active", active);
   scanProgressLabel.textContent = label;
   scanProgressBar.style.width = `${Math.max(4, Math.min(100, Number(progress) || 0))}%`;
+}
+
+function setEndpointScanProgress(active, progress = 0, label = "Scanning endpoint...") {
+  if (!endpointScanProgress || !endpointScanProgressLabel || !endpointScanProgressBar) return;
+  endpointScanProgress.classList.toggle("hidden", !active);
+  endpointScanProgress.classList.toggle("active", active);
+  endpointScanProgressLabel.textContent = label;
+  endpointScanProgressBar.style.width = `${Math.max(4, Math.min(100, Number(progress) || 0))}%`;
 }
 
 function clearResultsFilter() {
@@ -3149,17 +3163,17 @@ form.addEventListener("submit", async (event) => {
 
 localWinrmActivateBtn.addEventListener("click", async () => {
   setBusy(true);
-  localWinrmStatus.textContent = "Activating WinRM on the DSPM Windows server...";
+  localWinrmStatus.textContent = "Activating WinRM on the DSPM management server...";
   try {
     requireAuth();
     const result = await api("/api/endpoint/activate-local-winrm", readLocalWinrmPayload());
     localWinrmStatus.textContent = result.activated
-      ? `Server WinRM is active on ${result.host || "this server"}.`
-      : `Server activation needs review: ${result.message}`;
-    showToast(result.activated ? "Server WinRM activated" : "Server WinRM needs review", result.message || result.host || "", result.activated ? "success" : "danger");
+      ? `Management server WinRM is active on ${result.host || "this server"}.`
+      : `Management server activation needs review: ${result.message}`;
+    showToast(result.activated ? "Management WinRM activated" : "Management WinRM needs review", result.message || result.host || "", result.activated ? "success" : "danger");
   } catch (error) {
-    localWinrmStatus.textContent = `Server WinRM activation failed: ${error.message}`;
-    showToast("Server WinRM activation failed", error.message, "danger");
+    localWinrmStatus.textContent = `Management WinRM activation failed: ${error.message}`;
+    showToast("Management WinRM activation failed", error.message, "danger");
   } finally {
     setBusy(false);
   }
@@ -3175,13 +3189,9 @@ endpointActivateBtn.addEventListener("click", async () => {
     if (result.connected) {
       syncEndpointScanCredentials(payload);
     }
-    const serverPrep = result.server_preparation;
-    const serverText = serverPrep
-      ? `Server prep: ${serverPrep.activated ? "ready" : serverPrep.message || "needs review"}. `
-      : "";
     winrmActivateStatus.textContent = result.activated
-      ? `${serverText}Target WinRM ready on ${result.computer || result.host}. ${result.skipped_wmi_activation ? "Existing WinRM connection verified." : result.connected ? "Connection verified." : result.message || ""}`
-      : `${serverText}Target preparation needs review: ${result.connection_message || result.message}`;
+      ? `Target WinRM ready on ${result.computer || result.host}. ${result.skipped_wmi_activation ? "Existing WinRM connection verified." : result.connected ? "Connection verified." : result.message || ""}`
+      : `Target preparation needs review: ${result.connection_message || result.message}`;
     showToast(result.activated ? "Target WinRM ready" : "Target WinRM needs review", result.connection_message || result.message || result.host, result.activated ? "success" : "danger");
   } catch (error) {
     winrmActivateStatus.textContent = `Target WinRM preparation failed: ${error.message}`;
@@ -3217,7 +3227,11 @@ endpointScanBtn.addEventListener("click", async () => {
   if (endpointViewOverviewBtn) endpointViewOverviewBtn.classList.add("hidden");
   clearResultsFilter();
   renderSkeletonRows();
-  setScanProgress(true, 8, "Preparing endpoint scan...");
+  setEndpointScanProgress(true, 8, "Preparing endpoint scan...");
+  const endpointProgressTimer = window.setInterval(() => {
+    const current = Number.parseFloat(endpointScanProgressBar?.style.width || "8") || 8;
+    setEndpointScanProgress(true, Math.min(current + 7, 88), "Searching endpoint paths...");
+  }, 900);
   try {
     requireAuth();
     const payload = await ensureEndpointCredential(readEndpointPayload());
@@ -3233,7 +3247,7 @@ endpointScanBtn.addEventListener("click", async () => {
     endpointStatus.textContent = `Endpoint scan completed. ${latestFiles.length} files analyzed. ${extensionCounts} ${diagnostics}`;
     if (endpointViewOverviewBtn) endpointViewOverviewBtn.classList.remove("hidden");
     setStatus("Endpoint scan completed and report.json updated.");
-    setScanProgress(true, 100, "Endpoint scan completed");
+    setEndpointScanProgress(true, 100, "Endpoint scan completed");
     showToast("Endpoint scan completed", `${latestFiles.length} files found`, latestReport.summary?.critical ? "danger" : "success");
     await loadHistory();
   } catch (error) {
@@ -3241,7 +3255,8 @@ endpointScanBtn.addEventListener("click", async () => {
     setStatus(`Endpoint scan failed: ${error.message}`);
     showToast("Endpoint scan failed", error.message, "danger");
   } finally {
-    window.setTimeout(() => setScanProgress(false), 700);
+    window.clearInterval(endpointProgressTimer);
+    window.setTimeout(() => setEndpointScanProgress(false), 700);
     setBusy(false);
   }
 });

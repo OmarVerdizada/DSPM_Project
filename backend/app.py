@@ -103,6 +103,7 @@ class ConnectionRequest(BaseModel):
     include_system: bool = False
     hidden_filter_enabled: bool = False
     system_filter_enabled: bool = False
+    include_admin_shares: bool = False
 
 
 class AssetOverride(BaseModel):
@@ -480,18 +481,15 @@ def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal =
 def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     try:
-        local_result = activate_local_winrm(payload.username, payload.password, payload.domain)
         result = scanner.activate_winrm()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    result["server_preparation"] = local_result
     audit(
         principal.tenant_id,
         principal.subject,
         "endpoint.winrm.repair",
         {
             "host": payload.host,
-            "server_activated": local_result.get("activated"),
             "activated": result.get("activated"),
             "connected": result.get("connected"),
         },
@@ -757,6 +755,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         include_system=payload.include_system,
         hidden_filter_enabled=payload.hidden_filter_enabled,
         system_filter_enabled=payload.system_filter_enabled,
+        include_admin_shares=payload.include_admin_shares,
         asset_overrides=[
             {
                 "pattern": item.pattern.strip(),

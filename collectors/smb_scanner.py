@@ -4,6 +4,7 @@ import socket
 import tempfile
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+import re
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
 from collectors.file_scanner import TEXT_EXTENSIONS, detect_extension, matches_scan_filters, normalize_extension_filter
@@ -31,6 +32,7 @@ class SMBConfig:
     max_read_bytes: int = 1024 * 256
     allowed_extensions: list[str] | None = None
     extension_filter_enabled: bool = False
+    include_admin_shares: bool = False
 
 
 class SMBScanner:
@@ -38,6 +40,7 @@ class SMBScanner:
         self.config = config
         self.connection = None
         self.extension_filter = normalize_extension_filter(config.allowed_extensions)
+        self.credential_used = ""
 
     def connect(self) -> bool:
         try:
@@ -45,21 +48,27 @@ class SMBScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pysmb'. Install requirements.txt before SMB scans.") from exc
 
-        conn = SMBConnection(
-            self.config.username,
-            self.config.password,
-            self.config.client_name,
-            socket.gethostname(),
-            domain=self.config.domain,
-            use_ntlm_v2=True,
-            is_direct_tcp=True,
-        )
+        for username, domain, label in self._credential_candidates():
+            conn = SMBConnection(
+                username,
+                self.config.password,
+                self.config.client_name,
+                socket.gethostname(),
+                domain=domain,
+                use_ntlm_v2=True,
+                is_direct_tcp=True,
+            )
+            try:
+                if conn.connect(self.config.server, self.config.port):
+                    self.connection = conn
+                    self.credential_used = label
+                    return True
+            except Exception:
+                conn.close()
+                continue
+            conn.close()
 
-        if not conn.connect(self.config.server, self.config.port):
-            return False
-
-        self.connection = conn
-        return True
+        return False
 
     def close(self) -> None:
         if self.connection is not None:
@@ -74,6 +83,7 @@ class SMBScanner:
                 "connected": connected,
                 "server": self.config.server,
                 "domain": self.config.domain,
+                "credential_used": self.credential_used,
                 "shares": shares,
                 "message": "Connected successfully" if connected else "Connection failed",
             }
@@ -83,6 +93,7 @@ class SMBScanner:
                 "connected": False,
                 "server": self.config.server,
                 "domain": self.config.domain,
+                "credential_used": self.credential_used,
                 "shares": [],
                 "message": str(exc),
             }
@@ -97,7 +108,7 @@ class SMBScanner:
             records: list[dict] = []
             for share in self.connection.listShares():
                 share_name = share.name
-                if share_name in SYSTEM_SHARES or share_name.endswith("$"):
+                if self._skip_share(share_name):
                     continue
 
                 records.extend(self._walk_share(share_name, "/", depth=0))
@@ -112,8 +123,47 @@ class SMBScanner:
         return [
             share.name
             for share in self.connection.listShares()
-            if share.name not in SYSTEM_SHARES and not share.name.endswith("$")
+            if not self._skip_share(share.name)
         ]
+
+    def _skip_share(self, share_name: str) -> bool:
+        if share_name in SYSTEM_SHARES:
+            return True
+        if share_name.endswith("$") and not self.config.include_admin_shares:
+            return True
+        if share_name.endswith("$") and not re.fullmatch(r"[A-Za-z]\$", share_name):
+            return True
+        return False
+
+    def _credential_candidates(self) -> list[tuple[str, str, str]]:
+        username = self.config.username.strip()
+        domain = (self.config.domain.strip() or "WORKGROUP").strip()
+        server_name = self.config.server.split(".")[0].strip()
+        candidates: list[tuple[str, str, str]] = []
+
+        def add(user: str, dom: str) -> None:
+            label = f"{dom}\\{user}" if dom else user
+            if (user, dom, label) not in candidates:
+                candidates.append((user, dom, label))
+
+        if not username:
+            add("", domain)
+            return candidates
+
+        if "\\" in username:
+            raw_domain, raw_user = username.split("\\", 1)
+            add(raw_user, raw_domain)
+        elif "@" in username:
+            add(username, domain)
+        else:
+            add(username, domain)
+            if domain.upper() == "WORKGROUP" and server_name:
+                add(username, server_name)
+            if server_name and server_name.upper() != domain.upper():
+                add(username, server_name)
+            add(username, "")
+
+        return candidates
 
     def _walk_share(self, share_name: str, folder: str, depth: int) -> list[dict]:
         if self.connection is None or depth > self.config.max_depth:

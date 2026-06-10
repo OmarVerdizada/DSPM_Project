@@ -33,7 +33,7 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - `Security`: user management, role management, password reset, API keys, audit, DLP policy export.
 - `Integrations`: connector and response workflow roadmap.
 - `Risk Logic`: severity ranges, scoring formula, detection signals, customer asset context.
-- `Endpoint Scan`: prepares the DSPM Windows server, verifies target workstation WinRM, and scans selected user profile paths.
+- `Endpoint Scan`: prepares the management host when needed, verifies target workstation WinRM with the entered local-admin credential, and scans profile paths, one drive, or all fixed drives.
 
 ## Quick Start
 
@@ -89,25 +89,41 @@ python main.py scan --local-path enterprise_test_data --output report.json
 
 The CLI writes a full JSON report with summary, file findings, permissions, risk reasons, DLP recommendations, and remediation actions.
 
+## File Server Scans
+
+File-server scans use the credential entered in the sidebar only against the `File server / IP` target. For a domain account, enter the domain and username normally. For a server-local admin account, you can leave `Domain` as `WORKGROUP` or set it to the file server name; the scanner also tries the `SERVER\username` form automatically.
+
+By default, hidden administrative shares are skipped. Enable `Scan admin disk shares like C$` only when you intentionally want to scan drive shares such as `C$` or `D$` with a local administrator credential on that file server. `ADMIN$`, `IPC$`, and `print$` are still skipped.
+
+For VM testing:
+
+```text
+File server / IP: LAB-FILE01 or 192.0.2.20
+Domain: WORKGROUP or LAB-FILE01
+Username: svc_dspm_scan
+Password: <file-server-local-admin-password>
+Scan admin disk shares like C$: checked when testing C$ or D$
+```
+
 ## Windows Endpoint Scans
 
-Endpoint scans use WinRM to inspect selected paths under a target workstation profile such as `C:\Users\hr.01`. The recommended flow is:
+Endpoint scans use WinRM to inspect selected paths on a target workstation. The credential entered in the target or endpoint form is used only against that target host, and it should be a local administrator on that workstation.
 
-1. In `Windows server WinRM`, prepare the DSPM host. This enables WinRM, WMI/DCOM firewall groups, Remote Administration firewall rules, the HTTP listener on `5985`, and local remote-admin token policy.
-2. In `Target machine WinRM`, enter the target IP, the Windows profile user to scan, and an administrator credential that is valid on the target workstation. The app first verifies existing WinRM; if it is already reachable, it skips WMI bootstrap.
-3. In `Endpoint scan`, choose a focused path scope first, such as `Desktop only` or `Documents only`. Use `All profile` only after the connection is proven because it can traverse large profile trees.
+1. In `Management server WinRM`, prepare only the DSPM management host if it is not already ready.
+2. In `Target machine WinRM`, enter the target IP, optional Windows profile user to scan, and a local-admin credential that is valid on the target workstation. The app first verifies existing WinRM; if it is already reachable, it skips WMI bootstrap.
+3. In `Endpoint scan`, choose a focused path scope first, such as `Desktop only` or `Documents only`. Use `All profile`, `C drive`, or `All fixed drives` only after the connection is proven because these scopes can traverse large trees.
 
 Example target preparation values:
 
 ```text
-Target host / IP: 10.10.33.150
-Target Windows user: hr.01
-Domain: PROSOL
-Admin username: Administrator
-Admin password: <domain-admin-password>
+Target host / IP: LAB-WKS01 or 192.0.2.150
+Target Windows user: test.user
+Domain: EXAMPLE
+Admin username: svc_dspm_scan
+Admin password: <target-local-admin-password>
 ```
 
-If WinRM is already enabled by Group Policy, `Prepare & Test target WinRM` should report that the existing connection is verified. If it reports WMI access denied, the target rejected remote WMI/DCOM changes for that credential; fix this with GPO or a one-time local bootstrap on the target.
+If WinRM is already enabled by Group Policy, `Prepare & Test target WinRM` should report that the existing connection is verified. If it reports WMI access denied, the target rejected remote WMI/DCOM changes for that credential; make sure the account or group is in the target workstation's local `Administrators` group, or fix this with GPO or a one-time local bootstrap on the target.
 
 ### Group Policy For WinRM Targets
 
@@ -128,7 +144,7 @@ gpupdate /force
 Validate from the DSPM server:
 
 ```powershell
-Test-NetConnection 10.10.33.150 -Port 5985
+Test-NetConnection 192.0.2.150 -Port 5985
 ```
 
 `TcpTestSucceeded : True` means the network path and WinRM listener are reachable.

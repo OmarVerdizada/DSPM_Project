@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css?v=18" />
+    <link rel="stylesheet" href="/static/styles.css?v=19" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -30,11 +30,11 @@
           </label>
           <label>
             Domain
-            <input id="domain" name="domain" value="WORKGROUP" />
+            <input id="domain" name="domain" value="WORKGROUP" placeholder="Domain, WORKGROUP, or server name" />
           </label>
           <label>
             Username
-            <input id="username" name="username" autocomplete="username" placeholder="DOMAIN\\user" />
+            <input id="username" name="username" autocomplete="username" placeholder="Domain or local admin user" />
           </label>
           <label>
             Password
@@ -64,6 +64,10 @@
           <label class="checkbox-row">
             <input id="async_scan" name="async_scan" type="checkbox" checked />
             Run through async queue
+          </label>
+          <label class="checkbox-row">
+            <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
+            Scan admin disk shares like C$
           </label>
           <div class="actions">
             <button type="button" id="test-btn">Test</button>
@@ -391,14 +395,14 @@
           <div class="section-header">
             <div>
               <p class="eyebrow">Workstation discovery</p>
-              <h3>Endpoint user profile scan</h3>
-              <p>Prepare the DSPM Windows server, prepare the target workstation, then scan the selected user profile paths.</p>
+              <h3>Endpoint local-admin scan</h3>
+              <p>Use the credential you enter for the selected endpoint only, then scan a user profile, one drive, all fixed drives, or custom paths.</p>
             </div>
           </div>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
             <div class="panel-title">
-              <h4>1. Windows server WinRM</h4>
+              <h4>1. Management server WinRM</h4>
               <span>DSPM host preparation</span>
             </div>
             <div class="asset-form-grid endpoint-form">
@@ -416,9 +420,9 @@
               </label>
             </div>
             <div class="actions endpoint-actions">
-              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Activate server WinRM</button>
+              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Activate management WinRM</button>
             </div>
-            <p id="local-winrm-status" class="save-status">This prepares the Windows server where DSPM runs. If the backend is not already elevated, enter a local or domain admin credential.</p>
+            <p id="local-winrm-status" class="save-status">This prepares the management server where DSPM runs. Use a management-server admin credential only if the backend is not already elevated.</p>
           </section>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
@@ -466,7 +470,7 @@
               </label>
               <label>
                 Target Windows user
-                <input id="endpoint-target-username" placeholder="j.doe" />
+                <input id="endpoint-target-username" placeholder="j.doe, optional for drive scans" />
               </label>
               <label>
                 Domain
@@ -492,6 +496,8 @@
                   <option value="documents">Documents only</option>
                   <option value="downloads">Downloads only</option>
                   <option value="all">All profile</option>
+                  <option value="c_drive">C drive</option>
+                  <option value="all_fixed_drives">All fixed drives</option>
                   <option value="custom">Custom paths</option>
                 </select>
               </label>
@@ -520,6 +526,13 @@
             <div class="actions endpoint-actions">
               <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
               <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
+            </div>
+            <div id="endpoint-scan-progress" class="scan-progress endpoint-scan-progress hidden" aria-live="polite">
+              <div class="scan-pulse" aria-hidden="true"></div>
+              <div>
+                <strong id="endpoint-scan-progress-label">Scanning endpoint...</strong>
+                <div class="scan-progress-track"><span id="endpoint-scan-progress-bar"></span></div>
+              </div>
             </div>
             <p id="endpoint-status" class="save-status">Fill the endpoint scan details after WinRM is active on the workstation.</p>
           </section>

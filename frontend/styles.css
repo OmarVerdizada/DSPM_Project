@@ -594,6 +594,10 @@ button:disabled {
   transition: width 360ms ease;
 }
 
+.endpoint-scan-progress {
+  width: 100%;
+}
+
 .muted {
   color: var(--muted);
 }

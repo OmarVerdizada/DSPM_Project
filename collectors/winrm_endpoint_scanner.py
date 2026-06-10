@@ -367,6 +367,10 @@ class WinRMEndpointScanner:
             lowered = item.lower()
             if lowered == "all":
                 resolved.append(base)
+            elif lowered in {"c_drive", "system_drive"}:
+                resolved.append("C:\\")
+            elif lowered in {"all_fixed_drives", "fixed_drives", "all_drives"}:
+                resolved.append("__DSPM_FIXED_DRIVES__")
             elif lowered in DEFAULT_PROFILE_FOLDERS:
                 resolved.append(f"{base}\\{DEFAULT_PROFILE_FOLDERS[lowered]}")
             elif ":" in item or item.startswith("\\\\"):
@@ -412,7 +416,13 @@ class WinRMEndpointScanner:
                 ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_command],
             )
 
-        temp_path = f"$p = Join-Path $env:TEMP '{b64_name}'; "
+        temp_path = (
+            "$tempRoot = $env:TEMP; "
+            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = $env:TMP; } "
+            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = 'C:\\Windows\\Temp'; } "
+            "if (-not (Test-Path -LiteralPath $tempRoot)) { New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null; } "
+            f"$p = Join-Path $tempRoot '{b64_name}'; "
+        )
         init = run_short(temp_path + "Set-Content -LiteralPath $p -Value '' -Encoding ASCII")
         if init.status_code != 0:
             return init
@@ -421,24 +431,30 @@ class WinRMEndpointScanner:
             chunk = encoded_script[index : index + chunk_size]
             append = run_short(temp_path + f"Add-Content -LiteralPath $p -Value '{chunk}' -Encoding ASCII")
             if append.status_code != 0:
-                run_short(temp_path + "Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue")
+                run_short(temp_path + "if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }")
                 return append
 
         materialize = (
             "$ErrorActionPreference = 'Stop'; "
-            f"$b64 = Join-Path $env:TEMP '{b64_name}'; "
+            "$tempRoot = $env:TEMP; "
+            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = $env:TMP; } "
+            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = 'C:\\Windows\\Temp'; } "
+            f"$b64 = Join-Path $tempRoot '{b64_name}'; "
             "$raw = (Get-Content -LiteralPath $b64 -Raw).Trim(); "
             "$script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw)); "
             "$null = [ScriptBlock]::Create($script)"
         )
         materialized = run_short(materialize)
         if materialized.status_code != 0:
-            run_short(temp_path + "Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue")
+            run_short(temp_path + "if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }")
             return materialized
 
         execute = (
             "$ErrorActionPreference = 'Stop'; "
-            f"$b64 = Join-Path $env:TEMP '{b64_name}'; "
+            "$tempRoot = $env:TEMP; "
+            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = $env:TMP; } "
+            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = 'C:\\Windows\\Temp'; } "
+            f"$b64 = Join-Path $tempRoot '{b64_name}'; "
             "$raw = (Get-Content -LiteralPath $b64 -Raw).Trim(); "
             "$script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw)); "
             "$scriptBlock = [ScriptBlock]::Create($script); "
@@ -450,7 +466,7 @@ class WinRMEndpointScanner:
             "Write-Error $_; "
             "$exitCode = 1 "
             "} finally { "
-            "Remove-Item -LiteralPath $b64 -Force -ErrorAction SilentlyContinue "
+            "if (Test-Path -LiteralPath $b64) { Remove-Item -LiteralPath $b64 -Force -ErrorAction SilentlyContinue } "
             "} "
             "exit $exitCode"
         )
@@ -548,6 +564,27 @@ def _scan_script(
 
     function Resolve-DspmRoot($root) {{
       $roots = New-Object System.Collections.Generic.List[string]
+      if ($root -eq "__DSPM_FIXED_DRIVES__") {{
+        try {{
+          $drives = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue
+          foreach ($drive in $drives) {{
+            if ($drive.DeviceID) {{
+              $driveRoot = "$($drive.DeviceID)\"
+              if (Test-Path -LiteralPath $driveRoot) {{
+                $roots.Add($driveRoot) | Out-Null
+              }}
+            }}
+          }}
+        }} catch {{
+          Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {{
+            $driveRoot = $_.Root
+            if ($driveRoot -and (Test-Path -LiteralPath $driveRoot)) {{
+              $roots.Add($driveRoot) | Out-Null
+            }}
+          }}
+        }}
+        return @($roots.ToArray())
+      }}
       if (Test-Path -LiteralPath $root) {{
         $roots.Add($root) | Out-Null
         return @($roots.ToArray())

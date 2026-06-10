@@ -29,6 +29,7 @@ class ScanConfig:
     include_system: bool = False
     hidden_filter_enabled: bool = False
     system_filter_enabled: bool = False
+    include_admin_shares: bool = False
 
 
 @dataclass(slots=True)
@@ -96,6 +97,7 @@ class DSPMDiscoveryEngine:
                 include_system=self.config.include_system,
                 hidden_filter_enabled=self.config.hidden_filter_enabled,
                 system_filter_enabled=self.config.system_filter_enabled,
+                include_admin_shares=self.config.include_admin_shares,
             )
         )
         return scanner.test_connection()
@@ -127,6 +129,7 @@ class DSPMDiscoveryEngine:
                     include_system=self.config.include_system,
                     hidden_filter_enabled=self.config.hidden_filter_enabled,
                     system_filter_enabled=self.config.system_filter_enabled,
+                    include_admin_shares=self.config.include_admin_shares,
                 )
             )
             return scanner.scan()
