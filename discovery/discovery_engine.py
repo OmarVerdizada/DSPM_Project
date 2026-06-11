@@ -30,6 +30,7 @@ class ScanConfig:
     hidden_filter_enabled: bool = False
     system_filter_enabled: bool = False
     include_admin_shares: bool = False
+    inspect_archives: bool = False
 
 
 @dataclass(slots=True)
@@ -98,6 +99,7 @@ class DSPMDiscoveryEngine:
                 hidden_filter_enabled=self.config.hidden_filter_enabled,
                 system_filter_enabled=self.config.system_filter_enabled,
                 include_admin_shares=self.config.include_admin_shares,
+                inspect_archives=self.config.inspect_archives,
             )
         )
         return scanner.test_connection()
@@ -130,6 +132,7 @@ class DSPMDiscoveryEngine:
                     hidden_filter_enabled=self.config.hidden_filter_enabled,
                     system_filter_enabled=self.config.system_filter_enabled,
                     include_admin_shares=self.config.include_admin_shares,
+                    inspect_archives=self.config.inspect_archives,
                 )
             )
             return scanner.scan()
@@ -144,6 +147,7 @@ class DSPMDiscoveryEngine:
                 hidden_filter_enabled=self.config.hidden_filter_enabled,
                 system_filter_enabled=self.config.system_filter_enabled,
                 max_depth=self.config.max_depth,
+                inspect_archives=self.config.inspect_archives,
             )
 
         return []

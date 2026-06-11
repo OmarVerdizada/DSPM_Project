@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import socket
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 import re
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
-from collectors.file_scanner import TEXT_EXTENSIONS, detect_extension, matches_scan_filters, normalize_extension_filter
+from collectors.file_scanner import (
+    CONTENT_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    content_status_for_extension,
+    detect_extension,
+    matches_scan_filters,
+    normalize_extension_filter,
+    scan_mode_for_extension,
+)
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,6 +42,7 @@ class SMBConfig:
     allowed_extensions: list[str] | None = None
     extension_filter_enabled: bool = False
     include_admin_shares: bool = False
+    inspect_archives: bool = False
 
 
 class SMBScanner:
@@ -196,6 +206,8 @@ class SMBScanner:
                 continue
 
             extension = detect_extension(remote_path)
+            if self.config.inspect_archives and self._should_scan_archive_entries(extension):
+                records.extend(self._read_zip_entries(share_name, remote_path, is_hidden, is_system))
             if not matches_scan_filters(
                 extension,
                 is_hidden,
@@ -208,6 +220,7 @@ class SMBScanner:
                 self.config.system_filter_enabled,
             ):
                 continue
+            content = self._read_file_preview(share_name, remote_path, extension)
             records.append(
                 {
                     "source": "smb",
@@ -219,12 +232,78 @@ class SMBScanner:
                     "is_dir": False,
                     "is_hidden": is_hidden,
                     "is_system": is_system,
-                    "content": self._read_file_preview(share_name, remote_path, extension),
+                    "content": content,
                     "acl": {},
+                    "scan_mode": scan_mode_for_extension(extension),
+                    "content_status": content_status_for_extension(extension, content, self.config.read_content),
+                    "content_scannable": extension in CONTENT_EXTENSIONS,
                 }
             )
 
         return records
+
+    def _should_scan_archive_entries(self, extension: str) -> bool:
+        if extension != ".zip" or not self.config.extension_filter_enabled:
+            return False
+        archive_extensions = {".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"}
+        return any(item not in archive_extensions for item in self.extension_filter)
+
+    def _read_zip_entries(self, share_name: str, path: str, is_hidden: bool, is_system: bool) -> list[dict]:
+        if self.connection is None:
+            return []
+        try:
+            from io import BytesIO
+
+            buffer = BytesIO()
+            self.connection.retrieveFileFromOffset(share_name, path, buffer, offset=0, max_length=50 * 1024 * 1024)
+            buffer.seek(0)
+            records: list[dict] = []
+            with zipfile.ZipFile(buffer) as archive:
+                for entry in archive.infolist():
+                    if entry.is_dir():
+                        continue
+                    extension = detect_extension(entry.filename)
+                    if not matches_scan_filters(
+                        extension,
+                        is_hidden,
+                        is_system,
+                        self.extension_filter,
+                        self.config.extension_filter_enabled,
+                        self.config.include_hidden,
+                        self.config.include_system,
+                        self.config.hidden_filter_enabled,
+                        self.config.system_filter_enabled,
+                    ):
+                        continue
+                    content = ""
+                    if self.config.read_content and extension in TEXT_EXTENSIONS:
+                        try:
+                            with archive.open(entry) as handle:
+                                content = handle.read(self.config.max_read_bytes).decode("utf-8", errors="replace")
+                        except (OSError, RuntimeError, zipfile.BadZipFile):
+                            content = ""
+                    records.append(
+                        {
+                            "source": "smb",
+                            "share": share_name,
+                            "path": f"{path}::{entry.filename}",
+                            "name": PurePosixPath(entry.filename).name,
+                            "size": int(entry.file_size or 0),
+                            "extension": extension,
+                            "is_dir": False,
+                            "is_hidden": is_hidden,
+                            "is_system": is_system,
+                            "content": content,
+                            "acl": {},
+                            "scan_mode": scan_mode_for_extension(extension),
+                            "content_status": content_status_for_extension(extension, content, self.config.read_content),
+                            "content_scannable": extension in CONTENT_EXTENSIONS,
+                        }
+                    )
+            return records
+        except Exception as exc:
+            logger.debug("Could not inspect archive entries for %s:%s: %s", share_name, path, exc)
+            return []
 
     def _skip_path(self, path: str) -> bool:
         normalized = path.replace("/", "\\").lower()

@@ -12,7 +12,15 @@ from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
-from collectors.file_scanner import TEXT_EXTENSIONS, detect_extension, normalize_extension_filter, normalize_records
+from collectors.file_scanner import (
+    CONTENT_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    content_status_for_extension,
+    detect_extension,
+    normalize_extension_filter,
+    normalize_records,
+    scan_mode_for_extension,
+)
 
 
 DEFAULT_PROFILE_FOLDERS = {
@@ -335,6 +343,7 @@ class WinRMEndpointScanner:
         for item in raw_records:
             path = item.get("path", "")
             extension = item.get("extension") or detect_extension(path)
+            content = item.get("content", "")
             records.append(
                 {
                     "source": "endpoint-winrm",
@@ -346,12 +355,16 @@ class WinRMEndpointScanner:
                     "is_dir": False,
                     "is_hidden": bool(item.get("is_hidden", False)),
                     "is_system": bool(item.get("is_system", False)),
-                    "content": item.get("content", ""),
+                    "content": content,
                     "acl": {
                         "owner": item.get("owner", ""),
                         "principals": item.get("principals", []),
                         "permissions": item.get("permissions", []),
                     },
+                    "scan_mode": item.get("scan_mode") or scan_mode_for_extension(extension),
+                    "content_status": item.get("content_status")
+                    or content_status_for_extension(extension, content, self.config.read_content),
+                    "content_scannable": bool(item.get("content_scannable", extension in CONTENT_EXTENSIONS)),
                     "created_at": item.get("created_at", ""),
                     "modified_at": item.get("modified_at", ""),
                     "accessed_at": item.get("accessed_at", ""),

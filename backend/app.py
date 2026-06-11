@@ -104,6 +104,7 @@ class ConnectionRequest(BaseModel):
     hidden_filter_enabled: bool = False
     system_filter_enabled: bool = False
     include_admin_shares: bool = False
+    inspect_archives: bool = False
 
 
 class AssetOverride(BaseModel):
@@ -791,6 +792,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         hidden_filter_enabled=payload.hidden_filter_enabled,
         system_filter_enabled=payload.system_filter_enabled,
         include_admin_shares=payload.include_admin_shares,
+        inspect_archives=payload.inspect_archives,
         asset_overrides=[
             {
                 "pattern": item.pattern.strip(),

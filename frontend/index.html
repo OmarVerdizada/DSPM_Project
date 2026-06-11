@@ -55,10 +55,15 @@
           <div class="extension-filter">
             <label for="extension-search">Extension filter</label>
             <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+            <div class="extension-selected" data-extension-selected-for="file-server"></div>
             <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
             <div class="extension-actions" aria-label="Extension presets">
               <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
               <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
+            </div>
+            <div class="extension-actions" aria-label="Custom extension">
+              <input id="custom-extension-input" type="text" placeholder=".custom" />
+              <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add</button>
             </div>
           </div>
           <label class="checkbox-row">
@@ -68,6 +73,10 @@
           <label class="checkbox-row">
             <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
             Scan admin disk shares like C$
+          </label>
+          <label class="checkbox-row">
+            <input id="inspect_archives" name="inspect_archives" type="checkbox" />
+            Inspect ZIP archive entries
           </label>
           <div class="actions">
             <button type="button" id="test-btn">Test</button>
@@ -529,10 +538,15 @@
             <div class="extension-filter endpoint-extension-filter">
               <label for="endpoint-extension-search">Endpoint extension filter</label>
               <input id="endpoint-extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+              <div class="extension-selected" data-extension-selected-for="endpoint"></div>
               <div id="endpoint_allowed_extensions" class="extension-list" role="group" aria-label="Endpoint extension filter"></div>
               <div class="extension-actions" aria-label="Endpoint extension presets">
                 <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="all">All</button>
                 <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="clear">Clear</button>
+              </div>
+              <div class="extension-actions" aria-label="Endpoint custom extension">
+                <input id="endpoint-custom-extension-input" type="text" placeholder=".custom" />
+                <button type="button" class="secondary-btn mini-btn" id="endpoint-add-custom-extension-btn">Add</button>
               </div>
             </div>
             <div class="actions endpoint-actions">

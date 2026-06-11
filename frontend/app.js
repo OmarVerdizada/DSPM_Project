@@ -12,6 +12,10 @@ const allowedExtensionsList = document.querySelector("#allowed_extensions");
 const extensionSearch = document.querySelector("#extension-search");
 const endpointAllowedExtensionsList = document.querySelector("#endpoint_allowed_extensions");
 const endpointExtensionSearch = document.querySelector("#endpoint-extension-search");
+const customExtensionInput = document.querySelector("#custom-extension-input");
+const addCustomExtensionBtn = document.querySelector("#add-custom-extension-btn");
+const endpointCustomExtensionInput = document.querySelector("#endpoint-custom-extension-input");
+const endpointAddCustomExtensionBtn = document.querySelector("#endpoint-add-custom-extension-btn");
 const toastHost = document.querySelector("#toast-host");
 const health = document.querySelector("#health");
 const filterInput = document.querySelector("#filter");
@@ -294,10 +298,24 @@ const EXTENSION_PRESETS = {
   clear: [],
 };
 
+const EXTENSION_GROUP_ORDER = [
+  "Scope",
+  "Secrets & config",
+  "Documents",
+  "Data & exports",
+  "Source code",
+  "Archives",
+  "System & binaries",
+  "Media",
+  "Custom",
+  "Other",
+];
+
 let accessToken = safeSessionGet("dspm-access-token") || "";
 let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
 let currentUser = safeSessionGet("dspm-user") || "admin";
 let currentRole = safeSessionGet("dspm-role") || "admin";
+let customExtensions = loadCustomExtensions();
 let latestFiles = [];
 let latestReport = null;
 let rowOverrides = loadRowOverrides();
@@ -360,6 +378,10 @@ function authHeaders() {
 function readPayload() {
   const data = new FormData(form);
   const selectedExtensions = readSelectedExtensions();
+  const searchedExtension = readSearchExtension(extensionSearch);
+  if (searchedExtension && !selectedExtensions.includes(searchedExtension)) {
+    selectedExtensions.push(searchedExtension);
+  }
   const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
   return {
     server: data.get("server") || "",
@@ -376,6 +398,7 @@ function readPayload() {
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
     system_filter_enabled: selectedExtensions.includes("__system__"),
     include_admin_shares: Boolean(data.get("include_admin_shares")),
+    inspect_archives: Boolean(data.get("inspect_archives")),
     async_scan: Boolean(data.get("async_scan")),
     asset_overrides: assetRules,
   };
@@ -388,66 +411,185 @@ function readSelectedExtensions(list = allowedExtensionsList) {
 
 function readSearchExtension(search) {
   const value = search?.value?.trim().toLowerCase() || "";
-  if (!value || value.includes(" ") || value.includes(",")) return "";
-  return value.startsWith(".") ? value : `.${value}`;
+  return normalizeExtension(value);
 }
 
 function renderExtensionFilter(list = allowedExtensionsList, search = extensionSearch) {
   if (!list) return;
-  const scopeOptions = FILE_EXTENSION_OPTIONS.filter(([value]) => !value.startsWith("."));
-  const extensionOptions = FILE_EXTENSION_OPTIONS
-    .filter(([value]) => value.startsWith("."))
-    .sort(([first], [second]) => first.localeCompare(second));
-  list.innerHTML = [...scopeOptions, ...extensionOptions].map(
-    ([extension, label]) => `
-      <label class="extension-option" data-extension-label="${escapeHtml(`${extension} ${label}`.toLowerCase())}">
+  const selectedBefore = new Set(readSelectedExtensions(list));
+  const options = [
+    ...FILE_EXTENSION_OPTIONS.filter(([value]) => !value.startsWith(".")).map(([extension, label]) => [extension, label, "Scope"]),
+    ...getExtensionOptions().map(([extension, label]) => [extension, label, extensionGroupFor(extension)]),
+  ];
+  const groups = new Map();
+  options.forEach(([extension, label, group]) => {
+    const bucket = groups.get(group) || [];
+    bucket.push([extension, label]);
+    groups.set(group, bucket);
+  });
+  list.innerHTML = EXTENSION_GROUP_ORDER
+    .filter((group) => groups.has(group))
+    .map((group) => {
+      const rows = groups.get(group).sort(([first], [second]) => first.localeCompare(second)).map(
+        ([extension, label]) => `
+        <label class="extension-option" data-extension-group="${escapeHtml(group.toLowerCase())}" data-extension-label="${escapeHtml(`${extension} ${label} ${group}`.toLowerCase())}">
         <input type="checkbox" value="${extension}" />
         <span>${extension.startsWith(".") ? `${escapeHtml(extension)} - ` : ""}${escapeHtml(label)}</span>
       </label>
     `
-  ).join("");
-  applyExtensionPreset("clear", list, search);
+      ).join("");
+      return `<div class="extension-group" data-extension-group-wrap="${escapeHtml(group.toLowerCase())}">
+        <div class="extension-group-heading">${escapeHtml(group)}</div>
+        ${rows}
+      </div>`;
+    }).join("");
+  [...list.querySelectorAll("input[type='checkbox']")].forEach((input) => {
+    input.checked = selectedBefore.has(input.value);
+  });
+  reorderExtensionOptions(list);
+  filterExtensionList(list, search);
+  updateExtensionSummary(list);
+}
+
+function getExtensionOptions() {
+  const seen = new Set();
+  const options = [];
+  FILE_EXTENSION_OPTIONS
+    .filter(([value]) => value.startsWith("."))
+    .forEach(([value, label]) => {
+      const normalized = normalizeExtension(value);
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      options.push([normalized, label]);
+    });
+  customExtensions.forEach((extension) => {
+    if (seen.has(extension)) return;
+    seen.add(extension);
+    options.push([extension, "Custom extension"]);
+  });
+  return options;
+}
+
+function normalizeExtension(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw || raw.includes(" ") || raw.includes(",") || raw.includes("/") || raw.includes("\\")) return "";
+  const extension = raw.startsWith(".") ? raw : `.${raw}`;
+  if (!/^\.[a-z0-9][a-z0-9._+-]{0,40}$/.test(extension)) return "";
+  return extension;
+}
+
+function extensionGroupFor(extension) {
+  if (customExtensions.includes(extension)) return "Custom";
+  if ([".env", ".pem", ".key", ".crt", ".cer", ".pfx", ".p12", ".kdbx", ".npmrc", ".pypirc", ".netrc", ".aws", ".ovpn", ".pcf", ".mobileconfig", ".rdp"].includes(extension)) {
+    return "Secrets & config";
+  }
+  if ([".doc", ".docx", ".docm", ".dotx", ".dotm", ".rtf", ".odt", ".ott", ".pages", ".pdf", ".ppt", ".pptx", ".pptm", ".odp", ".otp", ".keynote", ".one", ".pub", ".vsd", ".vsdx", ".dwg", ".dxf"].includes(extension)) {
+    return "Documents";
+  }
+  if ([".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".config", ".properties", ".sql", ".dump", ".backup", ".bak", ".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".xls", ".xlsx", ".xlsm", ".xlsb", ".ods", ".ots", ".numbers", ".pst", ".ost", ".msg", ".eml", ".mbox", ".ics", ".dat"].includes(extension)) {
+    return "Data & exports";
+  }
+  if ([".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".sh", ".py", ".js", ".ts", ".tsx", ".jsx", ".html", ".htm", ".css", ".scss", ".java", ".cs", ".go", ".rb", ".php", ".c", ".cpp", ".h", ".hpp", ".md", ".adoc", ".rst", ".yara", ".reg", ".tf", ".tfvars", ".tfstate", ".hcl", ".dockerfile"].includes(extension)) {
+    return "Source code";
+  }
+  if ([".zip", ".7z", ".rar", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".cab", ".jar", ".iso", ".vhd", ".vhdx"].includes(extension)) {
+    return "Archives";
+  }
+  if ([".sys", ".dll", ".exe", ".msi", ".lnk", ".tmp", ".temp", ".old", ".swp", ".bin", ".gpg", ".pgp"].includes(extension)) {
+    return "System & binaries";
+  }
+  if ([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".svg", ".mp3", ".wav", ".mp4", ".mov", ".avi", ".mkv"].includes(extension)) {
+    return "Media";
+  }
+  return "Other";
 }
 
 function applyExtensionPreset(name, list = allowedExtensionsList, search = extensionSearch) {
   if (!list) return;
-  const selected = new Set(EXTENSION_PRESETS[name] || []);
+  const selected = new Set(name === "all" ? getExtensionOptions().map(([extension]) => extension) : EXTENSION_PRESETS[name] || []);
   [...list.querySelectorAll("input[type='checkbox']")].forEach((input) => {
     input.checked = selected.has(input.value);
   });
   reorderExtensionOptions(list);
   filterExtensionList(list, search);
+  updateExtensionSummary(list);
 }
 
 function filterExtensionList(list = allowedExtensionsList, search = extensionSearch) {
   if (!list || !search) return;
   const query = search.value.trim().toLowerCase();
-  const hasChecked = Boolean(list.querySelector("input[type='checkbox']:checked"));
   list.querySelectorAll(".extension-option").forEach((option) => {
-    const input = option.querySelector("input");
     const matchesQuery = !query || option.dataset.extensionLabel.includes(query);
-    const keepChecked = hasChecked && input?.checked;
-    const hideForQuery = query && !matchesQuery && !keepChecked;
-    const hideUnselectedAfterChoice = !query && hasChecked && !input?.checked;
-    option.classList.toggle("hidden", Boolean(hideForQuery || hideUnselectedAfterChoice));
+    option.classList.toggle("hidden", Boolean(query && !matchesQuery));
   });
+  list.querySelectorAll(".extension-group").forEach((group) => {
+    const visibleRows = [...group.querySelectorAll(".extension-option")].some((option) => !option.classList.contains("hidden"));
+    group.classList.toggle("hidden", !visibleRows);
+  });
+  updateExtensionSummary(list);
 }
 
 function reorderExtensionOptions(list = allowedExtensionsList) {
   if (!list) return;
-  const options = [...list.querySelectorAll(".extension-option")];
-  options
-    .sort((first, second) => {
-      const firstInput = first.querySelector("input");
-      const secondInput = second.querySelector("input");
-      const checkedDiff = Number(secondInput.checked) - Number(firstInput.checked);
-      if (checkedDiff) return checkedDiff;
-      const firstScope = firstInput.value.startsWith(".") ? 1 : 0;
-      const secondScope = secondInput.value.startsWith(".") ? 1 : 0;
-      if (firstScope !== secondScope) return firstScope - secondScope;
-      return firstInput.value.localeCompare(secondInput.value);
-    })
-    .forEach((option) => list.appendChild(option));
+  list.querySelectorAll(".extension-group").forEach((group) => {
+    [...group.querySelectorAll(".extension-option")]
+      .sort((first, second) => {
+        const firstInput = first.querySelector("input");
+        const secondInput = second.querySelector("input");
+        const checkedDiff = Number(secondInput.checked) - Number(firstInput.checked);
+        if (checkedDiff) return checkedDiff;
+        return firstInput.value.localeCompare(secondInput.value);
+      })
+      .forEach((option) => group.appendChild(option));
+  });
+}
+
+function updateExtensionSummary(list = allowedExtensionsList) {
+  const selected = readSelectedExtensions(list);
+  const host = list === endpointAllowedExtensionsList
+    ? document.querySelector('[data-extension-selected-for="endpoint"]')
+    : document.querySelector('[data-extension-selected-for="file-server"]');
+  if (!host) return;
+  if (!selected.length) {
+    host.innerHTML = '<span class="extension-selected-empty">No extension filter selected</span>';
+    return;
+  }
+  host.innerHTML = selected
+    .map((extension) => `<button type="button" class="extension-chip" data-remove-extension="${escapeHtml(extension)}">${escapeHtml(extension)}<span aria-hidden="true">x</span></button>`)
+    .join("");
+}
+
+function removeSelectedExtension(list, extension) {
+  const input = [...(list?.querySelectorAll("input[type='checkbox']") || [])].find((item) => item.value === extension);
+  if (!input) return;
+  input.checked = false;
+  reorderExtensionOptions(list);
+  filterExtensionList(list, list === endpointAllowedExtensionsList ? endpointExtensionSearch : extensionSearch);
+}
+
+function addCustomExtensionFromInput(input, list, search) {
+  const extension = normalizeExtension(input?.value);
+  if (!extension) {
+    setStatus("Custom extension format is invalid.");
+    return;
+  }
+  if (!customExtensions.includes(extension) && !FILE_EXTENSION_OPTIONS.some(([value]) => normalizeExtension(value) === extension)) {
+    customExtensions = [...customExtensions, extension].sort();
+    saveCustomExtensions();
+  }
+  if (input) input.value = "";
+  if (search) search.value = extension;
+  renderExtensionFilter(allowedExtensionsList, extensionSearch);
+  renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
+  [allowedExtensionsList, endpointAllowedExtensionsList].forEach((targetList) => {
+    [...targetList.querySelectorAll("input[type='checkbox']")].forEach((checkbox) => {
+      checkbox.checked = checkbox.checked || checkbox.value === extension;
+    });
+    reorderExtensionOptions(targetList);
+  });
+  filterExtensionList(allowedExtensionsList, extensionSearch);
+  filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
+  setStatus(`Custom extension saved: ${extension}`);
 }
 
 function readEndpointPayload() {
@@ -1199,6 +1341,20 @@ function loadRowOverrides() {
   } catch {
     return {};
   }
+}
+
+function loadCustomExtensions() {
+  try {
+    const saved = JSON.parse(safeStorageGet(tenantStorageKey("custom-extensions")) || "[]");
+    if (!Array.isArray(saved)) return [];
+    return [...new Set(saved.map(normalizeExtension).filter(Boolean))].sort();
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomExtensions() {
+  safeStorageSet(tenantStorageKey("custom-extensions"), JSON.stringify(customExtensions));
 }
 
 function saveRowOverrides() {
@@ -3164,6 +3320,18 @@ document.querySelectorAll("[data-extension-preset]").forEach((button) => {
 document.querySelectorAll("[data-endpoint-extension-preset]").forEach((button) => {
   button.addEventListener("click", () => applyExtensionPreset(button.dataset.endpointExtensionPreset, endpointAllowedExtensionsList, endpointExtensionSearch));
 });
+addCustomExtensionBtn?.addEventListener("click", () => addCustomExtensionFromInput(customExtensionInput, allowedExtensionsList, extensionSearch));
+customExtensionInput?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  addCustomExtensionFromInput(customExtensionInput, allowedExtensionsList, extensionSearch);
+});
+endpointAddCustomExtensionBtn?.addEventListener("click", () => addCustomExtensionFromInput(endpointCustomExtensionInput, endpointAllowedExtensionsList, endpointExtensionSearch));
+endpointCustomExtensionInput?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  addCustomExtensionFromInput(endpointCustomExtensionInput, endpointAllowedExtensionsList, endpointExtensionSearch);
+});
 extensionSearch?.addEventListener("input", () => filterExtensionList(allowedExtensionsList, extensionSearch));
 endpointExtensionSearch?.addEventListener("input", () => {
   filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
@@ -3179,6 +3347,15 @@ endpointAllowedExtensionsList?.addEventListener("change", (event) => {
   reorderExtensionOptions(endpointAllowedExtensionsList);
   filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
   tuneEndpointScanDefaults();
+});
+document.querySelectorAll("[data-extension-selected-for]").forEach((host) => {
+  host.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-remove-extension]");
+    if (!chip) return;
+    const isEndpoint = host.dataset.extensionSelectedFor === "endpoint";
+    removeSelectedExtension(isEndpoint ? endpointAllowedExtensionsList : allowedExtensionsList, chip.dataset.removeExtension);
+    if (isEndpoint) tuneEndpointScanDefaults();
+  });
 });
 
 testBtn.addEventListener("click", async () => {
@@ -3611,7 +3788,10 @@ tenantSwitcher.addEventListener("change", async () => {
   latestDashboard = null;
   rowOverrides = loadRowOverrides();
   assetRules = loadAssetRules();
+  customExtensions = loadCustomExtensions();
   renderProfile();
+  renderExtensionFilter(allowedExtensionsList, extensionSearch);
+  renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
   renderAssetRules();
   renderRows([]);
   updateSummaryFromFiles([]);

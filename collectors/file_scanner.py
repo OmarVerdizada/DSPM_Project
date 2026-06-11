@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
+import zipfile
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
 
@@ -153,6 +154,28 @@ METADATA_EXTENSIONS = {
 }
 
 SCANNABLE_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS | METADATA_EXTENSIONS
+ARCHIVE_EXTENSIONS = {".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"}
+CONTENT_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS
+
+
+def scan_mode_for_extension(extension: str) -> str:
+    if extension in TEXT_EXTENSIONS:
+        return "plain_text"
+    if extension in BINARY_TEXT_EXTENSIONS:
+        return "document_text"
+    if extension in ARCHIVE_EXTENSIONS:
+        return "archive_metadata"
+    if extension in METADATA_EXTENSIONS:
+        return "metadata_only"
+    return "unknown"
+
+
+def content_status_for_extension(extension: str, content: str, read_content: bool = True) -> str:
+    if not read_content:
+        return "not_requested"
+    if extension in CONTENT_EXTENSIONS:
+        return "scanned" if content else "empty_or_unreadable"
+    return "metadata_only"
 
 
 def normalize_extension_filter(extensions: Iterable[str] | None) -> set[str]:
@@ -222,6 +245,7 @@ class FileRecord:
     acl: dict | None = None
 
     def to_dict(self) -> dict:
+        scan_mode = scan_mode_for_extension(self.extension)
         return {
             "source": self.source,
             "share": self.share,
@@ -234,6 +258,9 @@ class FileRecord:
             "is_system": self.is_system,
             "content": self.content,
             "acl": self.acl or {},
+            "scan_mode": scan_mode,
+            "content_status": content_status_for_extension(self.extension, self.content),
+            "content_scannable": self.extension in CONTENT_EXTENSIONS,
         }
 
 
@@ -262,6 +289,7 @@ def scan_directory(
     hidden_filter_enabled: bool = False,
     system_filter_enabled: bool = False,
     max_depth: int = 4,
+    inspect_archives: bool = False,
 ) -> list[dict]:
     root_path = Path(path).expanduser().resolve()
     if not root_path.exists():
@@ -270,10 +298,16 @@ def scan_directory(
     extension_filter = normalize_extension_filter(allowed_extensions)
     records: list[FileRecord] = []
 
+    scan_archive_entries = inspect_archives and extension_filter_enabled and any(
+        extension not in ARCHIVE_EXTENSIONS for extension in extension_filter
+    )
+
     def add_file(item: Path) -> None:
         extension = detect_extension(item)
         is_hidden = is_hidden_path(item)
         is_system = is_system_path(item)
+        if scan_archive_entries and extension == ".zip":
+            add_zip_entries(item, is_hidden, is_system)
         if not matches_scan_filters(
             extension,
             is_hidden,
@@ -304,6 +338,78 @@ def scan_directory(
                 content=read_text_preview(item),
             )
         )
+
+    def add_zip_entries(archive_path: Path, is_hidden: bool, is_system: bool, depth: int = 0) -> None:
+        if depth > 2:
+            return
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                for entry in archive.infolist():
+                    if entry.is_dir():
+                        continue
+                    entry_path = f"{archive_path}::{entry.filename}"
+                    extension = detect_extension(entry.filename)
+                    if matches_scan_filters(
+                        extension,
+                        is_hidden,
+                        is_system,
+                        extension_filter,
+                        extension_filter_enabled,
+                        include_hidden,
+                        include_system,
+                        hidden_filter_enabled,
+                        system_filter_enabled,
+                    ):
+                        records.append(
+                            FileRecord(
+                                source="local",
+                                path=entry_path,
+                                name=Path(entry.filename).name,
+                                size=entry.file_size,
+                                extension=extension,
+                                is_hidden=is_hidden,
+                                is_system=is_system,
+                                content=read_zip_entry_preview(archive, entry, extension),
+                            )
+                        )
+                    if extension == ".zip":
+                        try:
+                            from io import BytesIO
+
+                            nested = BytesIO(archive.read(entry))
+                            with zipfile.ZipFile(nested) as nested_archive:
+                                for nested_entry in nested_archive.infolist():
+                                    if nested_entry.is_dir():
+                                        continue
+                                    nested_path = f"{entry_path}::{nested_entry.filename}"
+                                    nested_extension = detect_extension(nested_entry.filename)
+                                    if matches_scan_filters(
+                                        nested_extension,
+                                        is_hidden,
+                                        is_system,
+                                        extension_filter,
+                                        extension_filter_enabled,
+                                        include_hidden,
+                                        include_system,
+                                        hidden_filter_enabled,
+                                        system_filter_enabled,
+                                    ):
+                                        records.append(
+                                            FileRecord(
+                                                source="local",
+                                                path=nested_path,
+                                                name=Path(nested_entry.filename).name,
+                                                size=nested_entry.file_size,
+                                                extension=nested_extension,
+                                                is_hidden=is_hidden,
+                                                is_system=is_system,
+                                                content=read_zip_entry_preview(nested_archive, nested_entry, nested_extension),
+                                            )
+                                        )
+                        except (OSError, zipfile.BadZipFile):
+                            continue
+        except (OSError, zipfile.BadZipFile):
+            return
 
     def walk(folder: Path, depth: int) -> None:
         if depth > max_depth:
@@ -342,6 +448,17 @@ def scan_directory(
         walk(root_path, 0)
 
     return [record.to_dict() for record in records]
+
+
+def read_zip_entry_preview(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, extension: str, max_bytes: int = 1024 * 256) -> str:
+    if extension not in TEXT_EXTENSIONS:
+        return ""
+    try:
+        with archive.open(entry) as handle:
+            data = handle.read(max_bytes)
+        return data.decode("utf-8", errors="replace")
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        return ""
 
 
 def is_hidden_path(path: Path) -> bool:
@@ -404,6 +521,10 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "is_system": bool(record.get("is_system", False)),
                 "content": record.get("content", ""),
                 "acl": record.get("acl") or {},
+                "scan_mode": record.get("scan_mode") or scan_mode_for_extension(extension),
+                "content_status": record.get("content_status")
+                or content_status_for_extension(extension, str(record.get("content", ""))),
+                "content_scannable": bool(record.get("content_scannable", extension in CONTENT_EXTENSIONS)),
             }
         )
     return normalized
