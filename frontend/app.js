@@ -45,9 +45,18 @@ const profileRole = document.querySelector("#profile-role");
 const profilePanelName = document.querySelector("#profile-panel-name");
 const profilePanelTenant = document.querySelector("#profile-panel-tenant");
 const refreshHistoryBtn = document.querySelector("#refresh-history-btn");
+const historyRange = document.querySelector("#history-range");
+const historyFrom = document.querySelector("#history-from");
+const historyTo = document.querySelector("#history-to");
 const historyBody = document.querySelector("#history-body");
 const executiveSummary = document.querySelector("#executive-summary");
 const overviewInsights = document.querySelector("#overview-insights");
+const fileServerContext = document.querySelector("#file-server-context");
+const endpointContext = document.querySelector("#endpoint-context");
+const findingsSignalSummary = document.querySelector("#findings-signal-summary");
+const findingsPrioritySummary = document.querySelector("#findings-priority-summary");
+const exposurePermissionsSummary = document.querySelector("#exposure-permissions-summary");
+const exposureCoverageSummary = document.querySelector("#exposure-coverage-summary");
 const refreshExecutiveBtn = document.querySelector("#refresh-executive-btn");
 const executiveHero = document.querySelector("#executive-hero");
 const riskDistribution = document.querySelector("#risk-distribution");
@@ -318,6 +327,8 @@ let currentRole = safeSessionGet("dspm-role") || "admin";
 let customExtensions = loadCustomExtensions();
 let latestFiles = [];
 let latestReport = null;
+let latestScanKind = "";
+let latestHistoryItems = [];
 let rowOverrides = loadRowOverrides();
 let assetRules = loadAssetRules();
 let editingAssetIndex = null;
@@ -900,6 +911,211 @@ function updateSummaryFromFiles(files = []) {
 
   renderReportPreview();
   renderExecutiveExperience();
+  renderScanContextPanels();
+  renderFindingsWorkspace();
+  renderExposureWorkspace();
+}
+
+function applyScanReport(report, scanKind = "file-server") {
+  latestReport = report;
+  latestFiles = report.files || [];
+  latestScanKind = scanKind;
+  fileSearchIndex = new WeakMap();
+  renderedRowsLimit = ROW_PAGE_SIZE;
+  updateSummaryFromFiles(latestFiles);
+  hasRenderedScanRows = true;
+  renderRows(latestFiles);
+  scanMeta.textContent = buildScanMetaText(report, scanKind);
+}
+
+function buildScanMetaText(report = latestReport, scanKind = latestScanKind) {
+  if (!report) return "No scan has been run yet.";
+  const source = scanKind === "endpoint"
+    ? report.endpoint?.host || report.source || "endpoint"
+    : report.source || readPayload().server || "file server";
+  const label = scanKind === "endpoint" ? "endpoint files" : "files";
+  return `${latestFiles.length} ${label} scanned from ${source} at ${report.timestamp || "latest run"}`;
+}
+
+function getScanKindLabel() {
+  return latestScanKind === "endpoint" ? "Endpoint scan" : latestScanKind === "file-server" ? "File-server scan" : "No scan";
+}
+
+function renderScanContextPanels() {
+  const summary = buildCurrentSummary();
+  const source = latestScanKind === "endpoint"
+    ? latestReport?.endpoint?.host || latestReport?.source || "endpoint"
+    : latestReport?.source || readPayload().server || "file server";
+  const hasData = summary.total_files > 0;
+  const title = hasData ? `${getScanKindLabel()} - ${summary.total_files} files` : "No scan loaded";
+  const body = hasData
+    ? `${summary.critical || 0} critical, ${summary.high || 0} high, ${countSensitiveFiles(latestFiles)} sensitive files from ${source}.`
+    : "Run a file-server or endpoint scan to populate the shared workspace.";
+  const contextHtml = `
+    <div>
+      <span>Latest workspace data</span>
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(body)}</p>
+    </div>
+    <div class="context-actions">
+      <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+      <button type="button" class="secondary-btn" data-tab-jump="risk">Open risk</button>
+    </div>
+  `;
+  if (fileServerContext) fileServerContext.innerHTML = contextHtml;
+  if (endpointContext) endpointContext.innerHTML = contextHtml;
+}
+
+function renderScanRunningContext(scanKind, message) {
+  latestScanKind = scanKind;
+  const title = scanKind === "endpoint" ? "Endpoint scan running" : "File-server scan running";
+  const contextHtml = `
+    <div>
+      <span>Latest workspace data</span>
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(message)}</p>
+    </div>
+    <div class="context-actions">
+      <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+      <button type="button" class="secondary-btn" data-tab-jump="${scanKind === "endpoint" ? "endpoint" : "file-servers"}">Open scan</button>
+    </div>
+  `;
+  if (fileServerContext) fileServerContext.innerHTML = contextHtml;
+  if (endpointContext) endpointContext.innerHTML = contextHtml;
+}
+
+function renderFindingsWorkspace() {
+  if (!findingsSignalSummary || !findingsPrioritySummary) return;
+  const stats = buildFindingStats();
+  if (!latestFiles.length) {
+    findingsSignalSummary.className = "summary-list";
+    findingsPrioritySummary.className = "summary-list";
+    findingsSignalSummary.innerHTML = `
+      <div class="finding-kpi-grid">
+        <div class="finding-kpi critical"><span>Sensitive files</span><strong>0</strong></div>
+        <div class="finding-kpi high"><span>Secret signals</span><strong>0</strong></div>
+        <div class="finding-kpi medium"><span>Regulated data</span><strong>0</strong></div>
+      </div>
+      <div class="summary-row finding-signal-row"><span>Scan status</span><strong>Ready</strong></div>
+      <div class="summary-row finding-signal-row"><span>Finding categories</span><strong>Secrets / PII / PCI</strong></div>
+    `;
+    findingsPrioritySummary.innerHTML = `
+      <div class="summary-row finding-file-card HIGH"><span><b>No scan loaded</b><small>Run a file-server or endpoint scan to fill this queue.</small></span><strong class="badge HIGH">READY</strong></div>
+      <div class="summary-row finding-file-card MEDIUM"><span><b>Priority queue</b><small>Critical and high-risk files will appear here first.</small></span><strong class="badge MEDIUM">0</strong></div>
+      <div class="summary-row finding-file-card LOW"><span><b>Inventory link</b><small>Use Data Inventory after scan to inspect every matched file.</small></span><strong class="badge LOW">OPEN</strong></div>
+    `;
+    return;
+  }
+  findingsSignalSummary.className = "summary-list";
+  findingsPrioritySummary.className = "summary-list";
+  const sensitiveFiles = latestFiles.filter((file) => (file.findings || []).length);
+  const regulatedFiles = latestFiles.filter((file) => (file.findings || []).some((finding) => /pii|personal|gdpr|hipaa|pci|card|passport|ssn|iban/i.test(finding.type || finding.label || finding.pattern || "")));
+  const secretFiles = latestFiles.filter((file) => (file.findings || []).some((finding) => /secret|password|token|key|credential|private/i.test(finding.type || finding.label || finding.pattern || "")));
+  findingsSignalSummary.innerHTML = stats.length
+    ? `
+      <div class="finding-kpi-grid">
+        <div class="finding-kpi critical"><span>Sensitive files</span><strong>${sensitiveFiles.length}</strong></div>
+        <div class="finding-kpi high"><span>Secret signals</span><strong>${secretFiles.length}</strong></div>
+        <div class="finding-kpi medium"><span>Regulated data</span><strong>${regulatedFiles.length}</strong></div>
+      </div>
+      ${stats.slice(0, 8).map((item, index) => `
+        <div class="summary-row finding-signal-row signal-${index % 4}">
+          <span>${escapeHtml(item.type)}</span>
+          <strong>${item.count}</strong>
+        </div>
+      `).join("")}
+    `
+    : '<div class="empty compact">No sensitive findings were detected in the latest scan.</div>';
+  const priorityFiles = latestFiles
+    .filter((file) => (file.findings || []).length || ["CRITICAL", "HIGH"].includes(getEffectiveRisk(file).level))
+    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
+    .slice(0, 10);
+  findingsPrioritySummary.innerHTML = priorityFiles.length
+    ? priorityFiles.map((file) => {
+        const risk = getEffectiveRisk(file);
+        const findingCount = (file.findings || []).length;
+        const source = file.source || file.share || "workspace";
+        return `
+          <button type="button" class="summary-row action-row finding-file-card ${risk.level}" data-tab-jump="inventory">
+            <span>
+              <b>${escapeHtml(file.name || file.path || "Unknown file")}</b>
+              <small>${escapeHtml(source)} &middot; ${findingCount} finding${findingCount === 1 ? "" : "s"}</small>
+            </span>
+            <strong class="badge ${risk.level}">${risk.level}</strong>
+          </button>
+        `;
+      }).join("")
+    : '<div class="empty compact">No priority finding queue for the latest scan.</div>';
+}
+
+function renderExposureWorkspace() {
+  if (!exposurePermissionsSummary || !exposureCoverageSummary) return;
+  if (!latestFiles.length) {
+    exposurePermissionsSummary.className = "summary-list";
+    exposureCoverageSummary.className = "summary-list";
+    exposurePermissionsSummary.innerHTML = `
+      <div class="exposure-kpi-grid">
+        <div class="exposure-kpi high"><span>Broad access</span><strong>0</strong></div>
+        <div class="exposure-kpi medium"><span>Hidden files</span><strong>0</strong></div>
+        <div class="exposure-kpi low"><span>Sources</span><strong>0</strong></div>
+      </div>
+      <div class="summary-row exposure-row"><span><b>ACL posture</b><small>Enable endpoint ACL reading or SMB permission enrichment.</small></span><strong>Ready</strong></div>
+      <div class="summary-row exposure-row"><span><b>Share exposure</b><small>Writable, broad, hidden, and admin-share signals will be grouped here.</small></span><strong>0</strong></div>
+    `;
+    exposureCoverageSummary.innerHTML = `
+      <div class="summary-row coverage-row low"><span>Content previewed</span><strong>0</strong></div>
+      <div class="summary-row coverage-row medium"><span>Metadata-only files</span><strong>0</strong></div>
+      <div class="summary-row coverage-row high"><span>Archive entries</span><strong>0</strong></div>
+      <div class="summary-row coverage-row neutral"><span>Total files</span><strong>0</strong></div>
+      <div class="coverage-meter" aria-hidden="true"><span style="width:4%"></span></div>
+    `;
+    return;
+  }
+  const broad = latestFiles.filter((file) => file.risk?.reasons?.some((reason) => /everyone|authenticated users|broad|writable|permission|acl/i.test(reason))).length;
+  const hidden = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
+  const metadataOnly = latestFiles.filter((file) => file.content_status === "metadata_only" || file.content_scannable === false).length;
+  const archiveEntries = latestFiles.filter((file) => file.scan_mode === "archive_entry" || String(file.path || "").includes("!")).length;
+  const previewable = latestFiles.filter((file) => file.preview?.available).length;
+  const riskyFolders = Array.from(
+    latestFiles.reduce((map, file) => {
+      const path = String(file.path || file.name || "Unknown");
+      const folder = path.includes("\\") ? path.split("\\").slice(0, -1).join("\\") : path.split("/").slice(0, -1).join("/") || file.source || "Workspace";
+      const existing = map.get(folder) || { folder, count: 0, risk: 0 };
+      existing.count += 1;
+      existing.risk += getEffectiveRisk(file).score;
+      map.set(folder, existing);
+      return map;
+    }, new Map()).values()
+  ).sort((a, b) => b.risk - a.risk).slice(0, 6);
+  exposurePermissionsSummary.className = "summary-list";
+  exposureCoverageSummary.className = "summary-list";
+  exposurePermissionsSummary.innerHTML = `
+    <div class="exposure-kpi-grid">
+      <div class="exposure-kpi high"><span>Broad access</span><strong>${broad}</strong></div>
+      <div class="exposure-kpi medium"><span>Hidden files</span><strong>${hidden}</strong></div>
+      <div class="exposure-kpi low"><span>Sources</span><strong>${new Set(latestFiles.map((file) => file.source || "unknown")).size}</strong></div>
+    </div>
+    ${riskyFolders.map((item) => `
+      <div class="summary-row exposure-row">
+        <span>
+          <b>${escapeHtml(item.folder || "Workspace")}</b>
+          <small>${item.count} file${item.count === 1 ? "" : "s"} &middot; exposure score ${Math.round(item.risk)}</small>
+        </span>
+        <strong>${item.count}</strong>
+      </div>
+    `).join("")}
+  `;
+  exposureCoverageSummary.innerHTML = `
+    ${[
+      ["Content previewed", previewable, "low"],
+      ["Metadata-only files", metadataOnly, "medium"],
+      ["Archive entries", archiveEntries, "high"],
+      ["Total files", latestFiles.length, "neutral"],
+    ].map(([label, value, tone]) => `<div class="summary-row coverage-row ${tone}"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join("")}
+    <div class="coverage-meter" aria-hidden="true">
+      <span style="width:${Math.max(4, Math.min(100, Math.round((previewable / Math.max(1, latestFiles.length)) * 100)))}%"></span>
+    </div>
+  `;
 }
 
 function list(items) {
@@ -1015,9 +1231,11 @@ function getFileSearchText(file) {
 }
 
 function switchTab(tabName) {
-  tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === tabName));
-  tabPanels.forEach((panel) => panel.classList.toggle("active", panel.id === `tab-${tabName}`));
-  const activePanel = document.querySelector(`#tab-${tabName}`);
+  const requestedTab = tabName;
+  const resolvedTab = tabName === "inventory" ? "overview" : tabName;
+  tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === resolvedTab));
+  tabPanels.forEach((panel) => panel.classList.toggle("active", panel.id === `tab-${resolvedTab}`));
+  const activePanel = document.querySelector(`#tab-${resolvedTab}`);
   if (activePanel) {
     activePanel.animate(
       [
@@ -1027,11 +1245,20 @@ function switchTab(tabName) {
       { duration: 180, easing: "ease-out" }
     );
   }
+  if (requestedTab === "inventory") {
+    document.querySelector("#inventory-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 }
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  themeToggle.textContent = theme === "dark" ? "Light mode" : "Dark mode";
+  const icon = themeToggle.querySelector(".theme-icon");
+  const nextLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+  if (icon) {
+    icon.textContent = theme === "dark" ? "☀" : "☾";
+  }
+  themeToggle.setAttribute("aria-label", nextLabel);
+  themeToggle.title = nextLabel;
   safeStorageSet("dspm-theme", theme);
 }
 
@@ -1691,19 +1918,21 @@ function buildRemediationWorkflow() {
   const items = latestFiles
     .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level))
     .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
-    .slice(0, 5);
+    .slice(0, 18);
 
   if (!items.length) {
     return '<div class="empty compact">No active remediation queue yet.</div>';
   }
 
   return `
-    <div class="remediation-list">
+    <div class="scroll-card-list remediation-list">
       ${items.map((file) => {
         const risk = getEffectiveRisk(file);
         const remediation = file.risk?.remediation || {};
+        const actions = remediation.actions || ["Validate business ownership"];
+        const findingCount = (file.findings || []).length;
         return `
-          <article class="remediation-item">
+          <article class="remediation-item compact-risk-card ${risk.level}">
             <span class="badge ${risk.level}">${risk.level}</span>
             <div>
               <h4>${escapeHtml(file.name || file.path || "Unknown file")}</h4>
@@ -1750,6 +1979,38 @@ function buildMsspPortfolio() {
         </article>
       `;
     }).join("")}
+  `;
+}
+
+function buildRemediationWorkflow() {
+  const items = latestFiles
+    .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level))
+    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
+    .slice(0, 18);
+
+  if (!items.length) {
+    return '<div class="empty compact">No active remediation queue yet.</div>';
+  }
+
+  return `
+    <div class="scroll-card-list remediation-list">
+      ${items.map((file) => {
+        const risk = getEffectiveRisk(file);
+        const remediation = file.risk?.remediation || {};
+        const actions = remediation.actions || ["Validate business ownership"];
+        const findingCount = (file.findings || []).length;
+        return `
+          <article class="remediation-item compact-risk-card ${risk.level}">
+            <span class="badge ${risk.level}">${risk.level}</span>
+            <div>
+              <h4>${escapeHtml(file.name || file.path || "Unknown file")}</h4>
+              <p>${escapeHtml(remediation.ticket || "DSPM ticket")} &middot; ${escapeHtml(remediation.owner || "Data owner")} &middot; SLA ${escapeHtml(remediation.sla || "review")}</p>
+              <small>${findingCount} findings &middot; ${escapeHtml(actions[0])}</small>
+            </div>
+          </article>
+        `;
+      }).join("")}
+    </div>
   `;
 }
 
@@ -1881,6 +2142,38 @@ function buildDepartmentRisk() {
           <progress max="${maxScore}" value="${item.score}"></progress>
         </div>
       `).join("")}
+    </div>
+  `;
+}
+
+function buildPriorityRiskFiles() {
+  const items = latestFiles
+    .filter((file) => ["CRITICAL", "HIGH"].includes(getEffectiveRisk(file).level))
+    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
+    .slice(0, 16);
+
+  if (!items.length) {
+    return '<div class="empty compact">Critical and high files will appear after a risky scan.</div>';
+  }
+
+  return `
+    <div class="scroll-card-list priority-file-list">
+      ${items
+        .map((file) => {
+          const risk = getEffectiveRisk(file);
+          const findings = (file.findings || []).map((finding) => finding.type).slice(0, 3).join(", ") || "Risk context";
+          return `
+            <article class="priority-file compact-risk-card ${risk.level}">
+              <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
+              <div>
+                <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
+                <p>${escapeHtml(file.path || "")}</p>
+                <small>${escapeHtml(file.source || file.share || "workspace")} &middot; ${escapeHtml(findings)}</small>
+              </div>
+            </article>
+          `;
+        })
+        .join("")}
     </div>
   `;
 }
@@ -3029,11 +3322,17 @@ function renderTenantsTable(tenants) {
 }
 
 function renderHistory(items) {
+  latestHistoryItems = items || [];
+  const visibleItems = filterHistoryItems(latestHistoryItems);
   if (!items.length) {
     historyBody.innerHTML = '<tr><td colspan="6" class="empty">No scans saved for this tenant yet.</td></tr>';
     return;
   }
-  historyBody.innerHTML = items
+  if (!visibleItems.length) {
+    historyBody.innerHTML = '<tr><td colspan="6" class="empty">No scans match the selected date range.</td></tr>';
+    return;
+  }
+  historyBody.innerHTML = visibleItems
     .slice()
     .reverse()
     .map((item) => {
@@ -3050,6 +3349,41 @@ function renderHistory(items) {
       `;
     })
     .join("");
+}
+
+function parseHistoryTime(item) {
+  const value = item?.timestamp || "";
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function filterHistoryItems(items) {
+  const range = historyRange?.value || "all";
+  if (range === "all") return items;
+  const now = Date.now();
+  if (range !== "custom") {
+    const days = Number(range);
+    const cutoff = now - days * 24 * 60 * 60 * 1000;
+    return items.filter((item) => {
+      const time = parseHistoryTime(item);
+      return time === null || time >= cutoff;
+    });
+  }
+  const fromTime = historyFrom?.value ? new Date(`${historyFrom.value}T00:00:00`).getTime() : null;
+  const toTime = historyTo?.value ? new Date(`${historyTo.value}T23:59:59`).getTime() : null;
+  return items.filter((item) => {
+    const time = parseHistoryTime(item);
+    if (time === null) return true;
+    if (fromTime !== null && time < fromTime) return false;
+    if (toTime !== null && time > toTime) return false;
+    return true;
+  });
+}
+
+function updateHistoryFilterControls() {
+  const custom = historyRange?.value === "custom";
+  historyFrom?.classList.toggle("hidden", !custom);
+  historyTo?.classList.toggle("hidden", !custom);
 }
 
 function renderExecutiveDashboard(data) {
@@ -3393,6 +3727,7 @@ form.addEventListener("submit", async (event) => {
   setStatus("Fetching and assessing data...");
   clearResultsFilter();
   renderSkeletonRows();
+  renderScanRunningContext("file-server", "Scanning file-server or local dataset. Results will update across Overview, Inventory, Findings, Exposure, Risk, and Endpoint context.");
   setScanProgress(true, 8, "Preparing scan...");
   let simulatedProgress = 8;
   const progressTimer = window.setInterval(() => {
@@ -3403,14 +3738,7 @@ form.addEventListener("submit", async (event) => {
     requireAuth();
     const payload = await ensureCredential(readPayload());
     const report = payload.async_scan ? await runQueuedScan(payload) : await api("/api/scan", { ...payload, save_report: true });
-    latestReport = report;
-    latestFiles = report.files || [];
-    fileSearchIndex = new WeakMap();
-    renderedRowsLimit = ROW_PAGE_SIZE;
-    updateSummaryFromFiles(latestFiles);
-    hasRenderedScanRows = true;
-    renderRows(latestFiles);
-    scanMeta.textContent = `${latestFiles.length} files scanned from ${report.source} at ${report.timestamp}`;
+    applyScanReport(report, "file-server");
     setStatus("Scan completed and report.json updated.");
     setScanProgress(true, 100, "Scan completed");
     showToast("Scan completed", `${latestFiles.length} files found`, latestReport.summary?.critical ? "danger" : "success");
@@ -3506,6 +3834,7 @@ endpointScanBtn.addEventListener("click", async () => {
   if (endpointViewOverviewBtn) endpointViewOverviewBtn.classList.add("hidden");
   clearResultsFilter();
   renderSkeletonRows();
+  renderScanRunningContext("endpoint", "Scanning endpoint paths through WinRM. Results will update across Overview, Inventory, Findings, Exposure, Risk, and File Server context.");
   setEndpointScanProgress(true, 8, "Preparing endpoint scan...");
   const endpointProgressTimer = window.setInterval(() => {
     const current = Number.parseFloat(endpointScanProgressBar?.style.width || "8") || 8;
@@ -3518,14 +3847,7 @@ endpointScanBtn.addEventListener("click", async () => {
       window.clearInterval(endpointProgressTimer);
     }
     const report = payload.async_scan ? await runQueuedEndpointScan(payload) : await api("/api/endpoint/scan", payload);
-    latestReport = report;
-    latestFiles = report.files || [];
-    fileSearchIndex = new WeakMap();
-    renderedRowsLimit = ROW_PAGE_SIZE;
-    updateSummaryFromFiles(latestFiles);
-    hasRenderedScanRows = true;
-    renderRows(latestFiles);
-    scanMeta.textContent = `${latestFiles.length} endpoint files scanned from ${report.endpoint?.host || report.source} at ${report.timestamp}`;
+    applyScanReport(report, "endpoint");
     const extensionCounts = summarizeExtensions(latestFiles, report.endpoint?.extension_counts);
     const diagnostics = summarizeEndpointDiagnostics(report.endpoint);
     endpointStatus.textContent = `Endpoint scan completed. ${latestFiles.length} files analyzed. ${extensionCounts} ${diagnostics}`;
@@ -3660,6 +3982,12 @@ exportPdfBtn.addEventListener("click", exportPdf);
 refreshHistoryBtn.addEventListener("click", () => {
   loadHistory().catch((error) => setStatus(`History failed: ${error.message}`));
 });
+historyRange?.addEventListener("change", () => {
+  updateHistoryFilterControls();
+  renderHistory(latestHistoryItems);
+});
+historyFrom?.addEventListener("change", () => renderHistory(latestHistoryItems));
+historyTo?.addEventListener("change", () => renderHistory(latestHistoryItems));
 refreshExecutiveBtn.addEventListener("click", () => {
   loadHistory().catch((error) => setStatus(`Executive dashboard failed: ${error.message}`));
 });
@@ -3770,13 +4098,18 @@ exportDlpPolicyBtn.addEventListener("click", () => {
   });
 });
 logoutBtn.addEventListener("click", logout);
-profileToggle.addEventListener("click", () => {
-  document.querySelector(".profile-menu").classList.toggle("open");
+profileToggle.addEventListener("click", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+  const menu = document.querySelector(".profile-menu");
+  const isOpen = menu.classList.toggle("open");
+  profileToggle.setAttribute("aria-expanded", String(isOpen));
 });
 document.addEventListener("click", (event) => {
   const menu = event.target.closest(".profile-menu");
   if (!menu) {
     document.querySelector(".profile-menu")?.classList.remove("open");
+    profileToggle.setAttribute("aria-expanded", "false");
   }
 });
 tenantSwitcher.addEventListener("change", async () => {
@@ -3785,6 +4118,7 @@ tenantSwitcher.addEventListener("change", async () => {
   latestFiles = [];
   fileSearchIndex = new WeakMap();
   latestReport = null;
+  latestScanKind = "";
   latestDashboard = null;
   rowOverrides = loadRowOverrides();
   assetRules = loadAssetRules();
@@ -3795,6 +4129,7 @@ tenantSwitcher.addEventListener("change", async () => {
   renderAssetRules();
   renderRows([]);
   updateSummaryFromFiles([]);
+  scanMeta.textContent = "No scan has been run yet.";
   setStatus(`Switched MSSP customer to ${currentTenant}.`);
   await loadHistory().catch((error) => setStatus(`Tenant switch failed: ${error.message}`));
 });
@@ -3816,7 +4151,11 @@ renderProfile();
 renderAssetRules();
 renderReportPreview();
 renderExecutiveExperience();
+renderScanContextPanels();
+renderFindingsWorkspace();
+renderExposureWorkspace();
 renderIntegrations();
+updateHistoryFilterControls();
 updateEndpointCustomPathState();
 
 fetch("/api/health")
@@ -3849,3 +4188,26 @@ if (accessToken) {
 } else {
   loadProtectedMetadata();
 }
+
+
+/* DSPM_V4_PRODUCT_PATCH: small UX helpers added by UI rebuild */
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  document.querySelector(".profile-menu")?.classList.remove("open");
+  profileToggle?.setAttribute("aria-expanded", "false");
+  document.querySelector("#detail-drawer")?.classList.add("hidden");
+});
+
+window.addEventListener("storage", (event) => {
+  if (event.key === "dspm-theme" && event.newValue) {
+    document.documentElement.dataset.theme = event.newValue;
+    const toggle = document.querySelector("#theme-toggle");
+    const icon = toggle?.querySelector(".theme-icon");
+    if (icon) icon.textContent = event.newValue === "dark" ? "☀" : "☾";
+    if (toggle) {
+      const nextLabel = event.newValue === "dark" ? "Switch to light mode" : "Switch to dark mode";
+      toggle.setAttribute("aria-label", nextLabel);
+      toggle.title = nextLabel;
+    }
+  }
+});

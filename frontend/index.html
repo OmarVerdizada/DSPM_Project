@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css?v=19" />
+    <title>DSPM Command Center</title>
+    <link rel="stylesheet" href="/static/styles.css?v=51" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -19,111 +19,97 @@
           </span>
           <div>
             <h1>DSPM</h1>
-            <p>DLP discovery console</p>
+            <p>Enterprise data posture</p>
           </div>
         </div>
 
-        <form id="connection-form" class="panel">
-          <label>
-            File server / IP
-            <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
-          </label>
-          <label>
-            Domain
-            <input id="domain" name="domain" value="WORKGROUP" placeholder="Domain, WORKGROUP, or server name" />
-          </label>
-          <label>
-            Username
-            <input id="username" name="username" autocomplete="username" placeholder="Domain or local admin user" />
-          </label>
-          <label>
-            Password
-            <input id="password" name="password" type="password" autocomplete="current-password" />
-          </label>
-          <label>
-            Credential ref
-            <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
-          </label>
-          <label>
-            Local sample path
-            <input id="local_path" name="local_path" value="enterprise_test_data" />
-          </label>
-          <label>
-            Max folder depth
-            <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
-          </label>
-          <div class="extension-filter">
-            <label for="extension-search">Extension filter</label>
-            <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
-            <div class="extension-selected" data-extension-selected-for="file-server"></div>
-            <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
-            <div class="extension-actions" aria-label="Extension presets">
-              <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
-              <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
-            </div>
-            <div class="extension-actions" aria-label="Custom extension">
-              <input id="custom-extension-input" type="text" placeholder=".custom" />
-              <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add</button>
-            </div>
-          </div>
-          <label class="checkbox-row">
-            <input id="async_scan" name="async_scan" type="checkbox" checked />
-            Run through async queue
-          </label>
-          <label class="checkbox-row">
-            <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
-            Scan admin disk shares like C$
-          </label>
-          <label class="checkbox-row">
-            <input id="inspect_archives" name="inspect_archives" type="checkbox" />
-            Inspect ZIP archive entries
-          </label>
-          <div class="actions">
-            <button type="button" id="test-btn">Test</button>
-            <button type="submit" id="scan-btn">Fetch data</button>
-          </div>
-        </form>
+        <nav class="side-nav" aria-label="Product navigation">
+          <div class="nav-group-label">Command</div>
+          <button type="button" class="tab active" data-tab="overview">
+            <span>Dashboard</span>
+            <small>Posture, inventory, latest scan</small>
+          </button>
+          <button type="button" class="tab" data-tab="risk">
+            <span>Remediation Center</span>
+            <small>Risk score, SLA, owners</small>
+          </button>
 
-        <section class="demo-data-card" aria-label="Demo data generator">
-          <div>
-            <span>Demo dataset</span>
-            <strong id="demo-data-title">Enterprise test data</strong>
-            <small id="demo-data-status">Generate local sample files for scans.</small>
-          </div>
-          <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
-        </section>
+          <div class="nav-group-label">Discover</div>
+          <button type="button" class="tab" data-tab="file-servers">
+            <span>File Server Scan</span>
+            <small>SMB, local data, archive scope</small>
+          </button>
+          <button type="button" class="tab" data-tab="endpoint">
+            <span>Endpoint Scan</span>
+            <small>WinRM workstation discovery</small>
+          </button>
 
-        <div id="connection-status" class="status muted">Ready</div>
-        <div id="scan-progress" class="scan-progress hidden" aria-live="polite">
-          <div class="scan-pulse" aria-hidden="true"></div>
-          <div>
-            <strong id="scan-progress-label">Scanning...</strong>
-            <div class="scan-progress-track"><span id="scan-progress-bar"></span></div>
-          </div>
-        </div>
+          <div class="nav-group-label">Analyze</div>
+          <button type="button" class="tab" data-tab="findings">
+            <span>Findings</span>
+            <small>Secrets, PII, regulated data</small>
+          </button>
+          <button type="button" class="tab" data-tab="exposure">
+            <span>Exposure</span>
+            <small>Permissions and coverage</small>
+          </button>
+          <button type="button" class="tab" data-tab="reports">
+            <span>Reports</span>
+            <small>CSV, Word, PDF evidence</small>
+          </button>
+          <button type="button" class="tab" data-tab="history">
+            <span>History</span>
+            <small>Trend and scan audit</small>
+          </button>
+
+          <div class="nav-group-label">Operate</div>
+          <button type="button" class="tab" data-tab="security">
+            <span>Security Ops</span>
+            <small>Users, API keys, DLP export</small>
+          </button>
+          <button type="button" class="tab" data-tab="admin">
+            <span>MSSP Admin</span>
+            <small>Tenant portfolio</small>
+          </button>
+          <button type="button" class="tab" data-tab="settings">
+            <span>Asset Rules</span>
+            <small>Crown-jewel scoring</small>
+          </button>
+          <button type="button" class="tab" data-tab="integrations">
+            <span>Integrations</span>
+            <small>Connectors and API flow</small>
+          </button>
+          <button type="button" class="tab" data-tab="logic">
+            <span>Risk Logic</span>
+            <small>Scoring model</small>
+          </button>
+        </nav>
       </aside>
 
       <main>
         <section class="topbar">
-          <div>
-            <p class="eyebrow">Active Directory file-server assessment</p>
-            <h2>Data discovery and DLP rule preparation</h2>
+          <div class="topbar-title">
+            <p class="eyebrow">DSPM operations</p>
+            <h2>DSPM Command Center</h2>
+            <span>Discovery, exposure triage, remediation, and evidence reporting.</span>
           </div>
           <div class="topbar-actions">
-            <button type="button" id="theme-toggle" class="secondary-btn">Dark mode</button>
+            <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to dark mode" title="Switch theme">
+              <span class="theme-icon" aria-hidden="true">☾</span>
+            </button>
             <div class="health" id="health">API checking...</div>
             <select id="tenant-switcher" class="tenant-switcher" title="Switch MSSP customer">
               <option value="default">default</option>
             </select>
             <section class="profile-menu" aria-label="Profile">
-              <button type="button" id="profile-toggle" class="profile-toggle">
+              <button type="button" id="profile-toggle" class="profile-toggle" aria-expanded="false" aria-controls="profile-panel">
                 <span class="profile-avatar">A</span>
                 <span>
-                  <strong id="profile-name">Admin</strong>
+                  <strong id="profile-name">MSSP Admin</strong>
                   <small id="profile-tenant">default tenant</small>
                 </span>
               </button>
-              <div class="profile-panel">
+              <div class="profile-panel" id="profile-panel">
                 <div class="profile-panel-head">
                   <span class="profile-avatar panel-avatar">A</span>
                   <div>
@@ -144,20 +130,145 @@
           </div>
         </section>
 
-        <nav class="tabs" aria-label="Workspace sections">
-          <button type="button" class="tab active" data-tab="overview">Overview</button>
-          <button type="button" class="tab" data-tab="executive">Executive</button>
-          <button type="button" class="tab" data-tab="assets">Customer Assets</button>
-          <button type="button" class="tab" data-tab="reports">Reports</button>
-          <button type="button" class="tab" data-tab="history">History</button>
-          <button type="button" class="tab" data-tab="endpoint">Endpoint Scan</button>
-          <button type="button" class="tab" data-tab="tenants">Tenants</button>
-          <button type="button" class="tab" data-tab="security">Security</button>
-          <button type="button" class="tab" data-tab="integrations">Integrations</button>
-          <button type="button" class="tab" data-tab="logic">Risk Logic</button>
-        </nav>
+        <section id="tab-file-servers" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Data source discovery</p>
+              <h3>File server scan</h3>
+              <p>Configure SMB or local sample discovery, extension policy, archive inspection, and queue behavior in one focused workflow.</p>
+            </div>
+          </div>
+
+          <section class="wizard-strip" aria-label="File server scan workflow">
+            <div><span>01</span><strong>Connect</strong><small>SMB or local dataset</small></div>
+            <div><span>02</span><strong>Scope</strong><small>Depth, shares, extensions</small></div>
+            <div><span>03</span><strong>Analyze</strong><small>Secrets, PII, risk context</small></div>
+            <div><span>04</span><strong>Report</strong><small>Inventory and DLP output</small></div>
+          </section>
+
+          <section class="context-strip" id="file-server-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run a file-server scan or open Data Inventory after another scan completes.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+          </section>
+
+          <section class="visual-panel scan-workflow-panel">
+            <div class="panel-title">
+              <h4>Connection and scope</h4>
+              <span>SMB target or local dataset</span>
+            </div>
+            <form id="connection-form" class="scan-form-grid">
+              <label>
+                File server / IP
+                <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
+              </label>
+              <label>
+                Domain
+                <input id="domain" name="domain" value="WORKGROUP" placeholder="Domain, WORKGROUP, or server name" />
+              </label>
+              <label>
+                Username
+                <input id="username" name="username" autocomplete="username" placeholder="Domain or local admin user" />
+              </label>
+              <label>
+                Password
+                <input id="password" name="password" type="password" autocomplete="current-password" />
+              </label>
+              <label>
+                Credential ref
+                <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
+              </label>
+              <label>
+                Local sample path
+                <input id="local_path" name="local_path" value="enterprise_test_data" />
+              </label>
+              <label>
+                Max folder depth
+                <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
+              </label>
+              <div class="scan-option-stack">
+                <label class="checkbox-row">
+                  <input id="async_scan" name="async_scan" type="checkbox" checked />
+                  Run through async queue
+                </label>
+                <label class="checkbox-row">
+                  <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
+                  Scan admin disk shares like C$
+                </label>
+                <label class="checkbox-row">
+                  <input id="inspect_archives" name="inspect_archives" type="checkbox" />
+                  Inspect ZIP archive entries
+                </label>
+              </div>
+
+              <div class="extension-filter scan-form-wide">
+                <label for="extension-search">Extension policy</label>
+                <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+                <div class="extension-selected" data-extension-selected-for="file-server"></div>
+                <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
+                <div class="extension-actions" aria-label="Extension presets">
+                  <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
+                  <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
+                </div>
+                <div class="extension-actions" aria-label="Custom extension">
+                  <input id="custom-extension-input" type="text" placeholder=".custom" />
+                  <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add</button>
+                </div>
+              </div>
+
+              <div class="scan-run-card scan-form-wide">
+                <section class="demo-data-card" aria-label="Demo data generator">
+                  <div>
+                    <span>Demo dataset</span>
+                    <strong id="demo-data-title">Enterprise test data</strong>
+                    <small id="demo-data-status">Generate local sample files for scans.</small>
+                  </div>
+                  <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
+                </section>
+                <div class="actions">
+                  <button type="button" id="test-btn">Test connection</button>
+                  <button type="submit" id="scan-btn">Run file scan</button>
+                </div>
+                <div id="connection-status" class="status muted">Ready</div>
+                <div id="scan-progress" class="scan-progress hidden" aria-live="polite">
+                  <div class="scan-pulse" aria-hidden="true"></div>
+                  <div>
+                    <strong id="scan-progress-label">Scanning...</strong>
+                    <div class="scan-progress-track"><span id="scan-progress-bar"></span></div>
+                  </div>
+                </div>
+              </div>
+            </form>
+          </section>
+        </section>
 
         <section id="tab-overview" class="tab-panel active">
+          <section class="command-hero" aria-label="DSPM command center introduction">
+            <div class="command-hero-copy">
+              <p class="eyebrow">Live workspace</p>
+              <h1>Find sensitive data, prioritize exposure, and generate evidence from one console.</h1>
+              <p>Built for file-server, endpoint, and MSSP workflows with tenant-aware history, DLP export, and remediation-focused triage.</p>
+              <div class="command-actions">
+                <button type="button" data-tab-jump="file-servers">Start file scan</button>
+                <button type="button" class="secondary-btn" data-tab-jump="endpoint">Start endpoint scan</button>
+                <button type="button" class="secondary-btn" data-tab-jump="reports">Open reports</button>
+              </div>
+            </div>
+            <div class="command-hero-panel" aria-hidden="true">
+              <span>Posture workflow</span>
+              <div class="hero-flow"><b>Discover</b><i></i><b>Classify</b><i></i><b>Remediate</b></div>
+              <div class="hero-mini-grid">
+                <div><strong>SMB</strong><small>File servers</small></div>
+                <div><strong>WinRM</strong><small>Endpoints</small></div>
+                <div><strong>DLP</strong><small>Export</small></div>
+                <div><strong>MSSP</strong><small>Tenants</small></div>
+              </div>
+            </div>
+          </section>
+
           <section class="metrics" aria-label="Risk summary">
             <div class="metric critical">
               <span>Critical</span>
@@ -183,17 +294,18 @@
 
           <section id="overview-insights" class="insights-grid"></section>
 
-          <section class="workspace">
+          <section class="workspace" id="inventory-workspace">
             <div class="table-toolbar">
               <div>
-                <h3>Discovered data</h3>
+                <p class="eyebrow">Data catalog</p>
+                <h3>Data inventory</h3>
                 <p id="scan-meta">No scan has been run yet.</p>
               </div>
               <input id="filter" placeholder="Filter by file, finding, or risk" />
             </div>
 
-            <div class="table-wrap">
-              <table>
+            <div class="table-wrap inventory-table-wrap">
+              <table class="inventory-table">
                 <thead>
                   <tr>
                     <th>File</th>
@@ -215,11 +327,63 @@
           </section>
         </section>
 
-        <section id="tab-executive" class="tab-panel">
+        <section id="tab-findings" class="tab-panel">
           <div class="section-header">
             <div>
-              <p class="eyebrow">CISO view</p>
-              <h3>Risk posture command center</h3>
+              <p class="eyebrow">Classification</p>
+              <h3>Sensitive findings</h3>
+              <p>Review secret, PII, regulated-data, and confidentiality signals generated from scanned content and file context.</p>
+            </div>
+          </div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Detection signal mix</h4>
+                <span>From latest scan</span>
+              </div>
+              <div id="findings-signal-summary" class="empty compact">Run a scan to populate finding categories.</div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Priority finding queue</h4>
+                <span>Critical and high sensitivity</span>
+              </div>
+              <div id="findings-priority-summary" class="empty compact">Sensitive files will appear in Data Inventory and Risk & Remediation.</div>
+            </section>
+          </div>
+        </section>
+
+        <section id="tab-exposure" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Access posture</p>
+              <h3>Exposure and permissions</h3>
+              <p>Track broad access, writable permissions, share exposure, hidden files, and archive inspection coverage.</p>
+            </div>
+          </div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Permission exposure</h4>
+                <span>ACL and share posture</span>
+              </div>
+              <div id="exposure-permissions-summary" class="empty compact">Enable ACL reading in endpoint scans or enrich SMB ACL collection to populate this view.</div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Scan coverage</h4>
+                <span>Hidden, system, archive, and metadata-only files</span>
+              </div>
+              <div id="exposure-coverage-summary" class="empty compact">Coverage signals are recorded per file as scan mode and content status.</div>
+            </section>
+          </div>
+        </section>
+
+        <section id="tab-risk" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <p class="eyebrow">Remediation operations</p>
+              <h3>Risk and remediation</h3>
               <p>Current exposure, trend movement, alert pressure, and the top files that need attention.</p>
             </div>
             <button type="button" id="refresh-executive-btn" class="secondary-btn">Refresh</button>
@@ -316,14 +480,16 @@
           <div id="executive-top-files" class="top-files-grid"></div>
         </section>
 
-        <section id="tab-assets" class="tab-panel">
+        <section id="tab-settings" class="tab-panel">
           <div class="asset-header">
             <div>
-              <p class="eyebrow">MSSP customer context</p>
+              <p class="eyebrow">Platform configuration</p>
               <h3>Customer asset risk</h3>
               <p>Define tenant-specific crown-jewel paths, folders, extensions, or filenames. Saved rules are applied to every new scan.</p>
             </div>
             <div class="asset-actions">
+              <button type="button" class="secondary-btn" data-tab-jump="integrations">Integrations</button>
+              <button type="button" class="secondary-btn" data-tab-jump="logic">Risk logic</button>
               <button type="button" id="add-asset-btn" class="secondary-btn">Add asset</button>
               <button type="button" id="save-assets-btn">Save rules</button>
             </div>
@@ -378,7 +544,19 @@
               <h3>Scan history and audit</h3>
               <p>Tenant scan trend, posture score, and immutable activity trail.</p>
             </div>
-            <button type="button" id="refresh-history-btn" class="secondary-btn">Refresh</button>
+            <div class="history-controls">
+              <select id="history-range" class="tenant-switcher" title="Filter scan history">
+                <option value="all">All scans</option>
+                <option value="1">Last 24 hours</option>
+                <option value="5">Last 5 days</option>
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="custom">Custom range</option>
+              </select>
+              <input id="history-from" class="history-date hidden" type="date" title="From date" />
+              <input id="history-to" class="history-date hidden" type="date" title="To date" />
+              <button type="button" id="refresh-history-btn" class="secondary-btn">Refresh</button>
+            </div>
           </div>
           <div id="executive-summary" class="history-grid"></div>
           <div class="table-wrap">
@@ -408,6 +586,22 @@
               <p>Use the credential you enter for the selected endpoint only, then scan a user profile, one drive, all fixed drives, or custom paths.</p>
             </div>
           </div>
+
+          <section class="wizard-strip endpoint-wizard" aria-label="Endpoint scan workflow">
+            <div><span>01</span><strong>Prepare</strong><small>Optional local WinRM readiness</small></div>
+            <div><span>02</span><strong>Verify</strong><small>Target host and admin credential</small></div>
+            <div><span>03</span><strong>Scan</strong><small>User profile or fixed drives</small></div>
+            <div><span>04</span><strong>Triage</strong><small>Findings and remediation queue</small></div>
+          </section>
+
+          <section class="context-strip" id="endpoint-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run an endpoint scan or review the latest file-server scan in Data Inventory.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+          </section>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
             <div class="panel-title">
@@ -550,6 +744,7 @@
               </div>
             </div>
             <div class="actions endpoint-actions">
+              <button type="button" id="endpoint-test-btn" class="secondary-btn">Test endpoint</button>
               <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
               <button type="button" id="endpoint-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
               <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
@@ -590,7 +785,7 @@
                   <select id="new-user-role">
                     <option value="viewer">Viewer</option>
                     <option value="analyst">Analyst</option>
-                    <option value="admin">Admin</option>
+                    <option value="admin">MSSP Admin</option>
                   </select>
                 </label>
                 <label>
@@ -689,7 +884,7 @@
           </section>
         </section>
 
-        <section id="tab-tenants" class="tab-panel">
+        <section id="tab-admin" class="tab-panel">
           <div class="section-header">
             <div>
               <p class="eyebrow">Tenant management</p>
@@ -798,6 +993,6 @@
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=33"></script>
+    <script src="/static/app.js?v=51"></script>
   </body>
 </html>
