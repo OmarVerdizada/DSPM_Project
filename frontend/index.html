@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM Command Center</title>
-    <link rel="stylesheet" href="/static/styles.css?v=51" />
+    <link rel="stylesheet" href="/static/styles.css?v=81" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -17,10 +17,13 @@
               <path d="M19 16v16" />
             </svg>
           </span>
-          <div>
+          <div class="brand-copy">
             <h1>DSPM</h1>
             <p>Enterprise data posture</p>
           </div>
+          <button type="button" id="sidebar-toggle" class="sidebar-toggle" aria-label="Collapse navigation" aria-expanded="true" title="Collapse navigation">
+            <span aria-hidden="true"></span>
+          </button>
         </div>
 
         <nav class="side-nav" aria-label="Product navigation">
@@ -286,7 +289,11 @@
               <span>Low</span>
               <strong id="low-count">0</strong>
             </div>
-            <div class="metric">
+            <div class="metric protected">
+              <span>Protected / Locked</span>
+              <strong id="protected-count">0</strong>
+            </div>
+            <div class="metric total">
               <span>Total files</span>
               <strong id="total-count">0</strong>
             </div>
@@ -295,14 +302,48 @@
           <section id="overview-insights" class="insights-grid"></section>
 
           <section class="workspace" id="inventory-workspace">
-            <div class="table-toolbar">
+            <div class="table-toolbar inventory-toolbar">
               <div>
                 <p class="eyebrow">Data catalog</p>
                 <h3>Data inventory</h3>
                 <p id="scan-meta">No scan has been run yet.</p>
               </div>
-              <input id="filter" placeholder="Filter by file, finding, or risk" />
+              <div class="inventory-search-box">
+                <span aria-hidden="true">⌕</span>
+                <input id="filter" placeholder="Search file, path, finding, source, risk..." autocomplete="off" />
+              </div>
             </div>
+
+            <section class="inventory-command-bar" aria-label="Inventory filters and context">
+              <div class="risk-filter-group" aria-label="Risk filters">
+                <button type="button" class="risk-filter active" data-risk-filter="ALL">All</button>
+                <button type="button" class="risk-filter critical" data-risk-filter="CRITICAL">Critical</button>
+                <button type="button" class="risk-filter high" data-risk-filter="HIGH">High</button>
+                <button type="button" class="risk-filter medium" data-risk-filter="MEDIUM">Medium</button>
+                <button type="button" class="risk-filter low" data-risk-filter="LOW">Low</button>
+                <button type="button" class="risk-filter protected" data-risk-filter="PROTECTED">Protected</button>
+              </div>
+              <div class="inventory-facet-row">
+                <label>
+                  Source
+                  <select id="inventory-source-filter">
+                    <option value="ALL">All sources</option>
+                  </select>
+                </label>
+                <label>
+                  Finding type
+                  <select id="inventory-finding-filter">
+                    <option value="ALL">All finding types</option>
+                  </select>
+                </label>
+                <button type="button" id="clear-inventory-filters" class="secondary-btn mini-btn">Clear filters</button>
+              </div>
+              <div id="inventory-context-metrics" class="inventory-context-metrics">
+                <div><span>Visible</span><strong>0</strong><small>files</small></div>
+                <div><span>Sensitive</span><strong>0</strong><small>files</small></div>
+                <div><span>Avg risk</span><strong>0</strong><small>/100</small></div>
+              </div>
+            </section>
 
             <div class="table-wrap inventory-table-wrap">
               <table class="inventory-table">
@@ -477,7 +518,7 @@
               <div id="top-risky-folders"></div>
             </section>
           </div>
-          <div id="executive-top-files" class="top-files-grid"></div>
+          <div id="executive-top-files" class="top-files-grid hidden" aria-hidden="true"></div>
         </section>
 
         <section id="tab-settings" class="tab-panel">
@@ -864,7 +905,19 @@
                 <h3>Audit trail</h3>
                 <p>Immutable tenant activity captured by the backend.</p>
               </div>
-              <button type="button" id="refresh-audit-btn" class="secondary-btn">Refresh audit</button>
+              <div class="history-controls audit-controls">
+                <select id="audit-range" class="tenant-switcher" title="Filter audit trail">
+                  <option value="all">All events</option>
+                  <option value="1">Last 24 hours</option>
+                  <option value="5">Last 5 days</option>
+                  <option value="7">Last 7 days</option>
+                  <option value="30">Last 30 days</option>
+                  <option value="custom">Custom range</option>
+                </select>
+                <input id="audit-from" class="history-date hidden" type="date" title="Audit from date" />
+                <input id="audit-to" class="history-date hidden" type="date" title="Audit to date" />
+                <button type="button" id="refresh-audit-btn" class="secondary-btn">Refresh audit</button>
+              </div>
             </div>
             <div class="table-wrap">
               <table class="logic-table">
@@ -993,6 +1046,6 @@
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=51"></script>
+    <script src="/static/app.js?v=80"></script>
   </body>
 </html>

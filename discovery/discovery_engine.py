@@ -42,6 +42,7 @@ class ScanSummary:
     low: int
     sensitive_files: int
     hidden_files: int = 0
+    protected_files: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +53,7 @@ class ScanSummary:
             "low": self.low,
             "sensitive_files": self.sensitive_files,
             "hidden_files": self.hidden_files,
+            "protected_files": self.protected_files,
         }
 
 
@@ -177,6 +179,7 @@ class DSPMDiscoveryEngine:
         counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
         sensitive_files = 0
         hidden_files = 0
+        protected_files = 0
 
         for item in files:
             level = item.get("risk", {}).get("level", "LOW")
@@ -185,6 +188,15 @@ class DSPMDiscoveryEngine:
                 sensitive_files += 1
             if item.get("is_hidden"):
                 hidden_files += 1
+            protection_blob = " ".join(
+                str(item.get(key, "")).lower()
+                for key in ("content_status", "scan_error", "protection_type")
+            )
+            if item.get("protected") or any(
+                marker in protection_blob
+                for marker in ("protected", "password", "encrypted", "locked", "unreadable", "unsupported_archive", "bad_archive")
+            ):
+                protected_files += 1
 
         return ScanSummary(
             total_files=len(files),
@@ -194,6 +206,7 @@ class DSPMDiscoveryEngine:
             low=counts["LOW"],
             sensitive_files=sensitive_files,
             hidden_files=hidden_files,
+            protected_files=protected_files,
         )
 
 

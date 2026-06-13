@@ -228,6 +228,16 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
         reasons.extend(acl_assessment.get("issues", []))
         recommendations.append("Review AD group membership and share permissions")
 
+    protection_status = str(file_obj.get("content_status") or file_obj.get("scan_error") or file_obj.get("protection_type") or "").lower()
+    protected_content = bool(file_obj.get("protected")) or any(
+        marker in protection_status
+        for marker in ("protected", "password", "encrypted", "locked", "unreadable", "unsupported_archive", "bad_archive")
+    )
+    if protected_content:
+        score = max(score, 70)
+        reasons.append("File is encrypted, password-protected, or could not be inspected")
+        recommendations.append("Request owner attestation, password escrow, or a decrypted inspection copy")
+
     if file_obj.get("source") == "smb":
         score += 5
         reasons.append("Data is exposed through an SMB share")
@@ -324,8 +334,14 @@ def _build_remediation(level: str, score: int, file_obj: dict, findings: list[di
         actions.extend(["Quarantine file copy", "Rotate exposed secret", "Invalidate tokens and review access logs"])
     if has_regulated:
         actions.extend(["Apply regulated-data label", "Restrict external sharing", "Create DLP block rule for matching identifiers"])
+    protected_content = bool(file_obj.get("protected")) or any(
+        marker in str(file_obj.get("content_status") or file_obj.get("scan_error") or "").lower()
+        for marker in ("protected", "password", "encrypted", "locked", "unreadable", "unsupported_archive", "bad_archive")
+    )
     if has_acl_issue:
         actions.extend(["Remove broad or writable groups", "Confirm least-privilege access with the data owner"])
+    if protected_content:
+        actions.extend(["Confirm business owner", "Collect password or decrypted copy for inspection", "Document exception if content must remain sealed"])
     if not actions and level in {"HIGH", "CRITICAL"}:
         actions.append("Create remediation ticket and request owner attestation")
     if not actions:

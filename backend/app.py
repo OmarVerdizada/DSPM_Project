@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.alerts import evaluate_alerts
 from backend.jobs import cancel_job, create_job, create_scan_job, get_job
@@ -66,12 +69,23 @@ CORS_ORIGINS = [
     for origin in os.getenv("DSPM_CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS)).split(",")
     if origin.strip()
 ]
+TRUSTED_HOSTS = [
+    host.strip()
+    for host in os.getenv("DSPM_TRUSTED_HOSTS", "").split(",")
+    if host.strip()
+]
+LOGIN_WINDOW_SECONDS = int(os.getenv("DSPM_LOGIN_WINDOW_SECONDS", "600"))
+LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
+_LOGIN_FAILURES: dict[str, list[float]] = {}
 
 app = FastAPI(
     title="DSPM DLP Discovery API",
     description="Discovers sensitive data on AD file servers and produces DLP-ready risk context.",
     version="1.0.0",
 )
+
+if TRUSTED_HOSTS:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,20 +98,32 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
+@app.middleware("http")
+async def secure_response_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_: Request, __: RequestValidationError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": "Invalid request. Check required fields and formats."})
 
 
 class ConnectionRequest(BaseModel):
-    server: str = Field(default="", description="AD file server hostname or IP")
-    username: str = ""
-    password: str = ""
-    credential_ref: str = ""
-    domain: str = "WORKGROUP"
-    local_path: str = "enterprise_test_data"
+    server: str = Field(default="", description="AD file server hostname or IP", max_length=255)
+    username: str = Field(default="", max_length=160)
+    password: str = Field(default="", max_length=512)
+    credential_ref: str = Field(default="", max_length=120)
+    domain: str = Field(default="WORKGROUP", max_length=120)
+    local_path: str = Field(default="enterprise_test_data", max_length=260)
     max_depth: int = Field(default=4, ge=1, le=12)
-    allowed_extensions: list[str] = Field(default_factory=list)
+    allowed_extensions: list[str] = Field(default_factory=list, max_length=160)
     extension_filter_enabled: bool = False
     include_hidden: bool = False
     include_system: bool = False
@@ -105,6 +131,36 @@ class ConnectionRequest(BaseModel):
     system_filter_enabled: bool = False
     include_admin_shares: bool = False
     inspect_archives: bool = False
+
+    @field_validator("server", "username", "domain", "credential_ref")
+    @classmethod
+    def _clean_short_text(cls, value: str) -> str:
+        return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
+
+    @field_validator("local_path")
+    @classmethod
+    def _validate_local_path(cls, value: str) -> str:
+        cleaned = re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip() or "enterprise_test_data"
+        candidate = Path(cleaned)
+        if cleaned.startswith(("//", "\\")) or ".." in candidate.parts:
+            raise ValueError("local_path must be a direct local folder or file path without traversal")
+        return cleaned
+
+    @field_validator("allowed_extensions")
+    @classmethod
+    def _validate_extensions(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for item in values or []:
+            extension = str(item or "").strip().lower()
+            if not extension:
+                continue
+            if not extension.startswith("."):
+                extension = f".{extension}"
+            if not re.fullmatch(r"\.[a-z0-9][a-z0-9._+-]{0,40}", extension):
+                raise ValueError("Invalid file extension filter")
+            if extension not in normalized:
+                normalized.append(extension)
+        return normalized
 
 
 class AssetOverride(BaseModel):
@@ -120,13 +176,13 @@ class ScanRequest(ConnectionRequest):
 
 
 class EndpointScanRequest(BaseModel):
-    host: str = Field(description="Endpoint hostname or IP")
-    target_username: str = Field(default="", description="Windows profile username under C:\\Users")
-    domain: str = "WORKGROUP"
-    username: str = ""
-    password: str = ""
-    credential_ref: str = ""
-    paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"])
+    host: str = Field(description="Endpoint hostname or IP", max_length=255)
+    target_username: str = Field(default="", description="Windows profile username under C:\\Users", max_length=160)
+    domain: str = Field(default="WORKGROUP", max_length=120)
+    username: str = Field(default="", max_length=160)
+    password: str = Field(default="", max_length=512)
+    credential_ref: str = Field(default="", max_length=120)
+    paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"], max_length=40)
     max_depth: int = Field(default=12, ge=1, le=12)
     read_content: bool = True
     read_acl: bool = False
@@ -141,6 +197,26 @@ class EndpointScanRequest(BaseModel):
     save_report: bool = True
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
 
+    @field_validator("host", "target_username", "domain", "username", "credential_ref")
+    @classmethod
+    def _clean_endpoint_text(cls, value: str) -> str:
+        return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_endpoint_paths(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        allowed_aliases = {"desktop", "documents", "downloads", "all", "c_drive", "all_fixed_drives"}
+        for item in values or []:
+            value = re.sub(r"[\x00-\x1f\x7f]", "", str(item or "")).strip()
+            if not value:
+                continue
+            if value in allowed_aliases or re.fullmatch(r"[A-Za-z]:\\[^<>|?*]{0,240}", value):
+                cleaned.append(value)
+                continue
+            raise ValueError("Endpoint paths must be known aliases or absolute Windows paths")
+        return cleaned or ["desktop", "documents", "downloads"]
+
 
 class LocalWinRMActivationRequest(BaseModel):
     domain: str = "WORKGROUP"
@@ -149,8 +225,8 @@ class LocalWinRMActivationRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
 
 
 class RegisterRequest(BaseModel):
@@ -189,9 +265,9 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class CredentialRequest(BaseModel):
-    username: str
-    password: str
-    domain: str = "WORKGROUP"
+    username: str = Field(min_length=1, max_length=160)
+    password: str = Field(min_length=1, max_length=512)
+    domain: str = Field(default="WORKGROUP", max_length=120)
 
 
 class ApiKeyRequest(BaseModel):
@@ -239,10 +315,15 @@ def risk_rules(_: Principal = Depends(require_role("viewer"))) -> dict:
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest) -> dict:
+def login(payload: LoginRequest, request: Request) -> dict:
+    login_key = _login_rate_key(payload.username, request)
+    if _too_many_login_failures(login_key):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
     principal = authenticate_user(payload.username, payload.password)
     if principal is None:
+        _record_login_failure(login_key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    _clear_login_failures(login_key)
     audit(principal.tenant_id, principal.subject, "auth.login")
     return {
         "access_token": create_token(principal.subject, principal.role, principal.tenant_id),
@@ -597,6 +678,30 @@ def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) 
         "trend": history[-14:],
         "retention": data_retention_summary(principal.tenant_id),
     }
+
+
+def _login_rate_key(username: str, request: Request) -> str:
+    client = request.client.host if request.client else "unknown"
+    safe_user = sanitize_username(username) or "unknown"
+    return f"{client}:{safe_user}"
+
+
+def _too_many_login_failures(key: str) -> bool:
+    now = time.time()
+    failures = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if now - stamp <= LOGIN_WINDOW_SECONDS]
+    _LOGIN_FAILURES[key] = failures
+    return len(failures) >= LOGIN_MAX_ATTEMPTS
+
+
+def _record_login_failure(key: str) -> None:
+    now = time.time()
+    failures = [stamp for stamp in _LOGIN_FAILURES.get(key, []) if now - stamp <= LOGIN_WINDOW_SECONDS]
+    failures.append(now)
+    _LOGIN_FAILURES[key] = failures
+
+
+def _clear_login_failures(key: str) -> None:
+    _LOGIN_FAILURES.pop(key, None)
 
 
 def _safe_tenant(tenant_id: str) -> str:

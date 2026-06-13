@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -17,7 +18,8 @@ from backend.store import create_user, get_user, list_users, mark_user_login
 
 
 ROLES = {"admin": 3, "analyst": 2, "viewer": 1}
-SECRET_KEY = os.getenv("DSPM_SECRET_KEY", "dev-only-change-me")
+SECRET_KEY = os.getenv("DSPM_SECRET_KEY") or secrets.token_urlsafe(48)
+DEFAULT_SECRET_IN_USE = "DSPM_SECRET_KEY" not in os.environ
 TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "28800"))
 API_KEYS = {
     item.split(":", 1)[0]: item.split(":", 1)[1]
@@ -36,10 +38,22 @@ class Principal:
     auth_type: str = "jwt"
 
 
+def validate_password_strength(password: str) -> None:
+    if len(password or "") < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
+    if len(password) > 200:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password is too long")
+    if not any(ch.isalpha() for ch in password) or not any(ch.isdigit() for ch in password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must include letters and numbers")
+
+
 def hash_password(password: str) -> str:
+    validate_password_strength(password)
     salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 210_000).hex()
-    return f"pbkdf2_sha256$210000${salt}${digest}"
+    rounds = int(os.getenv("DSPM_PBKDF2_ROUNDS", "310000"))
+    rounds = max(210_000, min(rounds, 1_200_000))
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), rounds).hex()
+    return f"pbkdf2_sha256${rounds}${salt}${digest}"
 
 
 def verify_password(password: str, password_hash: str) -> bool:
@@ -51,7 +65,8 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def sanitize_username(username: str) -> str:
-    return username.strip().lower()
+    cleaned = re.sub(r"[^a-zA-Z0-9._@-]", "", username.strip().lower())
+    return cleaned[:80]
 
 
 def ensure_default_admin() -> None:
@@ -60,7 +75,7 @@ def ensure_default_admin() -> None:
         return
     create_user(
         "admin",
-        hash_password(os.getenv("DSPM_ADMIN_PASSWORD", "admin123")),
+        hash_password(os.getenv("DSPM_ADMIN_PASSWORD", "Admin12345")),
         "admin",
         "default",
         "Local Administrator",
@@ -151,7 +166,10 @@ def require_principal(
         key_hash = hash_api_key(x_api_key)
         for tenant_id, stored_hash in API_KEYS.items():
             if hmac.compare_digest(key_hash, stored_hash):
-                return Principal("api-key", "analyst", x_tenant_id or tenant_id, "api_key")
+                # API keys are tenant-scoped. Do not allow a caller to pivot into another tenant with X-Tenant-ID.
+                if x_tenant_id and x_tenant_id != tenant_id:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key is not valid for this tenant")
+                return Principal("api-key", "analyst", tenant_id, "api_key")
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 

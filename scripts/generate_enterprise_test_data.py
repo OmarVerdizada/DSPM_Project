@@ -5,6 +5,8 @@ import csv
 import json
 import random
 import shutil
+import subprocess
+import tempfile
 import zipfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -125,6 +127,32 @@ def write_pptx(path: Path, slides: list[str]) -> None:
             )
 
 
+def write_password_protected_zip(path: Path, inner_name: str, content: str, password: str = "DSPM-Test-2026!") -> bool:
+    """Create a synthetic password-protected ZIP when the system zip utility is available.
+
+    Python's stdlib can read encrypted ZIP metadata but cannot create encrypted ZIPs,
+    so this helper uses the platform zip command and falls back safely when unavailable.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    zip_binary = shutil.which("zip")
+    if not zip_binary:
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(inner_name, content)
+        return False
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_root = Path(temp_dir)
+        inner_path = temp_root / inner_name
+        inner_path.write_text(content.strip() + "\n", encoding="utf-8")
+        subprocess.run(
+            [zip_binary, "-j", "-P", password, str(path), str(inner_path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return True
+
+
+
 def escape_xml(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -190,6 +218,7 @@ to exercise detection logic.
                 created_files.append({"path": str(path.relative_to(root)), "department": department, "share": share, "extension": extension})
 
     add_cross_department_exports(root, people, created_files)
+    add_protected_content_samples(root, created_files)
     write_text(root / "_manifest.json", json.dumps({"company": COMPANY, "file_count": len(created_files), "generated": date.today().isoformat(), "files": created_files[:75]}, indent=2))
 
 
@@ -308,6 +337,35 @@ def add_cross_department_exports(root: Path, people: list[dict[str, str]], creat
     vault_path = root / "IT" / "Cloud" / "Current" / "breakglass_admin_credentials.env"
     write_text(vault_path, secret_block(9999) + "\nroot_email=cloud-admin@caspian-retail.example\n")
     created_files.append({"path": str(vault_path.relative_to(root)), "department": "IT", "share": "Cloud", "extension": ".env"})
+
+
+def add_protected_content_samples(root: Path, created_files: list[dict[str, object]]) -> None:
+    secure_root = root / "Executive" / "BoardPackets" / "Secure"
+    protected_zip = secure_root / "password_protected_board_pack.zip"
+    encrypted = write_password_protected_zip(
+        protected_zip,
+        "board_packet_private_notes.txt",
+        "CONFIDENTIAL board notes with synthetic payment card 4111 1111 1111 1111 and break-glass password placeholder.",
+    )
+    created_files.append({
+        "path": str(protected_zip.relative_to(root)),
+        "department": "Executive",
+        "share": "BoardPackets",
+        "extension": ".zip",
+        "protected": encrypted,
+    })
+
+    vault_path = root / "IT" / "Backups" / "Secure" / "production_credential_vault.kdbx"
+    vault_path.parent.mkdir(parents=True, exist_ok=True)
+    vault_path.write_bytes(b"KDBX_SYNTHETIC_PROTECTED_VAULT\x00\x01DSPM_TEST")
+    created_files.append({
+        "path": str(vault_path.relative_to(root)),
+        "department": "IT",
+        "share": "Backups",
+        "extension": ".kdbx",
+        "protected": True,
+    })
+
 
 
 def main() -> None:

@@ -155,7 +155,12 @@ METADATA_EXTENSIONS = {
 
 SCANNABLE_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS | METADATA_EXTENSIONS
 ARCHIVE_EXTENSIONS = {".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"}
+PROTECTED_CONTENT_EXTENSIONS = {".gpg", ".pgp", ".kdbx", ".p12", ".pfx"}
+UNSUPPORTED_ARCHIVE_EXTENSIONS = ARCHIVE_EXTENSIONS - {".zip"}
 CONTENT_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS
+MAX_ARCHIVE_ENTRY_BYTES = 25 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 200 * 1024 * 1024
+MAX_ARCHIVE_ENTRIES = 2000
 
 
 def scan_mode_for_extension(extension: str) -> str:
@@ -163,6 +168,8 @@ def scan_mode_for_extension(extension: str) -> str:
         return "plain_text"
     if extension in BINARY_TEXT_EXTENSIONS:
         return "document_text"
+    if extension in PROTECTED_CONTENT_EXTENSIONS:
+        return "protected_metadata"
     if extension in ARCHIVE_EXTENSIONS:
         return "archive_metadata"
     if extension in METADATA_EXTENSIONS:
@@ -173,6 +180,10 @@ def scan_mode_for_extension(extension: str) -> str:
 def content_status_for_extension(extension: str, content: str, read_content: bool = True) -> str:
     if not read_content:
         return "not_requested"
+    if extension in PROTECTED_CONTENT_EXTENSIONS:
+        return "protected"
+    if extension in UNSUPPORTED_ARCHIVE_EXTENSIONS:
+        return "unsupported_archive"
     if extension in CONTENT_EXTENSIONS:
         return "scanned" if content else "empty_or_unreadable"
     return "metadata_only"
@@ -243,9 +254,17 @@ class FileRecord:
     share: str | None = None
     content: str = ""
     acl: dict | None = None
+    content_status: str | None = None
+    content_scannable: bool | None = None
+    scan_error: str = ""
+    protected: bool = False
+    protection_type: str = ""
 
     def to_dict(self) -> dict:
         scan_mode = scan_mode_for_extension(self.extension)
+        status = self.content_status or content_status_for_extension(self.extension, self.content)
+        scannable = self.content_scannable if self.content_scannable is not None else self.extension in CONTENT_EXTENSIONS
+        protected = self.protected or status in {"protected", "password_protected", "encrypted", "locked"}
         return {
             "source": self.source,
             "share": self.share,
@@ -259,8 +278,11 @@ class FileRecord:
             "content": self.content,
             "acl": self.acl or {},
             "scan_mode": scan_mode,
-            "content_status": content_status_for_extension(self.extension, self.content),
-            "content_scannable": self.extension in CONTENT_EXTENSIONS,
+            "content_status": status,
+            "content_scannable": scannable,
+            "scan_error": self.scan_error,
+            "protected": protected,
+            "protection_type": self.protection_type,
         }
 
 
@@ -298,15 +320,15 @@ def scan_directory(
     extension_filter = normalize_extension_filter(allowed_extensions)
     records: list[FileRecord] = []
 
-    scan_archive_entries = inspect_archives and extension_filter_enabled and any(
-        extension not in ARCHIVE_EXTENSIONS for extension in extension_filter
-    )
+    scan_archive_entries = inspect_archives
 
     def add_file(item: Path) -> None:
         extension = detect_extension(item)
         is_hidden = is_hidden_path(item)
         is_system = is_system_path(item)
+        zip_protection: dict[str, str | bool] = {}
         if scan_archive_entries and extension == ".zip":
+            zip_protection = inspect_zip_protection(item)
             add_zip_entries(item, is_hidden, is_system)
         if not matches_scan_filters(
             extension,
@@ -326,6 +348,28 @@ def scan_directory(
         except OSError:
             return
 
+        protected_extension = extension in PROTECTED_CONTENT_EXTENSIONS
+        unsupported_archive = inspect_archives and extension in UNSUPPORTED_ARCHIVE_EXTENSIONS
+        content_status = None
+        content_scannable = None
+        scan_error = ""
+        protection_type = ""
+        protected = protected_extension or bool(zip_protection.get("protected"))
+        if protected_extension:
+            content_status = "protected"
+            content_scannable = False
+            protection_type = "encrypted_file"
+            scan_error = "File extension indicates encrypted or protected content"
+        elif zip_protection.get("status"):
+            content_status = str(zip_protection.get("status"))
+            content_scannable = False
+            protection_type = str(zip_protection.get("protection_type") or "zip_password")
+            scan_error = str(zip_protection.get("scan_error") or "ZIP archive contains encrypted entries")
+        elif unsupported_archive:
+            content_status = "unsupported_archive"
+            content_scannable = False
+            scan_error = "Archive type is metadata-only unless an extractor is configured"
+
         records.append(
             FileRecord(
                 source="local",
@@ -335,20 +379,81 @@ def scan_directory(
                 extension=extension,
                 is_hidden=is_hidden,
                 is_system=is_system,
-                content=read_text_preview(item),
+                content="" if protected or unsupported_archive else read_text_preview(item),
+                content_status=content_status,
+                content_scannable=content_scannable,
+                scan_error=scan_error,
+                protected=protected,
+                protection_type=protection_type,
             )
         )
+
+    def inspect_zip_protection(archive_path: Path) -> dict[str, str | bool]:
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                encrypted = any(bool(entry.flag_bits & 0x1) for entry in archive.infolist()[:MAX_ARCHIVE_ENTRIES])
+                if encrypted:
+                    return {
+                        "protected": True,
+                        "status": "password_protected",
+                        "protection_type": "zip_password",
+                        "scan_error": "ZIP archive has encrypted entries and needs a password",
+                    }
+                return {}
+        except (OSError, RuntimeError, zipfile.BadZipFile):
+            return {
+                "protected": True,
+                "status": "bad_archive",
+                "protection_type": "unreadable_archive",
+                "scan_error": "ZIP archive could not be opened or parsed",
+            }
+
 
     def add_zip_entries(archive_path: Path, is_hidden: bool, is_system: bool, depth: int = 0) -> None:
         if depth > 2:
             return
         try:
             with zipfile.ZipFile(archive_path) as archive:
-                for entry in archive.infolist():
+                entries = archive.infolist()[:MAX_ARCHIVE_ENTRIES]
+                inflated_total = 0
+                for entry in entries:
+                    inflated_total += int(entry.file_size or 0)
+                    if entry.file_size > MAX_ARCHIVE_ENTRY_BYTES or inflated_total > MAX_ARCHIVE_TOTAL_BYTES:
+                        continue
                     if entry.is_dir():
                         continue
                     entry_path = f"{archive_path}::{entry.filename}"
                     extension = detect_extension(entry.filename)
+                    if entry.flag_bits & 0x1:
+                        if matches_scan_filters(
+                            extension,
+                            is_hidden,
+                            is_system,
+                            extension_filter,
+                            extension_filter_enabled,
+                            include_hidden,
+                            include_system,
+                            hidden_filter_enabled,
+                            system_filter_enabled,
+                        ):
+                            records.append(
+                                FileRecord(
+                                    source="local",
+                                    path=entry_path,
+                                    name=Path(entry.filename).name,
+                                    size=entry.file_size,
+                                    extension=extension,
+                                    is_hidden=is_hidden,
+                                    is_system=is_system,
+                                    content="",
+                                    content_status="password_protected",
+                                    content_scannable=False,
+                                    scan_error="ZIP entry is encrypted and requires a password",
+                                    protected=True,
+                                    protection_type="zip_password",
+                                )
+                            )
+                        continue
                     if matches_scan_filters(
                         extension,
                         is_hidden,
@@ -378,11 +483,45 @@ def scan_directory(
 
                             nested = BytesIO(archive.read(entry))
                             with zipfile.ZipFile(nested) as nested_archive:
-                                for nested_entry in nested_archive.infolist():
+                                nested_total = 0
+                                for nested_entry in nested_archive.infolist()[:MAX_ARCHIVE_ENTRIES]:
+                                    nested_total += int(nested_entry.file_size or 0)
+                                    if nested_entry.file_size > MAX_ARCHIVE_ENTRY_BYTES or nested_total > MAX_ARCHIVE_TOTAL_BYTES:
+                                        continue
                                     if nested_entry.is_dir():
                                         continue
                                     nested_path = f"{entry_path}::{nested_entry.filename}"
                                     nested_extension = detect_extension(nested_entry.filename)
+                                    if nested_entry.flag_bits & 0x1:
+                                        if matches_scan_filters(
+                                            nested_extension,
+                                            is_hidden,
+                                            is_system,
+                                            extension_filter,
+                                            extension_filter_enabled,
+                                            include_hidden,
+                                            include_system,
+                                            hidden_filter_enabled,
+                                            system_filter_enabled,
+                                        ):
+                                            records.append(
+                                                FileRecord(
+                                                    source="local",
+                                                    path=nested_path,
+                                                    name=Path(nested_entry.filename).name,
+                                                    size=nested_entry.file_size,
+                                                    extension=nested_extension,
+                                                    is_hidden=is_hidden,
+                                                    is_system=is_system,
+                                                    content="",
+                                                    content_status="password_protected",
+                                                    content_scannable=False,
+                                                    scan_error="Nested ZIP entry is encrypted and requires a password",
+                                                    protected=True,
+                                                    protection_type="zip_password",
+                                                )
+                                            )
+                                        continue
                                     if matches_scan_filters(
                                         nested_extension,
                                         is_hidden,
@@ -406,9 +545,9 @@ def scan_directory(
                                                 content=read_zip_entry_preview(nested_archive, nested_entry, nested_extension),
                                             )
                                         )
-                        except (OSError, zipfile.BadZipFile):
+                        except (OSError, RuntimeError, zipfile.BadZipFile):
                             continue
-        except (OSError, zipfile.BadZipFile):
+        except (OSError, RuntimeError, zipfile.BadZipFile):
             return
 
     def walk(folder: Path, depth: int) -> None:
@@ -525,6 +664,9 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "content_status": record.get("content_status")
                 or content_status_for_extension(extension, str(record.get("content", ""))),
                 "content_scannable": bool(record.get("content_scannable", extension in CONTENT_EXTENSIONS)),
+                "scan_error": record.get("scan_error", ""),
+                "protected": bool(record.get("protected", False)),
+                "protection_type": record.get("protection_type", ""),
             }
         )
     return normalized
