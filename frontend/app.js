@@ -1093,13 +1093,13 @@ function renderFindingsWorkspace() {
         const findingCount = (file.findings || []).length;
         const source = file.source || file.share || "workspace";
         return `
-          <button type="button" class="summary-row action-row finding-file-card ${risk.level}" data-tab-jump="inventory">
+          <div class="summary-row finding-file-card ${risk.level}">
             <span>
               <b>${escapeHtml(file.name || file.path || "Unknown file")}</b>
               <small>${escapeHtml(source)} &middot; ${findingCount} finding${findingCount === 1 ? "" : "s"}</small>
             </span>
             <strong class="badge ${risk.level}">${risk.level}</strong>
-          </button>
+          </div>
         `;
       }).join("")
     : '<div class="empty compact">No priority finding queue for the latest scan.</div>';
@@ -1197,7 +1197,7 @@ function renderExposureWorkspace() {
     <div class="coverage-grid">
       ${coverageRows.map(([label, value, tone]) => `<div class="summary-row coverage-row ${tone}"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join("")}
     </div>
-    ${protectedFiles.length ? `<div class="protected-file-stack">${protectedFiles.slice(0, 6).map((file) => `<button type="button" class="summary-row coverage-row critical protected-file-row" data-tab-jump="inventory"><span><b>${escapeHtml(file.name || file.path || "Protected file")}</b><small>${escapeHtml(getProtectionLabel(file))} &middot; ${escapeHtml(file.path || "")}</small></span><strong>LOCKED</strong></button>`).join("")}</div>` : ""}
+    ${protectedFiles.length ? `<div class="protected-file-stack">${protectedFiles.slice(0, 6).map((file) => `<div class="summary-row coverage-row critical protected-file-row"><span><b>${escapeHtml(file.name || file.path || "Protected file")}</b><small>${escapeHtml(getProtectionLabel(file))} &middot; ${escapeHtml(file.path || "")}</small></span><strong>LOCKED</strong></div>`).join("")}</div>` : ""}
   `;
 }
 
@@ -1905,23 +1905,23 @@ function renderReportPreview() {
         <div><span>Total files</span><strong>${report.summary.total_files}</strong></div>
       </div>
       <div class="report-visual-grid">
-        <div class="chart-panel">
+        <div class="chart-panel report-card-scroll">
           <h5>Risk distribution</h5>
           ${buildDistributionBars(report.distribution)}
         </div>
-        <div class="chart-panel">
+        <div class="chart-panel report-card-scroll report-signal-card">
           <h5>Detection signals</h5>
           ${renderFindingBars(report.findingStats)}
         </div>
       </div>
       <div class="report-visual-grid">
-        <div class="chart-panel">
+        <div class="chart-panel report-card-scroll report-priority-card">
           <h5>Priority files</h5>
-          ${renderReportFileList(report.priorityFiles.slice(0, 5))}
+          ${renderReportFileList(report.priorityFiles.slice(0, 12))}
         </div>
-        <div class="chart-panel">
+        <div class="chart-panel report-card-scroll report-folder-card">
           <h5>Top risky folders</h5>
-          ${renderReportFolderList(report.folders.slice(0, 5))}
+          ${renderReportFolderList(report.folders.slice(0, 12))}
         </div>
       </div>
     </div>
@@ -2149,7 +2149,7 @@ function buildPostureTrend() {
     };
   });
 
-  const maxScore = 100;
+  const maxScore = Math.max(35, ...points.map((item) => item.score));
   return `
     <div class="trend-bars">
       ${points.map((item) => `
@@ -2333,7 +2333,7 @@ function buildDepartmentRisk() {
   const maxScore = Math.max(...groups.map((item) => item.score), 1);
   return `
     <div class="department-risk-list">
-      ${groups.slice(0, 8).map((item) => `
+      ${groups.map((item) => `
         <div class="department-risk-row">
           <div>
             <strong>${escapeHtml(item.department)}</strong>
@@ -2508,7 +2508,7 @@ function buildSignalMatrix() {
     <div class="signal-matrix">
       ${stats
         .map((item, index) => {
-          const size = 56 + Math.round((item.count / max) * 42);
+          const size = 96 + Math.round((item.count / max) * 70);
           return `
             <div class="signal-bubble b${index % 4}" style="--bubble:${size}px">
               <strong>${item.count}</strong>
@@ -3524,7 +3524,8 @@ function renderTenantsTable(tenants) {
 function renderHistory(items) {
   latestHistoryItems = items || [];
   const visibleItems = filterHistoryItems(latestHistoryItems);
-  if (!items.length) {
+  updateRangeStatus(historyRange, visibleItems.length, latestHistoryItems.length);
+  if (!latestHistoryItems.length) {
     historyBody.innerHTML = '<tr><td colspan="6" class="empty">No scans saved for this tenant yet.</td></tr>';
     return;
   }
@@ -3537,9 +3538,10 @@ function renderHistory(items) {
     .reverse()
     .map((item) => {
       const summary = item.summary || {};
+      const timestamp = getItemTimestampValue(item);
       return `
         <tr>
-          <td><span class="timestamp-cell">${escapeHtml(getFriendlyTimestamp(item.timestamp || ""))}</span><small>${escapeHtml(item.timestamp || "")}</small></td>
+          <td><span class="timestamp-cell">${escapeHtml(getFriendlyTimestamp(timestamp))}</span><small>${escapeHtml(timestamp)}</small></td>
           <td class="file-path">${escapeHtml(item.scan_id || "")}</td>
           <td>${summary.critical || 0}</td>
           <td>${summary.high || 0}</td>
@@ -3552,9 +3554,24 @@ function renderHistory(items) {
 }
 
 function parseHistoryTime(item) {
-  const value = item?.timestamp || "";
+  const value = getItemTimestampValue(item);
+  if (typeof value === "number") return value;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function getItemTimestampValue(item) {
+  if (!item) return "";
+  return item.timestamp
+    || item.created_at
+    || item.createdAt
+    || item.time
+    || item.date
+    || item.event_time
+    || item.scan_time
+    || item.detail?.timestamp
+    || item.detail?.created_at
+    || "";
 }
 
 function filterHistoryItems(items) {
@@ -3593,6 +3610,7 @@ async function loadAudit() {
 function renderAudit(events) {
   latestAuditEvents = events || [];
   const visibleEvents = filterTimedItems(latestAuditEvents, auditRange, auditFrom, auditTo);
+  updateRangeStatus(auditRange, visibleEvents.length, latestAuditEvents.length);
   if (!latestAuditEvents.length) {
     auditBody.innerHTML = '<tr><td colspan="4" class="empty">No audit events for this tenant yet.</td></tr>';
     return;
@@ -3607,7 +3625,7 @@ function renderAudit(events) {
     .map(
       (event) => `
         <tr>
-          <td><span class="timestamp-cell">${escapeHtml(getFriendlyTimestamp(event.timestamp || ""))}</span><small>${escapeHtml(event.timestamp || "")}</small></td>
+          <td><span class="timestamp-cell">${escapeHtml(getFriendlyTimestamp(getItemTimestampValue(event)))}</span><small>${escapeHtml(getItemTimestampValue(event))}</small></td>
           <td>${escapeHtml(event.actor || "")}</td>
           <td class="file-path">${escapeHtml(event.action || "")}</td>
           <td><code>${escapeHtml(JSON.stringify(event.detail || {}))}</code></td>
@@ -3623,21 +3641,38 @@ function filterTimedItems(items, rangeSelect, fromInput, toInput) {
   const now = Date.now();
   if (range !== "custom") {
     const days = Number(range);
-    const cutoff = now - days * 24 * 60 * 60 * 1000;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const cutoff = days === 1 ? now - 24 * 60 * 60 * 1000 : today.getTime() - (days - 1) * 24 * 60 * 60 * 1000;
     return items.filter((item) => {
       const time = parseHistoryTime(item);
-      return time === null || time >= cutoff;
+      return time !== null && time >= cutoff;
     });
   }
   const fromTime = fromInput?.value ? new Date(`${fromInput.value}T00:00:00`).getTime() : null;
   const toTime = toInput?.value ? new Date(`${toInput.value}T23:59:59`).getTime() : null;
   return items.filter((item) => {
     const time = parseHistoryTime(item);
-    if (time === null) return true;
+    if (time === null) return false;
     if (fromTime !== null && time < fromTime) return false;
     if (toTime !== null && time > toTime) return false;
     return true;
   });
+}
+
+function updateRangeStatus(rangeSelect, visible, total) {
+  if (!rangeSelect) return;
+  const controls = rangeSelect.closest(".history-controls");
+  if (!controls) return;
+  let status = controls.querySelector(".range-filter-status");
+  if (!status) {
+    status = document.createElement("span");
+    status.className = "range-filter-status";
+    controls.appendChild(status);
+  }
+  const selected = rangeSelect.options[rangeSelect.selectedIndex]?.textContent || "Selected range";
+  status.textContent = `${selected}: ${visible} of ${total}`;
+  rangeSelect.title = `${selected}: showing ${visible} of ${total}`;
 }
 
 function updateAuditFilterControls() {
@@ -4234,12 +4269,16 @@ historyRange?.addEventListener("change", () => {
 });
 historyFrom?.addEventListener("change", () => renderHistory(latestHistoryItems));
 historyTo?.addEventListener("change", () => renderHistory(latestHistoryItems));
+historyFrom?.addEventListener("input", () => renderHistory(latestHistoryItems));
+historyTo?.addEventListener("input", () => renderHistory(latestHistoryItems));
 auditRange?.addEventListener("change", () => {
   updateAuditFilterControls();
   renderAudit(latestAuditEvents);
 });
 auditFrom?.addEventListener("change", () => renderAudit(latestAuditEvents));
 auditTo?.addEventListener("change", () => renderAudit(latestAuditEvents));
+auditFrom?.addEventListener("input", () => renderAudit(latestAuditEvents));
+auditTo?.addEventListener("input", () => renderAudit(latestAuditEvents));
 function setSidebarCollapsed(collapsed) {
   document.body.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggle?.setAttribute("aria-expanded", String(!collapsed));

@@ -17,6 +17,8 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - Executive dashboard with posture ring, risk distribution, folder heatmap, signal mix, posture trend, topology, MSSP portfolio, and remediation queue.
 - Scan result analytics include risk trend, critical/high file queue, department risk, scan comparison, and top risky folders.
 - Right-side detail drawers for long risk reasons and DLP recommendations.
+- Dashboard tables keep long file paths visible instead of truncating them, and priority queues stay read-only so analysts can search or filter inventory deliberately.
+- History and security audit views include working date-range filters for all scans, last 24 hours, last 5 days, last 7 days, last 30 days, and custom ranges.
 - Report center with polished Excel, Word, and print/PDF exports, including KPI cards, SVG charts, department risk, folder heatmap, trend context, and priority file queues.
 - Security operations view with API keys, audit trail, DLP policy export, and credential vault support.
 - SQLite-backed tenant and user management with invitation-code registration, admin role management, password resets, and activity logging.

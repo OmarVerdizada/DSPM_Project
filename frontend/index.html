@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM Command Center</title>
-    <link rel="stylesheet" href="/static/styles.css?v=101" />
+    <link rel="stylesheet" href="/static/styles.css?v=112" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -192,18 +192,18 @@
                 Max folder depth
                 <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
               </label>
-              <div class="scan-option-stack">
-                <label class="checkbox-row">
+              <div class="scan-option-stack file-server-options scan-form-wide">
+                <label class="checkbox-row option-tile">
                   <input id="async_scan" name="async_scan" type="checkbox" checked />
-                  Run through async queue
+                  <span>Run through async queue</span>
                 </label>
-                <label class="checkbox-row">
+                <label class="checkbox-row option-tile">
                   <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
-                  Scan admin disk shares like C$
+                  <span>Scan admin disk shares like C$</span>
                 </label>
-                <label class="checkbox-row">
+                <label class="checkbox-row option-tile">
                   <input id="inspect_archives" name="inspect_archives" type="checkbox" />
-                  Inspect ZIP archive entries
+                  <span>Inspect ZIP archive entries</span>
                 </label>
               </div>
 
