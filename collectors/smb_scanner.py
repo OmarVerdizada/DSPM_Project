@@ -43,6 +43,7 @@ class SMBConfig:
     extension_filter_enabled: bool = False
     include_admin_shares: bool = False
     inspect_archives: bool = False
+    timeout: int = 10
 
 
 class SMBScanner:
@@ -69,7 +70,7 @@ class SMBScanner:
                 is_direct_tcp=True,
             )
             try:
-                if conn.connect(self.config.server, self.config.port):
+                if conn.connect(self.config.server, self.config.port, timeout=self.config.timeout):
                     self.connection = conn
                     self.credential_used = label
                     return True
@@ -105,7 +106,7 @@ class SMBScanner:
                 "domain": self.config.domain,
                 "credential_used": self.credential_used,
                 "shares": [],
-                "message": str(exc),
+                "message": "SMB connection test failed",
             }
         finally:
             self.close()

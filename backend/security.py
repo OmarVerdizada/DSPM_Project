@@ -14,11 +14,51 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from backend.store import create_user, get_user, list_users, mark_user_login
+from pathlib import Path
+
+from backend.store import (
+    create_user,
+    get_user,
+    is_token_revoked,
+    mark_user_login,
+    revoke_token_jti,
+    tenant_exists,
+    update_user_password,
+    update_user_role,
+)
 
 
 ROLES = {"admin": 3, "analyst": 2, "viewer": 1}
-SECRET_KEY = os.getenv("DSPM_SECRET_KEY") or secrets.token_urlsafe(48)
+ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
+IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_secret_key() -> str:
+    configured = os.getenv("DSPM_SECRET_KEY", "").strip()
+    if configured:
+        if len(configured) < 32:
+            raise RuntimeError("DSPM_SECRET_KEY must be at least 32 characters long")
+        return configured
+    if IS_PRODUCTION:
+        raise RuntimeError("DSPM_SECRET_KEY must be set in production")
+    key_path = BASE_DIR / "data" / ".jwt_secret"
+    try:
+        if key_path.exists():
+            return key_path.read_text(encoding="utf-8").strip()
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        generated = secrets.token_urlsafe(48)
+        key_path.write_text(generated, encoding="utf-8")
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        return generated
+    except OSError:
+        raise RuntimeError("Unable to load or persist DSPM_SECRET_KEY")
+
+
+SECRET_KEY = _load_secret_key()
 DEFAULT_SECRET_IN_USE = "DSPM_SECRET_KEY" not in os.environ
 TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "28800"))
 API_KEYS = {
@@ -61,7 +101,9 @@ def verify_password(password: str, password_hash: str) -> bool:
         _, rounds, salt, digest = password_hash.split("$", 3)
         candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(rounds)).hex()
         return hmac.compare_digest(candidate, digest)
-    return hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), password_hash)
+    if os.getenv("DSPM_ALLOW_LEGACY_SHA256_PASSWORDS", "0") == "1":
+        return hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), password_hash)
+    return False
 
 
 def sanitize_username(username: str) -> str:
@@ -70,16 +112,35 @@ def sanitize_username(username: str) -> str:
 
 
 def ensure_default_admin() -> None:
-    users = list_users()
-    if users:
+    """Create the built-in admin only when explicitly safe.
+
+    Production must set DSPM_ADMIN_PASSWORD. Local/demo installs get a strong
+    development default, and existing admin passwords are not silently reset
+    unless DSPM_SYNC_BUILTIN_ADMIN=1 is explicitly enabled.
+    """
+    username = "admin"
+    configured_password = os.getenv("DSPM_ADMIN_PASSWORD", "").strip()
+    if IS_PRODUCTION and not configured_password:
+        raise RuntimeError("DSPM_ADMIN_PASSWORD must be set in production")
+    password = configured_password or os.getenv("DSPM_DEV_ADMIN_PASSWORD", "Admin12345")
+    user = get_user(username)
+    if user is None:
+        create_user(
+            username,
+            hash_password(password),
+            "admin",
+            "default",
+            "Local Administrator",
+        )
         return
-    create_user(
-        "admin",
-        hash_password(os.getenv("DSPM_ADMIN_PASSWORD", "Admin12345")),
-        "admin",
-        "default",
-        "Local Administrator",
-    )
+
+    if os.getenv("DSPM_SYNC_BUILTIN_ADMIN", "0") != "1":
+        return
+
+    if user.get("role") != "admin" or user.get("tenant_id") != "default":
+        update_user_role(username, "admin", "default")
+    if configured_password and not verify_password(configured_password, user["password_hash"]):
+        update_user_password(username, hash_password(configured_password))
 
 
 def _b64url(data: bytes) -> str:
@@ -117,19 +178,42 @@ def create_token(subject: str, role: str, tenant_id: str) -> str:
 
 def verify_token(token: str) -> Principal:
     try:
-        header, payload, signature = token.split(".")
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError("malformed token")
+        header, payload, signature = parts
         message = f"{header}.{payload}"
         if not hmac.compare_digest(_sign(message), signature):
             raise ValueError("bad signature")
         claims = json.loads(_b64url_decode(payload))
-        if int(claims.get("exp", 0)) < int(time.time()):
+        exp = int(claims.get("exp", 0))
+        if exp < int(time.time()):
             raise ValueError("expired token")
-        role = str(claims.get("role", "viewer"))
+        jti = str(claims.get("jti") or "")
+        if is_token_revoked(jti):
+            raise ValueError("revoked token")
+        subject = sanitize_username(str(claims.get("sub") or ""))
+        user = get_user(subject)
+        if not user or not user.get("is_active"):
+            raise ValueError("inactive user")
+        role = str(user.get("role") or claims.get("role") or "viewer")
         if role not in ROLES:
             raise ValueError("invalid role")
-        return Principal(str(claims["sub"]), role, str(claims.get("tenant") or "default"))
+        tenant_id = str(user.get("tenant_id") or claims.get("tenant") or "default")
+        return Principal(subject, role, tenant_id)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+
+
+def revoke_token(token: str) -> None:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return
+        claims = json.loads(_b64url_decode(parts[1]))
+        revoke_token_jti(str(claims.get("jti") or ""), int(claims.get("exp", 0)))
+    except Exception:
+        return
 
 
 def authenticate_user(username: str, password: str) -> Principal | None:
@@ -159,7 +243,10 @@ def require_principal(
     if credentials and credentials.scheme.lower() == "bearer":
         principal = verify_token(credentials.credentials)
         if x_tenant_id and principal.role == "admin":
-            return Principal(principal.subject, principal.role, x_tenant_id, principal.auth_type)
+            requested_tenant = "".join(ch for ch in x_tenant_id.strip() if ch.isalnum() or ch in {"-", "_"})
+            if not requested_tenant or not tenant_exists(requested_tenant):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant is not valid")
+            return Principal(principal.subject, principal.role, requested_tenant, principal.auth_type)
         return principal
 
     if x_api_key:

@@ -18,6 +18,7 @@ const endpointCustomExtensionInput = document.querySelector("#endpoint-custom-ex
 const endpointAddCustomExtensionBtn = document.querySelector("#endpoint-add-custom-extension-btn");
 const toastHost = document.querySelector("#toast-host");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
+const menuOpenToggle = document.querySelector("#menu-open-toggle");
 const protectedCount = document.querySelector("#protected-count");
 const health = document.querySelector("#health");
 const filterInput = document.querySelector("#filter");
@@ -882,7 +883,18 @@ function setAuthState(isAuthenticated) {
   }
 }
 
-function logout() {
+async function logout() {
+  const tokenToRevoke = accessToken;
+  try {
+    if (tokenToRevoke) {
+      await fetch("/api/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenToRevoke}` },
+      });
+    }
+  } catch {
+    // Client-side logout still proceeds; token expiry/revocation is best-effort if the network is unavailable.
+  }
   accessToken = "";
   latestDashboard = null;
   safeSessionSet("dspm-access-token", "");
@@ -1095,76 +1107,100 @@ function renderFindingsWorkspace() {
 
 function renderExposureWorkspace() {
   if (!exposurePermissionsSummary || !exposureCoverageSummary) return;
+  exposurePermissionsSummary.className = "summary-list exposure-summary-list";
+  exposureCoverageSummary.className = "summary-list coverage-summary-list";
+
   if (!latestFiles.length) {
-    exposurePermissionsSummary.className = "summary-list";
-    exposureCoverageSummary.className = "summary-list";
     exposurePermissionsSummary.innerHTML = `
       <div class="exposure-kpi-grid">
-        <div class="exposure-kpi high"><span>Broad access</span><strong>0</strong></div>
-        <div class="exposure-kpi medium"><span>Hidden files</span><strong>0</strong></div>
-        <div class="exposure-kpi low"><span>Sources</span><strong>0</strong></div>
+        <div class="exposure-kpi high"><span>Broad access</span><strong>0</strong><small>ACL signals</small></div>
+        <div class="exposure-kpi medium"><span>Hidden files</span><strong>0</strong><small>discovery scope</small></div>
+        <div class="exposure-kpi low"><span>Sources</span><strong>0</strong><small>active connectors</small></div>
       </div>
-      <div class="summary-row exposure-row"><span><b>ACL posture</b><small>Enable endpoint ACL reading or SMB permission enrichment.</small></span><strong>Ready</strong></div>
+      <div class="summary-row exposure-row"><span><b>ACL posture</b><small>Enable endpoint ACL reading or SMB permission enrichment.</small></span><strong>READY</strong></div>
       <div class="summary-row exposure-row"><span><b>Share exposure</b><small>Writable, broad, hidden, and admin-share signals will be grouped here.</small></span><strong>0</strong></div>
     `;
     exposureCoverageSummary.innerHTML = `
-      <div class="summary-row coverage-row low"><span>Content previewed</span><strong>0</strong></div>
-      <div class="summary-row coverage-row medium"><span>Metadata-only files</span><strong>0</strong></div>
-      <div class="summary-row coverage-row high"><span>Archive entries</span><strong>0</strong></div>
-      <div class="summary-row coverage-row neutral"><span>Total files</span><strong>0</strong></div>
-      <div class="coverage-meter" aria-hidden="true"><span style="width:4%"></span></div>
+      <div class="coverage-overview-card">
+        <div><span>Scan coverage</span><strong>0%</strong><small>No file content has been previewed yet.</small></div>
+        <div class="coverage-meter" aria-hidden="true"><span style="width:4%"></span></div>
+      </div>
+      <div class="coverage-grid">
+        <div class="summary-row coverage-row low"><span>Content previewed</span><strong>0</strong></div>
+        <div class="summary-row coverage-row medium"><span>Metadata-only files</span><strong>0</strong></div>
+        <div class="summary-row coverage-row high"><span>Archive entries</span><strong>0</strong></div>
+        <div class="summary-row coverage-row neutral"><span>Total files</span><strong>0</strong></div>
+      </div>
     `;
     return;
   }
+
   const broad = latestFiles.filter((file) => file.risk?.reasons?.some((reason) => /everyone|authenticated users|broad|writable|permission|acl/i.test(reason))).length;
   const hidden = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
   const protectedFiles = latestFiles.filter(isProtectedFile);
   const metadataOnly = latestFiles.filter((file) => file.content_status === "metadata_only" || file.content_scannable === false).length;
   const archiveEntries = latestFiles.filter((file) => file.scan_mode === "archive_entry" || String(file.path || "").includes("!")).length;
   const previewable = latestFiles.filter((file) => file.preview?.available).length;
+  const previewPercent = Math.max(4, Math.min(100, Math.round((previewable / Math.max(1, latestFiles.length)) * 100)));
+  const sources = new Set(latestFiles.map((file) => file.source || file.share || "unknown")).size;
+
   const riskyFolders = Array.from(
     latestFiles.reduce((map, file) => {
       const path = String(file.path || file.name || "Unknown");
       const folder = path.includes("\\") ? path.split("\\").slice(0, -1).join("\\") : path.split("/").slice(0, -1).join("/") || file.source || "Workspace";
-      const existing = map.get(folder) || { folder, count: 0, risk: 0 };
+      const existing = map.get(folder) || { folder, count: 0, risk: 0, critical: 0 };
+      const effective = getEffectiveRisk(file);
       existing.count += 1;
-      existing.risk += getEffectiveRisk(file).score;
+      existing.risk += effective.score;
+      existing.critical += effective.level === "CRITICAL" ? 1 : 0;
       map.set(folder, existing);
       return map;
     }, new Map()).values()
   ).sort((a, b) => b.risk - a.risk).slice(0, 6);
-  exposurePermissionsSummary.className = "summary-list";
-  exposureCoverageSummary.className = "summary-list";
+
   exposurePermissionsSummary.innerHTML = `
     <div class="exposure-kpi-grid">
-      <div class="exposure-kpi high"><span>Broad access</span><strong>${broad}</strong></div>
-      <div class="exposure-kpi medium"><span>Hidden files</span><strong>${hidden}</strong></div>
-      <div class="exposure-kpi low"><span>Sources</span><strong>${new Set(latestFiles.map((file) => file.source || "unknown")).size}</strong></div>
+      <div class="exposure-kpi high"><span>Broad access</span><strong>${broad}</strong><small>permission signals</small></div>
+      <div class="exposure-kpi medium"><span>Hidden files</span><strong>${hidden}</strong><small>in scan scope</small></div>
+      <div class="exposure-kpi low"><span>Sources</span><strong>${sources}</strong><small>active sources</small></div>
     </div>
-    ${riskyFolders.map((item) => `
-      <div class="summary-row exposure-row">
-        <span>
-          <b>${escapeHtml(item.folder || "Workspace")}</b>
-          <small>${item.count} file${item.count === 1 ? "" : "s"} &middot; exposure score ${Math.round(item.risk)}</small>
-        </span>
-        <strong>${item.count}</strong>
-      </div>
-    `).join("")}
+    <div class="scroll-card-list exposure-folder-list">
+      ${riskyFolders.map((item) => `
+        <div class="summary-row exposure-row">
+          <span>
+            <b>${escapeHtml(item.folder || "Workspace")}</b>
+            <small>${item.count} file${item.count === 1 ? "" : "s"} &middot; ${item.critical} critical &middot; exposure score ${Math.round(item.risk)}</small>
+          </span>
+          <strong>${item.count}</strong>
+        </div>
+      `).join("")}
+    </div>
   `;
+
+  const coverageRows = [
+    ["Content previewed", previewable, "low"],
+    ["Metadata-only files", metadataOnly, "medium"],
+    ["Archive entries", archiveEntries, "high"],
+    ["Protected / locked", protectedFiles.length, "critical"],
+    ["Total files", latestFiles.length, "neutral"],
+  ];
+
   exposureCoverageSummary.innerHTML = `
-    ${[
-      ["Content previewed", previewable, "low"],
-      ["Metadata-only files", metadataOnly, "medium"],
-      ["Archive entries", archiveEntries, "high"],
-      ["Protected / locked", protectedFiles.length, "critical"],
-      ["Total files", latestFiles.length, "neutral"],
-    ].map(([label, value, tone]) => `<div class="summary-row coverage-row ${tone}"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join("")}
-    <div class="coverage-meter" aria-hidden="true">
-      <span style="width:${Math.max(4, Math.min(100, Math.round((previewable / Math.max(1, latestFiles.length)) * 100)))}%"></span>
+    <div class="coverage-overview-card">
+      <div>
+        <span>Preview coverage</span>
+        <strong>${previewPercent}%</strong>
+        <small>${previewable} of ${latestFiles.length} files have readable preview content.</small>
+      </div>
+      <div class="coverage-meter" aria-hidden="true"><span style="width:${previewPercent}%"></span></div>
+    </div>
+    <div class="coverage-grid">
+      ${coverageRows.map(([label, value, tone]) => `<div class="summary-row coverage-row ${tone}"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join("")}
     </div>
     ${protectedFiles.length ? `<div class="protected-file-stack">${protectedFiles.slice(0, 6).map((file) => `<button type="button" class="summary-row coverage-row critical protected-file-row" data-tab-jump="inventory"><span><b>${escapeHtml(file.name || file.path || "Protected file")}</b><small>${escapeHtml(getProtectionLabel(file))} &middot; ${escapeHtml(file.path || "")}</small></span><strong>LOCKED</strong></button>`).join("")}</div>` : ""}
   `;
 }
+
 
 function list(items) {
   if (!items || items.length === 0) {
@@ -1401,23 +1437,60 @@ function getFileSearchText(file) {
   return text;
 }
 
+function resolveTabName(tabName) {
+  const aliases = { inventory: "overview" };
+  return aliases[tabName] || tabName || "overview";
+}
+
+function hydrateNavigation() {
+  const icons = {
+    overview: "DB",
+    risk: "RM",
+    "file-servers": "FS",
+    endpoint: "EP",
+    findings: "FN",
+    exposure: "EX",
+    reports: "RP",
+    history: "HS",
+    security: "SO",
+    admin: "AD",
+    settings: "AR",
+    integrations: "IN",
+    logic: "LG",
+  };
+  tabs.forEach((tab) => {
+    const key = tab.dataset.tab;
+    tab.dataset.navIcon = tab.dataset.navIcon || icons[key] || (key || "DSPM").slice(0, 2).toUpperCase();
+    tab.title = tab.querySelector("span")?.textContent?.trim() || key || "Navigate";
+    tab.setAttribute("aria-current", tab.classList.contains("active") ? "page" : "false");
+  });
+}
+
 function switchTab(tabName) {
   const requestedTab = tabName;
-  const resolvedTab = tabName === "inventory" ? "overview" : tabName;
-  tabs.forEach((tab) => tab.classList.toggle("active", tab.dataset.tab === resolvedTab));
-  tabPanels.forEach((panel) => panel.classList.toggle("active", panel.id === `tab-${resolvedTab}`));
-  const activePanel = document.querySelector(`#tab-${resolvedTab}`);
-  if (activePanel) {
-    activePanel.animate(
-      [
-        { opacity: 0, transform: "translateY(8px)" },
-        { opacity: 1, transform: "translateY(0)" },
-      ],
-      { duration: 180, easing: "ease-out" }
-    );
-  }
+  const resolvedTab = resolveTabName(tabName);
+  const activePanel = document.getElementById(`tab-${resolvedTab}`);
+  if (!activePanel) return;
+
+  tabs.forEach((tab) => {
+    const isActive = tab.dataset.tab === resolvedTab;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-current", isActive ? "page" : "false");
+  });
+  tabPanels.forEach((panel) => panel.classList.toggle("active", panel === activePanel));
+
+  activePanel.animate(
+    [
+      { opacity: 0, transform: "translateY(8px)" },
+      { opacity: 1, transform: "translateY(0)" },
+    ],
+    { duration: 180, easing: "ease-out" }
+  );
+
   if (requestedTab === "inventory") {
     document.querySelector("#inventory-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else if (window.matchMedia("(max-width: 860px)").matches) {
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 }
 
@@ -2091,30 +2164,42 @@ function buildPostureTrend() {
   `;
 }
 
+
 function buildRemediationWorkflow() {
   const items = latestFiles
-    .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level))
+    .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level) || isProtectedFile(file))
     .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
     .slice(0, 18);
 
   if (!items.length) {
-    return '<div class="empty compact">No active remediation queue yet.</div>';
+    return '<div class="empty compact">No active remediation queue yet. Critical, high, protected, and medium-risk files will appear here after a scan.</div>';
   }
 
   return `
-    <div class="scroll-card-list remediation-list">
-      ${items.map((file) => {
+    <div class="scroll-card-list remediation-list remediation-kanban">
+      ${items.map((file, index) => {
         const risk = getEffectiveRisk(file);
         const remediation = file.risk?.remediation || {};
         const actions = remediation.actions || ["Validate business ownership"];
         const findingCount = (file.findings || []).length;
+        const owner = remediation.owner || inferDepartment(file) || "Data owner";
+        const ticket = remediation.ticket || `DSPM-${String(index + 1).padStart(4, "0")}`;
+        const sla = remediation.sla || (risk.level === "CRITICAL" ? "24 hours" : risk.level === "HIGH" ? "3 business days" : "14 days");
         return `
           <article class="remediation-item compact-risk-card ${risk.level}">
-            <span class="badge ${risk.level}">${risk.level}</span>
-            <div>
+            <div class="remediation-head">
+              <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
+              <span class="remediation-ticket">${escapeHtml(ticket)}</span>
+            </div>
+            <div class="remediation-body">
               <h4>${escapeHtml(file.name || file.path || "Unknown file")}</h4>
-              <p>${escapeHtml(remediation.ticket || "DSPM ticket")} · ${escapeHtml(remediation.owner || "Data owner")} · SLA ${escapeHtml(remediation.sla || "review")}</p>
-              <small>${escapeHtml((remediation.actions || ["Validate business ownership"])[0])}</small>
+              <p title="${escapeHtml(file.path || "")}">${escapeHtml(file.path || file.source || "Workspace")}</p>
+              <div class="remediation-meta">
+                <span>${findingCount} finding${findingCount === 1 ? "" : "s"}</span>
+                <span>${escapeHtml(owner)}</span>
+                <span>SLA ${escapeHtml(sla)}</span>
+              </div>
+              <small>${escapeHtml(actions[0])}</small>
             </div>
           </article>
         `;
@@ -2159,37 +2244,6 @@ function buildMsspPortfolio() {
   `;
 }
 
-function buildRemediationWorkflow() {
-  const items = latestFiles
-    .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level))
-    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
-    .slice(0, 18);
-
-  if (!items.length) {
-    return '<div class="empty compact">No active remediation queue yet.</div>';
-  }
-
-  return `
-    <div class="scroll-card-list remediation-list">
-      ${items.map((file) => {
-        const risk = getEffectiveRisk(file);
-        const remediation = file.risk?.remediation || {};
-        const actions = remediation.actions || ["Validate business ownership"];
-        const findingCount = (file.findings || []).length;
-        return `
-          <article class="remediation-item compact-risk-card ${risk.level}">
-            <span class="badge ${risk.level}">${risk.level}</span>
-            <div>
-              <h4>${escapeHtml(file.name || file.path || "Unknown file")}</h4>
-              <p>${escapeHtml(remediation.ticket || "DSPM ticket")} &middot; ${escapeHtml(remediation.owner || "Data owner")} &middot; SLA ${escapeHtml(remediation.sla || "review")}</p>
-              <small>${findingCount} findings &middot; ${escapeHtml(actions[0])}</small>
-            </div>
-          </article>
-        `;
-      }).join("")}
-    </div>
-  `;
-}
 
 function buildDonutSvg(distribution) {
   const total = distribution.reduce((sum, item) => sum + item.count, 0) || 1;
@@ -2299,30 +2353,29 @@ function buildPriorityRiskFiles() {
     .slice(0, 16);
 
   if (!items.length) {
-    return '<div class="empty compact">Critical and high files will appear after a risky scan.</div>';
+    return '<div class="empty compact">Critical, high, and protected files will appear after a risky scan.</div>';
   }
 
   return `
     <div class="scroll-card-list priority-file-list">
-      ${items
-        .map((file) => {
-          const risk = getEffectiveRisk(file);
-          const findings = (file.findings || []).map((finding) => finding.type).slice(0, 3).join(", ") || "Risk context";
-          return `
-            <article class="priority-file compact-risk-card ${risk.level}">
-              <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
-              <div>
-                <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
-                <p>${escapeHtml(file.path || "")}</p>
-                <small>${escapeHtml(file.source || file.share || "workspace")} &middot; ${escapeHtml(isProtectedFile(file) ? getProtectionLabel(file) : findings)}</small>
-              </div>
-            </article>
-          `;
-        })
-        .join("")}
+      ${items.map((file) => {
+        const risk = getEffectiveRisk(file);
+        const findings = (file.findings || []).map((finding) => finding.type).slice(0, 3).join(", ") || "Risk context";
+        return `
+          <article class="priority-file compact-risk-card ${risk.level}" title="${escapeHtml(file.path || file.name || "")}">
+            <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
+            <div>
+              <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
+              <p>${escapeHtml(file.path || "")}</p>
+              <small>${escapeHtml(file.source || file.share || "workspace")} &middot; ${escapeHtml(isProtectedFile(file) ? getProtectionLabel(file) : findings)}</small>
+            </div>
+          </article>
+        `;
+      }).join("")}
     </div>
   `;
 }
+
 
 function groupFilesByDepartment(files) {
   const groups = {};
@@ -3293,7 +3346,7 @@ function downloadFile(filename, content, type) {
 
 function requireAuth() {
   if (!accessToken) {
-    throw new Error("Sign in first. Default local admin is admin / admin123 unless DSPM_ADMIN_PASSWORD is set.");
+    throw new Error("Sign in first. Default local admin is admin / Admin12345 unless DSPM_ADMIN_PASSWORD is set.");
   }
 }
 
@@ -4187,12 +4240,20 @@ auditRange?.addEventListener("change", () => {
 });
 auditFrom?.addEventListener("change", () => renderAudit(latestAuditEvents));
 auditTo?.addEventListener("change", () => renderAudit(latestAuditEvents));
-sidebarToggle?.addEventListener("click", () => {
-  const collapsed = document.body.classList.toggle("sidebar-collapsed");
-  sidebarToggle.setAttribute("aria-expanded", String(!collapsed));
-  sidebarToggle.title = collapsed ? "Expand navigation" : "Collapse navigation";
+function setSidebarCollapsed(collapsed) {
+  document.body.classList.toggle("sidebar-collapsed", collapsed);
+  sidebarToggle?.setAttribute("aria-expanded", String(!collapsed));
+  menuOpenToggle?.setAttribute("aria-expanded", String(!collapsed));
+  if (sidebarToggle) {
+    sidebarToggle.title = collapsed ? "Expand navigation" : "Collapse navigation";
+  }
   safeSessionSet("dspm-sidebar-collapsed", collapsed ? "1" : "");
+}
+
+sidebarToggle?.addEventListener("click", () => {
+  setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
 });
+menuOpenToggle?.addEventListener("click", () => setSidebarCollapsed(false));
 refreshExecutiveBtn.addEventListener("click", () => {
   loadHistory().catch((error) => setStatus(`Executive dashboard failed: ${error.message}`));
 });
@@ -4348,6 +4409,7 @@ msspPortfolio.addEventListener("click", async (event) => {
   tenantSwitcher.dispatchEvent(new Event("change"));
 });
 
+hydrateNavigation();
 applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
 renderExtensionFilter(allowedExtensionsList, extensionSearch);
@@ -4361,8 +4423,7 @@ renderFindingsWorkspace();
 renderExposureWorkspace();
 renderIntegrations();
 if (safeSessionGet("dspm-sidebar-collapsed") === "1") {
-  document.body.classList.add("sidebar-collapsed");
-  sidebarToggle?.setAttribute("aria-expanded", "false");
+  setSidebarCollapsed(true);
 }
 updateHistoryFilterControls();
 updateAuditFilterControls();

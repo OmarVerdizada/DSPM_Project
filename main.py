@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import uvicorn
@@ -43,6 +44,9 @@ def run_scan(args: argparse.Namespace) -> None:
 
 
 def serve(args: argparse.Namespace) -> None:
+    is_production = os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}
+    if args.reload and is_production:
+        raise SystemExit("--reload is disabled when DSPM_ENV=production")
     uvicorn.run("backend.app:app", host=args.host, port=args.port, reload=args.reload)
 
 

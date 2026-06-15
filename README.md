@@ -60,7 +60,7 @@ http://127.0.0.1:8000
 Default local login:
 
 ```text
-admin / admin123
+admin / Admin12345
 ```
 
 For production-like use, set `DSPM_ADMIN_PASSWORD` before starting the app.
@@ -227,7 +227,7 @@ The app supports a managed-service workflow:
 
 Useful environment variables:
 
-- `DSPM_ADMIN_PASSWORD`: overrides the default local admin password.
+- `DSPM_ADMIN_PASSWORD`: required in production and overrides the local development admin password. Set `DSPM_SECRET_KEY` and `DSPM_VAULT_KEY` in production as well.
 - `DSPM_DB_PATH`: optional custom SQLite database path. Defaults to `data/dspm.sqlite`.
 - `DSPM_ENV`: shown in retention metadata.
 - `DSPM_API_KEYS`: API-key hash mapping in `tenant_id:hash` format.

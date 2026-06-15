@@ -107,7 +107,18 @@ function sessionUser() {
   };
 }
 
-function logout() {
+async function logout() {
+  const tokenToRevoke = sessionGet("dspm-access-token");
+  try {
+    if (tokenToRevoke) {
+      await fetch("/api/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenToRevoke}` },
+      });
+    }
+  } catch {
+    // Local session clearing must still happen if the revoke request cannot reach the API.
+  }
   sessionSet("dspm-access-token", "");
   sessionSet("dspm-tenant-id", "");
   sessionSet("dspm-role", "");

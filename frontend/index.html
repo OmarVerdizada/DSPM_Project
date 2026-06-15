@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM Command Center</title>
-    <link rel="stylesheet" href="/static/styles.css?v=81" />
+    <link rel="stylesheet" href="/static/styles.css?v=101" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -28,61 +28,61 @@
 
         <nav class="side-nav" aria-label="Product navigation">
           <div class="nav-group-label">Command</div>
-          <button type="button" class="tab active" data-tab="overview">
+          <button type="button" class="tab active" data-tab="overview" data-nav-icon="DB" aria-current="page">
             <span>Dashboard</span>
             <small>Posture, inventory, latest scan</small>
           </button>
-          <button type="button" class="tab" data-tab="risk">
+          <button type="button" class="tab" data-tab="risk" data-nav-icon="RM">
             <span>Remediation Center</span>
             <small>Risk score, SLA, owners</small>
           </button>
 
           <div class="nav-group-label">Discover</div>
-          <button type="button" class="tab" data-tab="file-servers">
+          <button type="button" class="tab" data-tab="file-servers" data-nav-icon="FS">
             <span>File Server Scan</span>
             <small>SMB, local data, archive scope</small>
           </button>
-          <button type="button" class="tab" data-tab="endpoint">
+          <button type="button" class="tab" data-tab="endpoint" data-nav-icon="EP">
             <span>Endpoint Scan</span>
             <small>WinRM workstation discovery</small>
           </button>
 
           <div class="nav-group-label">Analyze</div>
-          <button type="button" class="tab" data-tab="findings">
+          <button type="button" class="tab" data-tab="findings" data-nav-icon="FN">
             <span>Findings</span>
             <small>Secrets, PII, regulated data</small>
           </button>
-          <button type="button" class="tab" data-tab="exposure">
+          <button type="button" class="tab" data-tab="exposure" data-nav-icon="EX">
             <span>Exposure</span>
             <small>Permissions and coverage</small>
           </button>
-          <button type="button" class="tab" data-tab="reports">
+          <button type="button" class="tab" data-tab="reports" data-nav-icon="RP">
             <span>Reports</span>
             <small>CSV, Word, PDF evidence</small>
           </button>
-          <button type="button" class="tab" data-tab="history">
+          <button type="button" class="tab" data-tab="history" data-nav-icon="HS">
             <span>History</span>
             <small>Trend and scan audit</small>
           </button>
 
           <div class="nav-group-label">Operate</div>
-          <button type="button" class="tab" data-tab="security">
+          <button type="button" class="tab" data-tab="security" data-nav-icon="SO">
             <span>Security Ops</span>
             <small>Users, API keys, DLP export</small>
           </button>
-          <button type="button" class="tab" data-tab="admin">
+          <button type="button" class="tab" data-tab="admin" data-nav-icon="AD">
             <span>MSSP Admin</span>
             <small>Tenant portfolio</small>
           </button>
-          <button type="button" class="tab" data-tab="settings">
+          <button type="button" class="tab" data-tab="settings" data-nav-icon="AR">
             <span>Asset Rules</span>
             <small>Crown-jewel scoring</small>
           </button>
-          <button type="button" class="tab" data-tab="integrations">
+          <button type="button" class="tab" data-tab="integrations" data-nav-icon="IN">
             <span>Integrations</span>
             <small>Connectors and API flow</small>
           </button>
-          <button type="button" class="tab" data-tab="logic">
+          <button type="button" class="tab" data-tab="logic" data-nav-icon="LG">
             <span>Risk Logic</span>
             <small>Scoring model</small>
           </button>
@@ -1046,6 +1046,6 @@
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=80"></script>
+    <script src="/static/app.js?v=99"></script>
   </body>
 </html>

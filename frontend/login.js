@@ -38,7 +38,17 @@ loginForm.addEventListener("submit", async (event) => {
     });
 
     if (!response.ok) {
-      throw new Error("Username or password is incorrect.");
+      let detail = "Username or password is incorrect.";
+      try {
+        const errorPayload = await response.json();
+        detail = errorPayload.detail || detail;
+      } catch (_) {
+        // Keep the safe generic message if the server did not return JSON.
+      }
+      if (response.status === 401) {
+        detail = "Username or password is incorrect. Default local login is admin / Admin12345 unless DSPM_ADMIN_PASSWORD is set.";
+      }
+      throw new Error(detail);
     }
 
     const result = await response.json();

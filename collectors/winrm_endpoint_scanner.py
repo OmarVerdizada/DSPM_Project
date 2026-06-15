@@ -116,8 +116,18 @@ def _local_activation_script(require_current_admin: bool) -> str:
 def _activate_local_winrm_with_task(username: str, password: str, domain: str) -> dict:
     task_name = f"DSPM_Activate_WinRM_{uuid4().hex}"
     run_at = (datetime.now() + timedelta(minutes=1)).strftime("%H:%M")
-    script_path = Path(tempfile.gettempdir()) / f"{task_name}.ps1"
+    private_tmp = Path(tempfile.gettempdir()) / "dspm-winrm"
+    private_tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        private_tmp.chmod(0o700)
+    except OSError:
+        pass
+    script_path = private_tmp / f"{task_name}.ps1"
     script_path.write_text(_local_activation_script(False), encoding="utf-8")
+    try:
+        script_path.chmod(0o600)
+    except OSError:
+        pass
     task_command = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
     run_as = _format_windows_username(username, domain)
 
@@ -306,7 +316,7 @@ class WinRMEndpointScanner:
                 "message": "Connected successfully" if result.status_code == 0 else _clean_error(result.std_err),
             }
         except Exception as exc:
-            return {"connected": False, "host": self.config.host, "message": str(exc)}
+            return {"connected": False, "host": self.config.host, "message": "WinRM connection test failed"}
 
     def scan(self) -> list[dict]:
         target_paths = self._target_paths()
@@ -406,6 +416,8 @@ class WinRMEndpointScanner:
         username = self.config.username.strip()
         if self.config.domain.strip() and "\\" not in username and "@" not in username:
             username = f"{self.config.domain.strip()}\\{username}"
+        if not self.config.use_ssl and __import__("os").getenv("DSPM_REQUIRE_WINRM_SSL", "0") == "1":
+            raise RuntimeError("WinRM over HTTP is disabled by configuration")
         session = winrm.Session(endpoint, auth=(username, self.config.password), transport="ntlm")
         return session.run_ps(script)
 
@@ -419,6 +431,8 @@ class WinRMEndpointScanner:
         username = self.config.username.strip()
         if self.config.domain.strip() and "\\" not in username and "@" not in username:
             username = f"{self.config.domain.strip()}\\{username}"
+        if not self.config.use_ssl and __import__("os").getenv("DSPM_REQUIRE_WINRM_SSL", "0") == "1":
+            raise RuntimeError("WinRM over HTTP is disabled by configuration")
         session = winrm.Session(endpoint, auth=(username, self.config.password), transport="ntlm")
 
         token = uuid4().hex

@@ -112,6 +112,17 @@ def init_db() -> None:
                     created_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS login_failures (
+                    rate_key TEXT NOT NULL,
+                    timestamp REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS revoked_tokens (
+                    jti TEXT PRIMARY KEY,
+                    expires_at INTEGER NOT NULL,
+                    revoked_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL,
@@ -138,6 +149,10 @@ def init_db() -> None:
                     ON audit_events (tenant_id, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_alert_events_tenant_created
                     ON alert_events (tenant_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_login_failures_key_timestamp
+                    ON login_failures (rate_key, timestamp);
+                CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires
+                    ON revoked_tokens (expires_at);
                 CREATE INDEX IF NOT EXISTS idx_users_tenant
                     ON users (tenant_id, role);
                 """
@@ -217,17 +232,21 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
     return scan_id
 
 
-def read_scan_history(tenant_id: str) -> list[dict]:
-    with _connect() as conn:
-        rows = conn.execute(
-            """
+def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
+    query = """
             SELECT scan_id, timestamp, source, summary_json
             FROM scan_reports
             WHERE tenant_id = ?
-            ORDER BY created_at, scan_id
-            """,
-            (tenant_id,),
-        ).fetchall()
+            ORDER BY created_at DESC, scan_id DESC
+            """
+    params: tuple = (tenant_id,)
+    if limit is not None:
+        safe_limit = max(1, min(int(limit), 1000))
+        query += " LIMIT ?"
+        params = (tenant_id, safe_limit)
+    with _connect() as conn:
+        rows = conn.execute(query, params).fetchall()
+    rows = list(reversed(rows))
     return [
         {
             "scan_id": row["scan_id"],
@@ -252,7 +271,7 @@ def list_tenants() -> list[dict]:
     for row in rows:
         tenant_id = row["tenant_id"]
         registration_code = ensure_registration_code(tenant_id, row["registration_code"])
-        history = read_scan_history(tenant_id)
+        history = read_scan_history(tenant_id, limit=1)
         latest = history[-1] if history else {"summary": {}}
         tenants.append(
             {
@@ -397,12 +416,10 @@ def data_retention_summary(tenant_id: str) -> dict:
         ).fetchone()[0]
     return {
         "tenant_id": tenant_id,
-        "path": str(DB_PATH),
         "database": "sqlite",
         "report_count": report_count,
         "audit_events": audit_count,
         "alert_events": alert_count,
-        "env": os.getenv("DSPM_ENV", "local"),
     }
 
 
@@ -610,3 +627,71 @@ def mark_user_login(username: str) -> None:
     with _lock:
         with _connect() as conn:
             conn.execute("UPDATE users SET last_login_at = ? WHERE username = ?", (now, username))
+
+
+
+def count_login_failures(rate_key: str, window_seconds: int) -> int:
+    cutoff = __import__("time").time() - max(1, int(window_seconds))
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM login_failures WHERE timestamp < ?", (cutoff,))
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM login_failures WHERE rate_key = ? AND timestamp >= ?",
+                    (rate_key, cutoff),
+                ).fetchone()[0]
+            )
+
+
+def record_login_failure(rate_key: str, window_seconds: int) -> None:
+    now = __import__("time").time()
+    cutoff = now - max(1, int(window_seconds))
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM login_failures WHERE timestamp < ?", (cutoff,))
+            conn.execute("INSERT INTO login_failures (rate_key, timestamp) VALUES (?, ?)", (rate_key, now))
+
+
+def clear_login_failures(rate_key: str) -> None:
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM login_failures WHERE rate_key = ?", (rate_key,))
+
+
+def revoke_token_jti(jti: str, expires_at: int) -> None:
+    if not jti:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    cutoff = int(__import__("time").time())
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (cutoff,))
+            conn.execute(
+                "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
+                (jti, int(expires_at), now),
+            )
+
+
+def is_token_revoked(jti: str) -> bool:
+    if not jti:
+        return True
+    cutoff = int(__import__("time").time())
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (cutoff,))
+            row = conn.execute("SELECT 1 FROM revoked_tokens WHERE jti = ?", (jti,)).fetchone()
+    return row is not None
+
+
+
+def update_user_active(username: str, is_active: bool) -> dict | None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute(
+                "UPDATE users SET is_active = ?, updated_at = ? WHERE username = ?",
+                (1 if is_active else 0, now, username),
+            )
+            if result.rowcount == 0:
+                return None
+    return get_user(username)

@@ -320,7 +320,6 @@ select {
 .l1 { left: 24%; top: 31%; width: 31%; transform: rotate(18deg); }
 .l2 { left: 49%; top: 35%; width: 28%; transform: rotate(-18deg); }
 .l3 { left: 25%; bottom: 31%; width: 52%; transform: rotate(-6deg); }
-}
 
 .brand h1,
 .brand p,
@@ -5103,5 +5102,1614 @@ td .timestamp-cell + small {
 @media (max-width: 720px) {
   .profile-menu.open .profile-panel {
     transform: translateX(-50%) translateY(0) scale(1) !important;
+  }
+}
+
+
+/* DSPM FRONTEND v90 - consolidated enterprise layout and responsive hardening */
+:root {
+  --radius-xs: 10px;
+  --radius-sm: 14px;
+  --radius-md: 20px;
+  --radius-lg: 28px;
+  --card: var(--surface);
+  --card-2: color-mix(in srgb, var(--surface-soft) 64%, var(--surface));
+  --accent-soft: color-mix(in srgb, var(--accent) 10%, transparent);
+  --critical-soft: color-mix(in srgb, var(--critical) 11%, transparent);
+  --high-soft: color-mix(in srgb, var(--high) 11%, transparent);
+  --medium-soft: color-mix(in srgb, var(--medium) 13%, transparent);
+  --low-soft: color-mix(in srgb, var(--low) 11%, transparent);
+  --sidebar-width: clamp(252px, 20vw, 304px);
+  --collapsed-sidebar-width: 88px;
+}
+
+:root[data-theme="dark"] {
+  --card: color-mix(in srgb, var(--surface) 94%, #020617);
+  --card-2: color-mix(in srgb, var(--surface-soft) 82%, #020617);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+html,
+body {
+  width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 12% -10%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 34rem),
+    radial-gradient(circle at 94% 0%, color-mix(in srgb, var(--high) 10%, transparent), transparent 30rem),
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-soft) 62%, var(--bg)) 0, var(--bg) 480px),
+    var(--bg);
+}
+
+.app-shell {
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) !important;
+  align-items: start;
+}
+
+main {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: clamp(16px, 2.4vw, 32px) !important;
+}
+
+.sidebar {
+  width: 100%;
+  min-width: 0;
+  height: 100dvh;
+  border-right: 1px solid color-mix(in srgb, var(--line) 82%, transparent) !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface) 94%, transparent), color-mix(in srgb, var(--surface-soft) 94%, transparent)),
+    var(--surface) !important;
+  box-shadow: 18px 0 60px rgba(15, 23, 42, .06);
+}
+
+.brand-copy h1 { letter-spacing: -.04em; }
+.nav-group-label { margin: 16px 8px 6px; color: var(--muted); font-size: 10px; font-weight: 950; letter-spacing: .12em; text-transform: uppercase; }
+.side-nav .tab {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  border-radius: var(--radius-sm) !important;
+  min-width: 0;
+  overflow: hidden;
+}
+.side-nav .tab::after {
+  content: "";
+  position: absolute;
+  inset: 9px auto 9px 0;
+  width: 3px;
+  border-radius: 999px;
+  background: transparent;
+}
+.side-nav .tab.active::after { background: var(--accent); }
+.side-nav .tab:focus-visible,
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  outline-offset: 2px;
+}
+
+body.sidebar-collapsed .app-shell { grid-template-columns: var(--collapsed-sidebar-width) minmax(0, 1fr) !important; }
+body.sidebar-collapsed .sidebar { padding-inline: 12px !important; }
+body.sidebar-collapsed .side-nav .tab::before {
+  content: attr(data-nav-icon) !important;
+  width: 42px !important;
+  height: 42px !important;
+  border-radius: 16px !important;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface)) !important;
+  color: var(--accent-strong) !important;
+  font-size: 11px !important;
+  font-weight: 950 !important;
+  letter-spacing: -.02em !important;
+}
+body.sidebar-collapsed .side-nav .tab.active::before {
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent-strong) 52%, var(--accent))) !important;
+  color: #fff !important;
+}
+
+.topbar,
+.command-hero,
+.workspace,
+.visual-panel,
+.metric,
+.insight-card,
+.logic-card,
+.logic-band,
+.asset-editor,
+.profile-section-card,
+.profile-side-panel,
+.login-card,
+.login-visual {
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent) !important;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--card) 96%, transparent), color-mix(in srgb, var(--card-2) 72%, var(--card))) !important;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, .08) !important;
+}
+
+.topbar {
+  flex-wrap: wrap;
+  border-radius: var(--radius-lg) !important;
+  align-items: center !important;
+}
+.topbar-title { min-width: min(100%, 380px); }
+.topbar-title h2 { letter-spacing: -.045em; }
+.topbar-actions {
+  flex: 1 1 420px;
+  min-width: 0;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+.health,
+.tenant-switcher,
+.theme-toggle,
+.profile-toggle { border-radius: 999px !important; }
+.profile-panel { border-radius: var(--radius-md) !important; }
+.profile-menu.open .profile-panel { transform: translateY(0) scale(1) !important; }
+
+.command-hero {
+  grid-template-columns: minmax(0, 1.2fr) minmax(300px, .8fr) !important;
+  overflow: hidden;
+}
+.command-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.command-actions button { flex: 0 1 auto; }
+.metrics { grid-template-columns: repeat(6, minmax(132px, 1fr)) !important; }
+.metric { min-width: 0; border-radius: var(--radius-md) !important; }
+.metric strong { font-size: clamp(28px, 3vw, 42px) !important; }
+.metric span { min-height: 34px; }
+.metric.critical { border-color: color-mix(in srgb, var(--critical) 28%, var(--line)) !important; background: linear-gradient(145deg, var(--critical-soft), var(--card)) !important; }
+.metric.high { border-color: color-mix(in srgb, var(--high) 28%, var(--line)) !important; background: linear-gradient(145deg, var(--high-soft), var(--card)) !important; }
+.metric.medium { border-color: color-mix(in srgb, var(--medium) 30%, var(--line)) !important; background: linear-gradient(145deg, var(--medium-soft), var(--card)) !important; }
+.metric.low { border-color: color-mix(in srgb, var(--low) 28%, var(--line)) !important; background: linear-gradient(145deg, var(--low-soft), var(--card)) !important; }
+
+.section-header,
+.table-toolbar,
+.report-header,
+.asset-header {
+  min-width: 0;
+  gap: 16px;
+  align-items: flex-start;
+}
+.table-toolbar { flex-wrap: wrap; }
+.inventory-search-box { min-width: min(100%, 360px); }
+.inventory-command-bar {
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 12px !important;
+}
+.risk-filter-group,
+.inventory-facet-row { min-width: 0; overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; }
+.risk-filter { flex: 0 0 auto; }
+.inventory-context-metrics { grid-template-columns: repeat(4, minmax(110px, 1fr)) !important; }
+
+.table-wrap,
+.inventory-table-wrap {
+  width: 100%;
+  max-width: 100%;
+  overflow: auto !important;
+  border-radius: var(--radius-md) !important;
+  -webkit-overflow-scrolling: touch;
+}
+.inventory-table { min-width: 1280px !important; }
+.inventory-table th:nth-child(1),
+.inventory-table td:nth-child(1) { width: 380px !important; }
+.inventory-table th:nth-child(2),
+.inventory-table td:nth-child(2) { left: 380px !important; width: 112px !important; }
+.inventory-table .file-path,
+.inventory-table .subtext,
+.report-row span,
+.priority-file p,
+.protected-file-row small,
+.exposure-row small { overflow-wrap: anywhere !important; word-break: break-word !important; }
+
+.executive-grid,
+.security-grid,
+.integration-layout,
+.report-visual-grid,
+.insights-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)) !important;
+  align-items: start !important;
+}
+.visual-panel { min-width: 0; min-height: 0 !important; border-radius: var(--radius-lg) !important; }
+.visual-panel .panel-title { min-width: 0; }
+.visual-panel .panel-title h4,
+.visual-panel .panel-title span { overflow-wrap: anywhere; }
+.summary-row { min-width: 0 !important; border-radius: var(--radius-sm) !important; }
+.summary-row > span,
+.summary-row > div { min-width: 0; }
+.summary-row b,
+.summary-row small,
+.summary-row span { overflow-wrap: anywhere; }
+
+.exposure-summary-list,
+.coverage-summary-list { min-width: 0; }
+#exposure-permissions-summary,
+#exposure-coverage-summary {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: visible !important;
+  max-height: none !important;
+}
+.exposure-kpi-grid,
+.finding-kpi-grid {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)) !important;
+  min-width: 0;
+}
+.exposure-kpi,
+.finding-kpi { min-width: 0; border-radius: var(--radius-md) !important; }
+.exposure-kpi small,
+.finding-kpi small { display: block; margin-top: 6px; color: var(--muted); font-size: 11px; font-weight: 800; }
+.exposure-folder-list,
+.protected-file-stack,
+.priority-file-list,
+.remediation-list,
+.compact-folder-list {
+  max-width: 100%;
+  overflow: auto !important;
+  scrollbar-width: thin;
+  padding-bottom: 6px;
+}
+.exposure-folder-list { max-height: 340px; }
+.coverage-overview-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--accent-soft), var(--card));
+  padding: 14px;
+}
+.coverage-overview-card span,
+.coverage-overview-card small { display: block; color: var(--muted); font-size: 12px; font-weight: 850; }
+.coverage-overview-card strong { display: block; margin: 5px 0; color: var(--accent-strong); font-size: clamp(30px, 4vw, 46px); line-height: 1; }
+.coverage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+.coverage-row { grid-template-columns: minmax(0, 1fr) auto !important; }
+.coverage-row.critical,
+.exposure-kpi.critical { border-color: color-mix(in srgb, var(--critical) 30%, var(--line)) !important; background: color-mix(in srgb, var(--critical) 8%, var(--card)) !important; }
+.protected-file-row { min-width: min(680px, 100%) !important; }
+.protected-file-row small { white-space: normal !important; }
+.coverage-meter { width: 100%; }
+
+.priority-file.compact-risk-card,
+.remediation-item.compact-risk-card {
+  min-width: 0 !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  align-items: stretch !important;
+  border-radius: var(--radius-md) !important;
+}
+.priority-file.compact-risk-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+}
+.priority-file.compact-risk-card p,
+.priority-file.compact-risk-card small,
+.remediation-item.compact-risk-card p,
+.remediation-item.compact-risk-card small {
+  white-space: normal !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+}
+.remediation-kanban { grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.remediation-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.remediation-ticket { color: var(--muted); font-size: 11px; font-weight: 900; letter-spacing: .08em; }
+.remediation-body { min-width: 0; }
+.remediation-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.remediation-meta span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-soft) 58%, var(--surface));
+  color: var(--muted);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 850;
+}
+.compact-risk-card.CRITICAL { box-shadow: inset 4px 0 0 var(--critical), 0 12px 28px rgba(15, 23, 42, .06) !important; }
+.compact-risk-card.HIGH { box-shadow: inset 4px 0 0 var(--high), 0 12px 28px rgba(15, 23, 42, .06) !important; }
+.compact-risk-card.MEDIUM { box-shadow: inset 4px 0 0 var(--medium), 0 12px 28px rgba(15, 23, 42, .06) !important; }
+.compact-risk-card.LOW { box-shadow: inset 4px 0 0 var(--low), 0 12px 28px rgba(15, 23, 42, .06) !important; }
+
+.badge,
+.severity-pill,
+.risk-badge {
+  flex: 0 0 auto;
+  border-radius: 999px !important;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.badge.CRITICAL { background: color-mix(in srgb, var(--critical) 14%, transparent) !important; color: var(--critical) !important; border: 1px solid color-mix(in srgb, var(--critical) 30%, transparent) !important; }
+.badge.HIGH { background: color-mix(in srgb, var(--high) 14%, transparent) !important; color: var(--high) !important; border: 1px solid color-mix(in srgb, var(--high) 30%, transparent) !important; }
+.badge.MEDIUM { background: color-mix(in srgb, var(--medium) 16%, transparent) !important; color: var(--medium) !important; border: 1px solid color-mix(in srgb, var(--medium) 34%, transparent) !important; }
+.badge.LOW { background: color-mix(in srgb, var(--low) 14%, transparent) !important; color: var(--low) !important; border: 1px solid color-mix(in srgb, var(--low) 30%, transparent) !important; }
+
+.logic-band-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)) !important; }
+.logic-band { min-height: 150px; }
+.logic-band.LOW { border-color: color-mix(in srgb, var(--low) 30%, var(--line)) !important; background: linear-gradient(145deg, var(--low-soft), var(--card)) !important; }
+.logic-band.MEDIUM { border-color: color-mix(in srgb, var(--medium) 34%, var(--line)) !important; background: linear-gradient(145deg, var(--medium-soft), var(--card)) !important; }
+.logic-band.HIGH { border-color: color-mix(in srgb, var(--high) 32%, var(--line)) !important; background: linear-gradient(145deg, var(--high-soft), var(--card)) !important; }
+.logic-band.CRITICAL { border-color: color-mix(in srgb, var(--critical) 34%, var(--line)) !important; background: linear-gradient(145deg, var(--critical-soft), var(--card)) !important; }
+
+.asset-form-grid,
+.scan-form-grid,
+.endpoint-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)) !important;
+}
+.scan-form-wide { grid-column: 1 / -1; }
+.actions,
+.endpoint-actions,
+.report-actions,
+.history-controls,
+.audit-controls {
+  display: flex !important;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.actions > *,
+.endpoint-actions > *,
+.report-actions > * { flex: 1 1 180px; }
+
+@media (max-width: 1320px) {
+  .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  .command-hero { grid-template-columns: 1fr !important; }
+}
+
+@media (max-width: 980px) {
+  .app-shell,
+  body.sidebar-collapsed .app-shell { grid-template-columns: 1fr !important; }
+  .sidebar {
+    position: sticky !important;
+    top: 0;
+    z-index: 500;
+    height: auto !important;
+    max-height: 70dvh;
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--line) !important;
+    overflow: auto;
+  }
+  .brand.logo-lockup { margin-bottom: 10px; }
+  .side-nav {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(150px, 190px);
+    overflow-x: auto;
+    padding-bottom: 8px;
+  }
+  .nav-group-label { display: none !important; }
+  .side-nav .tab small { white-space: normal; }
+  body.sidebar-collapsed .brand-copy,
+  body.sidebar-collapsed .side-nav .tab span,
+  body.sidebar-collapsed .side-nav .tab small {
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    overflow: visible !important;
+    clip: auto !important;
+    white-space: normal !important;
+  }
+  body.sidebar-collapsed .side-nav .tab::before { display: none !important; }
+  .topbar-actions { justify-content: flex-start; }
+  .profile-panel { right: auto !important; left: 0 !important; width: min(92vw, 360px) !important; }
+}
+
+@media (max-width: 720px) {
+  main { padding: 14px !important; }
+  .topbar,
+  .command-hero,
+  .workspace,
+  .visual-panel { border-radius: 20px !important; padding: 16px !important; }
+  .metrics,
+  .inventory-context-metrics,
+  .coverage-grid,
+  .exposure-kpi-grid,
+  .finding-kpi-grid { grid-template-columns: 1fr !important; }
+  .command-hero-copy h1 { font-size: clamp(30px, 12vw, 42px) !important; }
+  .table-toolbar,
+  .section-header { display: grid !important; }
+  .inventory-table { min-width: 980px !important; }
+  .inventory-table th:nth-child(1),
+  .inventory-table td:nth-child(1) { width: 300px !important; }
+  .inventory-table th:nth-child(2),
+  .inventory-table td:nth-child(2) { left: 300px !important; width: 96px !important; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .001ms !important; }
+}
+
+
+/* DSPM FRONTEND v92 - final responsive containment and form-grid hardening
+   Fixes: sidebar-collapsed wide layouts, scan form overflow, Risk Logic card clipping,
+   right-edge panel cutoff, and browser zoom / narrow viewport stability. */
+:root {
+  --content-gap: clamp(14px, 1.55vw, 22px);
+}
+
+html,
+body,
+.app-shell,
+.app-shell > main,
+.tab-panel,
+.workspace,
+.visual-panel,
+.command-hero,
+.topbar,
+.context-strip,
+.wizard-strip,
+.section-header,
+.panel-title,
+.scan-form-grid,
+.endpoint-form,
+.asset-form-grid,
+.logic-section,
+.logic-hero,
+.logic-band-grid,
+.logic-card-grid,
+.logic-signal-grid,
+.logic-assets-grid {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+html,
+body {
+  overflow-x: clip !important;
+}
+
+.app-shell {
+  overflow-x: clip !important;
+}
+
+.app-shell > main {
+  overflow-x: clip !important;
+  isolation: isolate;
+}
+
+.tab-panel {
+  width: 100% !important;
+}
+
+.visual-panel,
+.workspace,
+.command-hero,
+.topbar,
+.context-strip,
+.scan-workflow-panel,
+.logic-section,
+.logic-hero {
+  overflow-x: clip !important;
+}
+
+.section-header,
+.panel-title,
+.context-strip,
+.table-toolbar,
+.asset-header,
+.report-header {
+  flex-wrap: wrap !important;
+}
+
+.section-header > *,
+.panel-title > *,
+.context-strip > *,
+.topbar-title,
+.topbar-actions,
+.command-hero-copy,
+.command-hero > *,
+.visual-panel > *,
+.workspace > * {
+  min-width: 0 !important;
+}
+
+/* The scan form was able to create 5 desktop columns when the sidebar was collapsed,
+   which pushed Credential ref and buttons past the right edge. Keep desktop to 4
+   balanced columns, then step down predictably. */
+.scan-form-grid {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: var(--content-gap) !important;
+  align-items: start !important;
+  width: 100% !important;
+}
+
+.scan-form-grid > label,
+.endpoint-form > label,
+.asset-form-grid > label,
+.compact-form > label,
+.scan-form-grid input,
+.scan-form-grid select,
+.endpoint-form input,
+.endpoint-form select,
+.asset-form-grid input,
+.asset-form-grid select,
+.compact-form input,
+.compact-form select {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  width: 100% !important;
+}
+
+.scan-form-grid > label,
+.endpoint-form > label,
+.asset-form-grid > label,
+.compact-form > label {
+  overflow-wrap: anywhere !important;
+}
+
+.scan-form-grid input::placeholder,
+.endpoint-form input::placeholder,
+.asset-form-grid input::placeholder {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.scan-option-stack {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  align-self: stretch !important;
+  overflow: visible !important;
+}
+
+.scan-option-stack .checkbox-row,
+.checkbox-row {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  width: 100% !important;
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: 10px !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+.extension-filter,
+.scan-run-card,
+.scan-form-wide {
+  grid-column: 1 / -1 !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.extension-list,
+.extension-selected,
+.extension-actions,
+.actions {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  flex-wrap: wrap !important;
+}
+
+.actions > button,
+.endpoint-actions > button,
+.report-actions > button,
+.extension-actions > button {
+  min-width: min(100%, 150px) !important;
+}
+
+@media (max-width: 1320px) {
+  .scan-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+}
+
+@media (max-width: 1040px) {
+  .scan-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+}
+
+@media (max-width: 720px) {
+  .scan-form-grid { grid-template-columns: 1fr !important; }
+  .actions > button,
+  .endpoint-actions > button,
+  .report-actions > button,
+  .extension-actions > button { width: 100% !important; }
+}
+
+/* Risk Logic had a more-specific fixed 4-column rule with 210px minimums.
+   This caused clipped cards on smaller / zoomed viewports. */
+#tab-logic.workspace.risk-logic {
+  overflow-x: clip !important;
+}
+
+.risk-logic .risk-logic-board {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  width: 100% !important;
+}
+
+.risk-logic .logic-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 190px) !important;
+}
+
+.risk-logic .logic-section {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.risk-logic .logic-band-grid,
+.risk-logic .logic-card-grid,
+.risk-logic .logic-signal-grid,
+.risk-logic .logic-assets-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)) !important;
+  gap: 12px !important;
+}
+
+.risk-logic .logic-band,
+.risk-logic .logic-card,
+.risk-logic .logic-signal-card,
+.risk-logic .logic-asset {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+}
+
+@media (max-width: 980px) {
+  .risk-logic .logic-hero { grid-template-columns: 1fr !important; }
+}
+
+/* Collapsed-sidebar mode must not create hidden horizontal page scroll. */
+body.sidebar-collapsed .app-shell {
+  grid-template-columns: var(--collapsed-sidebar-width) minmax(0, 1fr) !important;
+}
+
+body.sidebar-collapsed .app-shell > main {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+@media (max-width: 980px) {
+  body.sidebar-collapsed .app-shell,
+  .app-shell {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* Long generated strings and paths should wrap inside cards, not push the layout. */
+.priority-file,
+.protected-file-row,
+.exposure-row,
+.summary-row,
+.report-row,
+.logic-card,
+.logic-signal-card,
+.logic-asset,
+.workflow-item,
+.top-file-card,
+.inventory-context-metrics div,
+.coverage-row,
+.exposure-kpi,
+.finding-kpi {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+}
+
+.priority-file p,
+.priority-file small,
+.protected-file-row small,
+.exposure-row small,
+.summary-row small,
+.report-row span,
+.logic-card p,
+.logic-signal-card p,
+.logic-asset p,
+.coverage-row span {
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+
+/* Only data-dense tables/lists get their own scrollbars; the full page should not drift. */
+.table-wrap,
+.inventory-table-wrap,
+.exposure-folder-list,
+.protected-file-stack,
+.priority-file-list,
+.remediation-list,
+.compact-folder-list,
+.code-output {
+  overflow-x: auto !important;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* DSPM v93: collapsed navigation is fully hidden, not compressed into an icon rail. */
+.menu-open-toggle {
+  display: none;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 800;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+.menu-open-toggle:hover {
+  border-color: rgba(59, 130, 246, 0.42);
+  background: var(--surface-soft);
+}
+
+.menu-open-toggle > span,
+.menu-open-toggle > span::before,
+.menu-open-toggle > span::after {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  content: "";
+}
+
+.menu-open-toggle > span {
+  position: relative;
+}
+
+.menu-open-toggle > span::before,
+.menu-open-toggle > span::after {
+  position: absolute;
+  left: 0;
+}
+
+.menu-open-toggle > span::before {
+  top: -5px;
+}
+
+.menu-open-toggle > span::after {
+  top: 5px;
+}
+
+body.sidebar-collapsed .app-shell {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+body.sidebar-collapsed .sidebar {
+  display: none !important;
+}
+
+body.sidebar-collapsed .app-shell > main {
+  grid-column: 1 / -1 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+}
+
+body.sidebar-collapsed .menu-open-toggle {
+  display: inline-flex !important;
+}
+
+@media (max-width: 720px) {
+  .menu-open-toggle {
+    min-height: 40px;
+    padding-inline: 12px;
+  }
+}
+
+/* DSPM v94: dense remediation/exposure cards with hard wrapping for long scan paths. */
+#tab-risk .visual-panel,
+#tab-exposure .visual-panel,
+#tab-risk .remediation-workflow,
+#tab-risk .remediation-list,
+#tab-exposure #exposure-permissions-summary,
+#tab-exposure #exposure-coverage-summary {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+#tab-risk .scroll-card-list,
+#tab-exposure .scroll-card-list,
+#exposure-permissions-summary,
+#exposure-coverage-summary .protected-file-stack {
+  display: grid !important;
+  gap: 7px !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  padding-right: 6px !important;
+}
+
+.remediation-workflow .scroll-card-list,
+.remediation-list.remediation-kanban {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 238px), 1fr)) !important;
+  gap: 7px !important;
+  max-height: 470px !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+.remediation-item.compact-risk-card,
+.priority-file.compact-risk-card,
+.finding-file-card,
+.exposure-row,
+.coverage-row,
+.protected-file-row,
+.coverage-overview-card,
+.exposure-kpi,
+.finding-kpi,
+.summary-row {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+
+.remediation-item.compact-risk-card {
+  gap: 8px !important;
+  padding: 9px 10px !important;
+  border-radius: 12px !important;
+}
+
+.remediation-head,
+.remediation-body,
+.remediation-meta,
+.priority-file.compact-risk-card > div,
+.finding-file-card > span,
+.exposure-row > span,
+.coverage-row > span,
+.protected-file-row > span,
+.coverage-overview-card > div {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.remediation-head {
+  display: grid !important;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+.remediation-ticket {
+  min-width: 0 !important;
+  overflow-wrap: anywhere !important;
+  text-align: right;
+}
+
+.remediation-meta {
+  gap: 5px !important;
+  margin-top: 7px !important;
+}
+
+.remediation-meta span {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow-wrap: anywhere !important;
+  white-space: normal !important;
+}
+
+.remediation-item h4,
+.remediation-item p,
+.remediation-item small,
+.priority-file strong,
+.priority-file p,
+.priority-file small,
+.finding-file-card b,
+.finding-file-card small,
+.exposure-row b,
+.exposure-row small,
+.coverage-row span,
+.protected-file-row b,
+.protected-file-row small,
+.summary-row b,
+.summary-row small,
+.summary-row span,
+.coverage-overview-card span,
+.coverage-overview-card small {
+  max-width: 100% !important;
+  min-width: 0 !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+
+.priority-file-list,
+.exposure-folder-list,
+.protected-file-stack {
+  gap: 7px !important;
+  overflow-x: hidden !important;
+}
+
+.exposure-folder-list {
+  max-height: 360px !important;
+}
+
+#exposure-coverage-summary {
+  display: grid !important;
+  gap: 8px !important;
+}
+
+.coverage-grid,
+.exposure-kpi-grid,
+.finding-kpi-grid {
+  gap: 8px !important;
+}
+
+.coverage-row,
+.protected-file-row,
+.exposure-row,
+.finding-file-card {
+  grid-template-columns: minmax(0, 1fr) auto !important;
+  gap: 10px !important;
+}
+
+@media (max-width: 620px) {
+  .remediation-head,
+  .coverage-row,
+  .protected-file-row,
+  .exposure-row,
+  .finding-file-card {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .remediation-ticket {
+    text-align: left;
+  }
+}
+
+/* DSPM v95: collapsed navigation stays as a left rail; dashboard filters wrap cleanly. */
+body.sidebar-collapsed .app-shell {
+  grid-template-columns: 64px minmax(0, 1fr) !important;
+}
+
+body.sidebar-collapsed .sidebar {
+  display: block !important;
+  width: 64px !important;
+  min-width: 64px !important;
+  max-width: 64px !important;
+  padding: 12px 8px !important;
+  overflow: visible !important;
+}
+
+body.sidebar-collapsed .brand.logo-lockup {
+  position: sticky !important;
+  top: 12px !important;
+  z-index: 30 !important;
+  display: grid !important;
+  justify-items: center !important;
+  gap: 10px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-bottom: 0 !important;
+  background: transparent !important;
+}
+
+body.sidebar-collapsed .brand-mark,
+body.sidebar-collapsed .brand-copy,
+body.sidebar-collapsed .nav-group-label,
+body.sidebar-collapsed .side-nav {
+  display: none !important;
+}
+
+body.sidebar-collapsed .sidebar-toggle {
+  position: static !important;
+  width: 42px !important;
+  min-width: 42px !important;
+  height: 42px !important;
+  margin: 0 !important;
+  border-radius: 16px !important;
+  background: rgba(255, 255, 255, .10) !important;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, .20) !important;
+}
+
+body.sidebar-collapsed .sidebar-toggle span {
+  transform: rotate(90deg) !important;
+}
+
+body.sidebar-collapsed .menu-open-toggle {
+  display: none !important;
+}
+
+body.sidebar-collapsed .app-shell > main {
+  grid-column: auto !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+.inventory-command-bar {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.risk-filter-group {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 8px !important;
+  overflow: visible !important;
+}
+
+.risk-filter {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+}
+
+.risk-filter::after {
+  flex: 0 0 auto !important;
+  margin-left: 0 !important;
+}
+
+.risk-filter.protected {
+  flex: 1 1 158px !important;
+}
+
+.inventory-facet-row,
+.inventory-context-metrics {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: visible !important;
+}
+
+@media (max-width: 980px) {
+  body.sidebar-collapsed .app-shell {
+    grid-template-columns: 56px minmax(0, 1fr) !important;
+  }
+
+  body.sidebar-collapsed .sidebar {
+    width: 56px !important;
+    min-width: 56px !important;
+    max-width: 56px !important;
+    height: 100dvh !important;
+    border-right: 1px solid rgba(148, 163, 184, .20) !important;
+    border-bottom: 0 !important;
+  }
+
+  body.sidebar-collapsed .sidebar-toggle {
+    width: 40px !important;
+    min-width: 40px !important;
+    height: 40px !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .risk-filter {
+    flex: 1 1 calc(50% - 8px) !important;
+  }
+
+  .risk-filter.protected {
+    flex-basis: 100% !important;
+  }
+}
+
+/* DSPM v96: explicit risk-filter colors and branded collapsed menu icon. */
+.risk-filter {
+  --filter-tone: var(--accent);
+  --filter-tone-strong: var(--accent-strong);
+  flex: 1 1 118px !important;
+  border-color: color-mix(in srgb, var(--filter-tone) 34%, var(--line)) !important;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--filter-tone) 11%, var(--surface)), var(--surface)) !important;
+  color: var(--filter-tone-strong) !important;
+}
+
+.risk-filter::after {
+  background: color-mix(in srgb, var(--filter-tone) 18%, transparent) !important;
+  color: var(--filter-tone-strong) !important;
+  border: 1px solid color-mix(in srgb, var(--filter-tone) 24%, transparent) !important;
+}
+
+.risk-filter.active {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--filter-tone) 24%, var(--surface)), color-mix(in srgb, var(--filter-tone) 10%, var(--surface))) !important;
+  border-color: color-mix(in srgb, var(--filter-tone) 58%, var(--line)) !important;
+  box-shadow: 0 14px 30px color-mix(in srgb, var(--filter-tone) 18%, transparent) !important;
+  outline: 2px solid color-mix(in srgb, var(--filter-tone) 24%, transparent) !important;
+}
+
+.risk-filter.active::after {
+  background: color-mix(in srgb, var(--filter-tone) 26%, var(--surface)) !important;
+}
+
+.risk-filter[data-risk-filter="ALL"] {
+  --filter-tone: #64748b;
+  --filter-tone-strong: #dbeafe;
+}
+
+.risk-filter.critical {
+  --filter-tone: var(--critical);
+  --filter-tone-strong: var(--critical);
+}
+
+.risk-filter.high {
+  --filter-tone: var(--high);
+  --filter-tone-strong: var(--high);
+}
+
+.risk-filter.medium {
+  --filter-tone: var(--medium);
+  --filter-tone-strong: var(--medium);
+}
+
+.risk-filter.low {
+  --filter-tone: var(--low);
+  --filter-tone-strong: var(--low);
+}
+
+.risk-filter.protected {
+  --filter-tone: #7c3aed;
+  --filter-tone-strong: #8b5cf6;
+  flex: 1 1 150px !important;
+}
+
+:root[data-theme="dark"] .risk-filter[data-risk-filter="ALL"] {
+  --filter-tone-strong: #c7d2fe;
+}
+
+body.sidebar-collapsed .sidebar-toggle {
+  border: 1px solid color-mix(in srgb, var(--accent) 52%, rgba(255,255,255,.26)) !important;
+  background:
+    radial-gradient(circle at 28% 22%, rgba(255,255,255,.34), transparent 38%),
+    linear-gradient(135deg, var(--accent), #7c3aed) !important;
+  color: #ffffff !important;
+  box-shadow: 0 16px 34px color-mix(in srgb, var(--accent) 30%, rgba(0,0,0,.24)) !important;
+}
+
+body.sidebar-collapsed .sidebar-toggle:hover {
+  border-color: rgba(255,255,255,.58) !important;
+  transform: translateY(-1px) !important;
+}
+
+/* DSPM v97: theme-aware risk pills with tuned contrast for light and dark modes. */
+:root {
+  --filter-all: #475569;
+  --filter-all-text: #334155;
+  --filter-critical: #be123c;
+  --filter-critical-text: #9f1239;
+  --filter-high: #c2410c;
+  --filter-high-text: #9a3412;
+  --filter-medium: #ca8a04;
+  --filter-medium-text: #854d0e;
+  --filter-low: #16a34a;
+  --filter-low-text: #166534;
+  --filter-protected: #7c3aed;
+  --filter-protected-text: #6d28d9;
+  --filter-pill-surface: #ffffff;
+  --filter-pill-surface-2: #f8fafc;
+  --filter-count-surface: #eef2ff;
+}
+
+:root[data-theme="dark"] {
+  --filter-all: #94a3b8;
+  --filter-all-text: #dbeafe;
+  --filter-critical: #fb7185;
+  --filter-critical-text: #fecdd3;
+  --filter-high: #fdba74;
+  --filter-high-text: #fed7aa;
+  --filter-medium: #facc15;
+  --filter-medium-text: #fef08a;
+  --filter-low: #4ade80;
+  --filter-low-text: #bbf7d0;
+  --filter-protected: #a78bfa;
+  --filter-protected-text: #ddd6fe;
+  --filter-pill-surface: #111827;
+  --filter-pill-surface-2: #0b1220;
+  --filter-count-surface: #172033;
+}
+
+.risk-filter {
+  --filter-tone: var(--filter-all);
+  --filter-text: var(--filter-all-text);
+  --filter-soft: color-mix(in srgb, var(--filter-tone) 13%, var(--filter-pill-surface));
+  --filter-soft-active: color-mix(in srgb, var(--filter-tone) 23%, var(--filter-pill-surface));
+  --filter-border: color-mix(in srgb, var(--filter-tone) 36%, var(--line));
+  --filter-count-bg: color-mix(in srgb, var(--filter-tone) 15%, var(--filter-count-surface));
+  border-color: var(--filter-border) !important;
+  background: linear-gradient(135deg, var(--filter-soft), var(--filter-pill-surface-2)) !important;
+  color: var(--filter-text) !important;
+}
+
+.risk-filter::after {
+  background: var(--filter-count-bg) !important;
+  border-color: color-mix(in srgb, var(--filter-tone) 30%, transparent) !important;
+  color: var(--filter-text) !important;
+}
+
+.risk-filter:hover,
+.risk-filter.active {
+  background: linear-gradient(135deg, var(--filter-soft-active), var(--filter-soft)) !important;
+  border-color: color-mix(in srgb, var(--filter-tone) 62%, var(--line)) !important;
+  color: var(--filter-text) !important;
+  box-shadow: 0 14px 30px color-mix(in srgb, var(--filter-tone) 16%, transparent) !important;
+}
+
+.risk-filter[data-risk-filter="ALL"] {
+  --filter-tone: var(--filter-all);
+  --filter-text: var(--filter-all-text);
+}
+
+.risk-filter.critical {
+  --filter-tone: var(--filter-critical);
+  --filter-text: var(--filter-critical-text);
+}
+
+.risk-filter.high {
+  --filter-tone: var(--filter-high);
+  --filter-text: var(--filter-high-text);
+}
+
+.risk-filter.medium {
+  --filter-tone: var(--filter-medium);
+  --filter-text: var(--filter-medium-text);
+}
+
+.risk-filter.low {
+  --filter-tone: var(--filter-low);
+  --filter-text: var(--filter-low-text);
+}
+
+.risk-filter.protected {
+  --filter-tone: var(--filter-protected);
+  --filter-text: var(--filter-protected-text);
+}
+
+body.sidebar-collapsed .sidebar-toggle {
+  background:
+    radial-gradient(circle at 28% 20%, rgba(255,255,255,.34), transparent 35%),
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 88%, #ffffff), var(--filter-protected)) !important;
+}
+
+:root[data-theme="dark"] body.sidebar-collapsed .sidebar-toggle {
+  border-color: color-mix(in srgb, var(--accent) 52%, #1e293b) !important;
+  background:
+    radial-gradient(circle at 30% 22%, rgba(255,255,255,.24), transparent 34%),
+    linear-gradient(135deg, #2563eb, #7c3aed 58%, #06b6d4) !important;
+  box-shadow: 0 18px 38px rgba(37, 99, 235, .30) !important;
+}
+
+/* DSPM v98: WCAG-oriented contrast pass for light and dark themes. */
+:root {
+  --text: #0f172a;
+  --muted: #475569;
+  --line: #cbd5e1;
+  --surface: #ffffff;
+  --surface-soft: #f1f5f9;
+  --card: #ffffff;
+  --card-2: #f8fafc;
+  --sidebar-bg: #0f172a;
+  --sidebar-soft: #111827;
+  --sidebar-text: #f8fafc;
+  --sidebar-muted: #cbd5e1;
+  --accent: #2563eb;
+  --accent-strong: #1d4ed8;
+  --critical: #9f1239;
+  --high: #9a3412;
+  --medium: #713f12;
+  --low: #166534;
+  --critical-soft: #fff1f2;
+  --high-soft: #fff7ed;
+  --medium-soft: #fefce8;
+  --low-soft: #f0fdf4;
+}
+
+:root[data-theme="dark"] {
+  --text: #f8fafc;
+  --muted: #cbd5e1;
+  --line: #334155;
+  --surface: #111827;
+  --surface-soft: #0f172a;
+  --card: #0f172a;
+  --card-2: #111c2d;
+  --sidebar-bg: #020617;
+  --sidebar-soft: #0b1220;
+  --sidebar-text: #f8fafc;
+  --sidebar-muted: #cbd5e1;
+  --accent: #60a5fa;
+  --accent-strong: #bfdbfe;
+  --critical: #fecdd3;
+  --high: #fed7aa;
+  --medium: #fef08a;
+  --low: #bbf7d0;
+  --critical-soft: #3f121d;
+  --high-soft: #3d1f0e;
+  --medium-soft: #332a05;
+  --low-soft: #0e2f1a;
+}
+
+.sidebar,
+.brand,
+.logo-lockup,
+.side-nav,
+.side-nav .tab,
+.side-nav .tab span,
+.side-nav .tab small,
+.nav-group-label {
+  color: var(--sidebar-text) !important;
+}
+
+.side-nav .tab {
+  border-color: rgba(203, 213, 225, .16) !important;
+  background: rgba(15, 23, 42, .18) !important;
+}
+
+.side-nav .tab small,
+.nav-group-label,
+.brand p,
+.logo-lockup p {
+  color: var(--sidebar-muted) !important;
+}
+
+.side-nav .tab:hover,
+.side-nav .tab.active {
+  background: rgba(37, 99, 235, .28) !important;
+  border-color: rgba(191, 219, 254, .38) !important;
+}
+
+.side-nav .tab.active span,
+.side-nav .tab.active small {
+  color: #ffffff !important;
+}
+
+.topbar-title span,
+.section-header p,
+.table-toolbar p,
+.asset-header p,
+.report-header p,
+.panel-title span,
+.metric span,
+.summary-row small,
+.subtext,
+.muted,
+.empty {
+  color: var(--muted) !important;
+}
+
+.visual-panel,
+.workspace,
+.topbar,
+.metric,
+.summary-row,
+.inventory-command-bar,
+.risk-filter-group,
+.inventory-facet-row,
+.inventory-context-metrics {
+  color: var(--text) !important;
+}
+
+:root[data-theme="dark"] .risk-filter {
+  --filter-pill-surface: #0f172a;
+  --filter-pill-surface-2: #111827;
+  --filter-count-surface: #020617;
+}
+
+:root[data-theme="dark"] .risk-filter[data-risk-filter="ALL"] {
+  --filter-text: #e2e8f0;
+}
+
+/* DSPM v99: final sidebar contrast fix. Light theme gets dark text on light navigation. */
+:root:not([data-theme="dark"]) {
+  --sidebar-bg: #f8fafc;
+  --sidebar-soft: #eef4fb;
+  --sidebar-text: #0f172a;
+  --sidebar-muted: #475569;
+  --sidebar-active: #2563eb;
+  --sidebar-active-2: #4f46e5;
+}
+
+:root:not([data-theme="dark"]) .sidebar {
+  background:
+    radial-gradient(circle at 18% 0%, rgba(37, 99, 235, .10), transparent 18rem),
+    linear-gradient(180deg, var(--sidebar-bg), var(--sidebar-soft)) !important;
+  border-right: 1px solid #d8e1ee !important;
+  box-shadow: 14px 0 32px rgba(15, 23, 42, .08) !important;
+}
+
+:root:not([data-theme="dark"]) .brand,
+:root:not([data-theme="dark"]) .logo-lockup {
+  border-bottom-color: #d8e1ee !important;
+}
+
+:root:not([data-theme="dark"]) .brand h1,
+:root:not([data-theme="dark"]) .logo-lockup h1,
+:root:not([data-theme="dark"]) .brand-copy h1 {
+  color: #0f172a !important;
+}
+
+:root:not([data-theme="dark"]) .brand p,
+:root:not([data-theme="dark"]) .logo-lockup p,
+:root:not([data-theme="dark"]) .brand-copy p,
+:root:not([data-theme="dark"]) .nav-group-label,
+:root:not([data-theme="dark"]) .side-nav .tab small {
+  color: #475569 !important;
+}
+
+:root:not([data-theme="dark"]) .side-nav .tab {
+  color: #0f172a !important;
+  border: 1px solid #d7e0ed !important;
+  background: linear-gradient(135deg, #ffffff, #f1f5f9) !important;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, .05) !important;
+}
+
+:root:not([data-theme="dark"]) .side-nav .tab span {
+  color: #0f172a !important;
+  font-weight: 900 !important;
+}
+
+:root:not([data-theme="dark"]) .side-nav .tab:hover {
+  background: linear-gradient(135deg, #eff6ff, #e0f2fe) !important;
+  border-color: #93c5fd !important;
+  box-shadow: 0 12px 24px rgba(37, 99, 235, .12) !important;
+}
+
+:root:not([data-theme="dark"]) .side-nav .tab.active {
+  background: linear-gradient(135deg, var(--sidebar-active), var(--sidebar-active-2)) !important;
+  border-color: rgba(37, 99, 235, .36) !important;
+  box-shadow: 0 16px 34px rgba(37, 99, 235, .24) !important;
+}
+
+:root:not([data-theme="dark"]) .side-nav .tab.active span,
+:root:not([data-theme="dark"]) .side-nav .tab.active small {
+  color: #ffffff !important;
+}
+
+:root:not([data-theme="dark"]) .sidebar-toggle {
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+  background: #ffffff !important;
+}
+
+:root[data-theme="dark"] .sidebar {
+  background:
+    radial-gradient(circle at 18% 0%, rgba(96, 165, 250, .18), transparent 18rem),
+    linear-gradient(180deg, #020617, #0b1220) !important;
+}
+
+:root[data-theme="dark"] .side-nav .tab {
+  color: #f8fafc !important;
+  border-color: rgba(148, 163, 184, .18) !important;
+  background: rgba(15, 23, 42, .34) !important;
+}
+
+:root[data-theme="dark"] .side-nav .tab span {
+  color: #f8fafc !important;
+}
+
+:root[data-theme="dark"] .side-nav .tab small,
+:root[data-theme="dark"] .nav-group-label {
+  color: #cbd5e1 !important;
+}
+
+:root[data-theme="dark"] .side-nav .tab.active {
+  background: linear-gradient(135deg, #2563eb, #7c3aed) !important;
+}
+
+/* DSPM v101: scroll-stable remediation, detection matrix, and report preview surfaces. */
+:root {
+  --scrollbar-size: 10px;
+}
+
+#tab-risk #remediation-workflow,
+#tab-risk .remediation-workflow {
+  display: block !important;
+  max-height: 560px !important;
+  overflow: auto !important;
+  padding: 10px !important;
+  border-radius: var(--radius-lg, 22px) !important;
+  border: 1px solid var(--line) !important;
+  background: color-mix(in srgb, var(--card) 94%, transparent) !important;
+  scrollbar-gutter: stable both-edges;
+}
+
+#tab-risk #remediation-workflow .scroll-card-list,
+#tab-risk .remediation-list,
+#tab-risk .remediation-list.remediation-kanban {
+  display: grid !important;
+  grid-template-columns: minmax(760px, 1fr) !important;
+  gap: 6px !important;
+  align-items: start !important;
+  max-height: none !important;
+  min-width: 760px !important;
+  overflow: visible !important;
+  padding: 0 !important;
+}
+
+#tab-risk .remediation-item,
+#tab-risk .remediation-item.compact-risk-card,
+#tab-risk .workflow-item {
+  min-width: 720px !important;
+  max-height: 210px !important;
+  overflow: auto !important;
+  scrollbar-gutter: stable both-edges;
+  border-radius: var(--radius-md, 18px) !important;
+  border: 1px solid var(--line) !important;
+  background: color-mix(in srgb, var(--surface) 94%, var(--card-2)) !important;
+  padding: 10px 12px !important;
+  margin: 0 !important;
+  box-shadow: none !important;
+}
+
+#signal-matrix,
+#tab-risk #signal-matrix {
+  max-height: 390px !important;
+  overflow: auto !important;
+  scrollbar-gutter: stable both-edges;
+  border-radius: var(--radius-lg, 22px) !important;
+  border: 1px solid var(--line) !important;
+  background: color-mix(in srgb, var(--card) 94%, transparent) !important;
+  padding: 12px !important;
+}
+
+#signal-matrix .signal-matrix,
+.signal-matrix {
+  min-width: 720px !important;
+  max-height: none !important;
+  overflow: visible !important;
+  flex-wrap: nowrap !important;
+  justify-content: flex-start !important;
+  align-items: center !important;
+  padding-bottom: 4px !important;
+}
+
+#tab-reports .report-preview,
+#report-preview {
+  max-height: 640px !important;
+  overflow: auto !important;
+  scrollbar-gutter: stable both-edges;
+  border-radius: var(--radius-lg, 22px) !important;
+  border: 1px solid var(--line) !important;
+  background: color-mix(in srgb, var(--card) 94%, transparent) !important;
+  padding: 12px !important;
+}
+
+#report-preview .report-document,
+#report-preview .premium-report-preview {
+  min-width: 860px !important;
+  overflow: visible !important;
+}
+
+#report-preview .report-kpis,
+#report-preview .report-row,
+#report-preview .signal-bars {
+  min-width: 760px !important;
+}
+
+#tab-risk #remediation-workflow::-webkit-scrollbar,
+#tab-risk .remediation-item::-webkit-scrollbar,
+#signal-matrix::-webkit-scrollbar,
+#report-preview::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+#tab-risk #remediation-workflow::-webkit-scrollbar-thumb,
+#tab-risk .remediation-item::-webkit-scrollbar-thumb,
+#signal-matrix::-webkit-scrollbar-thumb,
+#report-preview::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 50%, transparent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+#tab-risk #remediation-workflow::-webkit-scrollbar-track,
+#tab-risk .remediation-item::-webkit-scrollbar-track,
+#signal-matrix::-webkit-scrollbar-track,
+#report-preview::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--card-2) 74%, transparent);
+  border-radius: 999px;
+}
+
+@media (max-width: 760px) {
+  #tab-risk #remediation-workflow .scroll-card-list,
+  #tab-risk .remediation-list,
+  #tab-risk .remediation-list.remediation-kanban,
+  #signal-matrix .signal-matrix,
+  .signal-matrix,
+  #report-preview .report-document,
+  #report-preview .premium-report-preview {
+    min-width: 680px !important;
+  }
+
+  #tab-risk .remediation-item,
+  #tab-risk .remediation-item.compact-risk-card,
+  #tab-risk .workflow-item {
+    min-width: 640px !important;
   }
 }

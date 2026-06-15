@@ -17,13 +17,18 @@ def _fernet():
 
     secret = os.getenv("DSPM_VAULT_KEY")
     if not secret:
+        if os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}:
+            raise RuntimeError("DSPM_VAULT_KEY must be set in production")
         secret = _load_or_create_local_vault_secret()
-    key = __import__("base64").urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    rounds = max(210_000, int(os.getenv("DSPM_VAULT_KDF_ROUNDS", "390000")))
+    salt = os.getenv("DSPM_VAULT_SALT", "dspm-local-vault-v2").encode()
+    key_material = hashlib.pbkdf2_hmac("sha256", secret.encode(), salt, rounds, dklen=32)
+    key = __import__("base64").urlsafe_b64encode(key_material)
     return Fernet(key)
 
 
 def _load_or_create_local_vault_secret() -> str:
-    key_path = Path(__file__).resolve().parent.parent / "data" / ".vault_key"
+    key_path = Path(os.getenv("DSPM_LOCAL_VAULT_KEY_PATH", Path.home() / ".dspm" / "vault.key"))
     try:
         if key_path.exists():
             return key_path.read_text(encoding="utf-8").strip()

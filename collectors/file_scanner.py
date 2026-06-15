@@ -161,6 +161,7 @@ CONTENT_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS
 MAX_ARCHIVE_ENTRY_BYTES = 25 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 2000
+MAX_ARCHIVE_COMPRESSION_RATIO = 100
 
 
 def scan_mode_for_extension(extension: str) -> str:
@@ -302,6 +303,18 @@ def read_text_preview(path: Path, max_bytes: int = 1024 * 256) -> str:
         return ""
 
 
+def _is_safe_archive_entry(entry: zipfile.ZipInfo) -> bool:
+    file_size = int(entry.file_size or 0)
+    compressed = max(1, int(entry.compress_size or 1))
+    if file_size > MAX_ARCHIVE_ENTRY_BYTES:
+        return False
+    if compressed > MAX_ARCHIVE_ENTRY_BYTES:
+        return False
+    if file_size / compressed > MAX_ARCHIVE_COMPRESSION_RATIO:
+        return False
+    return True
+
+
 def scan_directory(
     path: str | Path,
     allowed_extensions: Iterable[str] | None = None,
@@ -323,6 +336,11 @@ def scan_directory(
     scan_archive_entries = inspect_archives
 
     def add_file(item: Path) -> None:
+        try:
+            if item.is_symlink() or not item.resolve().is_relative_to(root_path):
+                return
+        except OSError:
+            return
         extension = detect_extension(item)
         is_hidden = is_hidden_path(item)
         is_system = is_system_path(item)
@@ -418,7 +436,7 @@ def scan_directory(
                 inflated_total = 0
                 for entry in entries:
                     inflated_total += int(entry.file_size or 0)
-                    if entry.file_size > MAX_ARCHIVE_ENTRY_BYTES or inflated_total > MAX_ARCHIVE_TOTAL_BYTES:
+                    if not _is_safe_archive_entry(entry) or inflated_total > MAX_ARCHIVE_TOTAL_BYTES:
                         continue
                     if entry.is_dir():
                         continue
@@ -481,12 +499,14 @@ def scan_directory(
                         try:
                             from io import BytesIO
 
+                            if not _is_safe_archive_entry(entry):
+                                continue
                             nested = BytesIO(archive.read(entry))
                             with zipfile.ZipFile(nested) as nested_archive:
                                 nested_total = 0
                                 for nested_entry in nested_archive.infolist()[:MAX_ARCHIVE_ENTRIES]:
                                     nested_total += int(nested_entry.file_size or 0)
-                                    if nested_entry.file_size > MAX_ARCHIVE_ENTRY_BYTES or nested_total > MAX_ARCHIVE_TOTAL_BYTES:
+                                    if not _is_safe_archive_entry(nested_entry) or nested_total > MAX_ARCHIVE_TOTAL_BYTES:
                                         continue
                                     if nested_entry.is_dir():
                                         continue
@@ -562,6 +582,8 @@ def scan_directory(
 
         for item in entries:
             try:
+                if item.is_symlink() or not item.resolve().is_relative_to(root_path):
+                    continue
                 is_dir = item.is_dir()
                 is_file = item.is_file()
             except OSError:
@@ -590,7 +612,7 @@ def scan_directory(
 
 
 def read_zip_entry_preview(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, extension: str, max_bytes: int = 1024 * 256) -> str:
-    if extension not in TEXT_EXTENSIONS:
+    if extension not in TEXT_EXTENSIONS or not _is_safe_archive_entry(entry):
         return ""
     try:
         with archive.open(entry) as handle:
