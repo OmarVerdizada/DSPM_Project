@@ -7,7 +7,7 @@
 - CSS cache busting updated to `styles.css?v=101`.
 
 ## Backend security
-- Removed production use of weak implicit `admin/admin123`; production now requires `DSPM_ADMIN_PASSWORD`. Local clean installs use `admin/Admin12345` unless `DSPM_DEV_ADMIN_PASSWORD` is set. Existing admin passwords are no longer reset at every startup unless `DSPM_SYNC_BUILTIN_ADMIN=1` is explicitly configured.
+- Production now requires `DSPM_ADMIN_PASSWORD`. Local clean installs use `admin/admin123` unless `DSPM_DEV_ADMIN_PASSWORD` is set. Existing admin passwords are no longer reset at every startup unless `DSPM_SYNC_BUILTIN_ADMIN=1` is explicitly configured.
 - JWT signing key is now persistent in local mode and required through `DSPM_SECRET_KEY` in production.
 - Added server-side token revocation and `/api/logout`; frontend logout now calls the endpoint before clearing local session state.
 - JWT validation now checks revocation, user existence, current role, current tenant, and active status.

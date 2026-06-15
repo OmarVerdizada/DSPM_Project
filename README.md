@@ -60,7 +60,7 @@ http://127.0.0.1:8000
 Default local login:
 
 ```text
-admin / Admin12345
+admin / admin123
 ```
 
 For production-like use, set `DSPM_ADMIN_PASSWORD` before starting the app.

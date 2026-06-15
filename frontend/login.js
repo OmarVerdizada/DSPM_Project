@@ -46,7 +46,7 @@ loginForm.addEventListener("submit", async (event) => {
         // Keep the safe generic message if the server did not return JSON.
       }
       if (response.status === 401) {
-        detail = "Username or password is incorrect. Default local login is admin / Admin12345 unless DSPM_ADMIN_PASSWORD is set.";
+        detail = "Username or password is incorrect. Default local login is admin / admin123 unless DSPM_ADMIN_PASSWORD is set.";
       }
       throw new Error(detail);
     }

@@ -122,7 +122,7 @@ def ensure_default_admin() -> None:
     configured_password = os.getenv("DSPM_ADMIN_PASSWORD", "").strip()
     if IS_PRODUCTION and not configured_password:
         raise RuntimeError("DSPM_ADMIN_PASSWORD must be set in production")
-    password = configured_password or os.getenv("DSPM_DEV_ADMIN_PASSWORD", "Admin12345")
+    password = configured_password or os.getenv("DSPM_DEV_ADMIN_PASSWORD", "admin123")
     user = get_user(username)
     if user is None:
         create_user(

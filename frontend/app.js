@@ -3346,7 +3346,7 @@ function downloadFile(filename, content, type) {
 
 function requireAuth() {
   if (!accessToken) {
-    throw new Error("Sign in first. Default local admin is admin / Admin12345 unless DSPM_ADMIN_PASSWORD is set.");
+    throw new Error("Sign in first. Default local admin is admin / admin123 unless DSPM_ADMIN_PASSWORD is set.");
   }
 }
 
