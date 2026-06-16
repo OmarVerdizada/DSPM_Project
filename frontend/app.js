@@ -318,6 +318,14 @@ const EXTENSION_PRESETS = {
   clear: [],
 };
 
+const SIMPLE_EXTENSION_MEDIA_EXCLUSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".svg", ".mp3", ".wav", ".mp4", ".mov", ".avi", ".mkv"]);
+const SIMPLE_EXTENSION_PRESETS = {
+  secrets: [".env", ".pem", ".key", ".crt", ".cer", ".pfx", ".p12", ".kdbx", ".npmrc", ".pypirc", ".netrc", ".aws", ".ovpn", ".pcf", ".mobileconfig", ".rdp", ".tfvars", ".tfstate", ".kubeconfig"],
+  recommended: [".env", ".pem", ".key", ".crt", ".cer", ".pfx", ".p12", ".kdbx", ".npmrc", ".pypirc", ".netrc", ".aws", ".ovpn", ".pcf", ".mobileconfig", ".rdp", ".tfvars", ".tfstate", ".kubeconfig", ".doc", ".docx", ".docm", ".pdf", ".xls", ".xlsx", ".xlsm", ".ppt", ".pptx", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".sql", ".db", ".sqlite", ".sqlite3", ".bak", ".dump", ".backup", ".msg", ".eml", ".pst", ".ost"],
+  broad: EXTENSION_PRESETS.all.filter((extension) => !SIMPLE_EXTENSION_MEDIA_EXCLUSIONS.has(extension)),
+  all: EXTENSION_PRESETS.all,
+};
+
 const EXTENSION_GROUP_ORDER = [
   "Scope",
   "Secrets & config",
@@ -539,6 +547,53 @@ function applyExtensionPreset(name, list = allowedExtensionsList, search = exten
   reorderExtensionOptions(list);
   filterExtensionList(list, search);
   updateExtensionSummary(list);
+}
+
+function applySimpleExtensionPolicy(name, list = allowedExtensionsList, search = extensionSearch) {
+  if (!list) return;
+  const selected = new Set(SIMPLE_EXTENSION_PRESETS[name] || SIMPLE_EXTENSION_PRESETS.secrets);
+  [...list.querySelectorAll("input[type='checkbox']")].forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+  reorderExtensionOptions(list);
+  filterExtensionList(list, search);
+  updateExtensionSummary(list);
+  if (list === endpointAllowedExtensionsList) {
+    tuneEndpointScanDefaults();
+  }
+}
+
+function toggleExtensionPolicyMode(simpleId, advancedId, buttonId) {
+  const simple = document.querySelector(`#${simpleId}`);
+  const advanced = document.querySelector(`#${advancedId}`);
+  const button = document.querySelector(`#${buttonId}`);
+  if (!simple || !advanced || !button) return;
+  const nextAdvanced = advanced.classList.contains("hidden");
+  simple.classList.toggle("hidden", nextAdvanced);
+  advanced.classList.toggle("hidden", !nextAdvanced);
+  button.textContent = nextAdvanced ? "Simple" : "Advanced";
+}
+
+function initSimpleExtensionPolicies() {
+  document.querySelectorAll("input[name='ext-preset']").forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (radio.checked) applySimpleExtensionPolicy(radio.value, allowedExtensionsList, extensionSearch);
+    });
+  });
+  document.querySelectorAll("input[name='endpoint-ext-preset']").forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (radio.checked) applySimpleExtensionPolicy(radio.value, endpointAllowedExtensionsList, endpointExtensionSearch);
+    });
+  });
+  document.querySelector("#ext-mode-toggle")?.addEventListener("click", () => toggleExtensionPolicyMode("ext-simple-mode", "ext-advanced-mode", "ext-mode-toggle"));
+  document.querySelector("#endpoint-ext-mode-toggle")?.addEventListener("click", () => toggleExtensionPolicyMode("endpoint-ext-simple-mode", "endpoint-ext-advanced-mode", "endpoint-ext-mode-toggle"));
+}
+
+function applyDefaultSimpleExtensionPolicies() {
+  const fileServerPreset = document.querySelector("input[name='ext-preset']:checked")?.value || "secrets";
+  const endpointPreset = document.querySelector("input[name='endpoint-ext-preset']:checked")?.value || "secrets";
+  applySimpleExtensionPolicy(fileServerPreset, allowedExtensionsList, extensionSearch);
+  applySimpleExtensionPolicy(endpointPreset, endpointAllowedExtensionsList, endpointExtensionSearch);
 }
 
 function filterExtensionList(list = allowedExtensionsList, search = extensionSearch) {
@@ -1043,7 +1098,7 @@ function renderScanRunningContext(scanKind, message) {
 
 function renderFindingsWorkspace() {
   if (!findingsSignalSummary || !findingsPrioritySummary) return;
-  const stats = buildFindingStats();
+  const stats = buildFindingStats(Number.POSITIVE_INFINITY);
   if (!latestFiles.length) {
     findingsSignalSummary.className = "summary-list";
     findingsPrioritySummary.className = "summary-list";
@@ -1075,12 +1130,7 @@ function renderFindingsWorkspace() {
         <div class="finding-kpi high"><span>Secret signals</span><strong>${secretFiles.length}</strong></div>
         <div class="finding-kpi medium"><span>Regulated data</span><strong>${regulatedFiles.length}</strong></div>
       </div>
-      ${stats.slice(0, 8).map((item, index) => `
-        <div class="summary-row finding-signal-row signal-${index % 4}">
-          <span>${escapeHtml(item.type)}</span>
-          <strong>${item.count}</strong>
-        </div>
-      `).join("")}
+      ${renderFindingBars(stats, "finding-signal-bars")}
     `
     : '<div class="empty compact">No sensitive findings were detected in the latest scan.</div>';
   const priorityFiles = latestFiles
@@ -1125,12 +1175,12 @@ function renderExposureWorkspace() {
         <div><span>Scan coverage</span><strong>0%</strong><small>No file content has been previewed yet.</small></div>
         <div class="coverage-meter" aria-hidden="true"><span style="width:4%"></span></div>
       </div>
-      <div class="coverage-grid">
-        <div class="summary-row coverage-row low"><span>Content previewed</span><strong>0</strong></div>
-        <div class="summary-row coverage-row medium"><span>Metadata-only files</span><strong>0</strong></div>
-        <div class="summary-row coverage-row high"><span>Archive entries</span><strong>0</strong></div>
-        <div class="summary-row coverage-row neutral"><span>Total files</span><strong>0</strong></div>
-      </div>
+      ${renderCoverageBars([
+        ["Content previewed", 0, "low"],
+        ["Metadata-only files", 0, "medium"],
+        ["Archive entries", 0, "high"],
+        ["Total files", 0, "neutral"],
+      ], 1)}
     `;
     return;
   }
@@ -1194,10 +1244,23 @@ function renderExposureWorkspace() {
       </div>
       <div class="coverage-meter" aria-hidden="true"><span style="width:${previewPercent}%"></span></div>
     </div>
-    <div class="coverage-grid">
-      ${coverageRows.map(([label, value, tone]) => `<div class="summary-row coverage-row ${tone}"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join("")}
+    ${renderCoverageBars(coverageRows, latestFiles.length)}
+    ${protectedFiles.length ? `<div class="protected-file-stack coverage-scroll-list">${protectedFiles.slice(0, 12).map((file) => `<div class="summary-row coverage-row critical protected-file-row"><span><b>${escapeHtml(file.name || file.path || "Protected file")}</b><small>${escapeHtml(getProtectionLabel(file))} &middot; ${escapeHtml(file.path || "")}</small></span><strong>LOCKED</strong></div>`).join("")}</div>` : ""}
+  `;
+}
+
+function renderCoverageBars(rows, total) {
+  const max = Math.max(Number(total) || 0, ...rows.map(([, value]) => Number(value) || 0), 1);
+  return `
+    <div class="coverage-grid coverage-bar-list">
+      ${rows.map(([label, value, tone]) => `
+        <div class="summary-row coverage-row ${tone}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${value}</strong>
+          <progress max="${max}" value="${Number(value) || 0}"></progress>
+        </div>
+      `).join("")}
     </div>
-    ${protectedFiles.length ? `<div class="protected-file-stack">${protectedFiles.slice(0, 6).map((file) => `<div class="summary-row coverage-row critical protected-file-row"><span><b>${escapeHtml(file.name || file.path || "Protected file")}</b><small>${escapeHtml(getProtectionLabel(file))} &middot; ${escapeHtml(file.path || "")}</small></span><strong>LOCKED</strong></div>`).join("")}</div>` : ""}
   `;
 }
 
@@ -1682,11 +1745,33 @@ function renderLogicRuleCard(rule) {
       </div>
       <h4>${escapeHtml(rule.signal)}</h4>
       <p>${escapeHtml(rule.reason)}</p>
+      ${renderLogicRuleList("Findings", rule.findings)}
+      ${renderLogicRuleList("Keywords", rule.keywords)}
       <div class="logic-action">
         <span>DLP action</span>
         <p>${escapeHtml(rule.dlp_action)}</p>
       </div>
+      ${rule.control ? `
+        <div class="logic-action logic-control">
+          <span>Control guidance</span>
+          <p>${escapeHtml(rule.control)}</p>
+        </div>
+      ` : ""}
     </article>
+  `;
+}
+
+function renderLogicRuleList(label, items = []) {
+  if (!Array.isArray(items) || !items.length) {
+    return "";
+  }
+  return `
+    <div class="logic-rule-tags">
+      <span>${escapeHtml(label)}</span>
+      <div>
+        ${items.map((item) => `<code>${escapeHtml(item)}</code>`).join("")}
+      </div>
+    </div>
   `;
 }
 
@@ -1904,8 +1989,8 @@ function renderReportPreview() {
         <div><span>Low</span><strong>${report.summary.low}</strong></div>
         <div><span>Total files</span><strong>${report.summary.total_files}</strong></div>
       </div>
-      <div class="report-visual-grid">
-        <div class="chart-panel report-card-scroll">
+      <div class="report-visual-grid report-distribution-grid">
+        <div class="chart-panel report-card-scroll report-risk-card">
           <h5>Risk distribution</h5>
           ${buildDistributionBars(report.distribution)}
         </div>
@@ -1937,7 +2022,7 @@ function buildReportModel() {
     summary,
     score: getCurrentPostureScore(summary),
     distribution: buildRiskDistribution(summary),
-    findingStats: buildFindingStats(),
+    findingStats: buildFindingStats(Number.POSITIVE_INFINITY),
     priorityFiles,
     departments: groupFilesByDepartment(latestFiles),
     folders: groupFilesByFolder(latestFiles),
@@ -2119,7 +2204,7 @@ function buildRiskDistribution(summary) {
   ];
 }
 
-function buildFindingStats() {
+function buildFindingStats(limit = 6) {
   const counts = {};
   latestFiles.forEach((file) => {
     (file.findings || []).forEach((finding) => {
@@ -2130,7 +2215,7 @@ function buildFindingStats() {
   return Object.entries(counts)
     .map(([type, count]) => ({ type, count }))
     .sort((a, b) => b.count - a.count)
-    .slice(0, 6);
+    .slice(0, limit);
 }
 
 function buildPostureTrend() {
@@ -2545,14 +2630,14 @@ function buildRiskTopology(summary) {
   `;
 }
 
-function renderFindingBars(items) {
+function renderFindingBars(items, extraClass = "") {
   if (!items.length) {
     return '<p class="subtext">No sensitive detection signals were found.</p>';
   }
 
   const max = Math.max(...items.map((item) => item.count), 1);
   return `
-    <div class="signal-bars">
+    <div class="signal-bars ${extraClass}">
       ${items
         .map(
           (item) => `
@@ -3444,9 +3529,32 @@ async function loadHistory() {
   ]);
   latestDashboard = dashboard;
   renderHistory(history.history || []);
-  renderExecutiveDashboard(dashboard);
+  await restoreLatestSavedReport(history.history || []);
   renderExecutiveExperience();
   loadTenants().catch(() => {});
+}
+
+async function restoreLatestSavedReport(historyItems = latestHistoryItems) {
+  if (latestFiles.length || !Array.isArray(historyItems) || !historyItems.length) {
+    return;
+  }
+  const latest = historyItems[historyItems.length - 1];
+  const scanId = latest?.scan_id;
+  if (!scanId) {
+    return;
+  }
+  try {
+    const data = await api(`/api/history/${encodeURIComponent(scanId)}/report`, null, "GET");
+    const report = data.report || {};
+    if (!Array.isArray(report.files) || !report.files.length) {
+      return;
+    }
+    const scanKind = report.endpoint ? "endpoint" : "file-server";
+    applyScanReport(report, scanKind);
+    scanMeta.textContent = `Restored ${report.files.length} files from saved scan ${scanId}.`;
+  } catch (error) {
+    setStatus(`Saved scan restore failed: ${error.message}`);
+  }
 }
 
 async function loadTenants() {
@@ -3525,6 +3633,7 @@ function renderHistory(items) {
   latestHistoryItems = items || [];
   const visibleItems = filterHistoryItems(latestHistoryItems);
   updateRangeStatus(historyRange, visibleItems.length, latestHistoryItems.length);
+  renderExecutiveDashboard(latestDashboard, visibleItems);
   if (!latestHistoryItems.length) {
     historyBody.innerHTML = '<tr><td colspan="6" class="empty">No scans saved for this tenant yet.</td></tr>';
     return;
@@ -3584,13 +3693,17 @@ function updateHistoryFilterControls() {
   historyTo?.classList.toggle("hidden", !custom);
 }
 
-function renderExecutiveDashboard(data) {
-  const latest = data.latest?.summary || {};
-  const score = latest.total_files ? calculatePostureScore(latest) : data.risk_posture_score ?? 100;
+function renderExecutiveDashboard(data = {}, visibleHistoryItems = filterHistoryItems(latestHistoryItems)) {
+  data = data || {};
+  const filteredItems = Array.isArray(visibleHistoryItems) ? visibleHistoryItems : [];
+  const latestVisible = filteredItems.at(-1);
+  const latest = latestVisible?.summary || data.latest?.summary || {};
+  const reports = filteredItems.length || (latestHistoryItems.length ? 0 : data.retention?.report_count || 0);
+  const score = latest.total_files ? calculatePostureScore(latest) : filteredItems.length ? 100 : data.risk_posture_score ?? 100;
   executiveSummary.innerHTML = `
     <div class="history-card"><span>Posture score</span><strong>${escapeHtml(score)}</strong></div>
     <div class="history-card"><span>Tenant</span><strong>${escapeHtml(data.tenant_id || currentTenant)}</strong></div>
-    <div class="history-card"><span>Reports</span><strong>${escapeHtml(data.retention?.report_count || 0)}</strong></div>
+    <div class="history-card"><span>Reports</span><strong>${escapeHtml(reports)}</strong></div>
     <div class="history-card"><span>Open critical</span><strong>${escapeHtml(latest.critical || 0)}</strong></div>
   `;
 }
@@ -4409,6 +4522,9 @@ profileToggle.addEventListener("click", (event) => {
   const menu = document.querySelector(".profile-menu");
   const isOpen = menu.classList.toggle("open");
   profileToggle.setAttribute("aria-expanded", String(isOpen));
+  if (!isOpen) {
+    profileToggle.blur();
+  }
 });
 document.addEventListener("click", (event) => {
   const menu = event.target.closest(".profile-menu");
@@ -4431,6 +4547,7 @@ tenantSwitcher.addEventListener("change", async () => {
   renderProfile();
   renderExtensionFilter(allowedExtensionsList, extensionSearch);
   renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
+  applyDefaultSimpleExtensionPolicies();
   renderAssetRules();
   renderRows([]);
   updateSummaryFromFiles([]);
@@ -4453,6 +4570,8 @@ applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
 renderExtensionFilter(allowedExtensionsList, extensionSearch);
 renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
+initSimpleExtensionPolicies();
+applyDefaultSimpleExtensionPolicies();
 renderProfile();
 renderAssetRules();
 renderReportPreview();

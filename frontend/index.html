@@ -208,18 +208,45 @@
               </div>
 
               <div class="extension-filter scan-form-wide">
-                <label for="extension-search">Extension policy</label>
-                <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
-                <div class="extension-selected" data-extension-selected-for="file-server"></div>
-                <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
-                <div class="extension-actions" aria-label="Extension presets">
-                  <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
-                  <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
+                <label>Extension policy</label>
+                <div id="ext-simple-mode" class="ext-mode-panel">
+                  <div class="ext-preset-grid">
+                    <label class="ext-preset-card">
+                      <input type="radio" name="ext-preset" value="secrets" checked />
+                      <span class="ext-preset-title">Secrets & credentials</span>
+                      <span class="ext-preset-desc">Keys, vaults, configs, remote access profiles.</span>
+                    </label>
+                    <label class="ext-preset-card">
+                      <input type="radio" name="ext-preset" value="recommended" />
+                      <span class="ext-preset-title">Recommended</span>
+                      <span class="ext-preset-desc">Secrets, documents, data exports, mailboxes.</span>
+                    </label>
+                    <label class="ext-preset-card">
+                      <input type="radio" name="ext-preset" value="broad" />
+                      <span class="ext-preset-title">Broad</span>
+                      <span class="ext-preset-desc">Enterprise coverage without media-heavy files.</span>
+                    </label>
+                    <label class="ext-preset-card">
+                      <input type="radio" name="ext-preset" value="all" />
+                      <span class="ext-preset-title">All extensions</span>
+                      <span class="ext-preset-desc">Full inventory sweep across every known file type.</span>
+                    </label>
+                  </div>
                 </div>
-                <div class="extension-actions" aria-label="Custom extension">
-                  <input id="custom-extension-input" type="text" placeholder=".custom" />
-                  <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add</button>
+                <div id="ext-advanced-mode" class="ext-mode-panel hidden">
+                  <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+                  <div class="extension-selected" data-extension-selected-for="file-server"></div>
+                  <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
+                  <div class="extension-actions" aria-label="Extension presets">
+                    <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
+                    <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
+                  </div>
+                  <div class="extension-actions" aria-label="Custom extension">
+                    <input id="custom-extension-input" type="text" placeholder=".custom" />
+                    <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add</button>
+                  </div>
                 </div>
+                <button type="button" id="ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
               </div>
 
               <div class="scan-run-card scan-form-wide">
@@ -376,6 +403,23 @@
               <p>Review secret, PII, regulated-data, and confidentiality signals generated from scanned content and file context.</p>
             </div>
           </div>
+          <section class="tab-spotlight spotlight-findings" aria-label="Findings workspace overview">
+            <div class="tab-spotlight-copy">
+              <p class="eyebrow">Detection cockpit</p>
+              <h3>Turn noisy matches into prioritized investigation queues.</h3>
+              <p>Group secrets, regulated identifiers, and confidentiality signals into a workflow analysts can scan quickly.</p>
+            </div>
+            <div class="tab-spotlight-board" aria-hidden="true">
+              <span>Signal workflow</span>
+              <div class="spotlight-flow"><b>Detect</b><i></i><b>Group</b><i></i><b>Triage</b></div>
+              <div class="spotlight-tile-grid">
+                <div><strong>Secrets</strong><small>Keys and tokens</small></div>
+                <div><strong>PII</strong><small>Identity signals</small></div>
+                <div><strong>DLP</strong><small>Controls</small></div>
+                <div><strong>SLA</strong><small>Priority queue</small></div>
+              </div>
+            </div>
+          </section>
           <div class="executive-grid">
             <section class="visual-panel">
               <div class="panel-title">
@@ -402,6 +446,23 @@
               <p>Track broad access, writable permissions, share exposure, hidden files, and archive inspection coverage.</p>
             </div>
           </div>
+          <section class="tab-spotlight spotlight-exposure" aria-label="Exposure workspace overview">
+            <div class="tab-spotlight-copy">
+              <p class="eyebrow">Exposure map</p>
+              <h3>See where sensitive data meets broad access and weak coverage.</h3>
+              <p>Keep permission risk, archive coverage, and metadata-only files visible before remediation starts.</p>
+            </div>
+            <div class="tab-spotlight-board" aria-hidden="true">
+              <span>Access workflow</span>
+              <div class="spotlight-flow"><b>Scope</b><i></i><b>Review</b><i></i><b>Reduce</b></div>
+              <div class="spotlight-tile-grid">
+                <div><strong>ACL</strong><small>Broad access</small></div>
+                <div><strong>Shares</strong><small>Writable paths</small></div>
+                <div><strong>Hidden</strong><small>Coverage gaps</small></div>
+                <div><strong>Archive</strong><small>Deep scan</small></div>
+              </div>
+            </div>
+          </section>
           <div class="executive-grid">
             <section class="visual-panel">
               <div class="panel-title">
@@ -575,6 +636,23 @@
               <button type="button" id="export-pdf-btn">Print / PDF</button>
             </div>
           </div>
+          <section class="tab-spotlight spotlight-reports compact-spotlight" aria-label="Reporting workflow overview">
+            <div class="tab-spotlight-copy">
+              <p class="eyebrow">Evidence package</p>
+              <h3>Convert scan output into board-ready proof and DLP actions.</h3>
+              <p>Risk distribution, priority files, and signal evidence stay together for customer reporting.</p>
+            </div>
+            <div class="tab-spotlight-board" aria-hidden="true">
+              <span>Report path</span>
+              <div class="spotlight-flow"><b>Summarize</b><i></i><b>Export</b><i></i><b>Prove</b></div>
+              <div class="spotlight-tile-grid">
+                <div><strong>CSV</strong><small>Inventory</small></div>
+                <div><strong>Word</strong><small>Client pack</small></div>
+                <div><strong>PDF</strong><small>Evidence</small></div>
+                <div><strong>DLP</strong><small>Actions</small></div>
+              </div>
+            </div>
+          </section>
 
           <div id="report-preview" class="report-preview"></div>
         </section>
@@ -627,6 +705,23 @@
               <p>Use the credential you enter for the selected endpoint only, then scan a user profile, one drive, all fixed drives, or custom paths.</p>
             </div>
           </div>
+          <section class="tab-spotlight spotlight-endpoint" aria-label="Endpoint scan workflow overview">
+            <div class="tab-spotlight-copy">
+              <p class="eyebrow">Endpoint command path</p>
+              <h3>Prepare WinRM, verify local admin access, and scan workstation data.</h3>
+              <p>Endpoint discovery follows the same evidence model as file-server scans without mixing credentials across tenants.</p>
+            </div>
+            <div class="tab-spotlight-board" aria-hidden="true">
+              <span>Endpoint workflow</span>
+              <div class="spotlight-flow"><b>Prepare</b><i></i><b>Verify</b><i></i><b>Scan</b></div>
+              <div class="spotlight-tile-grid">
+                <div><strong>WinRM</strong><small>Readiness</small></div>
+                <div><strong>Admin</strong><small>Credential</small></div>
+                <div><strong>Paths</strong><small>Scope</small></div>
+                <div><strong>Triage</strong><small>Findings</small></div>
+              </div>
+            </div>
+          </section>
 
           <section class="wizard-strip endpoint-wizard" aria-label="Endpoint scan workflow">
             <div><span>01</span><strong>Prepare</strong><small>Optional local WinRM readiness</small></div>
@@ -771,18 +866,45 @@
               </label>
             </div>
             <div class="extension-filter endpoint-extension-filter">
-              <label for="endpoint-extension-search">Endpoint extension filter</label>
-              <input id="endpoint-extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
-              <div class="extension-selected" data-extension-selected-for="endpoint"></div>
-              <div id="endpoint_allowed_extensions" class="extension-list" role="group" aria-label="Endpoint extension filter"></div>
-              <div class="extension-actions" aria-label="Endpoint extension presets">
-                <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="all">All</button>
-                <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="clear">Clear</button>
+              <label>Endpoint extension policy</label>
+              <div id="endpoint-ext-simple-mode" class="ext-mode-panel">
+                <div class="ext-preset-grid">
+                  <label class="ext-preset-card">
+                    <input type="radio" name="endpoint-ext-preset" value="secrets" checked />
+                    <span class="ext-preset-title">Secrets & credentials</span>
+                    <span class="ext-preset-desc">Keys, vaults, configs, remote access profiles.</span>
+                  </label>
+                  <label class="ext-preset-card">
+                    <input type="radio" name="endpoint-ext-preset" value="recommended" />
+                    <span class="ext-preset-title">Recommended</span>
+                    <span class="ext-preset-desc">Secrets, documents, data exports, mailboxes.</span>
+                  </label>
+                  <label class="ext-preset-card">
+                    <input type="radio" name="endpoint-ext-preset" value="broad" />
+                    <span class="ext-preset-title">Broad</span>
+                    <span class="ext-preset-desc">Enterprise coverage without media-heavy files.</span>
+                  </label>
+                  <label class="ext-preset-card">
+                    <input type="radio" name="endpoint-ext-preset" value="all" />
+                    <span class="ext-preset-title">All extensions</span>
+                    <span class="ext-preset-desc">Full inventory sweep across every known file type.</span>
+                  </label>
+                </div>
               </div>
-              <div class="extension-actions" aria-label="Endpoint custom extension">
-                <input id="endpoint-custom-extension-input" type="text" placeholder=".custom" />
-                <button type="button" class="secondary-btn mini-btn" id="endpoint-add-custom-extension-btn">Add</button>
+              <div id="endpoint-ext-advanced-mode" class="ext-mode-panel hidden">
+                <input id="endpoint-extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+                <div class="extension-selected" data-extension-selected-for="endpoint"></div>
+                <div id="endpoint_allowed_extensions" class="extension-list" role="group" aria-label="Endpoint extension filter"></div>
+                <div class="extension-actions" aria-label="Endpoint extension presets">
+                  <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="all">All</button>
+                  <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="clear">Clear</button>
+                </div>
+                <div class="extension-actions" aria-label="Endpoint custom extension">
+                  <input id="endpoint-custom-extension-input" type="text" placeholder=".custom" />
+                  <button type="button" class="secondary-btn mini-btn" id="endpoint-add-custom-extension-btn">Add</button>
+                </div>
               </div>
+              <button type="button" id="endpoint-ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
             </div>
             <div class="actions endpoint-actions">
               <button type="button" id="endpoint-test-btn" class="secondary-btn">Test endpoint</button>
@@ -809,6 +931,23 @@
               <p>API keys, audit evidence, DLP export, and tenant controls exposed by the backend.</p>
             </div>
           </div>
+          <section class="tab-spotlight spotlight-security compact-spotlight" aria-label="Security operations overview">
+            <div class="tab-spotlight-copy">
+              <p class="eyebrow">Operator controls</p>
+              <h3>Manage users, API keys, audit evidence, and DLP exports in one lane.</h3>
+              <p>Administrative actions stay close to audit history so tenant operations remain accountable.</p>
+            </div>
+            <div class="tab-spotlight-board" aria-hidden="true">
+              <span>Governance path</span>
+              <div class="spotlight-flow"><b>Access</b><i></i><b>Keys</b><i></i><b>Audit</b></div>
+              <div class="spotlight-tile-grid">
+                <div><strong>RBAC</strong><small>Users</small></div>
+                <div><strong>API</strong><small>Automation</small></div>
+                <div><strong>DLP</strong><small>Policy</small></div>
+                <div><strong>Log</strong><small>Trail</small></div>
+              </div>
+            </div>
+          </section>
 
           <div class="security-grid">
             <section class="visual-panel">
@@ -945,6 +1084,23 @@
               <p>Create tenant workspaces, copy registration codes, and remove tenant data when a customer is offboarded.</p>
             </div>
           </div>
+          <section class="tab-spotlight spotlight-admin compact-spotlight" aria-label="MSSP tenant workflow overview">
+            <div class="tab-spotlight-copy">
+              <p class="eyebrow">MSSP control plane</p>
+              <h3>Create customer workspaces without losing tenant isolation.</h3>
+              <p>Registration codes, report counts, and audit signals stay tied to the selected customer workspace.</p>
+            </div>
+            <div class="tab-spotlight-board" aria-hidden="true">
+              <span>Tenant workflow</span>
+              <div class="spotlight-flow"><b>Create</b><i></i><b>Register</b><i></i><b>Operate</b></div>
+              <div class="spotlight-tile-grid">
+                <div><strong>ID</strong><small>Workspace</small></div>
+                <div><strong>Code</strong><small>Register</small></div>
+                <div><strong>Audit</strong><small>Activity</small></div>
+                <div><strong>Risk</strong><small>Reports</small></div>
+              </div>
+            </div>
+          </section>
 
           <section class="visual-panel tenant-admin-panel">
             <div class="panel-title">

@@ -45,6 +45,7 @@ from backend.store import (
     list_users,
     read_audit_log,
     read_scan_history,
+    read_scan_report,
     record_login_failure,
     rotate_registration_code,
     save_scan_history,
@@ -771,6 +772,22 @@ def scan_history(
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict:
     return {"history": read_scan_history(principal.tenant_id, limit=limit)}
+
+
+@app.get("/api/history/latest/report")
+def latest_scan_report(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    report = read_scan_report(principal.tenant_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="No saved scan report found")
+    return {"report": report}
+
+
+@app.get("/api/history/{scan_id}/report")
+def saved_scan_report(scan_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+    report = read_scan_report(principal.tenant_id, scan_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Saved scan report not found")
+    return {"report": report}
 
 
 @app.get("/api/tenants")

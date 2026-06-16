@@ -258,6 +258,28 @@ def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
     ]
 
 
+def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
+    if scan_id:
+        query = """
+                SELECT report_json
+                FROM scan_reports
+                WHERE tenant_id = ? AND scan_id = ?
+                """
+        params: tuple = (tenant_id, scan_id)
+    else:
+        query = """
+                SELECT report_json
+                FROM scan_reports
+                WHERE tenant_id = ?
+                ORDER BY created_at DESC, scan_id DESC
+                LIMIT 1
+                """
+        params = (tenant_id,)
+    with _connect() as conn:
+        row = conn.execute(query, params).fetchone()
+    return json.loads(row["report_json"] or "{}") if row else None
+
+
 def list_tenants() -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
