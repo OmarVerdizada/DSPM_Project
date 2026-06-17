@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import socket
 import tempfile
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
 
@@ -22,6 +25,21 @@ from scripts.logger import get_logger
 logger = get_logger(__name__)
 
 SYSTEM_SHARES = {"print$", "IPC$", "ADMIN$"}
+
+
+def _format_smb_timestamp(value) -> str:
+    if not value:
+        return ""
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            parsed = datetime.fromtimestamp(float(value), timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
 
 
 @dataclass(slots=True)
@@ -222,6 +240,10 @@ class SMBScanner:
             ):
                 continue
             content = self._read_file_preview(share_name, remote_path, extension)
+            sha256 = self._hash_file(share_name, remote_path, int(getattr(entry, "file_size", 0) or 0))
+            created_at = _format_smb_timestamp(getattr(entry, "create_time", None))
+            modified_at = _format_smb_timestamp(getattr(entry, "last_write_time", None))
+            attributes = ", ".join([item for item in ["H" if is_hidden else "", "S" if is_system else ""] if item]) or "Normal"
             records.append(
                 {
                     "source": "smb",
@@ -238,6 +260,12 @@ class SMBScanner:
                     "scan_mode": scan_mode_for_extension(extension),
                     "content_status": content_status_for_extension(extension, content, self.config.read_content),
                     "content_scannable": extension in CONTENT_EXTENSIONS,
+                    "owner": "",
+                    "created_at": created_at,
+                    "modified_at": modified_at,
+                    "attributes": attributes,
+                    "sha256": sha256,
+                    "file_hash": sha256,
                 }
             )
 
@@ -322,6 +350,31 @@ class SMBScanner:
             "\\appdata\\roaming\\microsoft\\windows\\recent\\",
         )
         return any(fragment in normalized for fragment in skip_fragments)
+
+    def _hash_file(self, share_name: str, path: str, size: int, chunk_size: int = 1024 * 1024) -> str:
+        if self.connection is None:
+            return ""
+        digest = hashlib.sha256()
+        offset = 0
+        try:
+            while offset < size:
+                buffer = io.BytesIO()
+                self.connection.retrieveFileFromOffset(
+                    share_name,
+                    path,
+                    buffer,
+                    offset=offset,
+                    max_length=min(chunk_size, size - offset),
+                )
+                chunk = buffer.getvalue()
+                if not chunk:
+                    break
+                digest.update(chunk)
+                offset += len(chunk)
+            return digest.hexdigest() if offset == size else ""
+        except Exception as exc:
+            logger.debug("Could not hash %s:%s: %s", share_name, path, exc)
+            return ""
 
     def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
         if self.connection is None or not self.config.read_content:

@@ -790,6 +790,81 @@ def saved_scan_report(scan_id: str, principal: Principal = Depends(require_role(
     return {"report": report}
 
 
+def _file_hash_value(file_record: dict) -> str:
+    return str(file_record.get("sha256") or file_record.get("file_hash") or "").strip().lower()
+
+
+def _file_compare_key(file_record: dict) -> str:
+    path = str(file_record.get("path") or file_record.get("full_path") or file_record.get("name") or "")
+    source = str(file_record.get("source") or "")
+    share = str(file_record.get("share") or file_record.get("host") or file_record.get("server") or "")
+    return f"{source}|{share}|{path}".lower()
+
+
+def _hash_index(report: dict | None) -> dict[str, dict]:
+    files = report.get("files", []) if isinstance(report, dict) else []
+    indexed: dict[str, dict] = {}
+    for file_record in files:
+        if not isinstance(file_record, dict):
+            continue
+        key = _file_compare_key(file_record)
+        sha256 = _file_hash_value(file_record)
+        if key and sha256:
+            indexed[key] = file_record
+    return indexed
+
+
+@app.get("/api/history/hash-changes")
+def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    history = read_scan_history(principal.tenant_id, limit=2)
+    if len(history) < 2:
+        return {
+            "algorithm": "SHA-256",
+            "latest_scan_id": history[-1].get("scan_id") if history else "",
+            "previous_scan_id": "",
+            "changed": [],
+            "changed_count": 0,
+            "added_count": 0,
+            "removed_count": 0,
+        }
+
+    previous_item, latest_item = history[-2], history[-1]
+    previous_report = read_scan_report(principal.tenant_id, previous_item.get("scan_id"))
+    latest_report = read_scan_report(principal.tenant_id, latest_item.get("scan_id"))
+    previous_files = _hash_index(previous_report)
+    latest_files = _hash_index(latest_report)
+
+    changed = []
+    for key, latest_file in latest_files.items():
+        previous_file = previous_files.get(key)
+        if not previous_file:
+            continue
+        previous_hash = _file_hash_value(previous_file)
+        latest_hash = _file_hash_value(latest_file)
+        if previous_hash and latest_hash and previous_hash != latest_hash:
+            changed.append(
+                {
+                    "key": key,
+                    "name": latest_file.get("name") or latest_file.get("path") or "Unknown file",
+                    "path": latest_file.get("path") or "",
+                    "source": latest_file.get("source") or latest_file.get("share") or "",
+                    "previous_hash": previous_hash,
+                    "current_hash": latest_hash,
+                }
+            )
+
+    changed.sort(key=lambda item: str(item.get("path") or item.get("name") or "").lower())
+    return {
+        "algorithm": "SHA-256",
+        "latest_scan_id": latest_item.get("scan_id") or "",
+        "previous_scan_id": previous_item.get("scan_id") or "",
+        "changed": changed[:100],
+        "changed_count": len(changed),
+        "added_count": len(set(latest_files) - set(previous_files)),
+        "removed_count": len(set(previous_files) - set(latest_files)),
+    }
+
+
 @app.get("/api/tenants")
 def tenant_portfolio(principal: Principal = Depends(require_role("admin"))) -> dict:
     tenants = list_tenants() if _is_platform_admin(principal) else [item for item in list_tenants() if item["tenant_id"] == principal.tenant_id]

@@ -84,6 +84,23 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content.strip() + "\n", encoding="utf-8")
 
 
+def set_windows_attributes(path: Path, *flags: str) -> None:
+    if not flags:
+        return
+    attrib = shutil.which("attrib")
+    if not attrib:
+        return
+    try:
+        subprocess.run(
+            [attrib, *flags, str(path)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+
+
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -219,6 +236,7 @@ to exercise detection logic.
 
     add_cross_department_exports(root, people, created_files)
     add_protected_content_samples(root, created_files)
+    add_hidden_and_system_samples(root, created_files)
     write_text(root / "_manifest.json", json.dumps({"company": COMPANY, "file_count": len(created_files), "generated": date.today().isoformat(), "files": created_files[:75]}, indent=2))
 
 
@@ -366,6 +384,84 @@ def add_protected_content_samples(root: Path, created_files: list[dict[str, obje
         "protected": True,
     })
 
+
+def add_hidden_and_system_samples(root: Path, created_files: list[dict[str, object]]) -> None:
+    hidden_file = root / "Engineering" / "Data" / "Current" / ".hidden_frontend_scan_test.txt"
+    write_text(
+        hidden_file,
+        """
+CONFIDENTIAL hidden engineering sample.
+api_key=crg_hidden_SYNTHETIC_TOKEN
+Owner: engineering-owner@caspian-retail.example
+Purpose: validates hidden-file filters and Windows attribute collection.
+""",
+    )
+    set_windows_attributes(hidden_file, "+H")
+    created_files.append({
+        "path": str(hidden_file.relative_to(root)),
+        "department": "Engineering",
+        "share": "Data",
+        "extension": ".txt",
+        "hidden": True,
+    })
+
+    hidden_env = root / "IT" / "Cloud" / "Secure" / ".shadow_admin_tokens.env"
+    write_text(
+        hidden_env,
+        """
+AWS_ACCESS_KEY_ID=AKIA0000HIDDENSYNTH
+AWS_SECRET_ACCESS_KEY=synthetic_hidden_secret_value
+password=HiddenWinter2026!
+""",
+    )
+    set_windows_attributes(hidden_env, "+H")
+    created_files.append({
+        "path": str(hidden_env.relative_to(root)),
+        "department": "IT",
+        "share": "Cloud",
+        "extension": ".env",
+        "hidden": True,
+    })
+
+    system_file = root / "IT" / "ServiceDesk" / "SystemSignals" / "current_system_inventory.sys"
+    system_file.parent.mkdir(parents=True, exist_ok=True)
+    system_file.write_bytes(b"SYSTEM_SYNTHETIC_DSPM_SAMPLE\x00owner=IT\\service-desk")
+    set_windows_attributes(system_file, "+S")
+    created_files.append({
+        "path": str(system_file.relative_to(root)),
+        "department": "IT",
+        "share": "ServiceDesk",
+        "extension": ".sys",
+        "system": True,
+    })
+
+    archive_root = root / "Finance" / "Audit" / "Secure"
+    protected_zip = archive_root / "protected_finance_archive.zip"
+    encrypted = write_password_protected_zip(
+        protected_zip,
+        "finance_private_export.csv",
+        "name,email,card\nSynthetic Customer,customer@example.invalid,4111 1111 1111 1111",
+    )
+    created_files.append({
+        "path": str(protected_zip.relative_to(root)),
+        "department": "Finance",
+        "share": "Audit",
+        "extension": ".zip",
+        "protected": encrypted,
+    })
+
+    nested_zip = archive_root / "nested_sensitive_exports.zip"
+    nested_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(nested_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("exports/customer_fin_values.csv", "name,fin\nSynthetic Person,A123456\n")
+        archive.writestr("secrets/release_token.env", "token=synthetic_nested_release_token\n")
+    created_files.append({
+        "path": str(nested_zip.relative_to(root)),
+        "department": "Finance",
+        "share": "Audit",
+        "extension": ".zip",
+        "archive_entries": True,
+    })
 
 
 def main() -> None:

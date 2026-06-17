@@ -378,6 +378,9 @@ class WinRMEndpointScanner:
                     "created_at": item.get("created_at", ""),
                     "modified_at": item.get("modified_at", ""),
                     "accessed_at": item.get("accessed_at", ""),
+                    "attributes": item.get("attributes", ""),
+                    "sha256": item.get("sha256", ""),
+                    "file_hash": item.get("sha256", ""),
                 }
             )
         return normalize_records(records)
@@ -903,6 +906,12 @@ def _scan_script(
       }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
         $content = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
       }}
+      $sha256 = ""
+      try {{
+        $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
+      }} catch {{
+        $sha256 = ""
+      }}
       $records.Add([PSCustomObject]@{{
         path = $file.FullName
         name = $file.Name
@@ -913,6 +922,8 @@ def _scan_script(
         created_at = $file.CreationTimeUtc.ToString("o")
         modified_at = $file.LastWriteTimeUtc.ToString("o")
         accessed_at = $file.LastAccessTimeUtc.ToString("o")
+        attributes = $file.Attributes.ToString()
+        sha256 = $sha256
         owner = if ($acl) {{ $acl.Owner }} else {{ "" }}
         principals = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }}) }} else {{ @() }}
         permissions = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }}) }} else {{ @() }}

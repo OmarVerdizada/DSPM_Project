@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+import hashlib
 import zipfile
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
@@ -260,6 +262,11 @@ class FileRecord:
     scan_error: str = ""
     protected: bool = False
     protection_type: str = ""
+    owner: str = ""
+    created_at: str = ""
+    modified_at: str = ""
+    attributes: str = ""
+    sha256: str = ""
 
     def to_dict(self) -> dict:
         scan_mode = scan_mode_for_extension(self.extension)
@@ -284,6 +291,12 @@ class FileRecord:
             "scan_error": self.scan_error,
             "protected": protected,
             "protection_type": self.protection_type,
+            "owner": self.owner,
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+            "attributes": self.attributes,
+            "sha256": self.sha256,
+            "file_hash": self.sha256,
         }
 
 
@@ -300,6 +313,28 @@ def read_text_preview(path: Path, max_bytes: int = 1024 * 256) -> str:
             data = handle.read(max_bytes)
         return data.decode("utf-8", errors="replace")
     except OSError:
+        return ""
+
+
+def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(chunk_size), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
+def sha256_zip_entry(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    try:
+        with archive.open(entry) as handle:
+            for chunk in iter(lambda: handle.read(chunk_size), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (OSError, RuntimeError, zipfile.BadZipFile):
         return ""
 
 
@@ -344,6 +379,7 @@ def scan_directory(
         extension = detect_extension(item)
         is_hidden = is_hidden_path(item)
         is_system = is_system_path(item)
+        attributes = file_attribute_label(item, is_hidden, is_system)
         zip_protection: dict[str, str | bool] = {}
         if scan_archive_entries and extension == ".zip":
             zip_protection = inspect_zip_protection(item)
@@ -365,6 +401,13 @@ def scan_directory(
             stat = item.stat()
         except OSError:
             return
+        try:
+            owner = item.owner()
+        except (OSError, RuntimeError, NotImplementedError):
+            owner = ""
+        created_at = datetime.fromtimestamp(stat.st_ctime, timezone.utc).isoformat()
+        modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+        sha256 = sha256_file(item)
 
         protected_extension = extension in PROTECTED_CONTENT_EXTENSIONS
         unsupported_archive = inspect_archives and extension in UNSUPPORTED_ARCHIVE_EXTENSIONS
@@ -403,6 +446,11 @@ def scan_directory(
                 scan_error=scan_error,
                 protected=protected,
                 protection_type=protection_type,
+                owner=owner,
+                created_at=created_at,
+                modified_at=modified_at,
+                attributes=attributes,
+                sha256=sha256,
             )
         )
 
@@ -469,6 +517,7 @@ def scan_directory(
                                     scan_error="ZIP entry is encrypted and requires a password",
                                     protected=True,
                                     protection_type="zip_password",
+                                    sha256="",
                                 )
                             )
                         continue
@@ -493,6 +542,7 @@ def scan_directory(
                                 is_hidden=is_hidden,
                                 is_system=is_system,
                                 content=read_zip_entry_preview(archive, entry, extension),
+                                sha256=sha256_zip_entry(archive, entry),
                             )
                         )
                     if extension == ".zip":
@@ -539,6 +589,7 @@ def scan_directory(
                                                     scan_error="Nested ZIP entry is encrypted and requires a password",
                                                     protected=True,
                                                     protection_type="zip_password",
+                                                    sha256="",
                                                 )
                                             )
                                         continue
@@ -563,6 +614,7 @@ def scan_directory(
                                                 is_hidden=is_hidden,
                                                 is_system=is_system,
                                                 content=read_zip_entry_preview(nested_archive, nested_entry, nested_extension),
+                                                sha256=sha256_zip_entry(nested_archive, nested_entry),
                                             )
                                         )
                         except (OSError, RuntimeError, zipfile.BadZipFile):
@@ -663,12 +715,31 @@ def is_system_path(path: Path) -> bool:
     return any(part.lower() in system_parts for part in path.parts)
 
 
+def file_attribute_label(path: Path, is_hidden: bool = False, is_system: bool = False) -> str:
+    labels: list[str] = []
+    try:
+        stat = path.stat()
+        attributes = getattr(stat, "st_file_attributes", 0)
+    except OSError:
+        attributes = 0
+    if attributes & 0x20:
+        labels.append("A")
+    if attributes & 0x1:
+        labels.append("R")
+    if attributes & 0x2 or is_hidden:
+        labels.append("H")
+    if attributes & 0x4 or is_system:
+        labels.append("S")
+    return ", ".join(labels) or "Normal"
+
+
 def normalize_records(records: Iterable[dict]) -> list[dict]:
     normalized: list[dict] = []
     for record in records:
         path = str(record.get("path", ""))
         name = record.get("name") or Path(path).name
         extension = record.get("extension") or detect_extension(path)
+        sha256 = record.get("sha256") or record.get("file_hash") or ""
         normalized.append(
             {
                 "source": record.get("source", "unknown"),
@@ -689,6 +760,12 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "scan_error": record.get("scan_error", ""),
                 "protected": bool(record.get("protected", False)),
                 "protection_type": record.get("protection_type", ""),
+                "owner": record.get("owner", ""),
+                "created_at": record.get("created_at", ""),
+                "modified_at": record.get("modified_at", ""),
+                "attributes": record.get("attributes", ""),
+                "sha256": sha256,
+                "file_hash": sha256,
             }
         )
     return normalized

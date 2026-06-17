@@ -353,6 +353,7 @@ let rowOverrides = loadRowOverrides();
 let assetRules = loadAssetRules();
 let editingAssetIndex = null;
 let latestDashboard = null;
+let latestHashComparison = null;
 let tenantPortfolio = [];
 let latestRiskRules = [];
 let lastRenderedFileKeys = new Set();
@@ -982,6 +983,50 @@ function getFriendlyTimestamp(value) {
   return new Date(parsed).toLocaleString();
 }
 
+function fileMetaValue(value) {
+  return value ? String(value) : "Unknown";
+}
+
+function fileDateMeta(value) {
+  return getFriendlyTimestamp(value) || "Unknown";
+}
+
+function filePropertyOwner(file = {}) {
+  return reportText(file.owner || file.created_by || file.modified_by || file.account || file.principal, "Unknown");
+}
+
+function filePropertyAttributes(file = {}) {
+  const attributes = String(file.attributes || "").trim();
+  if (attributes) return attributes;
+  const flags = [
+    file.is_hidden ? "Hidden" : "",
+    file.is_system ? "System" : "",
+    isProtectedFile(file) ? "Protected" : "",
+  ].filter(Boolean);
+  return flags.join(", ") || "Normal";
+}
+
+function fileHashValue(file = {}) {
+  return String(file.sha256 || file.file_hash || "").trim().toLowerCase();
+}
+
+function shortHash(hash = "") {
+  const value = String(hash || "").trim();
+  if (!value) return "Not available";
+  return value.length > 18 ? `${value.slice(0, 12)}...${value.slice(-8)}` : value;
+}
+
+function hashComparisonKey(file = {}) {
+  const path = String(file.path || file.full_path || file.name || "");
+  const source = String(file.source || "");
+  const share = String(file.share || file.host || file.server || "");
+  return `${source}|${share}|${path}`.toLowerCase();
+}
+
+function changedHashKeys() {
+  return new Set((latestHashComparison?.changed || []).map((item) => String(item.key || "").toLowerCase()).filter(Boolean));
+}
+
 function renderProfile() {
   profileName.textContent = currentUser || "User";
   profileTenant.textContent = `${currentTenant || "default"} tenant`;
@@ -1291,6 +1336,7 @@ function renderRows(files) {
   const visible = getVisibleInventoryFiles(files);
   const page = visible.slice(0, renderedRowsLimit);
   const currentKeys = new Set(page.map((file) => fileKey(file)));
+  const hashChangedKeys = changedHashKeys();
   renderInventoryControlState(files, visible);
 
   if (visible.length === 0) {
@@ -1331,18 +1377,35 @@ function renderRows(files) {
       const sourceName = file.source || file.share || "workspace";
       const path = file.path || file.name || "";
       const owner = inferDepartment(file);
+      const fileOwner = filePropertyOwner(file);
+      const sha256 = fileHashValue(file);
+      const hashChanged = hashChangedKeys.has(hashComparisonKey(file));
+      const fileInfoId = `file-info-${Math.abs(hashString(key))}`;
 
       return `
         <tr class="${flash} severity-row ${level}" data-file-key="${escapeHtml(key)}">
           <td>
             <div class="file-title polished-file-title">
               <button type="button" class="preview-toggle" data-preview="${escapeHtml(key)}" title="Show file preview" aria-label="Show file preview"><span class="preview-toggle-icon" aria-hidden="true"></span></button>
-              <span class="file-path">${escapeHtml(file.name || file.path || "Unknown file")}</span>
+              <button type="button" class="file-info-toggle" aria-expanded="false" aria-controls="${escapeHtml(fileInfoId)}" title="Show file metadata">
+                <span class="file-path">${escapeHtml(file.name || file.path || "Unknown file")}</span>
+              </button>
+            </div>
+            <div id="${escapeHtml(fileInfoId)}" class="file-inline-info hidden" role="region" aria-label="File properties">
+              <div class="file-inline-info-title">Properties</div>
+              <dl>
+                <div><dt>Owner</dt><dd>${escapeHtml(fileMetaValue(fileOwner))}</dd></div>
+                <div><dt>Date created</dt><dd>${escapeHtml(fileDateMeta(file.created_at || file.createdAt || file.created))}</dd></div>
+                <div><dt>Date modified</dt><dd>${escapeHtml(fileDateMeta(file.modified_at || file.modifiedAt || file.last_modified || file.mtime))}</dd></div>
+                <div><dt>Attributes</dt><dd>${escapeHtml(filePropertyAttributes(file))}</dd></div>
+                <div><dt>SHA-256</dt><dd title="${escapeHtml(sha256)}">${escapeHtml(shortHash(sha256))}</dd></div>
+              </dl>
             </div>
             <div class="file-meta-line">
               ${file.extension ? `<span>${escapeHtml(file.extension)}</span>` : ""}
               <span>${escapeHtml(formatBytes(file.size))}</span>
-              <span>${escapeHtml(owner)}</span>
+              <span>${escapeHtml(sourceName)}</span>
+              ${hashChanged ? '<span class="hash-change-chip">Hash changed</span>' : ""}
             </div>
             ${fileFlags.length ? `<div class="file-flags polished-flags">${fileFlags.map((flag) => `<span>${escapeHtml(flag)}</span>`).join("")}</div>` : ""}
             <div class="subtext path-subtext">${escapeHtml(path)}</div>
@@ -1609,6 +1672,14 @@ function scoreForLevel(level) {
 
 function fileKey(file) {
   return `${file.source || "unknown"}|${file.share || ""}|${file.path || file.name || ""}`;
+}
+
+function hashString(value) {
+  let hash = 0;
+  for (let index = 0; index < String(value || "").length; index += 1) {
+    hash = ((hash << 5) - hash + String(value).charCodeAt(index)) | 0;
+  }
+  return hash;
 }
 
 function openDetailDrawer(key, type) {
@@ -1975,7 +2046,6 @@ function renderReportPreview() {
   const hiddenCount = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
   const protectedCount = latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length;
   const topFiles = report.priorityFiles.slice(0, 10);
-  const fullRegisterRows = buildReportRegisterRows(report.priorityFiles, { compact: true });
   const executiveTone = report.summary.critical || report.summary.high
     ? "Immediate remediation focus: critical/high files, sensitive signals, and broad access paths."
     : "Current scan is stable, but continue ownership validation and retention cleanup.";
@@ -1994,7 +2064,7 @@ function renderReportPreview() {
       <div class="report-narrative-card">
         <p class="eyebrow">Board summary</p>
         <h5>${escapeHtml(executiveTone)}</h5>
-        <p>Exports now separate the executive story from the full evidence register. The full dataset is available below through the expandable evidence drawer instead of forcing every row into the first page.</p>
+        <p>Exports keep the executive story focused while preserving the full evidence register in generated report packs.</p>
       </div>
 
       <div class="report-kpis product-report-kpis">
@@ -2002,8 +2072,8 @@ function renderReportPreview() {
         <div class="high"><span>High</span><strong>${report.summary.high}</strong></div>
         <div class="medium"><span>Medium</span><strong>${report.summary.medium}</strong></div>
         <div class="low"><span>Low</span><strong>${report.summary.low}</strong></div>
-        <div><span>Hidden</span><strong>${hiddenCount}</strong></div>
-        <div><span>Protected</span><strong>${protectedCount}</strong></div>
+        <div class="report-hidden"><span>Hidden</span><strong>${hiddenCount}</strong></div>
+        <div class="report-protected"><span>Protected</span><strong>${protectedCount}</strong></div>
       </div>
 
       <div class="report-visual-grid report-distribution-grid">
@@ -2041,12 +2111,13 @@ function renderReportPreview() {
             <thead>
               <tr><th>File</th><th>Source</th><th>Risk</th><th>Findings</th><th>Action</th></tr>
             </thead>
-            <tbody>${fullRegisterRows}</tbody>
+            <tbody></tbody>
           </table>
         </div>
       </details>
     </div>
   `;
+  reportPreview.querySelector(".report-data-drawer")?.remove();
 }
 
 
@@ -2542,6 +2613,29 @@ function buildScanComparison() {
     ["Low", latestSummary.low || 0, previousSummary.low || 0],
     ["Total", latestSummary.total_files || 0, previousSummary.total_files || 0],
   ];
+  const hashChanges = latestHashComparison?.changed || [];
+  const hashSummary = latestHashComparison
+    ? `
+      <div class="hash-comparison-card">
+        <div>
+          <span>Integrity comparison</span>
+          <strong>${escapeHtml(latestHashComparison.algorithm || "SHA-256")}</strong>
+          <small>${escapeHtml(latestHashComparison.changed_count || 0)} changed · ${escapeHtml(latestHashComparison.added_count || 0)} added · ${escapeHtml(latestHashComparison.removed_count || 0)} removed</small>
+        </div>
+        ${hashChanges.length ? `
+          <div class="hash-change-list">
+            ${hashChanges.slice(0, 5).map((item) => `
+              <div class="hash-change-row">
+                <strong>${escapeHtml(item.name || "Changed file")}</strong>
+                <span>${escapeHtml(item.path || item.source || "")}</span>
+                <code title="${escapeHtml(item.current_hash || "")}">${escapeHtml(shortHash(item.current_hash || ""))}</code>
+              </div>
+            `).join("")}
+          </div>
+        ` : '<p class="subtext">No SHA-256 changes detected between the latest two saved scans.</p>'}
+      </div>
+    `
+    : "";
 
   return `
     <div class="scan-comparison-list">
@@ -2557,6 +2651,7 @@ function buildScanComparison() {
         `;
       }).join("")}
     </div>
+    ${hashSummary}
   `;
 }
 
@@ -3778,15 +3873,38 @@ async function loadHistory() {
   if (!accessToken) {
     return;
   }
-  const [history, dashboard] = await Promise.all([
+  const [history, dashboard, hashComparison] = await Promise.all([
     api("/api/history", null, "GET"),
     api("/api/executive-dashboard", null, "GET"),
+    loadHashComparison(),
   ]);
   latestDashboard = dashboard;
+  latestHashComparison = hashComparison;
   renderHistory(history.history || []);
   await restoreLatestSavedReport(history.history || []);
   renderExecutiveExperience();
   loadTenants().catch(() => {});
+}
+
+async function loadHashComparison() {
+  try {
+    return await api("/api/history/hash-changes", null, "GET");
+  } catch {
+    return null;
+  }
+}
+
+async function refreshHashComparison() {
+  const [dashboard, hashComparison] = await Promise.all([
+    api("/api/executive-dashboard", null, "GET").catch(() => latestDashboard),
+    loadHashComparison(),
+  ]);
+  latestDashboard = dashboard;
+  latestHashComparison = hashComparison;
+  if (latestFiles.length) {
+    renderRows(latestFiles);
+  }
+  renderExecutiveExperience();
 }
 
 async function restoreLatestSavedReport(historyItems = latestHistoryItems) {
@@ -4358,6 +4476,7 @@ form.addEventListener("submit", async (event) => {
     const payload = await ensureCredential(readPayload());
     const report = payload.async_scan ? await runQueuedScan(payload) : await api("/api/scan", { ...payload, save_report: true });
     applyScanReport(report, "file-server");
+    await refreshHashComparison();
     setStatus("Scan completed and report.json updated.");
     setScanProgress(true, 100, "Scan completed");
     showToast("Scan completed", `${latestFiles.length} files found`, latestReport.summary?.critical ? "danger" : "success");
@@ -4467,6 +4586,7 @@ endpointScanBtn.addEventListener("click", async () => {
     }
     const report = payload.async_scan ? await runQueuedEndpointScan(payload) : await api("/api/endpoint/scan", payload);
     applyScanReport(report, "endpoint");
+    await refreshHashComparison();
     const extensionCounts = summarizeExtensions(latestFiles, report.endpoint?.extension_counts);
     const diagnostics = summarizeEndpointDiagnostics(report.endpoint);
     endpointStatus.textContent = `Endpoint scan completed. ${latestFiles.length} files analyzed. ${extensionCounts} ${diagnostics}`;
@@ -4574,6 +4694,17 @@ assetRuleList.addEventListener("click", (event) => {
 });
 
 resultsBody.addEventListener("click", (event) => {
+  const infoButton = event.target.closest(".file-info-toggle");
+  if (infoButton) {
+    const panel = infoButton.closest("td")?.querySelector(".file-inline-info");
+    if (panel) {
+      const isHidden = panel.classList.toggle("hidden");
+      infoButton.classList.toggle("info-open", !isHidden);
+      infoButton.setAttribute("aria-expanded", String(!isHidden));
+    }
+    return;
+  }
+
   const detailButton = event.target.closest(".detail-toggle");
   if (detailButton) {
     openDetailDrawer(detailButton.dataset.detailKey || "", detailButton.dataset.detailType || "reasons");
