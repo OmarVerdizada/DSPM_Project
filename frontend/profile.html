@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Profile | DSPM</title>
+    <script>
+      try {
+        document.documentElement.dataset.theme = window.localStorage.getItem("dspm-theme") || "light";
+      } catch {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
+    <link rel="stylesheet" href="/static/styles.css?v=101" />
+  </head>
+  <body class="profile-page">
+    <main class="profile-shell">
+      <section class="profile-header">
+        <div>
+          <p class="eyebrow">DSPM account</p>
+          <h1>Profile settings</h1>
+        </div>
+        <div class="profile-header-actions">
+          <button type="button" id="profile-theme-btn" class="secondary-btn">Dark mode</button>
+          <a class="secondary-btn profile-link" href="/dashboard">Dashboard</a>
+          <button type="button" id="profile-logout-btn" class="secondary-btn">Sign out</button>
+        </div>
+      </section>
+
+      <section class="profile-card">
+        <div class="profile-hero">
+          <div id="profile-avatar-large" class="profile-avatar large">U</div>
+          <div>
+            <p class="eyebrow">Account profile</p>
+            <h1 id="profile-title">Profile</h1>
+            <p id="profile-subtitle">Loading account details...</p>
+          </div>
+          <span id="profile-protection-badge" class="profile-state-badge">Loading</span>
+        </div>
+
+        <div class="profile-main-grid">
+          <aside class="profile-side-panel">
+            <div class="profile-summary-grid">
+              <div>
+                <span>Username</span>
+                <strong id="profile-username">-</strong>
+              </div>
+              <div>
+                <span>Role</span>
+                <strong id="profile-role-label">-</strong>
+              </div>
+              <div>
+                <span>Tenant</span>
+                <strong id="profile-tenant-label">-</strong>
+              </div>
+            </div>
+
+            <div class="profile-info-list">
+              <div>
+                <span>Session</span>
+                <strong id="profile-session-state">Authenticated</strong>
+              </div>
+              <div>
+                <span>Editable fields</span>
+                <strong id="profile-edit-state">Checking...</strong>
+              </div>
+              <div>
+                <span>Password policy</span>
+                <strong>8+ characters</strong>
+              </div>
+            </div>
+          </aside>
+
+          <section class="profile-settings-stack">
+            <form id="profile-form" class="profile-form profile-section-card">
+              <div>
+                <h2>Personal details</h2>
+                <p>Update the display name shown in account and user management views.</p>
+              </div>
+              <label>
+                Full name
+                <input id="profile-full-name" name="full_name" autocomplete="name" />
+              </label>
+              <button type="submit" id="save-profile-btn">Save profile</button>
+            </form>
+
+            <form id="password-form" class="profile-form profile-section-card">
+              <div>
+                <h2>Password</h2>
+                <p>Change your local account password after confirming the current one.</p>
+              </div>
+              <div class="profile-password-grid">
+                <label>
+                  Current password
+                  <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+                </label>
+                <label>
+                  New password
+                  <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+                </label>
+                <label>
+                  Confirm new password
+                  <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+                </label>
+              </div>
+              <button type="submit" id="save-password-btn" class="secondary-btn">Change password</button>
+            </form>
+          </section>
+        </div>
+
+        <p id="profile-status" class="save-status">Loading profile...</p>
+      </section>
+    </main>
+
+    <script src="/static/profile.js?v=92"></script>
+  </body>
+</html>
