@@ -1,6 +1,7 @@
 const form = document.querySelector("#connection-form");
 const testBtn = document.querySelector("#test-btn");
 const scanBtn = document.querySelector("#scan-btn");
+const scanCancelBtn = document.querySelector("#scan-cancel-btn");
 const generateDemoDataBtn = document.querySelector("#generate-demo-data-btn");
 const demoDataTitle = document.querySelector("#demo-data-title");
 const demoDataStatus = document.querySelector("#demo-data-status");
@@ -8,6 +9,7 @@ const statusBox = document.querySelector("#connection-status");
 const scanProgress = document.querySelector("#scan-progress");
 const scanProgressLabel = document.querySelector("#scan-progress-label");
 const scanProgressBar = document.querySelector("#scan-progress-bar");
+const scanProgressPercent = document.querySelector("#scan-progress-percent");
 const allowedExtensionsList = document.querySelector("#allowed_extensions");
 const extensionSearch = document.querySelector("#extension-search");
 const endpointAllowedExtensionsList = document.querySelector("#endpoint_allowed_extensions");
@@ -121,6 +123,7 @@ const endpointCustomPaths = document.querySelector("#endpoint-custom-paths");
 const endpointScanProgress = document.querySelector("#endpoint-scan-progress");
 const endpointScanProgressLabel = document.querySelector("#endpoint-scan-progress-label");
 const endpointScanProgressBar = document.querySelector("#endpoint-scan-progress-bar");
+const endpointScanProgressPercent = document.querySelector("#endpoint-scan-progress-percent");
 const detailDrawer = document.querySelector("#detail-drawer");
 const detailDrawerEyebrow = detailDrawer.querySelector("#detail-drawer-eyebrow");
 const detailDrawerTitle = detailDrawer.querySelector("#detail-drawer-title");
@@ -359,7 +362,10 @@ let latestRiskRules = [];
 let lastRenderedFileKeys = new Set();
 let hasRenderedScanRows = false;
 let renderedRowsLimit = 200;
+let activeScanJobId = "";
 let activeEndpointJobId = "";
+let scanProgressValue = 0;
+let endpointProgressValue = 0;
 let inventoryRiskFilter = "ALL";
 let inventorySourceFacet = "ALL";
 let inventoryFindingFacet = "ALL";
@@ -396,7 +402,11 @@ async function readErrorMessage(response) {
   }
   try {
     const data = JSON.parse(message);
-    return typeof data.detail === "string" ? data.detail : "Request failed.";
+    if (typeof data.detail === "string") return data.detail;
+    if (data.detail && typeof data.detail === "object") {
+      return [data.detail.message, data.detail.code, data.detail.hint].filter(Boolean).join(" - ");
+    }
+    return "Request failed.";
   } catch {
     return "Request failed.";
   }
@@ -633,6 +643,12 @@ function updateExtensionSummary(list = allowedExtensionsList) {
     : document.querySelector('[data-extension-selected-for="file-server"]');
   if (!host) return;
   if (!selected.length) {
+    const presetName = list === endpointAllowedExtensionsList ? "endpoint-ext-preset" : "ext-preset";
+    const preset = document.querySelector(`input[name='${presetName}']:checked`)?.value || "";
+    if (preset === "all") {
+      host.innerHTML = '<span class="extension-selected-empty">All extensions included</span>';
+      return;
+    }
     host.innerHTML = '<span class="extension-selected-empty">No extension filter selected</span>';
     return;
   }
@@ -663,14 +679,14 @@ function addCustomExtensionFromInput(input, list, search) {
   if (search) search.value = extension;
   renderExtensionFilter(allowedExtensionsList, extensionSearch);
   renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
-  [allowedExtensionsList, endpointAllowedExtensionsList].forEach((targetList) => {
-    [...targetList.querySelectorAll("input[type='checkbox']")].forEach((checkbox) => {
-      checkbox.checked = checkbox.checked || checkbox.value === extension;
-    });
-    reorderExtensionOptions(targetList);
+  [...list.querySelectorAll("input[type='checkbox']")].forEach((checkbox) => {
+    checkbox.checked = checkbox.checked || checkbox.value === extension;
   });
+  reorderExtensionOptions(list);
   filterExtensionList(allowedExtensionsList, extensionSearch);
   filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
+  updateExtensionSummary(allowedExtensionsList);
+  updateExtensionSummary(endpointAllowedExtensionsList);
   setStatus(`Custom extension saved: ${extension}`);
 }
 
@@ -680,8 +696,10 @@ function getEndpointScopeConfig(scope = endpointPathScope?.value || "default") {
     desktop: { paths: ["desktop"], depth: 3, label: "Desktop only" },
     documents: { paths: ["documents"], depth: 4, label: "Documents only" },
     downloads: { paths: ["downloads"], depth: 3, label: "Downloads only" },
+    onedrive: { paths: ["onedrive"], depth: 5, label: "OneDrive only" },
     all: { paths: ["all"], depth: 6, label: "Entire target profile" },
     c_drive: { paths: ["c_drive"], depth: 3, label: "C drive data scan" },
+    all_fixed_drives: { paths: ["all_fixed_drives"], depth: 3, label: "All fixed drives" },
     custom: { paths: readEndpointCustomPaths(), depth: 4, label: "Custom paths" },
   };
   return configs[scope] || configs.default;
@@ -696,7 +714,7 @@ function readEndpointCustomPaths() {
 
 function clampEndpointDepth(value, scope = endpointPathScope?.value || "default") {
   const number = Number(value || getEndpointScopeConfig(scope).depth);
-  const maxByScope = scope === "c_drive" ? 8 : scope === "all" ? 8 : 12;
+  const maxByScope = scope === "c_drive" || scope === "all_fixed_drives" ? 8 : scope === "all" ? 8 : 12;
   return Math.max(1, Math.min(maxByScope, Number.isFinite(number) ? Math.round(number) : getEndpointScopeConfig(scope).depth));
 }
 
@@ -713,6 +731,9 @@ function readEndpointPayload() {
   const targetUsername = document.querySelector("#endpoint-target-username").value.trim();
   if (scope === "custom" && !scopeConfig.paths.length) {
     throw new Error("Enter at least one custom endpoint path.");
+  }
+  if (["default", "desktop", "documents", "downloads", "onedrive", "all"].includes(scope) && !targetUsername) {
+    throw new Error("Enter Target Windows user for profile scopes, or choose C drive / All fixed drives / Custom paths.");
   }
   return {
     host: document.querySelector("#endpoint-host").value.trim(),
@@ -789,6 +810,7 @@ function setBusy(isBusy) {
   testBtn.disabled = isBusy;
   scanBtn.disabled = isBusy;
   generateDemoDataBtn.disabled = isBusy;
+  if (scanCancelBtn) scanCancelBtn.disabled = !activeScanJobId;
   if (localWinrmActivateBtn) localWinrmActivateBtn.disabled = isBusy;
   if (endpointActivateBtn) endpointActivateBtn.disabled = isBusy;
   if (endpointTestBtn) endpointTestBtn.disabled = isBusy;
@@ -827,19 +849,53 @@ function animateNumber(element, target) {
   requestAnimationFrame(step);
 }
 
+function normalizeProgress(progress, previous = 0, minimum = 0) {
+  const value = Math.round(Math.max(minimum, Math.min(100, Number(progress) || 0)));
+  return Math.max(previous, value);
+}
+
+function nextLiveProgress(current, serverProgress = 0, cap = 92) {
+  const floor = normalizeProgress(serverProgress, current, 5);
+  if (floor >= cap) return Math.min(99, floor);
+  const step = floor < 30 ? 4 : floor < 65 ? 3 : 1;
+  return Math.min(cap, Math.max(floor, current + step));
+}
+
 function setScanProgress(active, progress = 0, label = "Scanning...") {
   scanProgress.classList.toggle("hidden", !active);
   scanProgress.classList.toggle("active", active);
+  if (!active) {
+    scanProgressValue = 0;
+    if (scanProgressPercent) scanProgressPercent.textContent = "0%";
+    scanProgressBar.style.width = "0%";
+    return;
+  }
+  scanProgressValue = normalizeProgress(progress, scanProgressValue, 0);
   scanProgressLabel.textContent = label;
-  scanProgressBar.style.width = `${Math.max(4, Math.min(100, Number(progress) || 0))}%`;
+  scanProgressBar.style.width = `${scanProgressValue}%`;
+  scanProgressBar.parentElement?.setAttribute("aria-valuemin", "0");
+  scanProgressBar.parentElement?.setAttribute("aria-valuemax", "100");
+  scanProgressBar.parentElement?.setAttribute("aria-valuenow", String(scanProgressValue));
+  if (scanProgressPercent) scanProgressPercent.textContent = `${scanProgressValue}%`;
 }
 
 function setEndpointScanProgress(active, progress = 0, label = "Scanning endpoint...") {
   if (!endpointScanProgress || !endpointScanProgressLabel || !endpointScanProgressBar) return;
   endpointScanProgress.classList.toggle("hidden", !active);
   endpointScanProgress.classList.toggle("active", active);
+  if (!active) {
+    endpointProgressValue = 0;
+    if (endpointScanProgressPercent) endpointScanProgressPercent.textContent = "0%";
+    endpointScanProgressBar.style.width = "0%";
+    return;
+  }
+  endpointProgressValue = normalizeProgress(progress, endpointProgressValue, 0);
   endpointScanProgressLabel.textContent = label;
-  endpointScanProgressBar.style.width = `${Math.max(4, Math.min(100, Number(progress) || 0))}%`;
+  endpointScanProgressBar.style.width = `${endpointProgressValue}%`;
+  endpointScanProgressBar.parentElement?.setAttribute("aria-valuemin", "0");
+  endpointScanProgressBar.parentElement?.setAttribute("aria-valuemax", "100");
+  endpointScanProgressBar.parentElement?.setAttribute("aria-valuenow", String(endpointProgressValue));
+  if (endpointScanProgressPercent) endpointScanProgressPercent.textContent = `${endpointProgressValue}%`;
 }
 
 function clearResultsFilter() {
@@ -915,16 +971,20 @@ function updateEndpointCustomPathState(isBusy = false) {
   if (endpointStatus && !isBusy) {
     const scope = endpointPathScope.value;
     const targetUser = document.querySelector("#endpoint-target-username")?.value.trim();
-    if (["default", "desktop", "documents", "downloads", "all"].includes(scope) && !targetUser) {
-      endpointStatus.textContent = "No target user set: profile scopes will scan real user profiles under C:\\Users.";
+    if (["default", "desktop", "documents", "downloads", "onedrive", "all"].includes(scope) && !targetUser) {
+      endpointStatus.textContent = "Enter Target Windows user for profile scopes. Use C drive, All fixed drives, or Custom paths without a profile user.";
     } else if (scope === "default") {
       endpointStatus.textContent = "Quick scan checks the target user's Desktop, Documents, Downloads, and OneDrive equivalents.";
     } else if (["desktop", "documents", "downloads"].includes(scope)) {
       endpointStatus.textContent = "Selected profile folder scan uses the target user's real C:\\Users profile and OneDrive equivalents.";
+    } else if (scope === "onedrive") {
+      endpointStatus.textContent = "OneDrive scan checks OneDrive and OneDrive - tenant folders under the target user's profile.";
     } else if (scope === "all") {
       endpointStatus.textContent = "Entire profile scans the target user's full C:\\Users profile with browser/temp/project folders skipped.";
     } else if (scope === "c_drive") {
       endpointStatus.textContent = "C drive data scan checks C:\\ while skipping OS, browser cache, temp, and project folders. Use Custom paths for exact deep locations.";
+    } else if (scope === "all_fixed_drives") {
+      endpointStatus.textContent = "All fixed drives can be long-running. Keep depth low first, then expand after validating results.";
     } else {
       endpointStatus.textContent = "Fill the endpoint scan details after WinRM is active on the workstation.";
     }
@@ -3912,6 +3972,10 @@ function requireAuth() {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function ensureCredential(payload) {
   if (!payload.server || payload.credential_ref || !payload.password) {
     return payload;
@@ -3929,9 +3993,22 @@ async function ensureCredential(payload) {
 
 async function runQueuedScan(payload) {
   const job = await api("/api/scan", { ...payload, async_scan: true, save_report: true });
+  activeScanJobId = job.id;
+  if (scanCancelBtn) {
+    scanCancelBtn.classList.remove("hidden");
+    scanCancelBtn.disabled = false;
+  }
   setStatus(`Scan queued: ${job.id}`);
   setScanProgress(true, job.progress || 5, "Scan queued...");
-  return pollScan(job.id);
+  try {
+    return await pollScan(job.id);
+  } finally {
+    activeScanJobId = "";
+    if (scanCancelBtn) {
+      scanCancelBtn.classList.add("hidden");
+      scanCancelBtn.disabled = true;
+    }
+  }
 }
 
 async function runQueuedEndpointScan(payload) {
@@ -3945,8 +4022,13 @@ async function runQueuedEndpointScan(payload) {
   setEndpointScanProgress(true, job.progress || 5, "Endpoint scan queued...");
   try {
     return await pollScan(job.id, (polledJob) => {
-      endpointStatus.textContent = `${polledJob.message} (${polledJob.progress || 0}%)`;
-      setEndpointScanProgress(true, polledJob.progress || 0, polledJob.message || "Scanning endpoint...");
+      const displayedProgress = nextLiveProgress(endpointProgressValue, polledJob.progress || 0, 92);
+      endpointStatus.textContent = `${polledJob.message} (${displayedProgress}%)`;
+      setEndpointScanProgress(
+        true,
+        displayedProgress,
+        polledJob.message || "Scanning endpoint..."
+      );
     });
   } finally {
     activeEndpointJobId = "";
@@ -3957,10 +4039,18 @@ async function runQueuedEndpointScan(payload) {
   }
 }
 
-async function loadSavedReportById(scanId) {
+async function loadSavedReportById(scanId, retries = 3, delayMs = 350) {
   if (!scanId) return null;
-  const data = await api(`/api/history/${encodeURIComponent(scanId)}/report`, null, "GET");
-  return data.report || null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const data = await api(`/api/history/${encodeURIComponent(scanId)}/report`, null, "GET");
+      if (data.report) return data.report;
+    } catch (error) {
+      if (attempt >= retries) return null;
+    }
+    await sleep(delayMs);
+  }
+  return null;
 }
 
 async function generateDemoData() {
@@ -3984,8 +4074,9 @@ async function pollScan(jobId, onProgress = null) {
     if (onProgress) {
       onProgress(job);
     } else {
-      setStatus(`${job.message} (${job.progress || 0}%)`);
-      setScanProgress(true, job.progress || 0, job.message || "Scanning...");
+      const displayedProgress = nextLiveProgress(scanProgressValue, job.progress || 0, 92);
+      setStatus(`${job.message} (${displayedProgress}%)`);
+      setScanProgress(true, displayedProgress, job.message || "Scanning...");
     }
     if (job.status === "completed") {
       if (onProgress) {
@@ -4594,6 +4685,18 @@ generateDemoDataBtn.addEventListener("click", async () => {
   }
 });
 
+if (scanCancelBtn) scanCancelBtn.addEventListener("click", async () => {
+  if (!activeScanJobId) return;
+  scanCancelBtn.disabled = true;
+  try {
+    await api(`/api/scans/${activeScanJobId}/cancel`, {}, "POST");
+    setStatus("File scan cancellation requested.");
+    setScanProgress(false);
+  } catch (error) {
+    setStatus(`File scan cancel failed: ${error.message}`);
+  }
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   setBusy(true);
@@ -4610,7 +4713,18 @@ form.addEventListener("submit", async (event) => {
   try {
     requireAuth();
     const payload = await ensureCredential(readPayload());
-    const report = payload.async_scan ? await runQueuedScan(payload) : await api("/api/scan", { ...payload, save_report: true });
+    if (payload.async_scan) {
+      window.clearInterval(progressTimer);
+    }
+    let report = payload.async_scan ? await runQueuedScan(payload) : await api("/api/scan", { ...payload, save_report: true });
+    if (report?.scan_id) {
+      const fullReport = await loadSavedReportById(report.scan_id, 5, 500);
+      if (fullReport) {
+        report = fullReport;
+      } else if (report.result_truncated) {
+        throw new Error("Full saved scan report is not ready yet. Refresh history and open the saved scan.");
+      }
+    }
     applyScanReport(report, "file-server");
     await refreshHashComparison();
     setStatus("Scan completed and report.json updated.");
@@ -4625,7 +4739,10 @@ form.addEventListener("submit", async (event) => {
     showToast("Scan failed", error.message, "danger");
   } finally {
     window.clearInterval(progressTimer);
-    window.setTimeout(() => setScanProgress(false), 700);
+    if (scanProgressValue >= 100) {
+      await sleep(500);
+    }
+    setScanProgress(false);
     setBusy(false);
   }
 });
@@ -4723,7 +4840,12 @@ endpointScanBtn.addEventListener("click", async () => {
     }
     let report = payload.async_scan ? await runQueuedEndpointScan(payload) : await api("/api/endpoint/scan", payload);
     if (report?.scan_id) {
-      report = await loadSavedReportById(report.scan_id) || report;
+      const fullReport = await loadSavedReportById(report.scan_id, 5, 500);
+      if (fullReport) {
+        report = fullReport;
+      } else if (report.result_truncated) {
+        throw new Error("Full saved endpoint report is not ready yet. Refresh history and open the saved scan.");
+      }
     }
     if (!report?.endpoint) {
       throw new Error("Endpoint scan returned non-endpoint data. Previous SMB/demo report was not displayed.");
@@ -4744,7 +4866,10 @@ endpointScanBtn.addEventListener("click", async () => {
     showToast("Endpoint scan failed", error.message, "danger");
   } finally {
     window.clearInterval(endpointProgressTimer);
-    window.setTimeout(() => setEndpointScanProgress(false), 700);
+    if (endpointProgressValue >= 100) {
+      await sleep(500);
+    }
+    setEndpointScanProgress(false);
     setBusy(false);
   }
 });

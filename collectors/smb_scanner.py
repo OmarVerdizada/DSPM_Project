@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
+from typing import Callable
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
 from collectors.file_scanner import (
@@ -65,6 +66,7 @@ class SMBConfig:
     include_admin_shares: bool = False
     inspect_archives: bool = False
     timeout: int = 10
+    cancel_check: Callable[[], bool] | None = None
 
 
 class SMBScanner:
@@ -74,7 +76,11 @@ class SMBScanner:
         self.extension_filter = normalize_extension_filter(config.allowed_extensions)
         self.credential_used = ""
         self._owner_cache: dict[str, str] = {}
+        self._acl_cache: dict[str, dict] = {}
         self.last_scan_diagnostics: dict = {}
+
+    def _cancelled(self) -> bool:
+        return bool(self.config.cancel_check and self.config.cancel_check())
 
     def connect(self) -> bool:
         try:
@@ -142,6 +148,8 @@ class SMBScanner:
         try:
             records: list[dict] = []
             for share in self.connection.listShares():
+                if self._cancelled():
+                    raise RuntimeError("Scan cancelled")
                 share_name = share.name
                 if self._skip_share(share_name):
                     continue
@@ -208,6 +216,8 @@ class SMBScanner:
         return candidates
 
     def _walk_share(self, share_name: str, folder: str, depth: int) -> list[dict]:
+        if self._cancelled():
+            raise RuntimeError("Scan cancelled")
         if self.connection is None or depth > self.config.max_depth:
             return []
         if self._skip_path(folder):
@@ -221,6 +231,8 @@ class SMBScanner:
             return records
 
         for entry in entries:
+            if self._cancelled():
+                raise RuntimeError("Scan cancelled")
             if entry.filename in {".", ".."}:
                 continue
 
@@ -254,7 +266,8 @@ class SMBScanner:
                 continue
             content = self._read_file_preview(share_name, remote_path, extension)
             sha256 = self._hash_file(share_name, remote_path, int(getattr(entry, "file_size", 0) or 0))
-            owner = self._owner_for_path(share_name, remote_path)
+            acl = self._acl_for_path(share_name, remote_path)
+            owner = str(acl.get("owner") or "")
             created_at = _format_smb_timestamp(getattr(entry, "create_time", None))
             modified_at = _format_smb_timestamp(getattr(entry, "last_write_time", None))
             attributes = ", ".join([item for item in ["H" if is_hidden else "", "S" if is_system else ""] if item]) or "Normal"
@@ -270,7 +283,7 @@ class SMBScanner:
                     "is_hidden": is_hidden,
                     "is_system": is_system,
                     "content": content,
-                    "acl": {"owner": owner, "principals": [], "permissions": []},
+                    "acl": acl,
                     "scan_mode": scan_mode_for_extension(extension),
                     "content_status": content_status_for_extension(extension, content, self.config.read_content),
                     "content_scannable": extension in CONTENT_EXTENSIONS,
@@ -325,7 +338,8 @@ class SMBScanner:
                                 content = handle.read(self.config.max_read_bytes).decode("utf-8", errors="replace")
                         except (OSError, RuntimeError, zipfile.BadZipFile):
                             content = ""
-                    owner = self._owner_for_path(share_name, path)
+                    acl = self._acl_for_path(share_name, path)
+                    owner = str(acl.get("owner") or "")
                     records.append(
                         {
                             "source": "smb",
@@ -338,7 +352,7 @@ class SMBScanner:
                             "is_hidden": is_hidden,
                             "is_system": is_system,
                             "content": content,
-                            "acl": {"owner": owner, "principals": [], "permissions": []},
+                            "acl": acl,
                             "scan_mode": scan_mode_for_extension(extension),
                             "content_status": content_status_for_extension(extension, content, self.config.read_content),
                             "content_scannable": extension in CONTENT_EXTENSIONS,
@@ -374,9 +388,12 @@ class SMBScanner:
         return f"\\\\{self.config.server}\\{share_name}\\{relative}" if relative else f"\\\\{self.config.server}\\{share_name}"
 
     def _owner_for_path(self, share_name: str, path: str) -> str:
+        return str(self._acl_for_path(share_name, path).get("owner") or "")
+
+    def _acl_for_path(self, share_name: str, path: str) -> dict:
         unc_path = self._unc_path(share_name, path)
-        if unc_path in self._owner_cache:
-            return self._owner_cache[unc_path]
+        if unc_path in self._acl_cache:
+            return self._acl_cache[unc_path]
         self.last_scan_diagnostics["owner_read_attempts"] = int(self.last_scan_diagnostics.get("owner_read_attempts") or 0) + 1
         username, domain = self._windows_credential()
         payload = {
@@ -392,9 +409,13 @@ class SMBScanner:
         $username = [string]$payload.username
         $password = [string]$payload.password
         try {{
-          $directOwner = (Get-Acl -LiteralPath $path -ErrorAction Stop).Owner
-          if (-not [string]::IsNullOrWhiteSpace($directOwner)) {{
-            $directOwner
+          $directAcl = Get-Acl -LiteralPath $path -ErrorAction Stop
+          if ($directAcl) {{
+            [PSCustomObject]@{{
+              owner = [string]$directAcl.Owner
+              principals = @($directAcl.Access | ForEach-Object {{ $_.IdentityReference.Value }})
+              permissions = @($directAcl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+            }} | ConvertTo-Json -Compress
             exit 0
           }}
         }} catch {{
@@ -412,7 +433,12 @@ class SMBScanner:
         try {{
           New-PSDrive -Name $driveName -PSProvider FileSystem -Root $root -Credential $credential -ErrorAction Stop | Out-Null
           $drivePath = if ($relative) {{ $driveName + ':\\' + $relative }} else {{ $driveName + ':\\' }}
-          (Get-Acl -LiteralPath $drivePath -ErrorAction Stop).Owner
+          $acl = Get-Acl -LiteralPath $drivePath -ErrorAction Stop
+          [PSCustomObject]@{{
+            owner = [string]$acl.Owner
+            principals = @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }})
+            permissions = @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+          }} | ConvertTo-Json -Compress
         }} finally {{
           Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
         }}
@@ -436,17 +462,34 @@ class SMBScanner:
             )
         except (OSError, subprocess.SubprocessError):
             self.last_scan_diagnostics["owner_read_failed"] = int(self.last_scan_diagnostics.get("owner_read_failed") or 0) + 1
-            return ""
+            return {"owner": "", "principals": [], "permissions": []}
 
         if completed.returncode != 0:
             self.last_scan_diagnostics["owner_read_failed"] = int(self.last_scan_diagnostics.get("owner_read_failed") or 0) + 1
             logger.debug("Could not read SMB owner for %s: %s", unc_path, completed.stderr.strip() or completed.stdout.strip())
-            return ""
-        owner = completed.stdout.strip().splitlines()[0] if completed.stdout.strip() else ""
-        if not owner:
+            return {"owner": "", "principals": [], "permissions": []}
+        try:
+            acl = json.loads(completed.stdout.strip()) if completed.stdout.strip() else {}
+        except json.JSONDecodeError:
+            acl = {"owner": completed.stdout.strip().splitlines()[0] if completed.stdout.strip() else ""}
+        principals = acl.get("principals", [])
+        permissions = acl.get("permissions", [])
+        if isinstance(principals, str):
+            principals = [principals]
+        if isinstance(permissions, str):
+            permissions = [permissions]
+        normalized_acl = {
+            "owner": str(acl.get("owner") or ""),
+            "principals": [str(item) for item in principals if str(item or "").strip()],
+            "permissions": [str(item) for item in permissions if str(item or "").strip()],
+        }
+        if not normalized_acl["owner"]:
             self.last_scan_diagnostics["owner_read_failed"] = int(self.last_scan_diagnostics.get("owner_read_failed") or 0) + 1
-        self._owner_cache[unc_path] = owner
-        return owner
+        if normalized_acl["principals"]:
+            self.last_scan_diagnostics["acl_read_success"] = int(self.last_scan_diagnostics.get("acl_read_success") or 0) + 1
+        self._owner_cache[unc_path] = normalized_acl["owner"]
+        self._acl_cache[unc_path] = normalized_acl
+        return normalized_acl
 
     def _windows_credential(self) -> tuple[str, str]:
         username = self.config.username.strip()

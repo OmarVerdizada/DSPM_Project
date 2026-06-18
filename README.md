@@ -113,7 +113,7 @@ Endpoint scans use WinRM to inspect selected paths on a target workstation. The 
 
 1. In `Management server WinRM`, prepare only the DSPM management host if it is not already ready.
 2. In `Target machine WinRM`, enter the target IP, optional Windows profile user to scan, and a local-admin credential that is valid on the target workstation. The app first verifies existing WinRM; if it is already reachable, it skips WMI bootstrap.
-3. In `Endpoint scan`, choose a focused path scope first, such as `Desktop only` or `Documents only`. Use `All profile`, `C drive`, or `All fixed drives` only after the connection is proven because these scopes can traverse large trees.
+3. In `Endpoint scan`, choose a focused path scope first, such as `Desktop only`, `Documents only`, or `OneDrive only`. Use `All profile`, `C drive`, or `All fixed drives` only after the connection is proven because these scopes can traverse large trees.
 
 Example target preparation values:
 
@@ -126,6 +126,15 @@ Admin password: <target-local-admin-password>
 ```
 
 If WinRM is already enabled by Group Policy, `Prepare & Test target WinRM` should report that the existing connection is verified. If it reports WMI access denied, the target rejected remote WMI/DCOM changes for that credential; make sure the account or group is in the target workstation's local `Administrators` group, or fix this with GPO or a one-time local bootstrap on the target.
+
+Scan notes:
+
+- File-server extension, hidden, and system filters are narrowing filters. For example, `.pdf` plus `Hidden files` returns hidden PDFs, not every PDF plus every hidden file.
+- File-server SMB scans can include admin disk shares (`C$`, `D$`) when `Include SMB admin shares` is selected and the credential has access.
+- File-server scans enrich owner, principals, and permissions on a best-effort basis. If the backend host or credential cannot read ACLs, the scan continues with metadata and records ACL diagnostics.
+- Async file-server scans save the full report, then reload it by `scan_id` so large results are not limited to the in-memory job preview.
+- Local sample paths are project-local only. Use Endpoint custom paths for workstation folders outside the project.
+- Cancelling a file-server async scan stops traversal cooperatively at the next share/folder/file step. Remote WinRM endpoint scans use a synchronous remote PowerShell command, so cancellation stops the DSPM job state immediately but cannot always interrupt an already-running remote command until the remote command returns.
 
 ### Group Policy For WinRM Targets
 

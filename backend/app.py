@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import os
+import platform
 import re
 import socket
 import time
@@ -56,7 +57,7 @@ from backend.store import (
     update_user_active,
 )
 from backend.vault import CredentialVault
-from collectors.file_scanner import SCANNABLE_EXTENSIONS, normalize_extension_filter
+from collectors.file_scanner import SCANNABLE_EXTENSIONS, normalize_extension_filter, scan_directory
 from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner, activate_local_winrm
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
@@ -165,8 +166,8 @@ class ConnectionRequest(BaseModel):
     def _validate_local_path(cls, value: str) -> str:
         cleaned = re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip() or "enterprise_test_data"
         candidate = Path(cleaned)
-        if cleaned.startswith(("//", "\\")) or ".." in candidate.parts:
-            raise ValueError("local_path must be a direct local folder or file path without traversal")
+        if candidate.is_absolute() or cleaned.startswith(("//", "\\")) or ".." in candidate.parts:
+            raise ValueError("local_path must be a project-local folder or file path without traversal")
         return cleaned
 
     @field_validator("allowed_extensions")
@@ -253,6 +254,8 @@ class EndpointScanRequest(BaseModel):
             "profile_standard",
             "all",
             "c_drive",
+            "onedrive",
+            "all_fixed_drives",
         }
         for item in values or []:
             value = re.sub(r"[\x00-\x1f\x7f]", "", str(item or "")).strip()
@@ -632,7 +635,8 @@ def store_credentials(payload: CredentialRequest, principal: Principal = Depends
 
 @app.post("/api/test-connection")
 def test_connection(payload: ConnectionRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
-    _validate_scan_target(payload.server)
+    if not _is_local_endpoint_host(payload.server):
+        _validate_scan_target(payload.server)
     engine = DSPMDiscoveryEngine(_to_config(payload, principal.tenant_id))
     audit(principal.tenant_id, principal.subject, "connection.test", {"server": _safe_target_label(payload.server)})
     return engine.test_connection()
@@ -640,6 +644,22 @@ def test_connection(payload: ConnectionRequest, principal: Principal = Depends(r
 
 @app.post("/api/endpoint/test-connection")
 def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    if _is_local_endpoint_host(payload.host):
+        if platform.system().lower() != "windows":
+            return {
+                "connected": False,
+                "host": payload.host,
+                "user": os.getenv("USER") or os.getenv("USERNAME") or "",
+                "computer": socket.gethostname(),
+                "message": "Local endpoint scan is available only when the DSPM backend runs on Windows.",
+            }
+        return {
+            "connected": True,
+            "host": payload.host,
+            "user": os.getenv("USERNAME") or "",
+            "computer": socket.gethostname(),
+            "message": "Local workstation scan is available without WinRM.",
+        }
     _validate_scan_target(payload.host)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     audit(principal.tenant_id, principal.subject, "endpoint.connection.test", {"host": _safe_target_label(payload.host), "target_username": payload.target_username})
@@ -663,6 +683,11 @@ def endpoint_activate_local_winrm(payload: LocalWinRMActivationRequest, principa
 
 @app.post("/api/endpoint/activate-winrm")
 def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    if _is_local_endpoint_host(payload.host):
+        return endpoint_activate_local_winrm(
+            LocalWinRMActivationRequest(domain=payload.domain, username=payload.username, password=payload.password),
+            principal,
+        )
     _validate_scan_target(payload.host)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     try:
@@ -680,6 +705,11 @@ def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal =
 
 @app.post("/api/endpoint/repair-winrm")
 def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    if _is_local_endpoint_host(payload.host):
+        return endpoint_activate_local_winrm(
+            LocalWinRMActivationRequest(domain=payload.domain, username=payload.username, password=payload.password),
+            principal,
+        )
     _validate_scan_target(payload.host)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     try:
@@ -702,7 +732,8 @@ def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = D
 @app.post("/api/endpoint/scan")
 def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     try:
-        _validate_scan_target(payload.host)
+        if not _is_local_endpoint_host(payload.host):
+            _validate_scan_target(payload.host)
         config = _to_endpoint_config(payload, principal.tenant_id)
         if payload.async_scan:
             job = create_job(principal.tenant_id, lambda job: _run_endpoint_scan_payload(config, payload, principal, job))
@@ -720,8 +751,13 @@ def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(r
 
 @app.post("/api/demo-data/generate")
 def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
-    output = _safe_demo_output(payload.output)
-    generate_enterprise_test_data(output, payload.files_per_share)
+    try:
+        output = _safe_demo_output(payload.output)
+        generate_enterprise_test_data(output, payload.files_per_share)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _safe_operation_error("Demo data generation failed", exc) from exc
     manifest = _read_demo_manifest(output)
     audit(
         principal.tenant_id,
@@ -740,7 +776,8 @@ def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(
 @app.post("/api/scan")
 def scan(payload: ScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     try:
-        _validate_scan_target(payload.server)
+        if not _is_local_endpoint_host(payload.server):
+            _validate_scan_target(payload.server)
         if payload.async_scan:
             job = create_scan_job(principal.tenant_id, _to_config(payload, principal.tenant_id), lambda data: _persist_scan(data, payload, principal))
             audit(principal.tenant_id, principal.subject, "scan.queued", {"job_id": job.id, "server": _safe_target_label(payload.server)})
@@ -945,8 +982,23 @@ def _mask_secret(value: str) -> str:
 
 
 def _safe_operation_error(message: str, exc: Exception) -> HTTPException:
-    # Keep detailed exception data server-side only. The API returns a stable generic error.
-    return HTTPException(status_code=400, detail=message)
+    raw = str(exc or "")
+    lowered = raw.lower()
+    code = "operation_failed"
+    hint = "Check the target, credentials, and scan scope, then retry."
+    if "pywinrm" in lowered:
+        code = "missing_dependency"
+        hint = "Install requirements.txt on the DSPM backend host before running WinRM endpoint scans."
+    elif "access denied" in lowered or "unauthorized" in lowered:
+        code = "access_denied"
+        hint = "Use a credential that is local admin on the target and can read the selected paths."
+    elif "winrm" in lowered or "connection" in lowered or "timed out" in lowered:
+        code = "endpoint_unreachable"
+        hint = "Verify WinRM service, firewall, DNS/IP reachability, and the credential."
+    elif "cancel" in lowered:
+        code = "scan_cancelled"
+        hint = "The scan was cancelled by the user."
+    return HTTPException(status_code=400, detail={"message": message, "code": code, "hint": hint})
 
 
 def _safe_target_label(target: str) -> str:
@@ -954,6 +1006,18 @@ def _safe_target_label(target: str) -> str:
     if not target:
         return "local"
     return target[:80]
+
+
+def _is_local_endpoint_host(host: str) -> bool:
+    target = (host or "").strip().strip("[]").lower()
+    if target in {"localhost", "127.0.0.1", "::1", "."}:
+        return True
+    local_names = {
+        socket.gethostname().lower(),
+        socket.getfqdn().lower(),
+        (os.getenv("COMPUTERNAME") or "").strip().lower(),
+    }
+    return bool(target and target in {name for name in local_names if name})
 
 
 def _host_addresses(host: str) -> set[ipaddress._BaseAddress]:
@@ -1110,6 +1174,9 @@ def _run_endpoint_scan_payload(
     principal: Principal,
     job=None,
 ) -> dict:
+    if _is_local_endpoint_host(config.host):
+        return _run_local_endpoint_scan_payload(config, payload, principal, job)
+
     if job:
         job.progress = 8
         job.message = "Connecting to endpoint"
@@ -1171,10 +1238,169 @@ def _run_endpoint_scan_payload(
     return data
 
 
+def _run_local_endpoint_scan_payload(
+    config: WinRMEndpointConfig,
+    payload: EndpointScanRequest,
+    principal: Principal,
+    job=None,
+) -> dict:
+    if platform.system().lower() != "windows":
+        raise RuntimeError("Local endpoint scan is available only when the DSPM backend runs on Windows.")
+    if job:
+        job.progress = 10
+        job.message = "Resolving local workstation paths"
+
+    scan_paths, missing_paths = _local_endpoint_paths(config)
+    records: list[dict] = []
+    scan_errors: list[str] = []
+
+    for index, path in enumerate(scan_paths, start=1):
+        if job and job.cancel_requested:
+            raise RuntimeError("Scan cancelled")
+        if job:
+            job.progress = min(65, 10 + int((index - 1) / max(len(scan_paths), 1) * 55))
+            job.message = f"Scanning {path}"
+        try:
+            path_records = scan_directory(
+                path,
+                allowed_extensions=config.allowed_extensions,
+                extension_filter_enabled=config.extension_filter_enabled,
+                include_hidden=config.include_hidden,
+                include_system=config.include_system,
+                hidden_filter_enabled=config.hidden_filter_enabled,
+                system_filter_enabled=config.system_filter_enabled,
+                max_depth=config.max_depth,
+                inspect_archives=config.inspect_archives,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            scan_errors.append(f"{path}: {exc}")
+            continue
+
+        for record in path_records:
+            if not config.read_content:
+                record["content"] = ""
+                record["content_status"] = record.get("content_status") or "metadata_only"
+                record["content_scannable"] = False
+            record["source"] = "endpoint-local"
+            record["share"] = config.host or socket.gethostname()
+            owner = record.get("owner", "")
+            record["acl"] = {
+                "owner": owner,
+                "principals": [],
+                "permissions": [],
+            }
+            records.append(record)
+
+    if job:
+        if job.cancel_requested:
+            raise RuntimeError("Scan cancelled")
+        job.progress = 72
+        job.message = "Analyzing local workstation files"
+
+    report = DSPMDiscoveryEngine(
+        ScanConfig(
+            server="",
+            use_sample_when_empty=False,
+            asset_overrides=[
+                {
+                    "pattern": item.pattern.strip(),
+                    "level": item.level.strip().upper(),
+                    "reason": item.reason.strip(),
+                }
+                for item in payload.asset_overrides
+                if item.pattern.strip()
+            ],
+        )
+    )
+    analyzed = [report._analyze_record(record) for record in records]
+    extension_counts: dict[str, int] = {}
+    for record in records:
+        extension = str(record.get("extension") or "no extension").lower()
+        extension_counts[extension] = extension_counts.get(extension, 0) + 1
+
+    data = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "endpoint-local",
+        "summary": report._build_summary(analyzed).to_dict(),
+        "files": analyzed,
+        "endpoint": {
+            "host": config.host or socket.gethostname(),
+            "target_username": config.target_username,
+            "paths": config.paths,
+            "resolved_paths": [str(path) for path in scan_paths],
+            "max_depth": config.max_depth,
+            "allowed_extensions": config.allowed_extensions or [],
+            "extension_filter_enabled": config.extension_filter_enabled,
+            "include_hidden": config.include_hidden,
+            "include_system": config.include_system,
+            "hidden_filter_enabled": config.hidden_filter_enabled,
+            "system_filter_enabled": config.system_filter_enabled,
+            "read_content": config.read_content,
+            "read_acl": False,
+            "inspect_archives": config.inspect_archives,
+            "raw_record_count": len(records),
+            "extension_counts": extension_counts,
+            "scan_diagnostics": {
+                "mode": "local_endpoint",
+                "missing_paths": missing_paths,
+                "scan_errors": scan_errors[:20],
+            },
+        },
+    }
+    if job:
+        job.progress = 92
+        job.message = "Saving local endpoint report"
+    _persist_scan(data, payload, principal)
+    return data
+
+
+def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list[str]]:
+    profile = config.target_username.strip() or (os.getenv("USERNAME") or "").strip()
+    users_root = Path("C:/Users")
+    profile_root = users_root / profile if profile else users_root
+    paths = [item.strip() for item in config.paths if item.strip()] or ["desktop", "documents", "downloads"]
+    resolved: list[Path] = []
+
+    for item in paths:
+        lowered = item.lower()
+        if lowered == "profile_standard":
+            candidates = [profile_root / folder for folder in ("Desktop", "Documents", "Downloads", "OneDrive")]
+        elif lowered == "all":
+            candidates = [profile_root]
+        elif lowered == "c_drive":
+            candidates = [Path("C:/")]
+        elif lowered == "onedrive":
+            candidates = [profile_root / "OneDrive"]
+            candidates.extend(profile_root.glob("OneDrive - *") if profile_root.exists() else [])
+        elif lowered == "all_fixed_drives":
+            candidates = [Path(f"{letter}:/") for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(f"{letter}:/").exists()]
+        elif lowered in {"desktop", "documents", "downloads"}:
+            folder = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads"}[lowered]
+            candidates = [profile_root / folder, profile_root / "OneDrive" / folder]
+        else:
+            candidates = [Path(item)]
+        resolved.extend(candidate.expanduser().resolve() for candidate in candidates)
+
+    unique: list[Path] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+    for path in resolved:
+        key = str(path).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.exists():
+            unique.append(path)
+        else:
+            missing.append(str(path))
+    return unique, missing
+
+
 def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
     username = payload.username.strip()
     password = payload.password
     domain = payload.domain.strip() or "WORKGROUP"
+    server = "" if _is_local_endpoint_host(payload.server) else payload.server.strip()
     allowed_extensions, extension_filter_enabled = _scan_extension_settings(
         payload.allowed_extensions,
         payload.extension_filter_enabled,
@@ -1186,7 +1412,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         domain = secret.get("domain", domain)
 
     return ScanConfig(
-        server=payload.server.strip(),
+        server=server,
         username=username,
         password=password,
         domain=domain,

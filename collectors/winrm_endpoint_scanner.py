@@ -402,7 +402,7 @@ class WinRMEndpointScanner:
     def _is_profile_scoped_request(self) -> bool:
         if not self.config.target_username.strip():
             return False
-        profile_aliases = set(DEFAULT_PROFILE_FOLDERS) | {"all", "profile_standard"}
+        profile_aliases = set(DEFAULT_PROFILE_FOLDERS) | {"all", "profile_standard", "onedrive"}
         paths = [item.strip().lower() for item in self.config.paths if item.strip()]
         return bool(paths) and all(item in profile_aliases for item in paths)
 
@@ -442,6 +442,10 @@ class WinRMEndpointScanner:
                 resolved.append(f"__DSPM_PROFILE_ROOT_FOR__:{profile}" if profile else "__DSPM_ALL_PROFILES__")
             elif lowered == "c_drive":
                 resolved.append("C:\\")
+            elif lowered == "onedrive":
+                resolved.append(f"__DSPM_ONEDRIVE_FOR__:{profile}" if profile else "__DSPM_ALL_ONEDRIVE__")
+            elif lowered == "all_fixed_drives":
+                resolved.append("__DSPM_FIXED_DRIVES__")
             elif lowered in DEFAULT_PROFILE_FOLDERS:
                 folder = DEFAULT_PROFILE_FOLDERS[lowered]
                 if profile:
@@ -668,13 +672,10 @@ def _scan_script(
     }}
 
     function Test-DspmRecordIncluded($extension, $isHidden, $isSystem) {{
-      $hasActiveFilters = {extension_filter_value} -or {hidden_filter_value} -or {system_filter_value}
-      if ($hasActiveFilters) {{
-        $matchesExtension = {extension_filter_value} -and $extension -and $allowedSet.ContainsKey($extension.ToLowerInvariant())
-        $matchesHidden = {hidden_filter_value} -and $isHidden
-        $matchesSystem = {system_filter_value} -and $isSystem
-        return ($matchesExtension -or $matchesHidden -or $matchesSystem)
-      }}
+      if ({extension_filter_value} -and (-not $extension -or -not $allowedSet.ContainsKey($extension.ToLowerInvariant()))) {{ return $false }}
+      if ({hidden_filter_value} -and -not $isHidden) {{ return $false }}
+      if ({system_filter_value} -and -not $isSystem) {{ return $false }}
+      if ({extension_filter_value} -or {hidden_filter_value} -or {system_filter_value}) {{ return $true }}
       if ($isHidden -and -not {include_hidden_value}) {{ return $false }}
       if ($isSystem -and -not {include_system_value}) {{ return $false }}
       return $true
@@ -765,6 +766,64 @@ def _scan_script(
             Test-DspmUserProfileDir $_
           }} | ForEach-Object {{
             if (Test-Path -LiteralPath $_.FullName) {{
+              $roots.Add($_.FullName) | Out-Null
+            }}
+          }}
+        }} catch {{
+          return @()
+        }}
+        return @($roots.ToArray())
+      }}
+      if ($root -eq "__DSPM_FIXED_DRIVES__") {{
+        try {{
+          Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue | ForEach-Object {{
+            $driveRoot = "$($_.DeviceID)\\"
+            if (Test-Path -LiteralPath $driveRoot) {{
+              $roots.Add($driveRoot) | Out-Null
+            }}
+          }}
+        }} catch {{
+          Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {{
+            $driveRoot = "$($_.Name):\\"
+            if (Test-Path -LiteralPath $driveRoot) {{
+              $roots.Add($driveRoot) | Out-Null
+            }}
+          }}
+        }}
+        return @($roots.ToArray())
+      }}
+      if ($root -eq "__DSPM_ALL_ONEDRIVE__") {{
+        try {{
+          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+            Test-DspmUserProfileDir $_
+          }} | ForEach-Object {{
+            Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+              $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
+            }} | ForEach-Object {{
+              $roots.Add($_.FullName) | Out-Null
+            }}
+          }}
+        }} catch {{
+          return @()
+        }}
+        return @($roots.ToArray())
+      }}
+      if ($root.StartsWith("__DSPM_ONEDRIVE_FOR__:", [System.StringComparison]::OrdinalIgnoreCase)) {{
+        $profileName = $root.Substring("__DSPM_ONEDRIVE_FOR__:".Length).Trim()
+        if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @() }}
+        try {{
+          $profileNameLower = $profileName.ToLowerInvariant()
+          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+            $name = $_.Name.ToLowerInvariant()
+            $name -eq $profileNameLower -or
+            $name.StartsWith("$profileNameLower.") -or
+            $name.StartsWith("$profileNameLower_") -or
+            $name.EndsWith(".$profileNameLower") -or
+            $name -like "*$profileNameLower*"
+          }} | ForEach-Object {{
+            Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+              $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
+            }} | ForEach-Object {{
               $roots.Add($_.FullName) | Out-Null
             }}
           }}

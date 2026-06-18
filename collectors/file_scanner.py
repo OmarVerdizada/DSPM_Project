@@ -230,13 +230,13 @@ def matches_scan_filters(
     hidden_filter_enabled: bool,
     system_filter_enabled: bool,
 ) -> bool:
-    active_filters = extension_filter_enabled or hidden_filter_enabled or system_filter_enabled
-    if active_filters:
-        matches_extension = extension_filter_enabled and extension in extension_filter
-        matches_hidden = hidden_filter_enabled and is_hidden
-        matches_system = system_filter_enabled and is_system
-        if not (matches_extension or matches_hidden or matches_system):
-            return False
+    if extension_filter_enabled and extension not in extension_filter:
+        return False
+    if hidden_filter_enabled and not is_hidden:
+        return False
+    if system_filter_enabled and not is_system:
+        return False
+    if extension_filter_enabled or hidden_filter_enabled or system_filter_enabled:
         return True
 
     if is_hidden and not include_hidden:

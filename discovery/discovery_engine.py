@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Callable
 
 from classification.regex_classifier import classify_content
 from collectors.file_scanner import normalize_records, scan_directory
@@ -31,6 +32,7 @@ class ScanConfig:
     system_filter_enabled: bool = False
     include_admin_shares: bool = False
     inspect_archives: bool = False
+    cancel_check: Callable[[], bool] | None = None
 
 
 @dataclass(slots=True)
@@ -102,6 +104,7 @@ class DSPMDiscoveryEngine:
                 system_filter_enabled=self.config.system_filter_enabled,
                 include_admin_shares=self.config.include_admin_shares,
                 inspect_archives=self.config.inspect_archives,
+                cancel_check=self.config.cancel_check,
             )
         )
         return scanner.test_connection()
@@ -135,6 +138,7 @@ class DSPMDiscoveryEngine:
                     system_filter_enabled=self.config.system_filter_enabled,
                     include_admin_shares=self.config.include_admin_shares,
                     inspect_archives=self.config.inspect_archives,
+                    cancel_check=self.config.cancel_check,
                 )
             )
             return scanner.scan()

@@ -162,6 +162,7 @@ def _run_scan_job(job: ScanJob, config: ScanConfig, on_complete: Callable[[dict]
         raise RuntimeError("Scan cancelled")
     job.progress = 10
     job.message = "Collecting files"
+    config.cancel_check = lambda: job.cancel_requested
     engine = DSPMDiscoveryEngine(config)
     report = engine.run()
     data = report.to_dict()
