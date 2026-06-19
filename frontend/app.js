@@ -562,7 +562,7 @@ function applyExtensionPreset(name, list = allowedExtensionsList, search = exten
 
 function applySimpleExtensionPolicy(name, list = allowedExtensionsList, search = extensionSearch) {
   if (!list) return;
-  const selected = new Set(name === "all" ? [] : SIMPLE_EXTENSION_PRESETS[name] || SIMPLE_EXTENSION_PRESETS.secrets);
+  const selected = new Set(name === "all" ? getExtensionOptions().map(([extension]) => extension) : SIMPLE_EXTENSION_PRESETS[name] || SIMPLE_EXTENSION_PRESETS.secrets);
   [...list.querySelectorAll("input[type='checkbox']")].forEach((input) => {
     input.checked = selected.has(input.value);
   });
@@ -643,13 +643,13 @@ function updateExtensionSummary(list = allowedExtensionsList) {
     : document.querySelector('[data-extension-selected-for="file-server"]');
   if (!host) return;
   if (!selected.length) {
-    const presetName = list === endpointAllowedExtensionsList ? "endpoint-ext-preset" : "ext-preset";
-    const preset = document.querySelector(`input[name='${presetName}']:checked`)?.value || "";
-    if (preset === "all") {
-      host.innerHTML = '<span class="extension-selected-empty">All extensions included</span>';
-      return;
-    }
     host.innerHTML = '<span class="extension-selected-empty">No extension filter selected</span>';
+    return;
+  }
+  const selectedFileExtensions = selected.filter((extension) => extension.startsWith("."));
+  const allFileExtensions = getExtensionOptions().map(([extension]) => extension);
+  if (selectedFileExtensions.length >= allFileExtensions.length && allFileExtensions.every((extension) => selectedFileExtensions.includes(extension))) {
+    host.innerHTML = '<span class="extension-selected-empty">All listed extensions selected</span>';
     return;
   }
   host.innerHTML = selected
@@ -759,6 +759,31 @@ function readEndpointPayload() {
   };
 }
 
+function readEndpointConnectionPayload() {
+  return {
+    host: document.querySelector("#endpoint-host").value.trim(),
+    target_username: document.querySelector("#endpoint-target-username").value.trim(),
+    domain: document.querySelector("#endpoint-domain").value.trim() || "WORKGROUP",
+    username: document.querySelector("#endpoint-username").value.trim(),
+    password: document.querySelector("#endpoint-password").value,
+    credential_ref: document.querySelector("#endpoint-credential-ref").value.trim(),
+    paths: ["desktop"],
+    max_depth: 1,
+    read_content: false,
+    read_acl: false,
+    inspect_archives: false,
+    async_scan: false,
+    allowed_extensions: [],
+    extension_filter_enabled: false,
+    include_hidden: true,
+    include_system: false,
+    hidden_filter_enabled: false,
+    system_filter_enabled: false,
+    save_report: false,
+    asset_overrides: [],
+  };
+}
+
 function readWinrmActivationPayload() {
   return {
     host: document.querySelector("#winrm-activate-host").value.trim(),
@@ -793,7 +818,7 @@ function syncEndpointScanCredentials(payload) {
 }
 
 async function ensureEndpointCredential(payload) {
-  if (!payload.host || payload.credential_ref || !payload.password) {
+  if (!payload.host || !payload.password) {
     return payload;
   }
   const secret = await api("/api/credentials", {
@@ -946,6 +971,24 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
   if (resolved) parts.push(`Roots: ${resolved}`);
   if (missing) parts.push(`Missing: ${missing}`);
   if (archiveErrors) parts.push(`Archive errors: ${archiveErrors}`);
+  return parts.join(". ");
+}
+
+function summarizeFileServerDiagnostics(report = {}) {
+  const diagnostics = report.scan_diagnostics || {};
+  const parts = [];
+  if (Number.isFinite(Number(diagnostics.records))) parts.push(`Records: ${Number(diagnostics.records)}`);
+  if (Number.isFinite(Number(diagnostics.owner_resolved))) parts.push(`Owners: ${Number(diagnostics.owner_resolved)} resolved`);
+  if (Number.isFinite(Number(diagnostics.owner_missing)) && Number(diagnostics.owner_missing)) parts.push(`${Number(diagnostics.owner_missing)} owner missing`);
+  if (Number.isFinite(Number(diagnostics.owner_read_failed)) && Number(diagnostics.owner_read_failed)) parts.push(`${Number(diagnostics.owner_read_failed)} ACL reads failed`);
+  if (Array.isArray(diagnostics.list_errors) && diagnostics.list_errors.length) {
+    const shares = diagnostics.list_errors.slice(0, 3).map((item) => `${item.share || "share"}:${item.path || "/"}`).join(", ");
+    parts.push(`Unreadable paths: ${shares}`);
+  }
+  if (diagnostics.local_path) parts.push(`Local path: ${diagnostics.local_path}`);
+  if (Array.isArray(diagnostics.allowed_extensions) && diagnostics.allowed_extensions.length) {
+    parts.push(`Allowed: ${diagnostics.allowed_extensions.slice(0, 12).join(", ")}`);
+  }
   return parts.join(". ");
 }
 
@@ -3977,7 +4020,7 @@ function sleep(ms) {
 }
 
 async function ensureCredential(payload) {
-  if (!payload.server || payload.credential_ref || !payload.password) {
+  if (!payload.server || !payload.password) {
     return payload;
   }
 
@@ -4727,7 +4770,8 @@ form.addEventListener("submit", async (event) => {
     }
     applyScanReport(report, "file-server");
     await refreshHashComparison();
-    setStatus("Scan completed and report.json updated.");
+    const diagnostics = summarizeFileServerDiagnostics(report);
+    setStatus(`Scan completed and report.json updated.${diagnostics ? ` ${diagnostics}` : ""}`);
     setScanProgress(true, 100, "Scan completed");
     showToast("Scan completed", `${latestFiles.length} files found`, latestReport.summary?.critical ? "danger" : "success");
     if (latestReport.summary?.critical) {
@@ -4792,7 +4836,7 @@ if (endpointTestBtn) endpointTestBtn.addEventListener("click", async () => {
   endpointStatus.textContent = "Testing WinRM connection...";
   try {
     requireAuth();
-    const payload = await ensureEndpointCredential(readEndpointPayload());
+    const payload = await ensureEndpointCredential(readEndpointConnectionPayload());
     const result = await api("/api/endpoint/test-connection", payload);
     endpointStatus.textContent = result.connected
       ? `Connected to ${result.computer || result.host} as ${result.user || "remote user"}.`

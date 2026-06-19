@@ -188,10 +188,22 @@ def content_status_for_extension(extension: str, content: str, read_content: boo
     if extension in PROTECTED_CONTENT_EXTENSIONS:
         return "protected"
     if extension in UNSUPPORTED_ARCHIVE_EXTENSIONS:
-        return "unsupported_archive"
+        return "protected_or_uninspectable_archive"
     if extension in CONTENT_EXTENSIONS:
         return "scanned" if content else "empty_or_unreadable"
     return "metadata_only"
+
+
+def archive_protection_metadata(extension: str) -> dict[str, str | bool]:
+    if extension not in UNSUPPORTED_ARCHIVE_EXTENSIONS:
+        return {}
+    return {
+        "protected": True,
+        "content_status": "protected_or_uninspectable_archive",
+        "content_scannable": False,
+        "protection_type": "compressed_archive",
+        "scan_error": "Compressed archive may be password-protected or requires a dedicated extractor",
+    }
 
 
 def normalize_extension_filter(extensions: Iterable[str] | None) -> set[str]:
@@ -274,7 +286,7 @@ class FileRecord:
         scan_mode = scan_mode_for_extension(self.extension)
         status = self.content_status or content_status_for_extension(self.extension, self.content)
         scannable = self.content_scannable if self.content_scannable is not None else self.extension in CONTENT_EXTENSIONS
-        protected = self.protected or status in {"protected", "password_protected", "encrypted", "locked"}
+        protected = self.protected or status in {"protected", "password_protected", "encrypted", "locked", "protected_or_uninspectable_archive"}
         return {
             "source": self.source,
             "share": self.share,
@@ -418,8 +430,9 @@ def scan_directory(
         attributes = file_attribute_label(item, is_hidden, is_system)
         zip_protection: dict[str, str | bool] = {}
         if scan_archive_entries and extension == ".zip":
-            zip_protection = inspect_zip_protection(item)
             add_zip_entries(item, is_hidden, is_system)
+        if extension == ".zip":
+            zip_protection = inspect_zip_protection(item)
         if not matches_scan_filters(
             extension,
             is_hidden,
@@ -443,12 +456,12 @@ def scan_directory(
         sha256 = sha256_file(item)
 
         protected_extension = extension in PROTECTED_CONTENT_EXTENSIONS
-        unsupported_archive = inspect_archives and extension in UNSUPPORTED_ARCHIVE_EXTENSIONS
+        archive_metadata = archive_protection_metadata(extension)
         content_status = None
         content_scannable = None
         scan_error = ""
         protection_type = ""
-        protected = protected_extension or bool(zip_protection.get("protected"))
+        protected = protected_extension or bool(zip_protection.get("protected")) or bool(archive_metadata.get("protected"))
         if protected_extension:
             content_status = "protected"
             content_scannable = False
@@ -459,10 +472,11 @@ def scan_directory(
             content_scannable = False
             protection_type = str(zip_protection.get("protection_type") or "zip_password")
             scan_error = str(zip_protection.get("scan_error") or "ZIP archive contains encrypted entries")
-        elif unsupported_archive:
-            content_status = "unsupported_archive"
+        elif archive_metadata:
+            content_status = str(archive_metadata.get("content_status") or "")
             content_scannable = False
-            scan_error = "Archive type is metadata-only unless an extractor is configured"
+            protection_type = str(archive_metadata.get("protection_type") or "")
+            scan_error = str(archive_metadata.get("scan_error") or "")
 
         records.append(
             FileRecord(
@@ -473,7 +487,7 @@ def scan_directory(
                 extension=extension,
                 is_hidden=is_hidden,
                 is_system=is_system,
-                content="" if protected or unsupported_archive else read_text_preview(item),
+                content="" if protected else read_text_preview(item),
                 content_status=content_status,
                 content_scannable=content_scannable,
                 scan_error=scan_error,
@@ -773,6 +787,19 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
         name = record.get("name") or Path(path).name
         extension = record.get("extension") or detect_extension(path)
         sha256 = record.get("sha256") or record.get("file_hash") or ""
+        content = str(record.get("content", ""))
+        status = record.get("content_status") or content_status_for_extension(extension, content)
+        content_scannable = record.get("content_scannable")
+        if content_scannable is None:
+            content_scannable = extension in CONTENT_EXTENSIONS
+        protected = bool(record.get("protected", False)) or status in {
+            "protected",
+            "password_protected",
+            "encrypted",
+            "locked",
+            "bad_archive",
+            "protected_or_uninspectable_archive",
+        }
         normalized.append(
             {
                 "source": record.get("source", "unknown"),
@@ -784,14 +811,13 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "is_dir": bool(record.get("is_dir", False)),
                 "is_hidden": bool(record.get("is_hidden", False)),
                 "is_system": bool(record.get("is_system", False)),
-                "content": record.get("content", ""),
+                "content": content,
                 "acl": record.get("acl") or {},
                 "scan_mode": record.get("scan_mode") or scan_mode_for_extension(extension),
-                "content_status": record.get("content_status")
-                or content_status_for_extension(extension, str(record.get("content", ""))),
-                "content_scannable": bool(record.get("content_scannable", extension in CONTENT_EXTENSIONS)),
+                "content_status": status,
+                "content_scannable": bool(content_scannable),
                 "scan_error": record.get("scan_error", ""),
-                "protected": bool(record.get("protected", False)),
+                "protected": protected,
                 "protection_type": record.get("protection_type", ""),
                 "owner": record.get("owner", ""),
                 "created_at": record.get("created_at", ""),

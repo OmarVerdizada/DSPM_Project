@@ -65,19 +65,24 @@ class ScanReport:
     source: str
     summary: ScanSummary
     files: list[dict] = field(default_factory=list)
+    scan_diagnostics: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "timestamp": self.timestamp,
             "source": self.source,
             "summary": self.summary.to_dict(),
             "files": self.files,
         }
+        if self.scan_diagnostics:
+            data["scan_diagnostics"] = self.scan_diagnostics
+        return data
 
 
 class DSPMDiscoveryEngine:
     def __init__(self, config: ScanConfig):
         self.config = config
+        self.last_scan_diagnostics: dict = {}
 
     def test_connection(self) -> dict:
         if not self.config.server:
@@ -119,6 +124,7 @@ class DSPMDiscoveryEngine:
             source="smb" if self.config.server else "local",
             summary=summary,
             files=analyzed_files,
+            scan_diagnostics=self.last_scan_diagnostics,
         )
 
     def _collect_records(self) -> list[dict]:
@@ -141,10 +147,12 @@ class DSPMDiscoveryEngine:
                     cancel_check=self.config.cancel_check,
                 )
             )
-            return scanner.scan()
+            records = scanner.scan()
+            self.last_scan_diagnostics = scanner.last_scan_diagnostics
+            return records
 
         if self.config.use_sample_when_empty:
-            return scan_directory(
+            records = scan_directory(
                 self.config.local_path,
                 allowed_extensions=self.config.allowed_extensions,
                 extension_filter_enabled=self.config.extension_filter_enabled,
@@ -155,7 +163,18 @@ class DSPMDiscoveryEngine:
                 max_depth=self.config.max_depth,
                 inspect_archives=self.config.inspect_archives,
             )
+            self.last_scan_diagnostics = {
+                "mode": "local",
+                "local_path": self.config.local_path,
+                "records": len(records),
+                "allowed_extensions": self.config.allowed_extensions,
+                "extension_filter_enabled": self.config.extension_filter_enabled,
+                "max_depth": self.config.max_depth,
+                "inspect_archives": self.config.inspect_archives,
+            }
+            return records
 
+        self.last_scan_diagnostics = {"mode": "disabled", "records": 0}
         return []
 
     def _analyze_record(self, record: dict) -> dict:

@@ -57,7 +57,7 @@ from backend.store import (
     update_user_active,
 )
 from backend.vault import CredentialVault
-from collectors.file_scanner import SCANNABLE_EXTENSIONS, normalize_extension_filter, scan_directory
+from collectors.file_scanner import normalize_extension_filter, scan_directory
 from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner, activate_local_winrm
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
@@ -68,7 +68,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 vault = CredentialVault()
 PROTECTED_USERS = {"admin"}
-ALL_KNOWN_EXTENSIONS = set(SCANNABLE_EXTENSIONS)
 DEFAULT_CORS_ORIGINS = [
     "http://127.0.0.1:8000",
     "http://localhost:8000",
@@ -261,6 +260,8 @@ class EndpointScanRequest(BaseModel):
             value = re.sub(r"[\x00-\x1f\x7f]", "", str(item or "")).strip()
             if not value:
                 continue
+            if re.match(r"^[A-Za-z]:/", value):
+                value = value.replace("/", "\\")
             is_drive_path = bool(re.fullmatch(r"[A-Za-z]:\\[^<>|?*]{0,240}", value))
             is_unc_path = bool(re.fullmatch(r"\\\\[^\\/:*?\"<>|\r\n]+\\[^\\/:*?\"<>|\r\n]+(?:\\[^:*?\"<>|\r\n]{0,240})?", value))
             if value in allowed_aliases or is_drive_path or is_unc_path:
@@ -1134,9 +1135,6 @@ def _posture_score(summary: dict) -> int:
 def _scan_extension_settings(extensions: list[str], enabled: bool) -> tuple[list[str], bool]:
     normalized = sorted(normalize_extension_filter(extensions))
     if not enabled or not normalized:
-        return [], False
-    known_overlap = set(normalized) & ALL_KNOWN_EXTENSIONS
-    if ALL_KNOWN_EXTENSIONS and len(known_overlap) >= int(len(ALL_KNOWN_EXTENSIONS) * 0.9):
         return [], False
     return normalized, True
 

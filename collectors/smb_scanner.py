@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import base64
+import ipaddress
 import json
 import socket
 import subprocess
@@ -18,6 +19,7 @@ from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_t
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     TEXT_EXTENSIONS,
+    archive_protection_metadata,
     content_status_for_extension,
     detect_extension,
     matches_scan_filters,
@@ -75,6 +77,7 @@ class SMBScanner:
         self.connection = None
         self.extension_filter = normalize_extension_filter(config.allowed_extensions)
         self.credential_used = ""
+        self.server_used = ""
         self._owner_cache: dict[str, str] = {}
         self._acl_cache: dict[str, dict] = {}
         self.last_scan_diagnostics: dict = {}
@@ -88,25 +91,28 @@ class SMBScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pysmb'. Install requirements.txt before SMB scans.") from exc
 
-        for username, domain, label in self._credential_candidates():
-            conn = SMBConnection(
-                username,
-                self.config.password,
-                self.config.client_name,
-                socket.gethostname(),
-                domain=domain,
-                use_ntlm_v2=True,
-                is_direct_tcp=True,
-            )
-            try:
-                if conn.connect(self.config.server, self.config.port, timeout=self.config.timeout):
-                    self.connection = conn
-                    self.credential_used = label
-                    return True
-            except Exception:
+        for server in self._server_candidates():
+            remote_name = server.split(".")[0].strip() or server
+            for username, domain, label in self._credential_candidates():
+                conn = SMBConnection(
+                    username,
+                    self.config.password,
+                    self.config.client_name,
+                    remote_name,
+                    domain=domain,
+                    use_ntlm_v2=True,
+                    is_direct_tcp=True,
+                )
+                try:
+                    if conn.connect(server, self.config.port, timeout=self.config.timeout):
+                        self.connection = conn
+                        self.credential_used = label
+                        self.server_used = server
+                        return True
+                except Exception:
+                    conn.close()
+                    continue
                 conn.close()
-                continue
-            conn.close()
 
         return False
 
@@ -122,6 +128,7 @@ class SMBScanner:
             return {
                 "connected": connected,
                 "server": self.config.server,
+                "server_used": self.server_used,
                 "domain": self.config.domain,
                 "credential_used": self.credential_used,
                 "shares": shares,
@@ -132,6 +139,7 @@ class SMBScanner:
             return {
                 "connected": False,
                 "server": self.config.server,
+                "server_used": self.server_used,
                 "domain": self.config.domain,
                 "credential_used": self.credential_used,
                 "shares": [],
@@ -159,6 +167,7 @@ class SMBScanner:
             owner_missing = sum(1 for record in records if not str(record.get("owner") or "").strip())
             self.last_scan_diagnostics = {
                 **self.last_scan_diagnostics,
+                "server_used": self.server_used or self.config.server,
                 "records": len(records),
                 "owner_missing": owner_missing,
                 "owner_resolved": max(0, len(records) - owner_missing),
@@ -184,6 +193,37 @@ class SMBScanner:
         if share_name.endswith("$") and not re.fullmatch(r"[A-Za-z]\$", share_name):
             return True
         return False
+
+    def _server_candidates(self) -> list[str]:
+        server = self.config.server.strip()
+        candidates: list[str] = []
+
+        def add(value: str) -> None:
+            value = value.strip().rstrip(".")
+            if value and value not in candidates:
+                candidates.append(value)
+
+        try:
+            ipaddress.ip_address(server)
+            is_ip = True
+        except ValueError:
+            is_ip = False
+
+        if is_ip:
+            domain = (self.config.domain.strip() or "").strip(".")
+            try:
+                reverse_name = socket.gethostbyaddr(server)[0].strip().rstrip(".")
+            except OSError:
+                reverse_name = ""
+            if reverse_name:
+                if "." not in reverse_name and domain and domain.upper() != "WORKGROUP":
+                    add(f"{reverse_name}.{domain}")
+                add(reverse_name)
+            add(server)
+        else:
+            add(server)
+
+        return candidates
 
     def _credential_candidates(self) -> list[tuple[str, str, str]]:
         username = self.config.username.strip()
@@ -228,6 +268,9 @@ class SMBScanner:
             entries = self.connection.listPath(share_name, folder)
         except Exception as exc:
             logger.warning("Could not list %s:%s: %s", share_name, folder, exc)
+            errors = self.last_scan_diagnostics.setdefault("list_errors", [])
+            if isinstance(errors, list) and len(errors) < 20:
+                errors.append({"share": share_name, "path": folder, "error": str(exc).splitlines()[0][:180]})
             return records
 
         for entry in entries:
@@ -265,6 +308,9 @@ class SMBScanner:
             ):
                 continue
             content = self._read_file_preview(share_name, remote_path, extension)
+            archive_metadata = archive_protection_metadata(extension)
+            zip_metadata = self._inspect_zip_protection(share_name, remote_path) if extension == ".zip" else {}
+            protected_metadata = zip_metadata or archive_metadata
             sha256 = self._hash_file(share_name, remote_path, int(getattr(entry, "file_size", 0) or 0))
             acl = self._acl_for_path(share_name, remote_path)
             owner = str(acl.get("owner") or "")
@@ -282,11 +328,14 @@ class SMBScanner:
                     "is_dir": False,
                     "is_hidden": is_hidden,
                     "is_system": is_system,
-                    "content": content,
+                    "content": "" if protected_metadata else content,
                     "acl": acl,
                     "scan_mode": scan_mode_for_extension(extension),
-                    "content_status": content_status_for_extension(extension, content, self.config.read_content),
-                    "content_scannable": extension in CONTENT_EXTENSIONS,
+                    "content_status": protected_metadata.get("content_status") or content_status_for_extension(extension, content, self.config.read_content),
+                    "content_scannable": bool(protected_metadata.get("content_scannable", extension in CONTENT_EXTENSIONS)),
+                    "protected": bool(protected_metadata.get("protected", False)),
+                    "protection_type": protected_metadata.get("protection_type", ""),
+                    "scan_error": protected_metadata.get("scan_error", ""),
                     "owner": owner,
                     "created_at": created_at,
                     "modified_at": modified_at,
@@ -299,10 +348,7 @@ class SMBScanner:
         return records
 
     def _should_scan_archive_entries(self, extension: str) -> bool:
-        if extension != ".zip" or not self.config.extension_filter_enabled:
-            return False
-        archive_extensions = {".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"}
-        return any(item not in archive_extensions for item in self.extension_filter)
+        return extension == ".zip" and self.config.inspect_archives
 
     def _read_zip_entries(self, share_name: str, path: str, is_hidden: bool, is_system: bool) -> list[dict]:
         if self.connection is None:
@@ -332,11 +378,34 @@ class SMBScanner:
                     ):
                         continue
                     content = ""
-                    if self.config.read_content and extension in TEXT_EXTENSIONS:
+                    protected = False
+                    content_status = content_status_for_extension(extension, content, self.config.read_content)
+                    content_scannable = extension in CONTENT_EXTENSIONS
+                    protection_type = ""
+                    scan_error = ""
+                    if entry.flag_bits & 0x1:
+                        protected = True
+                        content_status = "password_protected"
+                        content_scannable = False
+                        protection_type = "zip_password"
+                        scan_error = "ZIP entry is encrypted and requires a password"
+                    elif archive_metadata := archive_protection_metadata(extension):
+                        protected = bool(archive_metadata.get("protected", False))
+                        content_status = str(archive_metadata.get("content_status") or content_status)
+                        content_scannable = bool(archive_metadata.get("content_scannable", content_scannable))
+                        protection_type = str(archive_metadata.get("protection_type") or "")
+                        scan_error = str(archive_metadata.get("scan_error") or "")
+                    if not protected and self.config.read_content and extension in TEXT_EXTENSIONS:
                         try:
                             with archive.open(entry) as handle:
                                 content = handle.read(self.config.max_read_bytes).decode("utf-8", errors="replace")
+                                content_status = content_status_for_extension(extension, content, self.config.read_content)
                         except (OSError, RuntimeError, zipfile.BadZipFile):
+                            protected = True
+                            content_status = "password_protected"
+                            content_scannable = False
+                            protection_type = "zip_password"
+                            scan_error = "ZIP entry is encrypted or unreadable and requires review"
                             content = ""
                     acl = self._acl_for_path(share_name, path)
                     owner = str(acl.get("owner") or "")
@@ -354,8 +423,11 @@ class SMBScanner:
                             "content": content,
                             "acl": acl,
                             "scan_mode": scan_mode_for_extension(extension),
-                            "content_status": content_status_for_extension(extension, content, self.config.read_content),
-                            "content_scannable": extension in CONTENT_EXTENSIONS,
+                            "content_status": content_status,
+                            "content_scannable": content_scannable,
+                            "protected": protected,
+                            "protection_type": protection_type,
+                            "scan_error": scan_error,
                             "owner": owner,
                         }
                     )
@@ -363,6 +435,35 @@ class SMBScanner:
         except Exception as exc:
             logger.debug("Could not inspect archive entries for %s:%s: %s", share_name, path, exc)
             return []
+
+    def _inspect_zip_protection(self, share_name: str, path: str) -> dict[str, str | bool]:
+        if self.connection is None:
+            return {}
+        try:
+            from io import BytesIO
+
+            buffer = BytesIO()
+            self.connection.retrieveFileFromOffset(share_name, path, buffer, offset=0, max_length=50 * 1024 * 1024)
+            buffer.seek(0)
+            with zipfile.ZipFile(buffer) as archive:
+                encrypted = any(bool(entry.flag_bits & 0x1) for entry in archive.infolist()[:2000])
+                if encrypted:
+                    return {
+                        "protected": True,
+                        "content_status": "password_protected",
+                        "content_scannable": False,
+                        "protection_type": "zip_password",
+                        "scan_error": "ZIP archive has encrypted entries and needs a password",
+                    }
+        except Exception:
+            return {
+                "protected": True,
+                "content_status": "bad_archive",
+                "content_scannable": False,
+                "protection_type": "unreadable_archive",
+                "scan_error": "ZIP archive could not be opened or parsed",
+            }
+        return {}
 
     def _skip_path(self, path: str) -> bool:
         normalized = path.replace("/", "\\").lower()
@@ -385,7 +486,8 @@ class SMBScanner:
 
     def _unc_path(self, share_name: str, path: str) -> str:
         relative = path.replace("/", "\\").lstrip("\\")
-        return f"\\\\{self.config.server}\\{share_name}\\{relative}" if relative else f"\\\\{self.config.server}\\{share_name}"
+        server = self.server_used or self.config.server
+        return f"\\\\{server}\\{share_name}\\{relative}" if relative else f"\\\\{server}\\{share_name}"
 
     def _owner_for_path(self, share_name: str, path: str) -> str:
         return str(self._acl_for_path(share_name, path).get("owner") or "")

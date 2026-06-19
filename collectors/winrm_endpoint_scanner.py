@@ -15,6 +15,7 @@ from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     TEXT_EXTENSIONS,
+    archive_protection_metadata,
     content_status_for_extension,
     detect_extension,
     normalize_extension_filter,
@@ -362,6 +363,7 @@ class WinRMEndpointScanner:
             content_scannable = item.get("content_scannable")
             if content_scannable is None:
                 content_scannable = extension in CONTENT_EXTENSIONS
+            archive_metadata = archive_protection_metadata(extension)
             records.append(
                 {
                     "source": "endpoint-winrm",
@@ -373,7 +375,7 @@ class WinRMEndpointScanner:
                     "is_dir": False,
                     "is_hidden": bool(item.get("is_hidden", False)),
                     "is_system": bool(item.get("is_system", False)),
-                    "content": content,
+                    "content": "" if archive_metadata else content,
                     "acl": {
                         "owner": item.get("owner", ""),
                         "principals": item.get("principals", []),
@@ -382,11 +384,12 @@ class WinRMEndpointScanner:
                     "owner": item.get("owner", ""),
                     "scan_mode": item.get("scan_mode") or scan_mode_for_extension(extension),
                     "content_status": item.get("content_status")
+                    or archive_metadata.get("content_status")
                     or content_status_for_extension(extension, content, self.config.read_content),
-                    "content_scannable": bool(content_scannable),
-                    "protected": bool(item.get("protected", False)),
-                    "protection_type": item.get("protection_type", ""),
-                    "scan_error": item.get("scan_error", ""),
+                    "content_scannable": bool(archive_metadata.get("content_scannable", content_scannable)),
+                    "protected": bool(item.get("protected", False) or archive_metadata.get("protected", False)),
+                    "protection_type": item.get("protection_type", "") or archive_metadata.get("protection_type", ""),
+                    "scan_error": item.get("scan_error", "") or archive_metadata.get("scan_error", ""),
                     "created_at": item.get("created_at", ""),
                     "modified_at": item.get("modified_at", ""),
                     "accessed_at": item.get("accessed_at", ""),
@@ -601,15 +604,7 @@ def _scan_script(
     $textExtensions = @({text_extensions})
     $binaryExtensions = @({binary_extensions})
     $archiveExtensions = @(".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip")
-    $scanArchiveEntries = $false
-    if ({inspect_archives_value} -and {extension_filter_value}) {{
-      foreach ($allowedExtension in $allowedExtensions) {{
-        if (-not ($archiveExtensions -contains $allowedExtension)) {{
-          $scanArchiveEntries = $true
-          break
-        }}
-      }}
-    }}
+    $scanArchiveEntries = {inspect_archives_value}
     $records = New-Object System.Collections.Generic.List[object]
     $extensionHistogram = @{{}}
     $diagnostics = [ordered]@{{
