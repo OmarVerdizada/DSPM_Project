@@ -806,6 +806,26 @@ def _scan_script(
       }}
     }}
 
+    function Add-DspmFixedDriveRoots($roots) {{
+      try {{
+        Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop | ForEach-Object {{
+          $driveRoot = "$($_.DeviceID)\\"
+          Add-DspmUniqueRoot $roots $driveRoot
+        }}
+      }} catch {{
+        $diagnostics.root_fallbacks += "fixed drives CIM fallback"
+      }}
+      if ($roots.Count -eq 0) {{
+        Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {{
+          $driveRoot = "$($_.Name):\\"
+          Add-DspmUniqueRoot $roots $driveRoot
+        }}
+        if ($roots.Count -gt 0) {{
+          $diagnostics.root_fallbacks += "fixed drives PSDrive fallback"
+        }}
+      }}
+    }}
+
     function Resolve-DspmRoot($root) {{
       $roots = New-Object System.Collections.Generic.List[string]
       if ($root -match "^[A-Za-z]:$") {{
@@ -826,21 +846,7 @@ def _scan_script(
         return @($roots.ToArray())
       }}
       if ($root -eq "__DSPM_FIXED_DRIVES__") {{
-        try {{
-          Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue | ForEach-Object {{
-            $driveRoot = "$($_.DeviceID)\\"
-            if (Test-Path -LiteralPath $driveRoot) {{
-              $roots.Add($driveRoot) | Out-Null
-            }}
-          }}
-        }} catch {{
-          Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue | ForEach-Object {{
-            $driveRoot = "$($_.Name):\\"
-            if (Test-Path -LiteralPath $driveRoot) {{
-              $roots.Add($driveRoot) | Out-Null
-            }}
-          }}
-        }}
+        Add-DspmFixedDriveRoots $roots
         return @($roots.ToArray())
       }}
       if ($root -eq "__DSPM_ALL_ONEDRIVE__") {{

@@ -1395,6 +1395,32 @@ def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list
     else:
         profile_roots = [users_root]
     profile_root = profile_roots[0]
+
+    def user_path_candidates(path: Path) -> list[Path]:
+        expanded = path.expanduser()
+        candidates = [expanded]
+        try:
+            relative = expanded.relative_to(users_root)
+        except ValueError:
+            return candidates
+        parts = relative.parts
+        if not parts:
+            return candidates
+        requested_profile = parts[0]
+        suffix = Path(*parts[1:]) if len(parts) > 1 else Path()
+        for root in profile_roots:
+            candidate = root / suffix if str(suffix) != "." else root
+            if candidate not in candidates:
+                candidates.append(candidate)
+        if users_root.exists():
+            for root in valid_profiles:
+                if not profile_matches(root.name, requested_profile):
+                    continue
+                candidate = root / suffix if str(suffix) != "." else root
+                if candidate not in candidates:
+                    candidates.append(candidate)
+        return candidates
+
     paths = [item.strip() for item in config.paths if item.strip()] or ["desktop", "documents", "downloads", "onedrive"]
     resolved: list[Path] = []
 
@@ -1423,7 +1449,7 @@ def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list
                 candidates.extend([root / folder, root / "OneDrive" / folder])
                 candidates.extend([onedrive / folder for onedrive in root.glob("OneDrive*") if onedrive.is_dir()] if root.exists() else [])
         else:
-            candidates = [Path(item)]
+            candidates = user_path_candidates(Path(item))
         resolved.extend(candidate.expanduser().resolve() for candidate in candidates)
 
     unique: list[Path] = []
