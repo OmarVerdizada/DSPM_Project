@@ -115,6 +115,8 @@ METADATA_EXTENSIONS = {
     ".mp4",
     ".msg",
     ".msi",
+    ".msix",
+    ".msixbundle",
     ".numbers",
     ".odp",
     ".ods",
@@ -246,14 +248,11 @@ def matches_scan_filters(
         return False
     if hidden_filter_enabled and not is_hidden:
         return False
+    if not hidden_filter_enabled and is_hidden and not include_hidden:
+        return False
     if system_filter_enabled and not is_system:
         return False
-    if extension_filter_enabled or hidden_filter_enabled or system_filter_enabled:
-        return True
-
-    if is_hidden and not include_hidden:
-        return False
-    if is_system and not include_system:
+    if not system_filter_enabled and is_system and not include_system:
         return False
     return True
 
@@ -767,10 +766,15 @@ def is_skipped_scan_path(path: Path) -> bool:
         "\\.git\\",
         "\\.vscode\\",
         "\\node_modules\\",
+        "\\program files\\",
+        "\\program files (x86)\\",
+        "\\programdata\\",
+        "\\appdata\\",
         "\\appdata\\local\\temp\\",
         "\\appdata\\local\\microsoft\\edge\\",
         "\\appdata\\local\\google\\chrome\\",
         "\\appdata\\local\\packages\\",
+        "\\appdata\\local\\microsoft\\windows sidebar\\",
         "\\appdata\\roaming\\microsoft\\windows\\recent\\",
     )
     return any(fragment in normalized for fragment in skip_fragments)

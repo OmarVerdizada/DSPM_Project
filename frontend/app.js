@@ -299,6 +299,8 @@ const FILE_EXTENSION_OPTIONS = [
   [".iso", "Disk image"],
   [".vhd", "Virtual disk"],
   [".vhdx", "Virtual disk"],
+  [".msix", "MSIX package"],
+  [".msixbundle", "MSIX bundle"],
   [".jpg", "JPEG image"],
   [".jpeg", "JPEG image"],
   [".png", "PNG image"],
@@ -698,7 +700,7 @@ function getEndpointScopeConfig(scope = endpointPathScope?.value || "default") {
     documents: { paths: ["documents"], depth: 4, label: "Documents only" },
     downloads: { paths: ["downloads"], depth: 3, label: "Downloads only" },
     onedrive: { paths: ["onedrive"], depth: 5, label: "OneDrive only" },
-    all: { paths: ["all"], depth: 6, label: "Entire target profile" },
+    all: { paths: ["all"], depth: 5, label: "Target profile data" },
     all_profiles: { paths: ["all_profiles"], depth: 5, label: "All user profiles" },
     c_drive: { paths: ["c_drive"], depth: 5, label: "C drive data scan" },
     all_fixed_drives: { paths: ["all_fixed_drives"], depth: 5, label: "All fixed drives" },
@@ -727,6 +729,10 @@ function readEndpointPayload() {
     selectedExtensions.push(searchedExtension);
   }
   const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
+  const allKnownFileExtensions = getExtensionOptions().map(([extension]) => extension);
+  const allExtensionsSelected = selectedFileExtensions.length >= allKnownFileExtensions.length
+    && allKnownFileExtensions.every((extension) => selectedFileExtensions.includes(extension));
+  const effectiveAllowedExtensions = allExtensionsSelected ? [] : selectedFileExtensions;
   const archiveOnlyFilter = selectedFileExtensions.length > 0 && selectedFileExtensions.every((extension) => ARCHIVE_EXTENSIONS.has(extension));
   const scope = endpointPathScope.value;
   const scopeConfig = getEndpointScopeConfig(scope);
@@ -750,8 +756,8 @@ function readEndpointPayload() {
     read_acl: document.querySelector("#endpoint-read-acl")?.checked || false,
     inspect_archives: document.querySelector("#endpoint-inspect-archives")?.checked || false,
     async_scan: document.querySelector("#endpoint-async-scan")?.checked || false,
-    allowed_extensions: selectedFileExtensions,
-    extension_filter_enabled: selectedFileExtensions.length > 0,
+    allowed_extensions: effectiveAllowedExtensions,
+    extension_filter_enabled: effectiveAllowedExtensions.length > 0,
     include_hidden: true,
     include_system: selectedExtensions.includes("__system__"),
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
@@ -1027,7 +1033,7 @@ function updateEndpointCustomPathState(isBusy = false) {
     } else if (scope === "onedrive") {
       endpointStatus.textContent = "OneDrive scan checks OneDrive and OneDrive - tenant folders under the target user's profile.";
     } else if (scope === "all") {
-      endpointStatus.textContent = "Entire profile scans the target user's full C:\\Users profile with browser/temp/project folders skipped.";
+      endpointStatus.textContent = "Target profile data scans the target user's C:\\Users profile while skipping AppData, OS cache, and project folders. Use Custom paths for an exact deep folder.";
     } else if (scope === "all_profiles") {
       endpointStatus.textContent = "All user profiles scans real C:\\Users profiles and skips Default/Public/system profile folders.";
     } else if (scope === "c_drive") {

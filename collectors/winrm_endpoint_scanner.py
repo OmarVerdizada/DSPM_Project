@@ -30,6 +30,62 @@ DEFAULT_PROFILE_FOLDERS = {
     "downloads": "Downloads",
 }
 
+PROFILE_DATA_SCOPE_ALIASES = set(DEFAULT_PROFILE_FOLDERS) | {"all", "profile_standard", "onedrive"}
+GLOBAL_ENDPOINT_SCOPE_ALIASES = {"all_profiles", "c_drive", "all_fixed_drives"}
+ENDPOINT_PATH_ALIASES = PROFILE_DATA_SCOPE_ALIASES | GLOBAL_ENDPOINT_SCOPE_ALIASES
+
+
+def normalize_endpoint_target_paths(paths: list[str], target_username: str = "") -> list[str]:
+    profile = target_username.strip()
+    base = f"C:\\Users\\{profile}" if profile else "C:\\Users"
+    requested = [item.strip() for item in paths if item.strip()] or ["desktop", "documents", "downloads"]
+
+    resolved: list[str] = []
+    for item in requested:
+        lowered = item.lower()
+        if lowered == "profile_standard":
+            resolved.append(f"__DSPM_PROFILE_STANDARD_FOR__:{profile}" if profile else "__DSPM_PROFILE_STANDARD__")
+        elif lowered == "all_profiles":
+            resolved.append("__DSPM_ALL_PROFILES__")
+        elif lowered == "all":
+            resolved.append(f"__DSPM_PROFILE_ROOT_FOR__:{profile}" if profile else "__DSPM_ALL_PROFILES__")
+        elif lowered == "c_drive":
+            resolved.append("C:\\")
+        elif lowered == "onedrive":
+            resolved.append(f"__DSPM_ONEDRIVE_FOR__:{profile}" if profile else "__DSPM_ALL_ONEDRIVE__")
+        elif lowered == "all_fixed_drives":
+            resolved.append("__DSPM_FIXED_DRIVES__")
+        elif lowered in DEFAULT_PROFILE_FOLDERS:
+            folder = DEFAULT_PROFILE_FOLDERS[lowered]
+            resolved.append(f"__DSPM_PROFILE_FOLDER_FOR__:{profile}:{folder}" if profile else f"__DSPM_PROFILE_FOLDER__:{folder}")
+        elif _is_windows_absolute_path(item):
+            resolved.append(_normalize_windows_path(item))
+        elif profile:
+            resolved.append(f"__DSPM_PROFILE_RELATIVE_FOR__:{profile}:{_normalize_windows_relative_path(item)}")
+        else:
+            resolved.append(_join_windows_path(base, item))
+    return list(dict.fromkeys(resolved))
+
+
+def _is_windows_absolute_path(value: str) -> bool:
+    return bool(re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith("\\\\"))
+
+
+def _normalize_windows_path(value: str) -> str:
+    normalized = value.replace("/", "\\")
+    if re.fullmatch(r"[A-Za-z]:", normalized):
+        return f"{normalized}\\"
+    return normalized
+
+
+def _normalize_windows_relative_path(value: str) -> str:
+    return value.replace("/", "\\").strip("\\")
+
+
+def _join_windows_path(root: str, suffix: str) -> str:
+    clean_root = root.rstrip("\\")
+    return f"{clean_root}\\{_normalize_windows_relative_path(suffix)}"
+
 
 def activate_local_winrm(username: str = "", password: str = "", domain: str = "WORKGROUP") -> dict:
     if platform.system().lower() != "windows":
@@ -405,9 +461,8 @@ class WinRMEndpointScanner:
     def _is_profile_scoped_request(self) -> bool:
         if not self.config.target_username.strip():
             return False
-        profile_aliases = set(DEFAULT_PROFILE_FOLDERS) | {"all", "profile_standard", "onedrive"}
         paths = [item.strip().lower() for item in self.config.paths if item.strip()]
-        return bool(paths) and all(item in profile_aliases for item in paths)
+        return bool(paths) and all(item in PROFILE_DATA_SCOPE_ALIASES for item in paths)
 
     def _path_matches_target_profile(self, path: str) -> bool:
         profile = self.config.target_username.strip().lower()
@@ -427,41 +482,7 @@ class WinRMEndpointScanner:
         )
 
     def _target_paths(self) -> list[str]:
-        profile = self.config.target_username.strip()
-        base = f"C:\\Users\\{profile}" if profile else "C:\\Users"
-        paths = [item.strip() for item in self.config.paths if item.strip()]
-        if not paths:
-            paths = ["desktop", "documents", "downloads"]
-
-        resolved: list[str] = []
-        for item in paths:
-            lowered = item.lower()
-            if lowered == "profile_standard":
-                if profile:
-                    resolved.append(f"__DSPM_PROFILE_STANDARD_FOR__:{profile}")
-                else:
-                    resolved.append("__DSPM_PROFILE_STANDARD__")
-            elif lowered == "all_profiles":
-                resolved.append("__DSPM_ALL_PROFILES__")
-            elif lowered == "all":
-                resolved.append(f"__DSPM_PROFILE_ROOT_FOR__:{profile}" if profile else "__DSPM_ALL_PROFILES__")
-            elif lowered == "c_drive":
-                resolved.append("C:\\")
-            elif lowered == "onedrive":
-                resolved.append(f"__DSPM_ONEDRIVE_FOR__:{profile}" if profile else "__DSPM_ALL_ONEDRIVE__")
-            elif lowered == "all_fixed_drives":
-                resolved.append("__DSPM_FIXED_DRIVES__")
-            elif lowered in DEFAULT_PROFILE_FOLDERS:
-                folder = DEFAULT_PROFILE_FOLDERS[lowered]
-                if profile:
-                    resolved.append(f"__DSPM_PROFILE_FOLDER_FOR__:{profile}:{folder}")
-                else:
-                    resolved.append(f"__DSPM_PROFILE_FOLDER__:{folder}")
-            elif ":" in item or item.startswith("\\\\"):
-                resolved.append(item)
-            else:
-                resolved.append(f"{base}\\{item}")
-        return list(dict.fromkeys(resolved))
+        return normalize_endpoint_target_paths(self.config.paths, self.config.target_username)
 
     def _run_ps(self, script: str):
         try:
@@ -607,6 +628,8 @@ def _scan_script(
     $binaryExtensions = @({binary_extensions})
     $archiveExtensions = @(".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip")
     $scanArchiveEntries = {inspect_archives_value}
+    $maxRecords = 5000
+    $maxArchiveEntriesPerFile = 200
     $records = New-Object System.Collections.Generic.List[object]
     $extensionHistogram = @{{}}
     $diagnostics = [ordered]@{{
@@ -617,7 +640,9 @@ def _scan_script(
       matched_files = 0
       archive_files = 0
       archive_entries = 0
+      archive_entries_skipped = 0
       archive_errors = @()
+      record_limit_reached = $false
       skipped_dirs = 0
       unreadable_dirs = @()
       allowed_extensions = @($allowedExtensions)
@@ -672,10 +697,9 @@ def _scan_script(
     function Test-DspmRecordIncluded($extension, $isHidden, $isSystem) {{
       if ({extension_filter_value} -and (-not $extension -or -not $allowedSet.ContainsKey($extension.ToLowerInvariant()))) {{ return $false }}
       if ({hidden_filter_value} -and -not $isHidden) {{ return $false }}
+      if ((-not {hidden_filter_value}) -and $isHidden -and -not {include_hidden_value}) {{ return $false }}
       if ({system_filter_value} -and -not $isSystem) {{ return $false }}
-      if ({extension_filter_value} -or {hidden_filter_value} -or {system_filter_value}) {{ return $true }}
-      if ($isHidden -and -not {include_hidden_value}) {{ return $false }}
-      if ($isSystem -and -not {include_system_value}) {{ return $false }}
+      if ((-not {system_filter_value}) -and $isSystem -and -not {include_system_value}) {{ return $false }}
       return $true
     }}
 
@@ -683,28 +707,33 @@ def _scan_script(
       $normalized = $path.ToLowerInvariant()
       if (-not $normalized.EndsWith([string][char]92)) {{ $normalized = $normalized + [string][char]92 }}
       $skipFragments = @(
-        "\\enterprise_test_data\\",
-        "\\dspm_project-main\\",
-        "\\.codex\\",
-        "\\.git\\",
-        "\\.vscode\\",
-        "\\node_modules\\",
-        "\\program files\\common files\\",
-        "\\program files (x86)\\common files\\",
-        "\\programdata\\package cache\\",
-        "\\programdata\\microsoft\\windows defender\\",
-        "\\windows\\",
-        "\\$recycle.bin\\",
-        "\\system volume information\\",
-        "\\pagefile.sys\\",
-        "\\swapfile.sys\\",
-        "\\hiberfil.sys\\",
-        "\\dumpstack.log",
-        "\\appdata\\local\\temp\\",
-        "\\appdata\\local\\microsoft\\edge\\",
-        "\\appdata\\local\\google\\chrome\\",
-        "\\appdata\\local\\packages\\",
-        "\\appdata\\roaming\\microsoft\\windows\\recent\\"
+        '\\enterprise_test_data\\',
+        '\\dspm_project-main\\',
+        '\\.codex\\',
+        '\\.git\\',
+        '\\.vscode\\',
+        '\\node_modules\\',
+        '\\program files\\',
+        '\\program files (x86)\\',
+        '\\program files\\common files\\',
+        '\\program files (x86)\\common files\\',
+        '\\programdata\\',
+        '\\programdata\\package cache\\',
+        '\\programdata\\microsoft\\windows defender\\',
+        '\\windows\\',
+        '\\$recycle.bin\\',
+        '\\system volume information\\',
+        '\\pagefile.sys\\',
+        '\\swapfile.sys\\',
+        '\\hiberfil.sys\\',
+        '\\dumpstack.log',
+        '\\appdata\\',
+        '\\appdata\\local\\temp\\',
+        '\\appdata\\local\\microsoft\\edge\\',
+        '\\appdata\\local\\google\\chrome\\',
+        '\\appdata\\local\\packages\\',
+        '\\appdata\\local\\microsoft\\windows sidebar\\',
+        '\\appdata\\roaming\\microsoft\\windows\\recent\\'
       )
       foreach ($fragment in $skipFragments) {{
         if ($normalized.Contains($fragment)) {{ return $true }}
@@ -725,6 +754,27 @@ def _scan_script(
       )
       if ($skipNames -contains $name) {{ return $false }}
       if ($name.StartsWith("default.")) {{ return $false }}
+      return $true
+    }}
+
+    function Test-DspmProfileNameMatch($candidateName, $profileName) {{
+      if ([string]::IsNullOrWhiteSpace($candidateName) -or [string]::IsNullOrWhiteSpace($profileName)) {{ return $false }}
+      $name = ([string]$candidateName).ToLowerInvariant()
+      $profileNameLower = ([string]$profileName).ToLowerInvariant()
+      return (
+        $name -eq $profileNameLower -or
+        $name.StartsWith("$profileNameLower.") -or
+        $name.StartsWith("$profileNameLower_") -or
+        $name.EndsWith(".$profileNameLower")
+      )
+    }}
+
+    function Add-DspmRecord($record) {{
+      if ($records.Count -ge $maxRecords) {{
+        $diagnostics.record_limit_reached = $true
+        return $false
+      }}
+      $records.Add($record) | Out-Null
       return $true
     }}
 
@@ -810,14 +860,17 @@ def _scan_script(
         $profileName = $root.Substring("__DSPM_ONEDRIVE_FOR__:".Length).Trim()
         if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
+          $exactProfileRoot = Join-Path "C:\\Users" $profileName
+          if (Test-Path -LiteralPath $exactProfileRoot) {{
+            Get-ChildItem -LiteralPath $exactProfileRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+              $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
+            }} | ForEach-Object {{
+              $roots.Add($_.FullName) | Out-Null
+            }}
+            return @($roots.ToArray())
+          }}
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileName
           }} | ForEach-Object {{
             Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
               $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
@@ -860,14 +913,13 @@ def _scan_script(
         $profileName = $root.Substring("__DSPM_PROFILE_STANDARD_FOR__:".Length).Trim()
         if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
+          $exactProfileRoot = Join-Path "C:\\Users" $profileName
+          if (Test-Path -LiteralPath $exactProfileRoot) {{
+            Add-DspmProfileStandardCandidates $roots $exactProfileRoot
+            return @($roots.ToArray())
+          }}
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileName
           }} | ForEach-Object {{
             Add-DspmProfileStandardCandidates $roots $_.FullName
           }}
@@ -880,14 +932,13 @@ def _scan_script(
         $profileName = $root.Substring("__DSPM_PROFILE_ROOT_FOR__:".Length).Trim()
         if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
+          $exactProfileRoot = Join-Path "C:\\Users" $profileName
+          if (Test-Path -LiteralPath $exactProfileRoot) {{
+            $roots.Add($exactProfileRoot) | Out-Null
+            return @($roots.ToArray())
+          }}
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileName
           }} | ForEach-Object {{
             if (Test-Path -LiteralPath $_.FullName) {{
               $roots.Add($_.FullName) | Out-Null
@@ -906,16 +957,44 @@ def _scan_script(
         $folderName = $parts[1].Trim()
         if ([string]::IsNullOrWhiteSpace($profileName) -or [string]::IsNullOrWhiteSpace($folderName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
+          $exactProfileRoot = Join-Path "C:\\Users" $profileName
+          if (Test-Path -LiteralPath $exactProfileRoot) {{
+            Add-DspmProfileFolderCandidates $roots $exactProfileRoot $folderName
+            return @($roots.ToArray())
+          }}
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileName
           }} | ForEach-Object {{
             Add-DspmProfileFolderCandidates $roots $_.FullName $folderName
+          }}
+        }} catch {{
+          return @()
+        }}
+        return @($roots.ToArray())
+      }}
+      if ($root.StartsWith("__DSPM_PROFILE_RELATIVE_FOR__:", [System.StringComparison]::OrdinalIgnoreCase)) {{
+        $payload = $root.Substring("__DSPM_PROFILE_RELATIVE_FOR__:".Length)
+        $parts = $payload -split ":", 2
+        if ($parts.Count -ne 2) {{ return @() }}
+        $profileName = $parts[0].Trim()
+        $relativePath = $parts[1].Trim().Trim("\\")
+        if ([string]::IsNullOrWhiteSpace($profileName) -or [string]::IsNullOrWhiteSpace($relativePath)) {{ return @() }}
+        try {{
+          $exactProfileRoot = Join-Path "C:\\Users" $profileName
+          if (Test-Path -LiteralPath $exactProfileRoot) {{
+            $candidatePath = Join-Path $exactProfileRoot $relativePath
+            if (Test-Path -LiteralPath $candidatePath) {{
+              $roots.Add($candidatePath) | Out-Null
+            }}
+            return @($roots.ToArray())
+          }}
+          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+            Test-DspmProfileNameMatch $_.Name $profileName
+          }} | ForEach-Object {{
+            $candidatePath = Join-Path $_.FullName $relativePath
+            if (Test-Path -LiteralPath $candidatePath) {{
+              $roots.Add($candidatePath) | Out-Null
+            }}
           }}
         }} catch {{
           return @()
@@ -939,14 +1018,8 @@ def _scan_script(
         $parts = $relative -split "\\\\"
         $profileName = $parts[0]
         $suffix = if ($parts.Count -gt 1) {{ ($parts[1..($parts.Count - 1)] -join "\\") }} else {{ "" }}
-        $profileNameLower = $profileName.ToLowerInvariant()
         $candidates = Get-ChildItem -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-          $name = $_.Name.ToLowerInvariant()
-          $name -eq $profileNameLower -or
-          $name.StartsWith("$profileNameLower.") -or
-          $name.StartsWith("$profileNameLower_") -or
-          $name.EndsWith(".$profileNameLower") -or
-          $name -like "*$profileNameLower*"
+          Test-DspmProfileNameMatch $_.Name $profileName
         }}
         foreach ($candidate in $candidates) {{
           $candidatePath = if ($suffix) {{ Join-Path $candidate.FullName $suffix }} else {{ $candidate.FullName }}
@@ -1109,9 +1182,14 @@ def _scan_script(
 
     function Add-ZipEntries($archive, $archivePath, $isHidden, $isSystem, $depth) {{
       if ($depth -gt 2) {{ return }}
-      foreach ($entry in $archive.Entries) {{
+      $entries = @($archive.Entries)
+      if ($entries.Count -gt $maxArchiveEntriesPerFile) {{
+        $diagnostics.archive_entries_skipped += ($entries.Count - $maxArchiveEntriesPerFile)
+      }}
+      foreach ($entry in @($entries | Select-Object -First $maxArchiveEntriesPerFile)) {{
+        if ($records.Count -ge $maxRecords) {{ return }}
         if ([string]::IsNullOrWhiteSpace($entry.Name)) {{ continue }}
-        $entryPath = "$archivePath::$($entry.FullName)"
+        $entryPath = "${{archivePath}}::$($entry.FullName)"
         $entryExtension = Get-DspmExtensionFromName $entry.FullName
         Add-DspmExtensionStat $entryExtension
         $includeEntry = Test-DspmRecordIncluded $entryExtension $isHidden $isSystem
@@ -1119,10 +1197,7 @@ def _scan_script(
           $diagnostics.archive_entries += 1
           $diagnostics.matched_files += 1
           $entryContent = ""
-          if ({read_content_value}) {{
-            $entryContent = Read-ZipEntryText $entry $entryExtension {int(max_read_bytes)}
-          }}
-          $records.Add([PSCustomObject]@{{
+          Add-DspmRecord ([PSCustomObject]@{{
             path = $entryPath
             name = $entry.Name
             size = $entry.Length
@@ -1199,7 +1274,7 @@ def _scan_script(
       }} catch {{
         $sha256 = ""
       }}
-      $records.Add([PSCustomObject]@{{
+      Add-DspmRecord ([PSCustomObject]@{{
         path = $file.FullName
         name = $file.Name
         size = $file.Length
@@ -1239,6 +1314,11 @@ def _scan_script(
       foreach ($entry in $entries) {{
         if ($entry.PSIsContainer) {{
           $dirHidden = [bool]($entry.Attributes -band [IO.FileAttributes]::Hidden)
+          $dirReparse = [bool]($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)
+          if ($dirReparse) {{
+            $diagnostics.skipped_dirs += 1
+            continue
+          }}
           if (Test-DspmSkippedPath $entry.FullName) {{
             $diagnostics.skipped_dirs += 1
             continue
@@ -1417,17 +1497,19 @@ def _read_json(output: bytes | str) -> object | None:
         return None
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as original_error:
         decoder = json.JSONDecoder()
         for index, char in enumerate(text):
             if char not in "[{":
                 continue
+            if index == 0:
+                raise original_error
             try:
                 value, _ = decoder.raw_decode(text[index:])
                 return value
             except json.JSONDecodeError:
                 continue
-        raise
+        raise original_error
 
 
 def _clean_error(output: bytes | str) -> str:

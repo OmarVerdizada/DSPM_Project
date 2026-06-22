@@ -58,7 +58,13 @@ from backend.store import (
 )
 from backend.vault import CredentialVault
 from collectors.file_scanner import normalize_extension_filter, scan_directory
-from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner, activate_local_winrm
+from collectors.winrm_endpoint_scanner import (
+    ENDPOINT_PATH_ALIASES,
+    WinRMEndpointConfig,
+    WinRMEndpointScanner,
+    activate_local_winrm,
+    normalize_endpoint_target_paths,
+)
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from risk.risk_engine import get_risk_rules
 from scripts.generate_enterprise_test_data import generate as generate_enterprise_test_data
@@ -246,17 +252,6 @@ class EndpointScanRequest(BaseModel):
     @classmethod
     def _validate_endpoint_paths(cls, values: list[str]) -> list[str]:
         cleaned: list[str] = []
-        allowed_aliases = {
-            "desktop",
-            "documents",
-            "downloads",
-            "profile_standard",
-            "all",
-            "all_profiles",
-            "c_drive",
-            "onedrive",
-            "all_fixed_drives",
-        }
         for item in values or []:
             value = re.sub(r"[\x00-\x1f\x7f]", "", str(item or "")).strip()
             if not value:
@@ -265,7 +260,7 @@ class EndpointScanRequest(BaseModel):
                 value = value.replace("/", "\\")
             is_drive_path = bool(re.fullmatch(r"[A-Za-z]:\\[^<>|?*]{0,240}", value))
             is_unc_path = bool(re.fullmatch(r"\\\\[^\\/:*?\"<>|\r\n]+\\[^\\/:*?\"<>|\r\n]+(?:\\[^:*?\"<>|\r\n]{0,240})?", value))
-            if value in allowed_aliases or is_drive_path or is_unc_path:
+            if value.lower() in ENDPOINT_PATH_ALIASES or is_drive_path or is_unc_path:
                 cleaned.append(value)
                 continue
             raise ValueError("Endpoint paths must be known aliases or absolute Windows paths")
@@ -1378,34 +1373,134 @@ def _local_user_profile_roots(users_root: Path) -> list[Path]:
     ]
 
 
+def _local_profile_standard_paths(profile_root: Path) -> list[Path]:
+    candidates = [profile_root / folder for folder in ("Desktop", "Documents", "Downloads")]
+    if profile_root.exists():
+        try:
+            candidates.extend(
+                onedrive / folder
+                for onedrive in profile_root.iterdir()
+                if onedrive.is_dir() and (onedrive.name == "OneDrive" or onedrive.name.startswith("OneDrive - "))
+                for folder in ("Desktop", "Documents", "Downloads")
+            )
+        except OSError:
+            pass
+    existing = [path for path in candidates if path.exists()]
+    return existing or [profile_root]
+
+
+def _local_matching_profile_roots(users_root: Path, profile: str) -> list[Path]:
+    profile = profile.strip()
+    if not profile:
+        return []
+    exact = users_root / profile
+    if exact.exists():
+        return [exact]
+    profile_lower = profile.lower()
+    try:
+        candidates = [item for item in users_root.iterdir() if item.is_dir()]
+    except OSError:
+        return []
+    return [
+        item
+        for item in candidates
+        if (
+            item.name.lower() == profile_lower
+            or item.name.lower().startswith(f"{profile_lower}.")
+            or item.name.lower().startswith(f"{profile_lower}_")
+            or item.name.lower().endswith(f".{profile_lower}")
+        )
+    ]
+
+
+def _local_profile_folder_paths(profile_root: Path, folder_name: str) -> list[Path]:
+    candidates = [profile_root / folder_name]
+    if profile_root.exists():
+        try:
+            candidates.extend(
+                onedrive / folder_name
+                for onedrive in profile_root.iterdir()
+                if onedrive.is_dir() and (onedrive.name == "OneDrive" or onedrive.name.startswith("OneDrive - "))
+            )
+        except OSError:
+            pass
+    return [path for path in candidates if path.exists()]
+
+
+def _local_onedrive_roots(profile_root: Path) -> list[Path]:
+    if not profile_root.exists():
+        return []
+    try:
+        return [
+            item
+            for item in profile_root.iterdir()
+            if item.is_dir() and (item.name == "OneDrive" or item.name.startswith("OneDrive - "))
+        ]
+    except OSError:
+        return []
+
+
+def _resolve_local_endpoint_token(token: str, users_root: Path) -> list[Path]:
+    if token == "__DSPM_ALL_PROFILES__":
+        return _local_user_profile_roots(users_root)
+    if token == "__DSPM_FIXED_DRIVES__":
+        return [Path(f"{letter}:/") for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(f"{letter}:/").exists()]
+    if token == "__DSPM_ALL_ONEDRIVE__":
+        roots: list[Path] = []
+        for profile_root in _local_user_profile_roots(users_root):
+            roots.extend(_local_onedrive_roots(profile_root))
+        return roots
+    if token == "__DSPM_PROFILE_STANDARD__":
+        roots: list[Path] = []
+        for profile_root in _local_user_profile_roots(users_root):
+            roots.extend(_local_profile_standard_paths(profile_root))
+        return roots
+    if token.startswith("__DSPM_PROFILE_FOLDER__:"):
+        folder_name = token.removeprefix("__DSPM_PROFILE_FOLDER__:").strip()
+        roots: list[Path] = []
+        for profile_root in _local_user_profile_roots(users_root):
+            roots.extend(_local_profile_folder_paths(profile_root, folder_name))
+        return roots
+    if token.startswith("__DSPM_PROFILE_STANDARD_FOR__:"):
+        profile = token.removeprefix("__DSPM_PROFILE_STANDARD_FOR__:").strip()
+        roots: list[Path] = []
+        for profile_root in _local_matching_profile_roots(users_root, profile):
+            roots.extend(_local_profile_standard_paths(profile_root))
+        return roots
+    if token.startswith("__DSPM_PROFILE_ROOT_FOR__:"):
+        profile = token.removeprefix("__DSPM_PROFILE_ROOT_FOR__:").strip()
+        return [root for root in _local_matching_profile_roots(users_root, profile) if root.exists()]
+    if token.startswith("__DSPM_PROFILE_FOLDER_FOR__:"):
+        payload = token.removeprefix("__DSPM_PROFILE_FOLDER_FOR__:")
+        profile, _, folder_name = payload.partition(":")
+        roots: list[Path] = []
+        for profile_root in _local_matching_profile_roots(users_root, profile.strip()):
+            roots.extend(_local_profile_folder_paths(profile_root, folder_name.strip()))
+        return roots
+    if token.startswith("__DSPM_PROFILE_RELATIVE_FOR__:"):
+        payload = token.removeprefix("__DSPM_PROFILE_RELATIVE_FOR__:")
+        profile, _, relative_path = payload.partition(":")
+        return [
+            profile_root / relative_path.strip().strip("\\/")
+            for profile_root in _local_matching_profile_roots(users_root, profile.strip())
+        ]
+    if token.startswith("__DSPM_ONEDRIVE_FOR__:"):
+        profile = token.removeprefix("__DSPM_ONEDRIVE_FOR__:").strip()
+        roots: list[Path] = []
+        for profile_root in _local_matching_profile_roots(users_root, profile):
+            roots.extend(_local_onedrive_roots(profile_root))
+        return roots
+    return [Path(token)]
+
+
 def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list[str]]:
     profile = config.target_username.strip() or (os.getenv("USERNAME") or "").strip()
     users_root = Path("C:/Users")
-    profile_root = users_root / profile if profile else users_root
-    paths = [item.strip() for item in config.paths if item.strip()] or ["desktop", "documents", "downloads"]
     resolved: list[Path] = []
+    requested_tokens = normalize_endpoint_target_paths(config.paths, profile)
 
-    for item in paths:
-        lowered = item.lower()
-        if lowered == "profile_standard":
-            candidates = [profile_root / folder for folder in ("Desktop", "Documents", "Downloads", "OneDrive")]
-        elif lowered == "all_profiles":
-            candidates = _local_user_profile_roots(users_root)
-        elif lowered == "all":
-            candidates = [profile_root]
-        elif lowered == "c_drive":
-            candidates = [Path("C:/")]
-        elif lowered == "onedrive":
-            candidates = [profile_root / "OneDrive"]
-            candidates.extend(profile_root.glob("OneDrive - *") if profile_root.exists() else [])
-        elif lowered == "all_fixed_drives":
-            candidates = [Path(f"{letter}:/") for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(f"{letter}:/").exists()]
-        elif lowered in {"desktop", "documents", "downloads"}:
-            folder = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads"}[lowered]
-            candidates = [profile_root / folder, profile_root / "OneDrive" / folder]
-        else:
-            candidates = [Path(item)]
-        resolved.extend(candidate.expanduser().resolve() for candidate in candidates)
+    for token in requested_tokens:
+        resolved.extend(candidate.expanduser().resolve() for candidate in _resolve_local_endpoint_token(token, users_root))
 
     unique: list[Path] = []
     missing: list[str] = []
