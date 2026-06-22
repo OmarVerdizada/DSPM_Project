@@ -219,7 +219,7 @@ class WinRMEndpointConfig:
     password: str
     domain: str = "WORKGROUP"
     target_username: str = ""
-    paths: list[str] = field(default_factory=lambda: ["desktop", "documents", "downloads"])
+    paths: list[str] = field(default_factory=lambda: ["desktop", "documents", "downloads", "onedrive"])
     max_depth: int = 12
     read_content: bool = True
     max_read_bytes: int = 1024 * 256
@@ -351,13 +351,8 @@ class WinRMEndpointScanner:
             raw_records = [raw_records]
 
         records = []
-        filtered_wrong_profile = 0
-        profile_scoped = self._is_profile_scoped_request()
         for item in raw_records:
             path = item.get("path", "")
-            if profile_scoped and not self._path_matches_target_profile(path):
-                filtered_wrong_profile += 1
-                continue
             extension = item.get("extension") or detect_extension(path)
             content = item.get("content", "")
             content_scannable = item.get("content_scannable")
@@ -398,40 +393,14 @@ class WinRMEndpointScanner:
                     "file_hash": item.get("sha256", ""),
                 }
             )
-        if filtered_wrong_profile:
-            self.last_scan_diagnostics["filtered_wrong_profile"] = filtered_wrong_profile
         return normalize_records(records)
-
-    def _is_profile_scoped_request(self) -> bool:
-        if not self.config.target_username.strip():
-            return False
-        profile_aliases = set(DEFAULT_PROFILE_FOLDERS) | {"all", "profile_standard", "onedrive"}
-        paths = [item.strip().lower() for item in self.config.paths if item.strip()]
-        return bool(paths) and all(item in profile_aliases for item in paths)
-
-    def _path_matches_target_profile(self, path: str) -> bool:
-        profile = self.config.target_username.strip().lower()
-        if not profile:
-            return True
-        normalized = path.replace("/", "\\").lower()
-        marker = "\\users\\"
-        if marker not in normalized:
-            return False
-        after_users = normalized.split(marker, 1)[1]
-        actual_profile = after_users.split("\\", 1)[0]
-        return (
-            actual_profile == profile
-            or actual_profile.startswith(f"{profile}.")
-            or actual_profile.startswith(f"{profile}_")
-            or actual_profile.endswith(f".{profile}")
-        )
 
     def _target_paths(self) -> list[str]:
         profile = self.config.target_username.strip()
         base = f"C:\\Users\\{profile}" if profile else "C:\\Users"
         paths = [item.strip() for item in self.config.paths if item.strip()]
         if not paths:
-            paths = ["desktop", "documents", "downloads"]
+            paths = ["desktop", "documents", "downloads", "onedrive"]
 
         resolved: list[str] = []
         for item in paths:
@@ -604,6 +573,7 @@ def _scan_script(
     $textExtensions = @({text_extensions})
     $binaryExtensions = @({binary_extensions})
     $archiveExtensions = @(".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip")
+    $protectedExtensions = @(".aes", ".enc", ".gpg", ".kdbx", ".p12", ".pfx", ".pgp")
     $scanArchiveEntries = {inspect_archives_value}
     $records = New-Object System.Collections.Generic.List[object]
     $extensionHistogram = @{{}}
@@ -725,6 +695,28 @@ def _scan_script(
       return $true
     }}
 
+    function Normalize-DspmProfileName($value) {{
+      return ([regex]::Replace(([string]$value).ToLowerInvariant(), "[^a-z0-9]", ""))
+    }}
+
+    function Test-DspmProfileNameMatch($actualName, $requestedName) {{
+      $actual = ([string]$actualName).ToLowerInvariant()
+      $requested = ([string]$requestedName).ToLowerInvariant()
+      if ([string]::IsNullOrWhiteSpace($actual) -or [string]::IsNullOrWhiteSpace($requested)) {{ return $false }}
+      $actualCompact = Normalize-DspmProfileName $actual
+      $requestedCompact = Normalize-DspmProfileName $requested
+      return (
+        $actual -eq $requested -or
+        $actual.StartsWith($requested + ".") -or
+        $actual.StartsWith($requested + "_") -or
+        $actual.EndsWith("." + $requested) -or
+        $actual.Contains($requested) -or
+        $requested.Contains($actual) -or
+        ($requestedCompact -and $actualCompact.Contains($requestedCompact)) -or
+        ($actualCompact -and $requestedCompact.Contains($actualCompact))
+      )
+    }}
+
     function Add-DspmProfileFolderCandidates($roots, $profileRoot, $folderName) {{
       $candidatePaths = New-Object System.Collections.Generic.List[string]
       $candidatePaths.Add((Join-Path $profileRoot $folderName)) | Out-Null
@@ -744,6 +736,13 @@ def _scan_script(
       $before = $roots.Count
       foreach ($folderName in @("Desktop", "Documents", "Downloads")) {{
         Add-DspmProfileFolderCandidates $roots $profileRoot $folderName
+      }}
+      Get-ChildItem -LiteralPath $profileRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+        $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
+      }} | ForEach-Object {{
+        if (-not $roots.Contains($_.FullName)) {{
+          $roots.Add($_.FullName) | Out-Null
+        }}
       }}
       if ($roots.Count -eq $before -and (Test-Path -LiteralPath $profileRoot)) {{
         $roots.Add($profileRoot) | Out-Null
@@ -809,12 +808,7 @@ def _scan_script(
         try {{
           $profileNameLower = $profileName.ToLowerInvariant()
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileNameLower
           }} | ForEach-Object {{
             Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
               $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
@@ -859,12 +853,7 @@ def _scan_script(
         try {{
           $profileNameLower = $profileName.ToLowerInvariant()
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileNameLower
           }} | ForEach-Object {{
             Add-DspmProfileStandardCandidates $roots $_.FullName
           }}
@@ -879,12 +868,7 @@ def _scan_script(
         try {{
           $profileNameLower = $profileName.ToLowerInvariant()
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileNameLower
           }} | ForEach-Object {{
             if (Test-Path -LiteralPath $_.FullName) {{
               $roots.Add($_.FullName) | Out-Null
@@ -905,12 +889,7 @@ def _scan_script(
         try {{
           $profileNameLower = $profileName.ToLowerInvariant()
           Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            $name = $_.Name.ToLowerInvariant()
-            $name -eq $profileNameLower -or
-            $name.StartsWith("$profileNameLower.") -or
-            $name.StartsWith("$profileNameLower_") -or
-            $name.EndsWith(".$profileNameLower") -or
-            $name -like "*$profileNameLower*"
+            Test-DspmProfileNameMatch $_.Name $profileNameLower
           }} | ForEach-Object {{
             Add-DspmProfileFolderCandidates $roots $_.FullName $folderName
           }}
@@ -938,12 +917,7 @@ def _scan_script(
         $suffix = if ($parts.Count -gt 1) {{ ($parts[1..($parts.Count - 1)] -join "\\") }} else {{ "" }}
         $profileNameLower = $profileName.ToLowerInvariant()
         $candidates = Get-ChildItem -LiteralPath $usersRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-          $name = $_.Name.ToLowerInvariant()
-          $name -eq $profileNameLower -or
-          $name.StartsWith("$profileNameLower.") -or
-          $name.StartsWith("$profileNameLower_") -or
-          $name.EndsWith(".$profileNameLower") -or
-          $name -like "*$profileNameLower*"
+          Test-DspmProfileNameMatch $_.Name $profileNameLower
         }}
         foreach ($candidate in $candidates) {{
           $candidatePath = if ($suffix) {{ Join-Path $candidate.FullName $suffix }} else {{ $candidate.FullName }}
@@ -1104,6 +1078,79 @@ def _scan_script(
       return [PSCustomObject]$result
     }}
 
+    function Get-DspmArchiveProtection($extension) {{
+      if ($archiveExtensions -contains $extension -and $extension -ne ".zip") {{
+        return [PSCustomObject]@{{
+          protected = $true
+          content_status = "protected_or_uninspectable_archive"
+          protection_type = "compressed_archive"
+          scan_error = "Compressed archive may be password-protected or requires a dedicated extractor"
+        }}
+      }}
+      return [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }}
+    }}
+
+    function Test-DspmOfficeProtection($path, $extension) {{
+      $result = [ordered]@{{
+        protected = $false
+        content_status = ""
+        protection_type = ""
+        scan_error = ""
+      }}
+      if (-not (@(".docx", ".docm", ".dotx", ".dotm", ".xlsx", ".xlsm", ".pptx", ".pptm") -contains $extension)) {{
+        return [PSCustomObject]$result
+      }}
+      try {{
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+        $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {{
+          $archive = New-Object -TypeName System.IO.Compression.ZipArchive -ArgumentList $stream, ([System.IO.Compression.ZipArchiveMode]::Read), $false
+          try {{
+            $names = @($archive.Entries | Select-Object -First 2000 | ForEach-Object {{ $_.FullName.ToLowerInvariant() }})
+            if ($names -contains "encryptioninfo" -or $names -contains "encryptedpackage") {{
+              $result.protected = $true
+              $result.content_status = "encrypted"
+              $result.protection_type = "office_encryption"
+              $result.scan_error = "Office document package is encrypted"
+              return [PSCustomObject]$result
+            }}
+            foreach ($marker in @("word/settings.xml", "xl/workbook.xml", "ppt/presentation.xml")) {{
+              $entry = $archive.Entries | Where-Object {{ $_.FullName.ToLowerInvariant() -eq $marker }} | Select-Object -First 1
+              if (-not $entry) {{ continue }}
+              try {{
+                $reader = New-Object System.IO.StreamReader($entry.Open())
+                try {{
+                  $text = $reader.ReadToEnd().ToLowerInvariant()
+                }} finally {{
+                  $reader.Close()
+                }}
+              }} catch {{
+                $result.protected = $true
+                $result.content_status = "password_protected"
+                $result.protection_type = "office_password"
+                $result.scan_error = "Office document settings could not be read and may require a password"
+                return [PSCustomObject]$result
+              }}
+              if ($text.Contains("documentprotection") -or $text.Contains("workbookprotection") -or $text.Contains("sheetprotection") -or $text.Contains("modifyverifier")) {{
+                $result.protected = $true
+                $result.content_status = "password_protected"
+                $result.protection_type = "office_password"
+                $result.scan_error = "Office document contains password or protection metadata"
+                return [PSCustomObject]$result
+              }}
+            }}
+          }} finally {{
+            $archive.Dispose()
+          }}
+        }} finally {{
+          $stream.Dispose()
+        }}
+      }} catch {{
+        return [PSCustomObject]$result
+      }}
+      return [PSCustomObject]$result
+    }}
+
     function Add-ZipEntries($archive, $archivePath, $isHidden, $isSystem, $depth) {{
       if ($depth -gt 2) {{ return }}
       foreach ($entry in $archive.Entries) {{
@@ -1182,12 +1229,17 @@ def _scan_script(
       if (-not $includeRecord) {{ return }}
       $diagnostics.matched_files += 1
       $zipProtection = if ($extension -eq ".zip") {{ Test-DspmZipProtection $file.FullName }} else {{ [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }} }}
+      $archiveProtection = Get-DspmArchiveProtection $extension
+      $officeProtection = Test-DspmOfficeProtection $file.FullName $extension
+      $extensionProtection = if ($protectedExtensions -contains $extension) {{ [PSCustomObject]@{{ protected = $true; content_status = "protected"; protection_type = "encrypted_file"; scan_error = "File extension indicates encrypted or protected content" }} }} else {{ [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }} }}
+      $protection = @($zipProtection, $archiveProtection, $officeProtection, $extensionProtection) | Where-Object {{ $_.protected }} | Select-Object -First 1
+      if (-not $protection) {{ $protection = [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }} }}
       $ownerAcl = Get-Acl -LiteralPath $file.FullName -ErrorAction SilentlyContinue
       $acl = if ({read_acl_value}) {{ $ownerAcl }} else {{ $null }}
       $content = ""
-      if ({read_content_value} -and ($textExtensions -contains $extension)) {{
+      if ((-not $protection.protected) -and {read_content_value} -and ($textExtensions -contains $extension)) {{
         $content = Read-PlainText $file.FullName {int(max_read_bytes)}
-      }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
+      }} elseif ((-not $protection.protected) -and {read_content_value} -and ($binaryExtensions -contains $extension)) {{
         $content = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
       }}
       $sha256 = ""
@@ -1208,11 +1260,11 @@ def _scan_script(
         accessed_at = $file.LastAccessTimeUtc.ToString("o")
         attributes = $file.Attributes.ToString()
         sha256 = $sha256
-        protected = [bool]$zipProtection.protected
-        content_status = if ($zipProtection.content_status) {{ $zipProtection.content_status }} else {{ "" }}
-        content_scannable = if ($zipProtection.protected) {{ $false }} else {{ $null }}
-        protection_type = if ($zipProtection.protection_type) {{ $zipProtection.protection_type }} else {{ "" }}
-        scan_error = if ($zipProtection.scan_error) {{ $zipProtection.scan_error }} else {{ "" }}
+        protected = [bool]$protection.protected
+        content_status = if ($protection.content_status) {{ $protection.content_status }} else {{ "" }}
+        content_scannable = if ($protection.protected) {{ $false }} else {{ $null }}
+        protection_type = if ($protection.protection_type) {{ $protection.protection_type }} else {{ "" }}
+        scan_error = if ($protection.scan_error) {{ $protection.scan_error }} else {{ "" }}
         owner = if ($ownerAcl) {{ $ownerAcl.Owner }} else {{ "" }}
         principals = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }}) }} else {{ @() }}
         permissions = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }}) }} else {{ @() }}
@@ -1234,7 +1286,12 @@ def _scan_script(
             $diagnostics.skipped_dirs += 1
             continue
           }}
+          $dirSystem = [bool]($entry.Attributes -band [IO.FileAttributes]::System)
           if ($dirHidden -and -not ({include_hidden_value} -or {hidden_filter_value})) {{
+            $diagnostics.skipped_dirs += 1
+            continue
+          }}
+          if ($dirSystem -and -not ({include_system_value} -or {system_filter_value})) {{
             $diagnostics.skipped_dirs += 1
             continue
           }}

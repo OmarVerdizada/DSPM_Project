@@ -24,6 +24,7 @@ from collectors.file_scanner import (
     detect_extension,
     matches_scan_filters,
     normalize_extension_filter,
+    protected_status_values,
     scan_mode_for_extension,
 )
 from scripts.logger import get_logger
@@ -289,6 +290,8 @@ class SMBScanner:
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
                     continue
+                if is_system and not (self.config.include_system or self.config.system_filter_enabled):
+                    continue
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
                 continue
 
@@ -311,6 +314,9 @@ class SMBScanner:
             archive_metadata = archive_protection_metadata(extension)
             zip_metadata = self._inspect_zip_protection(share_name, remote_path) if extension == ".zip" else {}
             protected_metadata = zip_metadata or archive_metadata
+            protected = bool(protected_metadata.get("protected", False))
+            content_status = str(protected_metadata.get("content_status") or content_status_for_extension(extension, content, self.config.read_content))
+            protected = protected or content_status in protected_status_values()
             sha256 = self._hash_file(share_name, remote_path, int(getattr(entry, "file_size", 0) or 0))
             acl = self._acl_for_path(share_name, remote_path)
             owner = str(acl.get("owner") or "")
@@ -328,12 +334,12 @@ class SMBScanner:
                     "is_dir": False,
                     "is_hidden": is_hidden,
                     "is_system": is_system,
-                    "content": "" if protected_metadata else content,
+                    "content": "" if protected else content,
                     "acl": acl,
                     "scan_mode": scan_mode_for_extension(extension),
-                    "content_status": protected_metadata.get("content_status") or content_status_for_extension(extension, content, self.config.read_content),
+                    "content_status": content_status,
                     "content_scannable": bool(protected_metadata.get("content_scannable", extension in CONTENT_EXTENSIONS)),
-                    "protected": bool(protected_metadata.get("protected", False)),
+                    "protected": protected,
                     "protection_type": protected_metadata.get("protection_type", ""),
                     "scan_error": protected_metadata.get("scan_error", ""),
                     "owner": owner,
@@ -455,6 +461,20 @@ class SMBScanner:
                         "protection_type": "zip_password",
                         "scan_error": "ZIP archive has encrypted entries and needs a password",
                     }
+                for entry in archive.infolist()[:2000]:
+                    if entry.is_dir():
+                        continue
+                    try:
+                        with archive.open(entry) as handle:
+                            handle.read(1)
+                    except (OSError, RuntimeError, zipfile.BadZipFile):
+                        return {
+                            "protected": True,
+                            "content_status": "password_protected",
+                            "content_scannable": False,
+                            "protection_type": "zip_password",
+                            "scan_error": "ZIP archive has encrypted or unreadable entries and needs review",
+                        }
         except Exception:
             return {
                 "protected": True,

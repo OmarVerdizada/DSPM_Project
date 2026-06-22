@@ -159,7 +159,7 @@ METADATA_EXTENSIONS = {
 
 SCANNABLE_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS | METADATA_EXTENSIONS
 ARCHIVE_EXTENSIONS = {".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"}
-PROTECTED_CONTENT_EXTENSIONS = {".gpg", ".pgp", ".kdbx", ".p12", ".pfx"}
+PROTECTED_CONTENT_EXTENSIONS = {".gpg", ".pgp", ".kdbx", ".p12", ".pfx", ".aes", ".enc"}
 UNSUPPORTED_ARCHIVE_EXTENSIONS = ARCHIVE_EXTENSIONS - {".zip"}
 CONTENT_EXTENSIONS = TEXT_EXTENSIONS | BINARY_TEXT_EXTENSIONS
 MAX_ARCHIVE_ENTRY_BYTES = 25 * 1024 * 1024
@@ -204,6 +204,67 @@ def archive_protection_metadata(extension: str) -> dict[str, str | bool]:
         "protection_type": "compressed_archive",
         "scan_error": "Compressed archive may be password-protected or requires a dedicated extractor",
     }
+
+
+def protected_status_values() -> set[str]:
+    return {
+        "protected",
+        "password_protected",
+        "encrypted",
+        "locked",
+        "bad_archive",
+        "protected_or_uninspectable_archive",
+    }
+
+
+def openxml_protection_metadata(path: Path) -> dict[str, str | bool]:
+    extension = detect_extension(path)
+    if extension not in {".docx", ".docm", ".dotx", ".dotm", ".xlsx", ".xlsm", ".pptx", ".pptm"}:
+        return {}
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = {entry.filename.lower() for entry in archive.infolist()[:MAX_ARCHIVE_ENTRIES]}
+            protected_markers = {
+                "encryptioninfo",
+                "encryptedpackage",
+                "word/settings.xml",
+                "xl/workbook.xml",
+                "ppt/presentation.xml",
+            }
+            if not any(marker in names for marker in protected_markers):
+                return {}
+            for marker in ("word/settings.xml", "xl/workbook.xml", "ppt/presentation.xml"):
+                if marker not in names:
+                    continue
+                try:
+                    data = archive.read(marker, pwd=None)[:256 * 1024].decode("utf-8", errors="ignore").lower()
+                except (OSError, RuntimeError, zipfile.BadZipFile):
+                    return {
+                        "protected": True,
+                        "content_status": "password_protected",
+                        "content_scannable": False,
+                        "protection_type": "office_password",
+                        "scan_error": "Office document settings could not be read and may require a password",
+                    }
+                if "documentprotection" in data or "workbookprotection" in data or "sheetprotection" in data or "modifyverifier" in data:
+                    return {
+                        "protected": True,
+                        "content_status": "password_protected",
+                        "content_scannable": False,
+                        "protection_type": "office_password",
+                        "scan_error": "Office document contains password or protection metadata",
+                    }
+            if "encryptioninfo" in names or "encryptedpackage" in names:
+                return {
+                    "protected": True,
+                    "content_status": "encrypted",
+                    "content_scannable": False,
+                    "protection_type": "office_encryption",
+                    "scan_error": "Office document package is encrypted",
+                }
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        return {}
+    return {}
 
 
 def normalize_extension_filter(extensions: Iterable[str] | None) -> set[str]:
@@ -286,7 +347,7 @@ class FileRecord:
         scan_mode = scan_mode_for_extension(self.extension)
         status = self.content_status or content_status_for_extension(self.extension, self.content)
         scannable = self.content_scannable if self.content_scannable is not None else self.extension in CONTENT_EXTENSIONS
-        protected = self.protected or status in {"protected", "password_protected", "encrypted", "locked", "protected_or_uninspectable_archive"}
+        protected = self.protected or status in protected_status_values()
         return {
             "source": self.source,
             "share": self.share,
@@ -456,7 +517,7 @@ def scan_directory(
         sha256 = sha256_file(item)
 
         protected_extension = extension in PROTECTED_CONTENT_EXTENSIONS
-        archive_metadata = archive_protection_metadata(extension)
+        archive_metadata = archive_protection_metadata(extension) or openxml_protection_metadata(item)
         content_status = None
         content_scannable = None
         scan_error = ""
@@ -512,6 +573,19 @@ def scan_directory(
                         "protection_type": "zip_password",
                         "scan_error": "ZIP archive has encrypted entries and needs a password",
                     }
+                for entry in archive.infolist()[:MAX_ARCHIVE_ENTRIES]:
+                    if entry.is_dir():
+                        continue
+                    try:
+                        with archive.open(entry) as handle:
+                            handle.read(1)
+                    except (OSError, RuntimeError, zipfile.BadZipFile):
+                        return {
+                            "protected": True,
+                            "status": "password_protected",
+                            "protection_type": "zip_password",
+                            "scan_error": "ZIP archive has encrypted or unreadable entries and needs review",
+                        }
                 return {}
         except (OSError, RuntimeError, zipfile.BadZipFile):
             return {
@@ -692,7 +766,10 @@ def scan_directory(
                 if is_skipped_scan_path(item):
                     continue
                 is_hidden_dir = is_hidden_path(item)
+                is_system_dir = is_system_path(item)
                 if is_hidden_dir and not (include_hidden or hidden_filter_enabled):
+                    continue
+                if is_system_dir and not (include_system or system_filter_enabled):
                     continue
                 walk(item, depth + 1)
                 continue
@@ -792,14 +869,7 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
         content_scannable = record.get("content_scannable")
         if content_scannable is None:
             content_scannable = extension in CONTENT_EXTENSIONS
-        protected = bool(record.get("protected", False)) or status in {
-            "protected",
-            "password_protected",
-            "encrypted",
-            "locked",
-            "bad_archive",
-            "protected_or_uninspectable_archive",
-        }
+        protected = bool(record.get("protected", False)) or status in protected_status_values()
         normalized.append(
             {
                 "source": record.get("source", "unknown"),

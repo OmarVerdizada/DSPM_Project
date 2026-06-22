@@ -1695,6 +1695,32 @@ tbody tr.row-flash {
   color: #b45309 !important;
 }
 
+.hash-change-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 5px;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, #f59e0b 30%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, #f59e0b 8%, var(--card));
+  color: #92400e;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.hash-change-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 999px;
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px color-mix(in srgb, #f59e0b 16%, transparent);
+}
+
 .hash-comparison-card {
   display: grid;
   gap: 10px;
@@ -6549,6 +6575,11 @@ body.sidebar-collapsed .sidebar-toggle:hover {
 .risk-filter.protected {
   --filter-tone: var(--filter-protected);
   --filter-text: var(--filter-protected-text);
+}
+
+.risk-filter.hash-changed {
+  --filter-tone: #f59e0b;
+  --filter-text: #92400e;
 }
 
 body.sidebar-collapsed .sidebar-toggle {

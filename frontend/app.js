@@ -65,8 +65,6 @@ const fileServerContext = document.querySelector("#file-server-context");
 const endpointContext = document.querySelector("#endpoint-context");
 const findingsSignalSummary = document.querySelector("#findings-signal-summary");
 const findingsPrioritySummary = document.querySelector("#findings-priority-summary");
-const exposurePermissionsSummary = document.querySelector("#exposure-permissions-summary");
-const exposureCoverageSummary = document.querySelector("#exposure-coverage-summary");
 const refreshExecutiveBtn = document.querySelector("#refresh-executive-btn");
 const executiveHero = document.querySelector("#executive-hero");
 const riskDistribution = document.querySelector("#risk-distribution");
@@ -428,6 +426,7 @@ function readPayload() {
     selectedExtensions.push(searchedExtension);
   }
   const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
+  const allKnownExtensions = isAllKnownExtensionSelection(selectedFileExtensions);
   return {
     server: data.get("server") || "",
     domain: data.get("domain") || "WORKGROUP",
@@ -436,8 +435,8 @@ function readPayload() {
     credential_ref: data.get("credential_ref") || "",
     local_path: data.get("local_path") || "enterprise_test_data",
     max_depth: Number(data.get("max_depth") || 4),
-    allowed_extensions: selectedFileExtensions,
-    extension_filter_enabled: selectedFileExtensions.length > 0,
+    allowed_extensions: allKnownExtensions ? [] : selectedFileExtensions,
+    extension_filter_enabled: !allKnownExtensions && selectedFileExtensions.length > 0,
     include_hidden: true,
     include_system: selectedExtensions.includes("__system__"),
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
@@ -452,6 +451,13 @@ function readPayload() {
 function readSelectedExtensions(list = allowedExtensionsList) {
   if (!list) return [];
   return [...list.querySelectorAll("input[type='checkbox']:checked")].map((input) => input.value);
+}
+
+function isAllKnownExtensionSelection(selectedFileExtensions = []) {
+  const known = getExtensionOptions().map(([extension]) => extension);
+  if (!known.length || selectedFileExtensions.length < known.length) return false;
+  const selected = new Set(selectedFileExtensions);
+  return known.every((extension) => selected.has(extension));
 }
 
 function readSearchExtension(search) {
@@ -692,12 +698,12 @@ function addCustomExtensionFromInput(input, list, search) {
 
 function getEndpointScopeConfig(scope = endpointPathScope?.value || "default") {
   const configs = {
-    default: { paths: ["desktop", "documents", "downloads"], depth: 5, label: "User profile quick scan" },
-    desktop: { paths: ["desktop"], depth: 3, label: "Desktop only" },
-    documents: { paths: ["documents"], depth: 4, label: "Documents only" },
-    downloads: { paths: ["downloads"], depth: 3, label: "Downloads only" },
-    onedrive: { paths: ["onedrive"], depth: 5, label: "OneDrive only" },
-    all: { paths: ["all"], depth: 6, label: "Entire target profile" },
+    default: { paths: ["desktop", "documents", "downloads", "onedrive"], depth: 6, label: "User profile quick scan" },
+    desktop: { paths: ["desktop"], depth: 6, label: "Desktop only" },
+    documents: { paths: ["documents"], depth: 8, label: "Documents only" },
+    downloads: { paths: ["downloads"], depth: 6, label: "Downloads only" },
+    onedrive: { paths: ["onedrive"], depth: 8, label: "OneDrive only" },
+    all: { paths: ["all"], depth: 8, label: "Entire target profile" },
     c_drive: { paths: ["c_drive"], depth: 3, label: "C drive data scan" },
     all_fixed_drives: { paths: ["all_fixed_drives"], depth: 3, label: "All fixed drives" },
     custom: { paths: readEndpointCustomPaths(), depth: 4, label: "Custom paths" },
@@ -725,7 +731,9 @@ function readEndpointPayload() {
     selectedExtensions.push(searchedExtension);
   }
   const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
-  const archiveOnlyFilter = selectedFileExtensions.length > 0 && selectedFileExtensions.every((extension) => ARCHIVE_EXTENSIONS.has(extension));
+  const allKnownExtensions = isAllKnownExtensionSelection(selectedFileExtensions);
+  const effectiveFileExtensions = allKnownExtensions ? [] : selectedFileExtensions;
+  const archiveOnlyFilter = effectiveFileExtensions.length > 0 && effectiveFileExtensions.every((extension) => ARCHIVE_EXTENSIONS.has(extension));
   const scope = endpointPathScope.value;
   const scopeConfig = getEndpointScopeConfig(scope);
   const targetUsername = document.querySelector("#endpoint-target-username").value.trim();
@@ -748,8 +756,8 @@ function readEndpointPayload() {
     read_acl: document.querySelector("#endpoint-read-acl")?.checked || false,
     inspect_archives: document.querySelector("#endpoint-inspect-archives")?.checked || false,
     async_scan: document.querySelector("#endpoint-async-scan")?.checked || false,
-    allowed_extensions: selectedFileExtensions,
-    extension_filter_enabled: selectedFileExtensions.length > 0,
+    allowed_extensions: effectiveFileExtensions,
+    extension_filter_enabled: effectiveFileExtensions.length > 0,
     include_hidden: true,
     include_system: selectedExtensions.includes("__system__"),
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
@@ -1017,7 +1025,7 @@ function updateEndpointCustomPathState(isBusy = false) {
     if (["default", "desktop", "documents", "downloads", "onedrive", "all"].includes(scope) && !targetUser) {
       endpointStatus.textContent = "Enter Target Windows user for profile scopes. Use C drive, All fixed drives, or Custom paths without a profile user.";
     } else if (scope === "default") {
-      endpointStatus.textContent = "Quick scan checks the target user's Desktop, Documents, Downloads, and OneDrive equivalents.";
+      endpointStatus.textContent = "User profile quick scan means Desktop, Documents, Downloads, OneDrive, and OneDrive - tenant folders under the target Windows profile.";
     } else if (["desktop", "documents", "downloads"].includes(scope)) {
       endpointStatus.textContent = "Selected profile folder scan uses the target user's real C:\\Users profile and OneDrive equivalents.";
     } else if (scope === "onedrive") {
@@ -1263,7 +1271,6 @@ function updateSummaryFromFiles(files = []) {
   renderExecutiveExperience();
   renderScanContextPanels();
   renderFindingsWorkspace();
-  renderExposureWorkspace();
 }
 
 function isSampleDataPath(value = "") {
@@ -1421,100 +1428,6 @@ function renderFindingsWorkspace() {
     : '<div class="empty compact">No priority finding queue for the latest scan.</div>';
 }
 
-function renderExposureWorkspace() {
-  if (!exposurePermissionsSummary || !exposureCoverageSummary) return;
-  exposurePermissionsSummary.className = "summary-list exposure-summary-list";
-  exposureCoverageSummary.className = "summary-list coverage-summary-list";
-
-  if (!latestFiles.length) {
-    exposurePermissionsSummary.innerHTML = `
-      <div class="exposure-kpi-grid">
-        <div class="exposure-kpi high"><span>Broad access</span><strong>0</strong><small>ACL signals</small></div>
-        <div class="exposure-kpi medium"><span>Hidden files</span><strong>0</strong><small>discovery scope</small></div>
-        <div class="exposure-kpi low"><span>Sources</span><strong>0</strong><small>active connectors</small></div>
-      </div>
-      <div class="summary-row exposure-row"><span><b>ACL posture</b><small>Enable endpoint ACL reading or SMB permission enrichment.</small></span><strong>READY</strong></div>
-      <div class="summary-row exposure-row"><span><b>Share exposure</b><small>Writable, broad, hidden, and admin-share signals will be grouped here.</small></span><strong>0</strong></div>
-    `;
-    exposureCoverageSummary.innerHTML = `
-      <div class="coverage-overview-card">
-        <div><span>Scan coverage</span><strong>0%</strong><small>No file content has been previewed yet.</small></div>
-        <div class="coverage-meter" aria-hidden="true"><span style="width:4%"></span></div>
-      </div>
-      ${renderCoverageBars([
-        ["Content previewed", 0, "low"],
-        ["Metadata-only files", 0, "medium"],
-        ["Archive entries", 0, "high"],
-        ["Total files", 0, "neutral"],
-      ], 1)}
-    `;
-    return;
-  }
-
-  const broad = latestFiles.filter((file) => file.risk?.reasons?.some((reason) => /everyone|authenticated users|broad|writable|permission|acl/i.test(reason))).length;
-  const hidden = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
-  const protectedFiles = latestFiles.filter(isProtectedFile);
-  const metadataOnly = latestFiles.filter((file) => file.content_status === "metadata_only" || file.content_scannable === false).length;
-  const archiveEntries = latestFiles.filter((file) => file.scan_mode === "archive_entry" || String(file.path || "").includes("!")).length;
-  const previewable = latestFiles.filter((file) => file.preview?.available).length;
-  const previewPercent = Math.max(4, Math.min(100, Math.round((previewable / Math.max(1, latestFiles.length)) * 100)));
-  const sources = new Set(latestFiles.map((file) => file.source || file.share || "unknown")).size;
-
-  const riskyFolders = Array.from(
-    latestFiles.reduce((map, file) => {
-      const path = String(file.path || file.name || "Unknown");
-      const folder = path.includes("\\") ? path.split("\\").slice(0, -1).join("\\") : path.split("/").slice(0, -1).join("/") || file.source || "Workspace";
-      const existing = map.get(folder) || { folder, count: 0, risk: 0, critical: 0 };
-      const effective = getEffectiveRisk(file);
-      existing.count += 1;
-      existing.risk += effective.score;
-      existing.critical += effective.level === "CRITICAL" ? 1 : 0;
-      map.set(folder, existing);
-      return map;
-    }, new Map()).values()
-  ).sort((a, b) => b.risk - a.risk).slice(0, 6);
-
-  exposurePermissionsSummary.innerHTML = `
-    <div class="exposure-kpi-grid">
-      <div class="exposure-kpi high"><span>Broad access</span><strong>${broad}</strong><small>permission signals</small></div>
-      <div class="exposure-kpi medium"><span>Hidden files</span><strong>${hidden}</strong><small>in scan scope</small></div>
-      <div class="exposure-kpi low"><span>Sources</span><strong>${sources}</strong><small>active sources</small></div>
-    </div>
-    <div class="scroll-card-list exposure-folder-list">
-      ${riskyFolders.map((item) => `
-        <div class="summary-row exposure-row">
-          <span>
-            <b>${escapeHtml(item.folder || "Workspace")}</b>
-            <small>${item.count} file${item.count === 1 ? "" : "s"} &middot; ${item.critical} critical &middot; exposure score ${Math.round(item.risk)}</small>
-          </span>
-          <strong>${item.count}</strong>
-        </div>
-      `).join("")}
-    </div>
-  `;
-
-  const coverageRows = [
-    ["Content previewed", previewable, "low"],
-    ["Metadata-only files", metadataOnly, "medium"],
-    ["Archive entries", archiveEntries, "high"],
-    ["Protected / locked", protectedFiles.length, "critical"],
-    ["Total files", latestFiles.length, "neutral"],
-  ];
-
-  exposureCoverageSummary.innerHTML = `
-    <div class="coverage-overview-card">
-      <div>
-        <span>Preview coverage</span>
-        <strong>${previewPercent}%</strong>
-        <small>${previewable} of ${latestFiles.length} files have readable preview content.</small>
-      </div>
-      <div class="coverage-meter" aria-hidden="true"><span style="width:${previewPercent}%"></span></div>
-    </div>
-    ${renderCoverageBars(coverageRows, latestFiles.length)}
-    ${protectedFiles.length ? `<div class="protected-file-stack coverage-scroll-list">${protectedFiles.slice(0, 12).map((file) => `<div class="summary-row coverage-row critical protected-file-row"><span><b>${escapeHtml(file.name || file.path || "Protected file")}</b><small>${escapeHtml(getProtectionLabel(file))} &middot; ${escapeHtml(file.path || "")}</small></span><strong>LOCKED</strong></div>`).join("")}</div>` : ""}
-  `;
-}
-
 function renderCoverageBars(rows, total) {
   const max = Math.max(Number(total) || 0, ...rows.map(([, value]) => Number(value) || 0), 1);
   return `
@@ -1620,8 +1533,8 @@ function renderRows(files) {
               ${file.extension ? `<span>${escapeHtml(file.extension)}</span>` : ""}
               <span>${escapeHtml(formatBytes(file.size))}</span>
               <span>${escapeHtml(sourceName)}</span>
-              ${hashChanged ? '<span class="hash-change-chip">Hash changed</span>' : ""}
             </div>
+            ${hashChanged ? '<div class="hash-change-note"><span class="hash-change-dot" aria-hidden="true"></span><span>Hash changed since previous scan</span></div>' : ""}
             ${fileFlags.length ? `<div class="file-flags polished-flags">${fileFlags.map((flag) => `<span>${escapeHtml(flag)}</span>`).join("")}</div>` : ""}
             <div class="subtext path-subtext">${escapeHtml(path)}</div>
             ${preview}
@@ -1664,7 +1577,8 @@ function getVisibleInventoryFiles(files = latestFiles) {
   return (files || []).filter((file) => {
     const risk = getEffectiveRisk(file).level;
     if (inventoryRiskFilter === "PROTECTED" && !isProtectedFile(file)) return false;
-    if (!["ALL", "PROTECTED"].includes(inventoryRiskFilter) && risk !== inventoryRiskFilter) return false;
+    if (inventoryRiskFilter === "HASH_CHANGED" && !hasHashChanged(file)) return false;
+    if (!["ALL", "PROTECTED", "HASH_CHANGED"].includes(inventoryRiskFilter) && risk !== inventoryRiskFilter) return false;
     const source = getInventorySourceValue(file);
     if (inventorySourceFacet !== "ALL" && source !== inventorySourceFacet) return false;
     if (inventoryFindingFacet !== "ALL" && !getFileFindingTypes(file).includes(inventoryFindingFacet)) return false;
@@ -1681,7 +1595,9 @@ function renderInventoryControlState(files = latestFiles, visible = getVisibleIn
       ? (files || []).length
       : risk === "PROTECTED"
         ? (files || []).filter(isProtectedFile).length
-        : (files || []).filter((file) => getEffectiveRisk(file).level === risk).length;
+        : risk === "HASH_CHANGED"
+          ? (files || []).filter(hasHashChanged).length
+          : (files || []).filter((file) => getEffectiveRisk(file).level === risk).length;
     button.dataset.count = String(count);
   });
   if (inventoryContextMetrics) {
@@ -1802,7 +1718,6 @@ function hydrateNavigation() {
     "file-servers": "FS",
     endpoint: "EP",
     findings: "FN",
-    exposure: "EX",
     reports: "RP",
     history: "HS",
     security: "SO",
@@ -4746,7 +4661,7 @@ form.addEventListener("submit", async (event) => {
   setStatus("Fetching and assessing data...");
   clearResultsFilter();
   renderSkeletonRows();
-  renderScanRunningContext("file-server", "Scanning file-server or local dataset. Results will update across Overview, Inventory, Findings, Exposure, Risk, and Endpoint context.");
+  renderScanRunningContext("file-server", "Scanning file-server or local dataset. Results will update across Overview, Inventory, Findings, Risk, and Endpoint context.");
   setScanProgress(true, 8, "Preparing scan...");
   let simulatedProgress = 8;
   const progressTimer = window.setInterval(() => {
@@ -4870,7 +4785,7 @@ endpointScanBtn.addEventListener("click", async () => {
   clearResultsFilter();
   clearActiveScanReport("Endpoint scan running. Previous SMB/demo results cleared.");
   renderSkeletonRows();
-  renderScanRunningContext("endpoint", "Scanning endpoint paths through WinRM. Results will update across Overview, Inventory, Findings, Exposure, Risk, and File Server context.");
+  renderScanRunningContext("endpoint", "Scanning endpoint paths through WinRM. Results will update across Overview, Inventory, Findings, Risk, and File Server context.");
   setEndpointScanProgress(true, 8, "Preparing endpoint scan...");
   const endpointProgressTimer = window.setInterval(() => {
     const current = Number.parseFloat(endpointScanProgressBar?.style.width || "8") || 8;
@@ -5290,7 +5205,6 @@ renderReportPreview();
 renderExecutiveExperience();
 renderScanContextPanels();
 renderFindingsWorkspace();
-renderExposureWorkspace();
 renderIntegrations();
 if (safeSessionGet("dspm-sidebar-collapsed") === "1") {
   setSidebarCollapsed(true);

@@ -210,7 +210,7 @@ class EndpointScanRequest(BaseModel):
     username: str = Field(default="", max_length=160)
     password: str = Field(default="", max_length=512)
     credential_ref: str = Field(default="", max_length=120)
-    paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"], max_length=40)
+    paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads", "onedrive"], max_length=40)
     max_depth: int = Field(default=12, ge=1, le=12)
     read_content: bool = True
     read_acl: bool = False
@@ -268,7 +268,7 @@ class EndpointScanRequest(BaseModel):
                 cleaned.append(value)
                 continue
             raise ValueError("Endpoint paths must be known aliases or absolute Windows paths")
-        return cleaned or ["desktop", "documents", "downloads"]
+        return cleaned or ["desktop", "documents", "downloads", "onedrive"]
 
 
 class LocalWinRMActivationRequest(BaseModel):
@@ -1355,14 +1355,38 @@ def _run_local_endpoint_scan_payload(
 def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list[str]]:
     profile = config.target_username.strip() or (os.getenv("USERNAME") or "").strip()
     users_root = Path("C:/Users")
-    profile_root = users_root / profile if profile else users_root
-    paths = [item.strip() for item in config.paths if item.strip()] or ["desktop", "documents", "downloads"]
+    def compact(value: str) -> str:
+        return "".join(char for char in value.lower() if char.isalnum())
+
+    def profile_matches(actual: str, requested: str) -> bool:
+        actual_lower = actual.lower()
+        requested_lower = requested.lower()
+        actual_compact = compact(actual_lower)
+        requested_compact = compact(requested_lower)
+        return (
+            actual_lower == requested_lower
+            or actual_lower.startswith(f"{requested_lower}.")
+            or actual_lower.startswith(f"{requested_lower}_")
+            or actual_lower.endswith(f".{requested_lower}")
+            or requested_lower in actual_lower
+            or actual_lower in requested_lower
+            or (requested_compact and requested_compact in actual_compact)
+            or (actual_compact and actual_compact in requested_compact)
+        )
+
+    if profile and users_root.exists():
+        matches = [item for item in users_root.iterdir() if item.is_dir() and profile_matches(item.name, profile)]
+        profile_root = matches[0] if matches else users_root / profile
+    else:
+        profile_root = users_root
+    paths = [item.strip() for item in config.paths if item.strip()] or ["desktop", "documents", "downloads", "onedrive"]
     resolved: list[Path] = []
 
     for item in paths:
         lowered = item.lower()
         if lowered == "profile_standard":
-            candidates = [profile_root / folder for folder in ("Desktop", "Documents", "Downloads", "OneDrive")]
+            candidates = [profile_root / folder for folder in ("Desktop", "Documents", "Downloads")]
+            candidates.extend([item for item in profile_root.glob("OneDrive*") if item.is_dir()] if profile_root.exists() else [])
         elif lowered == "all":
             candidates = [profile_root]
         elif lowered == "c_drive":
@@ -1375,6 +1399,7 @@ def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list
         elif lowered in {"desktop", "documents", "downloads"}:
             folder = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads"}[lowered]
             candidates = [profile_root / folder, profile_root / "OneDrive" / folder]
+            candidates.extend([item / folder for item in profile_root.glob("OneDrive*") if item.is_dir()] if profile_root.exists() else [])
         else:
             candidates = [Path(item)]
         resolved.extend(candidate.expanduser().resolve() for candidate in candidates)
@@ -1456,7 +1481,7 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         password=password,
         domain=domain,
         target_username=payload.target_username.strip(),
-        paths=[item.strip() for item in payload.paths if item.strip()] or ["desktop", "documents", "downloads"],
+        paths=[item.strip() for item in payload.paths if item.strip()] or ["desktop", "documents", "downloads", "onedrive"],
         max_depth=payload.max_depth,
         read_content=payload.read_content,
         allowed_extensions=allowed_extensions,
