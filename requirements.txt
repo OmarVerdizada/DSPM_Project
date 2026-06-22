@@ -1,0 +1,18 @@
+# Runtime API and web server
+fastapi==0.136.1
+uvicorn==0.46.0
+pydantic==2.13.4
+
+# SMB/file-server connector
+pysmb==1.2.10
+pywinrm==0.5.0
+
+# Local configuration and encrypted credential vault
+python-dotenv==1.2.2
+cryptography==45.0.7
+
+# Test/client utility used by FastAPI/Starlette tooling
+httpx==0.28.1
+
+# SQLite is provided by Python's built-in sqlite3 module.
+# The frontend is static HTML/CSS/JavaScript and has no npm dependencies.
