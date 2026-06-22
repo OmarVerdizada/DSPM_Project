@@ -162,20 +162,20 @@ Test-NetConnection 192.0.2.150 -Port 5985
 
 ## AD / Windows Environment Checklist
 
-Bu project AD-den tam inventory cekmir; AD/Windows muhitinde SMB file-server ve WinRM endpoint scan aparir. AD terefinde qisa hazirliq:
+This project does not perform full AD inventory collection. It uses AD/Windows access to scan SMB file servers and WinRM-enabled Windows endpoints. Prepare the environment with least privilege:
 
-- Domain service account: `DOMAIN\svc_dspm_scan` kimi ayrica hesab yaradın. Domain Admin etmeyin; file-share scan ucun lazim olan share ve NTFS path-lerde `Read`, `List folder contents`, `Read attributes`, `Read permissions` verin.
-- File server local/admin account: yalniz `C$`, `D$` kimi admin disk share-lar scan olunacaqsa file server-de local administrator ve ya hemin serverde admin huquqlu domain group lazimdir. Normal paylasimlar ucun local admin mecburi deyil.
-- Endpoint local admin account/group: workstation scan ucun hedef kompüterlerin local `Administrators` qrupunda olan hesab lazimdir. Praktik model: AD group `GG_DSPM_Endpoint_Local_Admins` yaradın, ora `svc_dspm_scan` ve ya ayrica `svc_dspm_endpoint` hesabini əlavə edin, sonra GPO ile bu group-u workstation-larin local `Administrators` qrupuna salin.
-- Scope ayirma: file server oxuma hesabi ile endpoint local-admin hesabini ayirmaq daha yaxsidir. Domain Admin, Enterprise Admin ve DC admin credential-larini bu tool-a vermeyin.
-- SMB/File server portu: DSPM serverden file serverlere TCP `445` aciq olmalidir. DNS adlari ve ya IP-lər `File server / IP` sahəsində işləməlidir.
-- WinRM portlari: workstation endpoint scan ucun TCP `5985` HTTP lazimdir; SSL istifade edirsinizse `5986` de aciq olmalidir.
-- WinRM GPO: `Allow remote server management through WinRM` aktiv edin, IPv4/IPv6 filter-i uygun edin (`*` lab ucun kifayetdir), `WinRM` service-i Automatic/Running saxlayin.
-- Firewall GPO: Domain profile-de `Windows Remote Management`, `Windows Management Instrumentation (WMI)` ve TCP `5985` inbound rule-larini aktiv edin. Birdefelik remote bootstrap istifade olunacaqsa WMI/DCOM da kecmelidir.
-- Remote UAC/local admin: local administrator hesabi ile remote ishleyeceksinizse `LocalAccountTokenFilterPolicy=1` lazim ola biler; GPO ile vermek daha stabil yoldur.
-- ACL risk analizi: project `Everyone`, `Domain Users`, `Authenticated Users`, `Users`, `Guest`, `Administrators`, `Domain Admins`, `Enterprise Admins` kimi principal-lari oxuyub broad/writable/privileged access kimi score edir. Ona gore hesab `Get-Acl` oxuya bilmelidir.
-- GPO targeting: bu policy-ləri butun domain-e yox, test OU ve ya scan olunacaq workstation/file-server OU-larina link etmek daha tehlukesizdir.
-- Test ardicilligi: evvel `Test-NetConnection <host> -Port 445` file server ucun, `Test-NetConnection <host> -Port 5985` endpoint ucun yoxlayin; sonra UI-da `Test connection` ve `Prepare & Test target WinRM` edin.
+- Domain service account: create a dedicated account such as `DOMAIN\svc_dspm_scan`. Do not make it a Domain Admin. For file-share scans, grant only the required share and NTFS permissions: `Read`, `List folder contents`, `Read attributes`, and `Read permissions`.
+- File server local/admin account: local administrator rights are needed only when scanning hidden administrative disk shares such as `C$` or `D$`. Normal shared folders do not require local admin rights if the service account has read access.
+- Endpoint local admin account/group: workstation scans require an account that is a local administrator on the target endpoint. A practical model is to create `GG_DSPM_Endpoint_Local_Admins`, add the scan account or a separate `svc_dspm_endpoint` account, and use GPO to place that group in local `Administrators` on scoped workstations.
+- Credential separation: keep file-server read access and endpoint local-admin access separate when possible. Do not provide Domain Admin, Enterprise Admin, or domain-controller admin credentials to the tool.
+- SMB/file-server connectivity: allow TCP `445` from the DSPM server to target file servers. DNS names or IP addresses must resolve from the `File server / IP` field.
+- WinRM connectivity: allow TCP `5985` for HTTP WinRM endpoint scans. If SSL WinRM is used, allow TCP `5986`.
+- WinRM GPO: enable `Allow remote server management through WinRM`, set appropriate IPv4/IPv6 filters (`*` is acceptable for lab use), and keep the `WinRM` service Automatic/Running.
+- Firewall GPO: enable inbound rules for `Windows Remote Management`, `Windows Management Instrumentation (WMI)`, and TCP `5985` on the Domain profile. WMI/DCOM must also be reachable if one-time remote bootstrap is used.
+- Remote UAC/local admin: if local administrator credentials are used remotely, `LocalAccountTokenFilterPolicy=1` may be required. Prefer setting this through a scoped GPO.
+- ACL risk analysis: the project reads principals such as `Everyone`, `Domain Users`, `Authenticated Users`, `Users`, `Guest`, `Administrators`, `Domain Admins`, and `Enterprise Admins` to score broad, writable, and privileged access. The scan account must be able to run `Get-Acl` against scanned paths.
+- GPO targeting: link these policies only to test, workstation, or file-server OUs that are in scan scope instead of the entire domain.
+- Validation order: first run `Test-NetConnection <host> -Port 445` for file servers and `Test-NetConnection <host> -Port 5985` for endpoints, then use `Test connection` and `Prepare & Test target WinRM` in the UI.
 
 ## API Overview
 
