@@ -1381,7 +1381,7 @@ def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list
             for item in users_root.iterdir()
             if item.is_dir()
             and item.name.lower()
-            not in {"all users", "default", "default user", "public", "defaultapppool", "administrator"}
+            not in {"all users", "default", "default user", "public", "defaultapppool"}
             and not item.name.lower().startswith("default.")
         ]
     if profile and users_root.exists():
@@ -1432,7 +1432,7 @@ def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list
                 candidates.extend(root / folder for folder in ("Desktop", "Documents", "Downloads"))
                 candidates.extend([onedrive for onedrive in root.glob("OneDrive*") if onedrive.is_dir()] if root.exists() else [])
         elif lowered == "all":
-            candidates = profile_roots
+            candidates = valid_profiles or profile_roots
         elif lowered == "c_drive":
             candidates = [Path("C:/")]
         elif lowered == "onedrive":

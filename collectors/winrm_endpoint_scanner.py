@@ -411,7 +411,7 @@ class WinRMEndpointScanner:
                 else:
                     resolved.append("__DSPM_PROFILE_STANDARD__")
             elif lowered == "all":
-                resolved.append(f"__DSPM_PROFILE_ROOT_FOR__:{profile}" if profile else "__DSPM_ALL_PROFILES__")
+                resolved.append("__DSPM_ALL_PROFILES__")
             elif lowered == "c_drive":
                 resolved.append("C:\\")
             elif lowered == "onedrive":
@@ -654,7 +654,6 @@ def _scan_script(
       $normalized = $path.ToLowerInvariant()
       if (-not $normalized.EndsWith([string][char]92)) {{ $normalized = $normalized + [string][char]92 }}
       $skipFragments = @(
-        "\\enterprise_test_data\\",
         "\\dspm_project-main\\",
         "\\.codex\\",
         "\\.git\\",
@@ -691,8 +690,7 @@ def _scan_script(
         "default",
         "default user",
         "public",
-        "defaultapppool",
-        "administrator"
+        "defaultapppool"
       )
       if ($skipNames -contains $name) {{ return $false }}
       if ($name.StartsWith("default.")) {{ return $false }}
@@ -1207,6 +1205,10 @@ def _scan_script(
           $stream.Dispose()
         }}
       }} catch {{
+        $result.protected = $true
+        $result.content_status = "encrypted"
+        $result.protection_type = "office_encryption"
+        $result.scan_error = "Office document package could not be opened and may be encrypted"
         return [PSCustomObject]$result
       }}
       return [PSCustomObject]$result

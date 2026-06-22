@@ -263,7 +263,13 @@ def openxml_protection_metadata(path: Path) -> dict[str, str | bool]:
                     "scan_error": "Office document package is encrypted",
                 }
     except (OSError, RuntimeError, zipfile.BadZipFile):
-        return {}
+        return {
+            "protected": True,
+            "content_status": "encrypted",
+            "content_scannable": False,
+            "protection_type": "office_encryption",
+            "scan_error": "Office document package could not be opened and may be encrypted",
+        }
     return {}
 
 

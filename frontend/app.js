@@ -703,7 +703,7 @@ function getEndpointScopeConfig(scope = endpointPathScope?.value || "default") {
     documents: { paths: ["documents"], depth: 12, label: "Documents only" },
     downloads: { paths: ["downloads"], depth: 12, label: "Downloads only" },
     onedrive: { paths: ["onedrive"], depth: 12, label: "OneDrive only" },
-    all: { paths: ["all"], depth: 12, label: "Entire target profile" },
+    all: { paths: ["all"], depth: 12, label: "All user profiles" },
     c_drive: { paths: ["c_drive"], depth: 6, label: "C drive data scan" },
     all_fixed_drives: { paths: ["all_fixed_drives"], depth: 6, label: "All fixed drives" },
     custom: { paths: readEndpointCustomPaths(), depth: 12, label: "Custom paths" },
@@ -740,8 +740,8 @@ function readEndpointPayload() {
   if (scope === "custom" && !scopeConfig.paths.length) {
     throw new Error("Enter at least one custom endpoint path.");
   }
-  if (["default", "desktop", "documents", "downloads", "onedrive", "all"].includes(scope) && !targetUsername) {
-    throw new Error("Enter Target Windows user for profile scopes, or choose C drive / All fixed drives / Custom paths.");
+  if (["default", "desktop", "documents", "downloads", "onedrive"].includes(scope) && !targetUsername) {
+    throw new Error("Enter Target Windows user for single-user profile scopes, or choose All user profiles / C drive / All fixed drives / Custom paths.");
   }
   return {
     host: document.querySelector("#endpoint-host").value.trim(),
@@ -1029,8 +1029,8 @@ function updateEndpointCustomPathState(isBusy = false) {
   if (endpointStatus && !isBusy) {
     const scope = endpointPathScope.value;
     const targetUser = document.querySelector("#endpoint-target-username")?.value.trim();
-    if (["default", "desktop", "documents", "downloads", "onedrive", "all"].includes(scope) && !targetUser) {
-      endpointStatus.textContent = "Enter Target Windows user for profile scopes. Use C drive, All fixed drives, or Custom paths without a profile user.";
+    if (["default", "desktop", "documents", "downloads", "onedrive"].includes(scope) && !targetUser) {
+      endpointStatus.textContent = "Enter Target Windows user for single-user profile scopes. Use All user profiles, C drive, All fixed drives, or Custom paths without a profile user.";
     } else if (scope === "default") {
       endpointStatus.textContent = "User profile quick scan means Desktop, Documents, Downloads, OneDrive, and OneDrive - tenant folders under the target Windows profile.";
     } else if (["desktop", "documents", "downloads"].includes(scope)) {
@@ -1038,7 +1038,7 @@ function updateEndpointCustomPathState(isBusy = false) {
     } else if (scope === "onedrive") {
       endpointStatus.textContent = "OneDrive scan checks OneDrive and OneDrive - tenant folders under the target user's profile.";
     } else if (scope === "all") {
-      endpointStatus.textContent = "Entire profile scans the target user's full C:\\Users profile with browser/temp/project folders skipped.";
+      endpointStatus.textContent = "All user profiles scans every real C:\\Users profile the admin credential can read, with browser/temp/project folders skipped.";
     } else if (scope === "c_drive") {
       endpointStatus.textContent = "C drive data scan checks C:\\ while skipping OS, browser cache, temp, and project folders. Use Custom paths for exact deep locations.";
     } else if (scope === "all_fixed_drives") {

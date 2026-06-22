@@ -222,6 +222,7 @@ to exercise detection logic.
                 share_root / "00_share_notice.txt",
                 f"{COMPANY} {department}/{share}. Owner: {department.lower()}-owner@{DOMAIN}. Classification: Internal use only.",
             )
+            add_share_attribute_samples(root, share_root, department, share, created_files)
             for file_index in range(files_per_department):
                 absolute_index = dept_index * 1000 + share_index * 100 + file_index
                 target = share_root / folder_for(file_index)
@@ -461,6 +462,43 @@ password=HiddenWinter2026!
         "share": "Audit",
         "extension": ".zip",
         "archive_entries": True,
+    })
+
+
+def add_share_attribute_samples(root: Path, share_root: Path, department: str, share: str, created_files: list[dict[str, object]]) -> None:
+    attribute_root = share_root / "AttributeTests"
+    hidden_file = attribute_root / f".hidden_{department.lower()}_{share.lower()}_scan_test.txt"
+    write_text(
+        hidden_file,
+        f"""
+CONFIDENTIAL hidden attribute test for {department}/{share}.
+api_key=crg_hidden_{department.lower()}_{share.lower()}_SYNTHETIC
+Purpose: validates endpoint and file-server hidden-file scanning.
+""",
+    )
+    set_windows_attributes(hidden_file, "+H")
+    created_files.append({
+        "path": str(hidden_file.relative_to(root)),
+        "department": department,
+        "share": share,
+        "extension": ".txt",
+        "hidden": True,
+        "attribute_test": True,
+    })
+
+    system_file = attribute_root / f"system_{department.lower()}_{share.lower()}_scan_test.sys"
+    system_file.parent.mkdir(parents=True, exist_ok=True)
+    system_file.write_bytes(
+        f"SYSTEM_DSPM_ATTRIBUTE_TEST\x00department={department};share={share};owner={department.lower()}-owner@{DOMAIN}".encode("utf-8")
+    )
+    set_windows_attributes(system_file, "+S")
+    created_files.append({
+        "path": str(system_file.relative_to(root)),
+        "department": department,
+        "share": share,
+        "extension": ".sys",
+        "system": True,
+        "attribute_test": True,
     })
 
 
