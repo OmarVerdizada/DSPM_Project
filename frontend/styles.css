@@ -6116,21 +6116,15 @@ body.sidebar-collapsed .menu-open-toggle {
   }
 }
 
-/* DSPM v94: dense remediation/exposure cards with hard wrapping for long scan paths. */
+/* DSPM v94: dense remediation cards with hard wrapping for long scan paths. */
 #tab-risk .visual-panel,
-#tab-exposure .visual-panel,
 #tab-risk .remediation-workflow,
-#tab-risk .remediation-list,
-#tab-exposure #exposure-permissions-summary,
-#tab-exposure #exposure-coverage-summary {
+#tab-risk .remediation-list {
   min-width: 0 !important;
   max-width: 100% !important;
 }
 
-#tab-risk .scroll-card-list,
-#tab-exposure .scroll-card-list,
-#exposure-permissions-summary,
-#exposure-coverage-summary .protected-file-stack {
+#tab-risk .scroll-card-list {
   display: grid !important;
   gap: 7px !important;
   min-width: 0 !important;

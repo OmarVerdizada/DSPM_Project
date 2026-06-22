@@ -581,6 +581,10 @@ def _scan_script(
       requested_roots = @($targetPaths)
       resolved_roots = @()
       missing_roots = @()
+      root_fallbacks = @()
+      list_errors = @()
+      visited_dirs = 0
+      empty_dirs = 0
       visited_files = 0
       matched_files = 0
       archive_files = 0
@@ -695,6 +699,13 @@ def _scan_script(
       return $true
     }}
 
+    function Add-DspmUniqueRoot($roots, $path) {{
+      if ([string]::IsNullOrWhiteSpace($path)) {{ return }}
+      if ((Test-Path -LiteralPath $path) -and -not $roots.Contains($path)) {{
+        $roots.Add($path) | Out-Null
+      }}
+    }}
+
     function Normalize-DspmProfileName($value) {{
       return ([regex]::Replace(([string]$value).ToLowerInvariant(), "[^a-z0-9]", ""))
     }}
@@ -726,9 +737,7 @@ def _scan_script(
         $candidatePaths.Add((Join-Path $_.FullName $folderName)) | Out-Null
       }}
       foreach ($candidatePath in $candidatePaths) {{
-        if ((Test-Path -LiteralPath $candidatePath) -and -not $roots.Contains($candidatePath)) {{
-          $roots.Add($candidatePath) | Out-Null
-        }}
+        Add-DspmUniqueRoot $roots $candidatePath
       }}
     }}
 
@@ -740,12 +749,60 @@ def _scan_script(
       Get-ChildItem -LiteralPath $profileRoot -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
         $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
       }} | ForEach-Object {{
-        if (-not $roots.Contains($_.FullName)) {{
-          $roots.Add($_.FullName) | Out-Null
-        }}
+        Add-DspmUniqueRoot $roots $_.FullName
       }}
       if ($roots.Count -eq $before -and (Test-Path -LiteralPath $profileRoot)) {{
         $roots.Add($profileRoot) | Out-Null
+      }}
+    }}
+
+    function Get-DspmValidProfiles() {{
+      try {{
+        return @(Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+          Test-DspmUserProfileDir $_
+        }})
+      }} catch {{
+        return @()
+      }}
+    }}
+
+    function Get-DspmMatchingProfiles($profileName) {{
+      $matches = New-Object System.Collections.Generic.List[object]
+      if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @($matches.ToArray()) }}
+      $profileNameLower = ([string]$profileName).ToLowerInvariant()
+      foreach ($profileDir in (Get-DspmValidProfiles)) {{
+        if (Test-DspmProfileNameMatch $profileDir.Name $profileNameLower) {{
+          $matches.Add($profileDir) | Out-Null
+        }}
+      }}
+      $literal = Join-Path "C:\\Users" $profileName
+      if ((Test-Path -LiteralPath $literal) -and -not ($matches | Where-Object {{ $_.FullName -eq $literal }})) {{
+        try {{ $matches.Add((Get-Item -LiteralPath $literal -Force -ErrorAction SilentlyContinue)) | Out-Null }} catch {{ }}
+      }}
+      return @($matches.ToArray())
+    }}
+
+    function Add-DspmAllProfileFolderFallback($roots, $folderName, $reason) {{
+      $before = $roots.Count
+      foreach ($profileDir in (Get-DspmValidProfiles)) {{
+        Add-DspmProfileFolderCandidates $roots $profileDir.FullName $folderName
+      }}
+      if ($roots.Count -gt $before) {{
+        $diagnostics.root_fallbacks += $reason
+      }}
+    }}
+
+    function Add-DspmAllOneDriveFallback($roots, $reason) {{
+      $before = $roots.Count
+      foreach ($profileDir in (Get-DspmValidProfiles)) {{
+        Get-ChildItem -LiteralPath $profileDir.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+          $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
+        }} | ForEach-Object {{
+          Add-DspmUniqueRoot $roots $_.FullName
+        }}
+      }}
+      if ($roots.Count -gt $before) {{
+        $diagnostics.root_fallbacks += $reason
       }}
     }}
 
@@ -788,13 +845,11 @@ def _scan_script(
       }}
       if ($root -eq "__DSPM_ALL_ONEDRIVE__") {{
         try {{
-          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            Test-DspmUserProfileDir $_
-          }} | ForEach-Object {{
-            Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+          foreach ($profileDir in (Get-DspmValidProfiles)) {{
+            Get-ChildItem -LiteralPath $profileDir.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
               $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
             }} | ForEach-Object {{
-              $roots.Add($_.FullName) | Out-Null
+              Add-DspmUniqueRoot $roots $_.FullName
             }}
           }}
         }} catch {{
@@ -806,16 +861,14 @@ def _scan_script(
         $profileName = $root.Substring("__DSPM_ONEDRIVE_FOR__:".Length).Trim()
         if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
-          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            Test-DspmProfileNameMatch $_.Name $profileNameLower
-          }} | ForEach-Object {{
-            Get-ChildItem -LiteralPath $_.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
+          foreach ($profileDir in (Get-DspmMatchingProfiles $profileName)) {{
+            Get-ChildItem -LiteralPath $profileDir.FullName -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
               $_.Name -eq "OneDrive" -or $_.Name.StartsWith("OneDrive - ")
             }} | ForEach-Object {{
-              $roots.Add($_.FullName) | Out-Null
+              Add-DspmUniqueRoot $roots $_.FullName
             }}
           }}
+          if ($roots.Count -eq 0) {{ Add-DspmAllOneDriveFallback $roots "onedrive profile fallback: $profileName" }}
         }} catch {{
           return @()
         }}
@@ -851,11 +904,14 @@ def _scan_script(
         $profileName = $root.Substring("__DSPM_PROFILE_STANDARD_FOR__:".Length).Trim()
         if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
-          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            Test-DspmProfileNameMatch $_.Name $profileNameLower
-          }} | ForEach-Object {{
-            Add-DspmProfileStandardCandidates $roots $_.FullName
+          foreach ($profileDir in (Get-DspmMatchingProfiles $profileName)) {{
+            Add-DspmProfileStandardCandidates $roots $profileDir.FullName
+          }}
+          if ($roots.Count -eq 0) {{
+            foreach ($folderName in @("Desktop", "Documents", "Downloads")) {{
+              Add-DspmAllProfileFolderFallback $roots $folderName "profile standard fallback: $profileName"
+            }}
+            Add-DspmAllOneDriveFallback $roots "profile standard onedrive fallback: $profileName"
           }}
         }} catch {{
           return @()
@@ -866,13 +922,14 @@ def _scan_script(
         $profileName = $root.Substring("__DSPM_PROFILE_ROOT_FOR__:".Length).Trim()
         if ([string]::IsNullOrWhiteSpace($profileName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
-          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            Test-DspmProfileNameMatch $_.Name $profileNameLower
-          }} | ForEach-Object {{
-            if (Test-Path -LiteralPath $_.FullName) {{
-              $roots.Add($_.FullName) | Out-Null
+          foreach ($profileDir in (Get-DspmMatchingProfiles $profileName)) {{
+            Add-DspmUniqueRoot $roots $profileDir.FullName
+          }}
+          if ($roots.Count -eq 0) {{
+            foreach ($profileDir in (Get-DspmValidProfiles)) {{
+              Add-DspmUniqueRoot $roots $profileDir.FullName
             }}
+            if ($roots.Count -gt 0) {{ $diagnostics.root_fallbacks += "entire profile fallback: $profileName" }}
           }}
         }} catch {{
           return @()
@@ -887,12 +944,10 @@ def _scan_script(
         $folderName = $parts[1].Trim()
         if ([string]::IsNullOrWhiteSpace($profileName) -or [string]::IsNullOrWhiteSpace($folderName)) {{ return @() }}
         try {{
-          $profileNameLower = $profileName.ToLowerInvariant()
-          Get-ChildItem -LiteralPath "C:\\Users" -Directory -Force -ErrorAction SilentlyContinue | Where-Object {{
-            Test-DspmProfileNameMatch $_.Name $profileNameLower
-          }} | ForEach-Object {{
-            Add-DspmProfileFolderCandidates $roots $_.FullName $folderName
+          foreach ($profileDir in (Get-DspmMatchingProfiles $profileName)) {{
+            Add-DspmProfileFolderCandidates $roots $profileDir.FullName $folderName
           }}
+          if ($roots.Count -eq 0) {{ Add-DspmAllProfileFolderFallback $roots $folderName "$folderName profile fallback: $profileName" }}
         }} catch {{
           return @()
         }}
@@ -1278,7 +1333,14 @@ def _scan_script(
         $diagnostics.skipped_dirs += 1
         return
       }}
-      $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue)
+      $diagnostics.visited_dirs += 1
+      try {{
+        $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop)
+      }} catch {{
+        $diagnostics.list_errors += "$current :: $($_.Exception.Message)"
+        return
+      }}
+      if ($entries.Count -eq 0) {{ $diagnostics.empty_dirs += 1 }}
       foreach ($entry in $entries) {{
         if ($entry.PSIsContainer) {{
           $dirHidden = [bool]($entry.Attributes -band [IO.FileAttributes]::Hidden)

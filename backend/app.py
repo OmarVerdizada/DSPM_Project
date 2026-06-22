@@ -1374,32 +1374,54 @@ def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list
             or (actual_compact and actual_compact in requested_compact)
         )
 
+    valid_profiles = []
+    if users_root.exists():
+        valid_profiles = [
+            item
+            for item in users_root.iterdir()
+            if item.is_dir()
+            and item.name.lower()
+            not in {"all users", "default", "default user", "public", "defaultapppool", "administrator"}
+            and not item.name.lower().startswith("default.")
+        ]
     if profile and users_root.exists():
-        matches = [item for item in users_root.iterdir() if item.is_dir() and profile_matches(item.name, profile)]
-        profile_root = matches[0] if matches else users_root / profile
+        matches = [item for item in valid_profiles if profile_matches(item.name, profile)]
+        literal = users_root / profile
+        if literal.exists() and all(item.resolve() != literal.resolve() for item in matches):
+            matches.append(literal)
+        profile_roots = matches or valid_profiles or [literal]
+    elif users_root.exists():
+        profile_roots = valid_profiles or [users_root]
     else:
-        profile_root = users_root
+        profile_roots = [users_root]
+    profile_root = profile_roots[0]
     paths = [item.strip() for item in config.paths if item.strip()] or ["desktop", "documents", "downloads", "onedrive"]
     resolved: list[Path] = []
 
     for item in paths:
         lowered = item.lower()
         if lowered == "profile_standard":
-            candidates = [profile_root / folder for folder in ("Desktop", "Documents", "Downloads")]
-            candidates.extend([item for item in profile_root.glob("OneDrive*") if item.is_dir()] if profile_root.exists() else [])
+            candidates = []
+            for root in profile_roots:
+                candidates.extend(root / folder for folder in ("Desktop", "Documents", "Downloads"))
+                candidates.extend([onedrive for onedrive in root.glob("OneDrive*") if onedrive.is_dir()] if root.exists() else [])
         elif lowered == "all":
-            candidates = [profile_root]
+            candidates = profile_roots
         elif lowered == "c_drive":
             candidates = [Path("C:/")]
         elif lowered == "onedrive":
-            candidates = [profile_root / "OneDrive"]
-            candidates.extend(profile_root.glob("OneDrive - *") if profile_root.exists() else [])
+            candidates = []
+            for root in profile_roots:
+                candidates.append(root / "OneDrive")
+                candidates.extend(root.glob("OneDrive*") if root.exists() else [])
         elif lowered == "all_fixed_drives":
             candidates = [Path(f"{letter}:/") for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if Path(f"{letter}:/").exists()]
         elif lowered in {"desktop", "documents", "downloads"}:
             folder = {"desktop": "Desktop", "documents": "Documents", "downloads": "Downloads"}[lowered]
-            candidates = [profile_root / folder, profile_root / "OneDrive" / folder]
-            candidates.extend([item / folder for item in profile_root.glob("OneDrive*") if item.is_dir()] if profile_root.exists() else [])
+            candidates = []
+            for root in profile_roots:
+                candidates.extend([root / folder, root / "OneDrive" / folder])
+                candidates.extend([onedrive / folder for onedrive in root.glob("OneDrive*") if onedrive.is_dir()] if root.exists() else [])
         else:
             candidates = [Path(item)]
         resolved.extend(candidate.expanduser().resolve() for candidate in candidates)

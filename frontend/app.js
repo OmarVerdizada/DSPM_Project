@@ -698,15 +698,15 @@ function addCustomExtensionFromInput(input, list, search) {
 
 function getEndpointScopeConfig(scope = endpointPathScope?.value || "default") {
   const configs = {
-    default: { paths: ["desktop", "documents", "downloads", "onedrive"], depth: 6, label: "User profile quick scan" },
-    desktop: { paths: ["desktop"], depth: 6, label: "Desktop only" },
-    documents: { paths: ["documents"], depth: 8, label: "Documents only" },
-    downloads: { paths: ["downloads"], depth: 6, label: "Downloads only" },
-    onedrive: { paths: ["onedrive"], depth: 8, label: "OneDrive only" },
-    all: { paths: ["all"], depth: 8, label: "Entire target profile" },
-    c_drive: { paths: ["c_drive"], depth: 3, label: "C drive data scan" },
-    all_fixed_drives: { paths: ["all_fixed_drives"], depth: 3, label: "All fixed drives" },
-    custom: { paths: readEndpointCustomPaths(), depth: 4, label: "Custom paths" },
+    default: { paths: ["desktop", "documents", "downloads", "onedrive"], depth: 12, label: "User profile quick scan" },
+    desktop: { paths: ["desktop"], depth: 12, label: "Desktop only" },
+    documents: { paths: ["documents"], depth: 12, label: "Documents only" },
+    downloads: { paths: ["downloads"], depth: 12, label: "Downloads only" },
+    onedrive: { paths: ["onedrive"], depth: 12, label: "OneDrive only" },
+    all: { paths: ["all"], depth: 12, label: "Entire target profile" },
+    c_drive: { paths: ["c_drive"], depth: 6, label: "C drive data scan" },
+    all_fixed_drives: { paths: ["all_fixed_drives"], depth: 6, label: "All fixed drives" },
+    custom: { paths: readEndpointCustomPaths(), depth: 12, label: "Custom paths" },
   };
   return configs[scope] || configs.default;
 }
@@ -720,7 +720,7 @@ function readEndpointCustomPaths() {
 
 function clampEndpointDepth(value, scope = endpointPathScope?.value || "default") {
   const number = Number(value || getEndpointScopeConfig(scope).depth);
-  const maxByScope = scope === "c_drive" || scope === "all_fixed_drives" ? 8 : scope === "all" ? 8 : 12;
+  const maxByScope = 12;
   return Math.max(1, Math.min(maxByScope, Number.isFinite(number) ? Math.round(number) : getEndpointScopeConfig(scope).depth));
 }
 
@@ -966,18 +966,25 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
   const archiveFiles = Number(diagnostics.archive_files || 0);
   const archiveEntries = Number(diagnostics.archive_entries || 0);
   const skippedDirs = Number(diagnostics.skipped_dirs || 0);
+  const visitedDirs = Number(diagnostics.visited_dirs || 0);
+  const emptyDirs = Number(diagnostics.empty_dirs || 0);
   const filteredWrongProfile = Number(diagnostics.filtered_wrong_profile || 0);
   const resolved = (diagnostics.resolved_roots || []).slice(0, 8).join("; ");
   const missing = (diagnostics.missing_roots || []).slice(0, 8).join("; ");
   const archiveErrors = (diagnostics.archive_errors || []).slice(0, 2).join("; ");
+  const listErrors = (diagnostics.list_errors || []).slice(0, 3).join("; ");
+  const fallbacks = (diagnostics.root_fallbacks || []).slice(0, 4).join("; ");
   const allowed = (diagnostics.allowed_extensions || endpoint.allowed_extensions || []).join(", ");
-  const parts = [`Visited: ${visited}`, `Matched: ${matched}`];
+  const parts = [`Dirs: ${visitedDirs}`, `Visited: ${visited}`, `Matched: ${matched}`];
+  if (emptyDirs) parts.push(`Empty dirs: ${emptyDirs}`);
   if (skippedDirs) parts.push(`Skipped dirs: ${skippedDirs}`);
   if (filteredWrongProfile) parts.push(`Wrong-profile files ignored: ${filteredWrongProfile}`);
   if (archiveFiles || archiveEntries) parts.push(`Archives: ${archiveFiles}`, `Archive entries: ${archiveEntries}`);
   if (allowed) parts.push(`Allowed: ${allowed}`);
   if (resolved) parts.push(`Roots: ${resolved}`);
   if (missing) parts.push(`Missing: ${missing}`);
+  if (fallbacks) parts.push(`Fallbacks: ${fallbacks}`);
+  if (listErrors) parts.push(`Unreadable: ${listErrors}`);
   if (archiveErrors) parts.push(`Archive errors: ${archiveErrors}`);
   return parts.join(". ");
 }
