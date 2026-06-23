@@ -37,19 +37,41 @@ GLOBAL_ENDPOINT_SCOPE_ALIASES = {"all_profiles", "c_drive", "all_fixed_drives"}
 ENDPOINT_PATH_ALIASES = PROFILE_DATA_SCOPE_ALIASES | GLOBAL_ENDPOINT_SCOPE_ALIASES
 
 
-def resolve_endpoint_connection_host(host: str) -> str:
+def endpoint_connection_hosts(host: str) -> list[str]:
     target = str(host or "").strip()
     if not target:
-        return target
+        return []
+    candidates = [target]
     try:
         ipaddress.ip_address(target.strip("[]"))
     except ValueError:
-        return target
+        try:
+            for _, _, _, _, sockaddr in socket.getaddrinfo(target, None):
+                address = str(sockaddr[0]).strip()
+                if address and address not in candidates:
+                    candidates.append(address)
+        except OSError:
+            pass
+    else:
+        try:
+            resolved, _, _ = socket.gethostbyaddr(target)
+            resolved = resolved.rstrip(".")
+            if resolved and resolved not in candidates:
+                candidates.append(resolved)
+        except OSError:
+            pass
+    return candidates
+
+
+def resolve_endpoint_connection_host(host: str) -> str:
+    candidates = endpoint_connection_hosts(host)
+    if not candidates:
+        return str(host or "").strip()
     try:
-        resolved, _, _ = socket.gethostbyaddr(target)
-        return resolved.rstrip(".") or target
-    except OSError:
-        return target
+        ipaddress.ip_address(candidates[0].strip("[]"))
+    except ValueError:
+        return candidates[0]
+    return candidates[1] if len(candidates) > 1 else candidates[0]
 
 
 def normalize_endpoint_target_paths(paths: list[str], target_username: str = "") -> list[str]:
@@ -312,6 +334,7 @@ class WinRMEndpointScanner:
     def __init__(self, config: WinRMEndpointConfig):
         self.config = config
         self.last_scan_diagnostics: dict = {}
+        self.last_connection_host = ""
 
     def activate_winrm(self) -> dict:
         if platform.system().lower() != "windows":
@@ -385,7 +408,8 @@ class WinRMEndpointScanner:
             return {
                 "connected": result.status_code == 0,
                 "host": self.config.host,
-                "connection_host": self._connection_host(),
+                "connection_host": self.last_connection_host or self._connection_host(),
+                "connection_candidates": self._connection_hosts(),
                 "user": info.get("user", ""),
                 "computer": info.get("computer", self.config.host),
                 "message": "Connected successfully" if result.status_code == 0 else _clean_error(result.std_err),
@@ -419,6 +443,8 @@ class WinRMEndpointScanner:
             return []
         if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
             self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
+            self.last_scan_diagnostics["connection_host"] = self.last_connection_host or self._connection_host()
+            self.last_scan_diagnostics["connection_candidates"] = self._connection_hosts()
             raw_records = raw_records["records"]
         if isinstance(raw_records, dict):
             self.last_scan_diagnostics = {}
@@ -505,20 +531,40 @@ class WinRMEndpointScanner:
     def _connection_host(self) -> str:
         return resolve_endpoint_connection_host(self.config.host)
 
+    def _connection_hosts(self) -> list[str]:
+        return endpoint_connection_hosts(self.config.host) or [self.config.host.strip()]
+
+    def _username(self) -> str:
+        username = self.config.username.strip()
+        if self.config.domain.strip() and "\\" not in username and "@" not in username:
+            username = f"{self.config.domain.strip()}\\{username}"
+        return username
+
+    def _endpoint_url(self, connection_host: str) -> str:
+        port = self.config.port or (5986 if self.config.use_ssl else 5985)
+        return f"http{'s' if self.config.use_ssl else ''}://{connection_host}:{port}/wsman"
+
     def _run_ps(self, script: str):
         try:
             import winrm
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        endpoint = f"http{'s' if self.config.use_ssl else ''}://{self._connection_host()}:{self.config.port or (5986 if self.config.use_ssl else 5985)}/wsman"
-        username = self.config.username.strip()
-        if self.config.domain.strip() and "\\" not in username and "@" not in username:
-            username = f"{self.config.domain.strip()}\\{username}"
         if not self.config.use_ssl and __import__("os").getenv("DSPM_REQUIRE_WINRM_SSL", "0") == "1":
             raise RuntimeError("WinRM over HTTP is disabled by configuration")
-        session = winrm.Session(endpoint, auth=(username, self.config.password), transport="ntlm")
-        return session.run_ps(script)
+        last_error: Exception | None = None
+        for connection_host in self._connection_hosts():
+            try:
+                session = winrm.Session(self._endpoint_url(connection_host), auth=(self._username(), self.config.password), transport="ntlm")
+                result = session.run_ps(script)
+                self.last_connection_host = connection_host
+                return result
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error:
+            raise last_error
+        raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
 
     def _run_ps_file(self, script: str):
         try:
@@ -526,13 +572,23 @@ class WinRMEndpointScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        endpoint = f"http{'s' if self.config.use_ssl else ''}://{self._connection_host()}:{self.config.port or (5986 if self.config.use_ssl else 5985)}/wsman"
-        username = self.config.username.strip()
-        if self.config.domain.strip() and "\\" not in username and "@" not in username:
-            username = f"{self.config.domain.strip()}\\{username}"
         if not self.config.use_ssl and __import__("os").getenv("DSPM_REQUIRE_WINRM_SSL", "0") == "1":
             raise RuntimeError("WinRM over HTTP is disabled by configuration")
-        session = winrm.Session(endpoint, auth=(username, self.config.password), transport="ntlm")
+        last_error: Exception | None = None
+        for connection_host in self._connection_hosts():
+            try:
+                session = winrm.Session(self._endpoint_url(connection_host), auth=(self._username(), self.config.password), transport="ntlm")
+                result = self._run_ps_file_with_session(session, script)
+                self.last_connection_host = connection_host
+                return result
+            except Exception as exc:
+                last_error = exc
+                continue
+        if last_error:
+            raise last_error
+        raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
+
+    def _run_ps_file_with_session(self, session, script: str):
 
         token = uuid4().hex
         b64_name = f"dspm_{token}.b64"
