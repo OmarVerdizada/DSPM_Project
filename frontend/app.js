@@ -1204,6 +1204,18 @@ function hasHashChanged(file = {}) {
   return changedHashKeys().has(hashComparisonKey(file));
 }
 
+function duplicateHashKeys() {
+  const keys = (latestHashComparison?.duplicate_hash_paths || [])
+    .flatMap((item) => Array.isArray(item.keys) ? item.keys : [])
+    .map((key) => String(key || "").toLowerCase())
+    .filter(Boolean);
+  return new Set(keys);
+}
+
+function hasDuplicateHashPath(file = {}) {
+  return duplicateHashKeys().has(hashComparisonKey(file));
+}
+
 function firstFileValue(file = {}, keys = []) {
   for (const key of keys) {
     const value = key.split(".").reduce((current, part) => current?.[part], file);
@@ -1212,7 +1224,7 @@ function firstFileValue(file = {}, keys = []) {
   return "";
 }
 
-function renderFilePropertyRows(file = {}, sha256 = fileHashValue(file), hashChanged = hasHashChanged(file)) {
+function renderFilePropertyRows(file = {}, sha256 = fileHashValue(file), hashChanged = hasHashChanged(file), duplicateHashPath = hasDuplicateHashPath(file)) {
   const owner = filePropertyOwner(file);
   const displayValue = (value) => {
     const text = String(value ?? "").trim();
@@ -1235,6 +1247,7 @@ function renderFilePropertyRows(file = {}, sha256 = fileHashValue(file), hashCha
     { label: "Scan mode", value: file.scan_mode || "" },
     { label: "SHA-256", value: sha256 ? `<span title="${escapeHtml(sha256)}">${escapeHtml(shortHash(sha256))}</span>` : "-", html: Boolean(sha256), required: true },
     { label: "Hash status", value: hashChanged ? "Hash changed since previous scan" : "" },
+    { label: "Duplicate hash", value: duplicateHashPath ? "Same SHA-256 appears at another path" : "" },
     { label: "Path", value: file.path || file.full_path || "", required: true },
   ];
 
@@ -1592,6 +1605,7 @@ function renderRows(files) {
   const page = visible.slice(0, renderedRowsLimit);
   const currentKeys = new Set(page.map((file) => fileKey(file)));
   const hashChangedKeys = changedHashKeys();
+  const duplicateHashPathKeys = duplicateHashKeys();
   renderInventoryControlState(files, visible);
 
   if (visible.length === 0) {
@@ -1615,6 +1629,7 @@ function renderRows(files) {
       const score = effectiveRisk.score;
       const key = fileKey(file);
       const hashChanged = hashChangedKeys.has(hashComparisonKey(file));
+      const duplicateHashPath = duplicateHashPathKeys.has(hashComparisonKey(file));
       const preview = renderPreview(file.preview);
       const flash = hasRenderedScanRows && !lastRenderedFileKeys.has(key) ? " row-flash" : "";
       const fileFlags = [
@@ -1625,7 +1640,11 @@ function renderRows(files) {
         isProtectedFile(file) ? "Protected / locked" : "",
       ].filter(Boolean);
       const riskLabel = buildRiskLabel(level, score);
-      const displayFindings = hashChanged ? [...rawFindings, { type: "Hash changed", count: 1 }] : rawFindings;
+      const integrityFindings = [
+        hashChanged ? { type: "Hash changed", count: 1 } : null,
+        duplicateHashPath ? { type: "Duplicate hash path", count: 1 } : null,
+      ].filter(Boolean);
+      const displayFindings = integrityFindings.length ? [...rawFindings, ...integrityFindings] : rawFindings;
       const findingChips = displayFindings.length
         ? displayFindings.slice(0, 4).map((finding) => `<span class="finding-chip">${escapeHtml(finding.type || finding.label || "Signal")} <b>${escapeHtml(finding.count || 1)}</b></span>`).join("")
         : '<span class="subtext">No sensitive signals</span>';
@@ -1647,7 +1666,7 @@ function renderRows(files) {
             <div id="${escapeHtml(fileInfoId)}" class="file-inline-info hidden" role="region" aria-label="File properties">
               <div class="file-inline-info-title">Properties</div>
               <dl>
-                ${renderFilePropertyRows(file, sha256, hashChanged)}
+                ${renderFilePropertyRows(file, sha256, hashChanged, duplicateHashPath)}
               </dl>
             </div>
             <div class="file-meta-line">
@@ -1655,6 +1674,7 @@ function renderRows(files) {
               <span>${escapeHtml(formatBytes(file.size))}</span>
               <span>${escapeHtml(sourceName)}</span>
               ${hashChanged ? '<span class="hash-change-chip">Hash changed</span>' : ""}
+              ${duplicateHashPath ? '<span class="hash-change-chip duplicate-hash-chip">Duplicate hash path</span>' : ""}
             </div>
             ${fileFlags.length ? `<div class="file-flags polished-flags">${fileFlags.map((flag) => `<span>${escapeHtml(flag)}</span>`).join("")}</div>` : ""}
             <div class="subtext path-subtext">${escapeHtml(path)}</div>
@@ -1765,6 +1785,9 @@ function getFileFindingTypes(file) {
   }
   if (hasHashChanged(file)) {
     findings.push("Hash changed");
+  }
+  if (hasDuplicateHashPath(file)) {
+    findings.push("Duplicate hash path");
   }
   return findings;
 }
@@ -1886,7 +1909,7 @@ function applyTheme(theme) {
   const icon = themeToggle.querySelector(".theme-icon");
   const nextLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
   if (icon) {
-    icon.textContent = theme === "dark" ? "â˜€" : "â˜¾";
+    icon.innerHTML = theme === "dark" ? "&#9728;" : "&#9790;";
   }
   themeToggle.setAttribute("aria-label", nextLabel);
   themeToggle.title = nextLabel;
@@ -2878,13 +2901,14 @@ function buildScanComparison() {
     ["Total", latestSummary.total_files || 0, previousSummary.total_files || 0],
   ];
   const hashChanges = latestHashComparison?.changed || [];
+  const duplicateHashPaths = latestHashComparison?.duplicate_hash_paths || [];
   const hashSummary = latestHashComparison
     ? `
       <div class="hash-comparison-card">
         <div>
           <span>Integrity comparison</span>
           <strong>${escapeHtml(latestHashComparison.algorithm || "SHA-256")}</strong>
-          <small>${escapeHtml(latestHashComparison.changed_count || 0)} changed Â· ${escapeHtml(latestHashComparison.added_count || 0)} added Â· ${escapeHtml(latestHashComparison.removed_count || 0)} removed</small>
+          <small>${escapeHtml(latestHashComparison.changed_count || 0)} changed &middot; ${escapeHtml(latestHashComparison.added_count || 0)} added &middot; ${escapeHtml(latestHashComparison.removed_count || 0)} removed &middot; ${escapeHtml(latestHashComparison.duplicate_hash_path_count || 0)} duplicate hash groups</small>
         </div>
         ${hashChanges.length ? `
           <div class="hash-change-list">
@@ -2897,6 +2921,17 @@ function buildScanComparison() {
             `).join("")}
           </div>
         ` : '<p class="subtext">No SHA-256 changes detected between the latest two saved scans.</p>'}
+        ${duplicateHashPaths.length ? `
+          <div class="hash-change-list">
+            ${duplicateHashPaths.slice(0, 5).map((item) => `
+              <div class="hash-change-row duplicate-hash-row">
+                <strong>${escapeHtml(item.name || "Duplicate content")}</strong>
+                <span>${escapeHtml((item.paths || []).slice(0, 2).map((path) => path.path || path.name || "").filter(Boolean).join(" | "))}</span>
+                <code title="${escapeHtml(item.hash || "")}">${escapeHtml(shortHash(item.hash || ""))}</code>
+              </div>
+            `).join("")}
+          </div>
+        ` : '<p class="subtext">No identical SHA-256 values found across different paths in the latest scan.</p>'}
       </div>
     `
     : "";
@@ -5384,7 +5419,7 @@ window.addEventListener("storage", (event) => {
     document.documentElement.dataset.theme = event.newValue;
     const toggle = document.querySelector("#theme-toggle");
     const icon = toggle?.querySelector(".theme-icon");
-    if (icon) icon.textContent = event.newValue === "dark" ? "â˜€" : "â˜¾";
+    if (icon) icon.innerHTML = event.newValue === "dark" ? "&#9728;" : "&#9790;";
     if (toggle) {
       const nextLabel = event.newValue === "dark" ? "Switch to light mode" : "Switch to dark mode";
       toggle.setAttribute("aria-label", nextLabel);
@@ -5392,10 +5427,4 @@ window.addEventListener("storage", (event) => {
     }
   }
 });
-
-
-
-
-
-
 

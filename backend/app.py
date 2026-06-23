@@ -859,10 +859,56 @@ def _hash_index(report: dict | None) -> dict[str, dict]:
     return indexed
 
 
+def _duplicate_hash_paths(report: dict | None) -> list[dict]:
+    files = report.get("files", []) if isinstance(report, dict) else []
+    grouped: dict[str, list[dict]] = {}
+    seen: set[tuple[str, str]] = set()
+    for file_record in files:
+        if not isinstance(file_record, dict):
+            continue
+        sha256 = _file_hash_value(file_record)
+        key = _file_compare_key(file_record)
+        if not sha256 or not key or (sha256, key) in seen:
+            continue
+        seen.add((sha256, key))
+        grouped.setdefault(sha256, []).append(file_record)
+
+    duplicate_groups: list[dict] = []
+    for sha256, hash_files in grouped.items():
+        if len(hash_files) < 2:
+            continue
+        paths = []
+        keys = []
+        for file_record in sorted(hash_files, key=lambda item: _file_compare_key(item)):
+            keys.append(_file_compare_key(file_record))
+            paths.append(
+                {
+                    "key": _file_compare_key(file_record),
+                    "name": file_record.get("name") or file_record.get("path") or "Unknown file",
+                    "path": file_record.get("path") or file_record.get("full_path") or "",
+                    "source": file_record.get("source") or file_record.get("share") or "",
+                }
+            )
+        duplicate_groups.append(
+            {
+                "hash": sha256,
+                "count": len(paths),
+                "name": paths[0].get("name") or "Duplicate content",
+                "keys": keys,
+                "paths": paths[:20],
+            }
+        )
+
+    duplicate_groups.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get("name") or "").lower()))
+    return duplicate_groups
+
+
 @app.get("/api/history/hash-changes")
 def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) -> dict:
     history = read_scan_history(principal.tenant_id, limit=2)
     if len(history) < 2:
+        latest_report = read_scan_report(principal.tenant_id, history[-1].get("scan_id")) if history else None
+        duplicate_hash_paths = _duplicate_hash_paths(latest_report)
         return {
             "algorithm": "SHA-256",
             "latest_scan_id": history[-1].get("scan_id") if history else "",
@@ -871,6 +917,8 @@ def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) ->
             "changed_count": 0,
             "added_count": 0,
             "removed_count": 0,
+            "duplicate_hash_paths": duplicate_hash_paths[:100],
+            "duplicate_hash_path_count": len(duplicate_hash_paths),
         }
 
     previous_item, latest_item = history[-2], history[-1]
@@ -878,6 +926,7 @@ def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) ->
     latest_report = read_scan_report(principal.tenant_id, latest_item.get("scan_id"))
     previous_files = _hash_index(previous_report)
     latest_files = _hash_index(latest_report)
+    duplicate_hash_paths = _duplicate_hash_paths(latest_report)
 
     changed = []
     for key, latest_file in latest_files.items():
@@ -907,6 +956,8 @@ def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) ->
         "changed_count": len(changed),
         "added_count": len(set(latest_files) - set(previous_files)),
         "removed_count": len(set(previous_files) - set(latest_files)),
+        "duplicate_hash_paths": duplicate_hash_paths[:100],
+        "duplicate_hash_path_count": len(duplicate_hash_paths),
     }
 
 
@@ -1591,5 +1642,4 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         read_acl=payload.read_acl,
         inspect_archives=payload.inspect_archives,
     )
-
 

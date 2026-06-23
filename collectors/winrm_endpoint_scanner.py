@@ -721,6 +721,11 @@ def _scan_script(
         '\\programdata\\package cache\\',
         '\\programdata\\microsoft\\windows defender\\',
         '\\windows\\',
+        '\\$winreagent\\',
+        '\\recovery\\',
+        '\\config.msi\\',
+        '\\perflogs\\',
+        '\\msocache\\',
         '\\$recycle.bin\\',
         '\\system volume information\\',
         '\\pagefile.sys\\',
@@ -1522,5 +1527,4 @@ def _clean_error(output: bytes | str) -> str:
     text = re.sub(r"_x000D__x000A_|&#xD;|&#xA;", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text or "Request failed"
-
 

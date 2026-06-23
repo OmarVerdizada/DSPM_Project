@@ -1695,6 +1695,12 @@ tbody tr.row-flash {
   color: #b45309 !important;
 }
 
+.duplicate-hash-chip {
+  border-color: color-mix(in srgb, #0891b2 38%, var(--line)) !important;
+  background: color-mix(in srgb, #0891b2 12%, var(--card)) !important;
+  color: #0e7490 !important;
+}
+
 .hash-comparison-card {
   display: grid;
   gap: 10px;
