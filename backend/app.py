@@ -1026,7 +1026,7 @@ def _mask_secret(value: str) -> str:
     value = str(value or "")
     if not value:
         return ""
-    return f"{value[:8]}â€¦{value[-4:]}" if len(value) > 14 else "â€¢â€¢â€¢â€¢"
+    return f"{value[:8]}...{value[-4:]}" if len(value) > 14 else "****"
 
 
 def _safe_operation_error(message: str, exc: Exception) -> HTTPException:
@@ -1642,4 +1642,3 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         read_acl=payload.read_acl,
         inspect_archives=payload.inspect_archives,
     )
-

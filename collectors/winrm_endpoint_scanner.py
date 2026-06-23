@@ -1,9 +1,11 @@
 ﻿from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import platform
 import re
+import socket
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -33,6 +35,21 @@ DEFAULT_PROFILE_FOLDERS = {
 PROFILE_DATA_SCOPE_ALIASES = set(DEFAULT_PROFILE_FOLDERS) | {"all", "profile_standard", "onedrive"}
 GLOBAL_ENDPOINT_SCOPE_ALIASES = {"all_profiles", "c_drive", "all_fixed_drives"}
 ENDPOINT_PATH_ALIASES = PROFILE_DATA_SCOPE_ALIASES | GLOBAL_ENDPOINT_SCOPE_ALIASES
+
+
+def resolve_endpoint_connection_host(host: str) -> str:
+    target = str(host or "").strip()
+    if not target:
+        return target
+    try:
+        ipaddress.ip_address(target.strip("[]"))
+    except ValueError:
+        return target
+    try:
+        resolved, _, _ = socket.gethostbyaddr(target)
+        return resolved.rstrip(".") or target
+    except OSError:
+        return target
 
 
 def normalize_endpoint_target_paths(paths: list[str], target_username: str = "") -> list[str]:
@@ -319,7 +336,7 @@ class WinRMEndpointScanner:
 
         script = _activation_script(
             {
-                "host": self.config.host.strip(),
+                "host": self._connection_host(),
                 "username": self.config.username.strip(),
                 "password": self.config.password,
                 "domain": self.config.domain.strip() or "WORKGROUP",
@@ -368,6 +385,7 @@ class WinRMEndpointScanner:
             return {
                 "connected": result.status_code == 0,
                 "host": self.config.host,
+                "connection_host": self._connection_host(),
                 "user": info.get("user", ""),
                 "computer": info.get("computer", self.config.host),
                 "message": "Connected successfully" if result.status_code == 0 else _clean_error(result.std_err),
@@ -484,13 +502,16 @@ class WinRMEndpointScanner:
     def _target_paths(self) -> list[str]:
         return normalize_endpoint_target_paths(self.config.paths, self.config.target_username)
 
+    def _connection_host(self) -> str:
+        return resolve_endpoint_connection_host(self.config.host)
+
     def _run_ps(self, script: str):
         try:
             import winrm
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        endpoint = f"http{'s' if self.config.use_ssl else ''}://{self.config.host}:{self.config.port or (5986 if self.config.use_ssl else 5985)}/wsman"
+        endpoint = f"http{'s' if self.config.use_ssl else ''}://{self._connection_host()}:{self.config.port or (5986 if self.config.use_ssl else 5985)}/wsman"
         username = self.config.username.strip()
         if self.config.domain.strip() and "\\" not in username and "@" not in username:
             username = f"{self.config.domain.strip()}\\{username}"
@@ -505,7 +526,7 @@ class WinRMEndpointScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        endpoint = f"http{'s' if self.config.use_ssl else ''}://{self.config.host}:{self.config.port or (5986 if self.config.use_ssl else 5985)}/wsman"
+        endpoint = f"http{'s' if self.config.use_ssl else ''}://{self._connection_host()}:{self.config.port or (5986 if self.config.use_ssl else 5985)}/wsman"
         username = self.config.username.strip()
         if self.config.domain.strip() and "\\" not in username and "@" not in username:
             username = f"{self.config.domain.strip()}\\{username}"
@@ -1500,6 +1521,7 @@ def _read_json(output: bytes | str) -> object | None:
     text = text.strip()
     if not text:
         return None
+    text = "".join(" " if ord(char) < 32 else char for char in text)
     try:
         return json.loads(text)
     except json.JSONDecodeError as original_error:
@@ -1527,4 +1549,3 @@ def _clean_error(output: bytes | str) -> str:
     text = re.sub(r"_x000D__x000A_|&#xD;|&#xA;", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text or "Request failed"
-

@@ -1,4 +1,4 @@
-﻿const form = document.querySelector("#connection-form");
+const form = document.querySelector("#connection-form");
 const testBtn = document.querySelector("#test-btn");
 const scanBtn = document.querySelector("#scan-btn");
 const scanCancelBtn = document.querySelector("#scan-cancel-btn");
@@ -2318,7 +2318,7 @@ function renderReportPreview() {
   if (!latestFiles.length) {
     reportPreview.innerHTML = `
       <div class="report-empty product-report-empty">
-        <span class="report-empty-icon">â†—</span>
+        <span class="report-empty-icon">&nearr;</span>
         <h4>No report data yet</h4>
         <p>Run a scan first. The report center will prepare a board-ready summary, evidence register, and export package.</p>
       </div>
@@ -2340,7 +2340,7 @@ function renderReportPreview() {
         <div>
           <span>DSPM executive evidence package</span>
           <h4>${escapeHtml(report.title)}</h4>
-          <p>${escapeHtml(report.generatedAt)} Â· tenant ${escapeHtml(currentTenant)} Â· ${report.summary.total_files} files analyzed</p>
+          <p>${escapeHtml(report.generatedAt)} &middot; tenant ${escapeHtml(currentTenant)} &middot; ${report.summary.total_files} files analyzed</p>
         </div>
         <strong>${report.score}</strong>
       </div>
@@ -2386,7 +2386,7 @@ function renderReportPreview() {
         <summary>
           <span>
             <strong>Show full evidence register</strong>
-            <small>All scanned files are available here; no hidden â€œadditional filesâ€ placeholder.</small>
+            <small>All scanned files are available here; no hidden "additional files" placeholder.</small>
           </span>
           <b>${report.priorityFiles.length} rows</b>
         </summary>
@@ -2452,7 +2452,7 @@ function renderReportFolderList(folders) {
         <div class="report-row">
           <div>
             <strong>${escapeHtml(folder.folder)}</strong>
-            <span>${folder.files} files Â· ${folder.critical} critical Â· avg ${Math.round(folder.score / Math.max(folder.files, 1))}</span>
+            <span>${folder.files} files &middot; ${folder.critical} critical &middot; avg ${Math.round(folder.score / Math.max(folder.files, 1))}</span>
           </div>
         </div>
       `
@@ -2702,7 +2702,7 @@ function buildMsspPortfolio() {
     <article class="mssp-summary-card">
       <span>Managed customers</span>
       <strong>${totalCustomers}</strong>
-      <p>Active customer: ${escapeHtml(currentTenant)} Â· ${activeSummary.total_files || 0} files in scope</p>
+      <p>Active customer: ${escapeHtml(currentTenant)} &middot; ${activeSummary.total_files || 0} files in scope</p>
     </article>
     <article class="mssp-summary-card">
       <span>Open critical exposure</span>
@@ -2717,7 +2717,7 @@ function buildMsspPortfolio() {
         <article class="portfolio-card ${isActive ? "active" : ""}" data-tenant-jump="${escapeHtml(tenant.tenant_id)}">
           <span>${escapeHtml(tenant.tenant_id)}</span>
           <strong>${score}</strong>
-          <p>${summary.total_files || 0} files Â· ${summary.critical || 0} critical Â· ${tenant.scan_count || 0} scans</p>
+          <p>${summary.total_files || 0} files &middot; ${summary.critical || 0} critical &middot; ${tenant.scan_count || 0} scans</p>
         </article>
       `;
     }).join("")}
@@ -2817,7 +2817,7 @@ function buildDepartmentRisk() {
         <div class="department-risk-row">
           <div>
             <strong>${escapeHtml(item.department)}</strong>
-            <span>${item.files} files Â· ${item.critical} critical Â· ${item.high} high</span>
+            <span>${item.files} files &middot; ${item.critical} critical &middot; ${item.high} high</span>
           </div>
           <progress max="${maxScore}" value="${item.score}"></progress>
         </div>
@@ -2965,7 +2965,7 @@ function buildTopRiskyFolders() {
       ${folders.slice(0, 6).map((item) => `
         <article class="folder-risk-row">
           <strong>${escapeHtml(item.folder)}</strong>
-          <span>${item.files} files Â· avg ${Math.round(item.score / Math.max(item.files, 1))} Â· ${item.critical} critical</span>
+          <span>${item.files} files &middot; avg ${Math.round(item.score / Math.max(item.files, 1))} &middot; ${item.critical} critical</span>
         </article>
       `).join("")}
     </div>
@@ -3117,7 +3117,7 @@ function reportFileName(extension) {
   return `dspm-${source}-${reportTimestampSlug()}.${extension}`;
 }
 
-function reportText(value, fallback = "â€”") {
+function reportText(value, fallback = "-") {
   if (Array.isArray(value)) {
     const joined = value.filter(Boolean).join("; ");
     return joined || fallback;
@@ -3177,7 +3177,7 @@ function buildReportRegisterRows(files, options = {}) {
       return `
         <tr>
           <td><strong>${escapeHtml(name)}</strong><br><span>${escapeHtml(path)}</span></td>
-          <td>${escapeHtml(source)}<br><span>${escapeHtml(hidden)} Â· ${escapeHtml(protectedLabel)}</span></td>
+          <td>${escapeHtml(source)}<br><span>${escapeHtml(hidden)} &middot; ${escapeHtml(protectedLabel)}</span></td>
           <td>${riskCell}</td>
           <td>${escapeHtml(reportFindingsText(file))}</td>
           <td>${escapeHtml(reportActionsText(file))}</td>
@@ -3444,7 +3444,7 @@ function buildPolishedReportHtml(mode = "word") {
               <div class="cover-copy">
                 <h1>DSPM Assessment Report</h1>
                 <p>${sourceLabel}</p>
-                <p>Generated ${escapeHtml(report.generatedAt)} Â· tenant ${escapeHtml(currentTenant)}</p>
+                <p>Generated ${escapeHtml(report.generatedAt)} &middot; tenant ${escapeHtml(currentTenant)}</p>
               </div>
               <div class="logo"><span>D</span></div>
             </div>
@@ -3478,11 +3478,11 @@ function buildPolishedReportHtml(mode = "word") {
             <section class="grid">
               <div class="panel">
                 <h2>Department risk</h2>
-                ${report.departments.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.department)}</strong><span>${item.files} files Â· ${item.critical} critical Â· ${item.high} high</span></div>`).join("") || '<p class="muted">No department data.</p>'}
+                ${report.departments.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.department)}</strong><span>${item.files} files &middot; ${item.critical} critical &middot; ${item.high} high</span></div>`).join("") || '<p class="muted">No department data.</p>'}
               </div>
               <div class="panel">
                 <h2>Top risky folders</h2>
-                ${report.folders.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.folder)}</strong><span>${item.files} files Â· ${item.critical} critical Â· avg ${Math.round(item.score / Math.max(item.files, 1))}</span></div>`).join("") || '<p class="muted">No folder data.</p>'}
+                ${report.folders.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.folder)}</strong><span>${item.files} files &middot; ${item.critical} critical &middot; avg ${Math.round(item.score / Math.max(item.files, 1))}</span></div>`).join("") || '<p class="muted">No folder data.</p>'}
               </div>
             </section>
             <h2>Scan comparison</h2>
@@ -3713,14 +3713,14 @@ function buildExecutiveReportHtml(mode = "word") {
             <section class="register-intro ${mode === "pdf" ? "no-print" : ""}">
               <div>
                 <strong>Full evidence register is separated from the executive story.</strong>
-                <span>${mode === "pdf" ? "Click â€œShow full data registerâ€ in the composer before printing if the PDF must include every row." : "Word export includes the full appendix below, so auditors can review every row without changing the executive summary layout."}</span>
+                <span>${mode === "pdf" ? "Click \"Show full data register\" in the composer before printing if the PDF must include every row." : "Word export includes the full appendix below, so auditors can review every row without changing the executive summary layout."}</span>
               </div>
               <div class="fake-button">${mode === "pdf" ? "Show data from toolbar" : `${report.priorityFiles.length} rows included`}</div>
             </section>
 
             <section class="full-register-section page-break">
-              <h2>Appendix A â€” Full evidence register</h2>
-              <p class="muted">All scanned files sorted by effective risk score. This replaces the old â€œadditional filesâ€ placeholder and keeps every row available when requested.</p>
+              <h2>Appendix A - Full evidence register</h2>
+              <p class="muted">All scanned files sorted by effective risk score. This replaces the old "additional files" placeholder and keeps every row available when requested.</p>
               <table class="full-register-table">
                 <thead><tr><th>File</th><th>Source</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Findings</th><th>Reasons</th><th>DLP / action</th></tr></thead>
                 <tbody>${fullRows || '<tr><td colspan="9">No file evidence rows available.</td></tr>'}</tbody>
@@ -3977,7 +3977,7 @@ function buildPolishedExcelWorkbookHtml() {
         <h2>Risk Distribution</h2>
         <table><tr><th>Level</th><th>Files</th><th>Percent of scan</th></tr>${report.distribution.map((item) => `<tr><td class="${item.level}">${item.label}</td><td>${item.count}</td><td>${Math.round((item.count / Math.max(report.summary.total_files, 1)) * 100)}%</td></tr>`).join("")}</table>
 
-        <h2 class="section-break">Risk Register â€” All Files</h2>
+        <h2 class="section-break">Risk Register - All Files</h2>
         <table>
           <tr><th>#</th><th>File</th><th>Path</th><th>Source</th><th>Share</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Score</th><th>Findings</th><th>Reasons</th><th>DLP Recommendation</th><th>Remediation Action</th></tr>
           ${riskRows || '<tr><td colspan="14">No risk rows available</td></tr>'}
@@ -5427,4 +5427,3 @@ window.addEventListener("storage", (event) => {
     }
   }
 });
-
