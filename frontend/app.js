@@ -65,8 +65,6 @@ const fileServerContext = document.querySelector("#file-server-context");
 const endpointContext = document.querySelector("#endpoint-context");
 const findingsSignalSummary = document.querySelector("#findings-signal-summary");
 const findingsPrioritySummary = document.querySelector("#findings-priority-summary");
-const exposurePermissionsSummary = document.querySelector("#exposure-permissions-summary");
-const exposureCoverageSummary = document.querySelector("#exposure-coverage-summary");
 const refreshExecutiveBtn = document.querySelector("#refresh-executive-btn");
 const executiveHero = document.querySelector("#executive-hero");
 const riskDistribution = document.querySelector("#risk-distribution");
@@ -124,6 +122,9 @@ const endpointScanProgress = document.querySelector("#endpoint-scan-progress");
 const endpointScanProgressLabel = document.querySelector("#endpoint-scan-progress-label");
 const endpointScanProgressBar = document.querySelector("#endpoint-scan-progress-bar");
 const endpointScanProgressPercent = document.querySelector("#endpoint-scan-progress-percent");
+const complianceEnabledInput = document.querySelector("#compliance-enabled");
+const endpointComplianceEnabledInput = document.querySelector("#endpoint-compliance-enabled");
+const complianceFrameworkHosts = document.querySelectorAll("[data-compliance-frameworks]");
 const detailDrawer = document.querySelector("#detail-drawer");
 const detailDrawerEyebrow = detailDrawer.querySelector("#detail-drawer-eyebrow");
 const detailDrawerTitle = detailDrawer.querySelector("#detail-drawer-title");
@@ -352,6 +353,50 @@ let customExtensions = loadCustomExtensions();
 let latestFiles = [];
 let latestReport = null;
 let latestScanKind = "";
+
+const COMPLIANCE_FRAMEWORKS = [
+  { id: "gdpr", name: "GDPR", desc: "Personal data, IDs, health, biometric, HR and customer records." },
+];
+const COMPLIANCE_LOGIC = [
+  {
+    id: "gdpr",
+    name: "GDPR",
+    scope: "EU personal data protection and special-category data exposure",
+    summary: "Maps files to GDPR when scan evidence contains personal data, identity records, health data, biometrics, online identifiers, employee records, customer data, financial records, or credential material tied to a person or regulated process.",
+    scoring: [
+      "Risk score contributes up to 35% of the compliance score so normal DSPM severity influences GDPR priority without forcing every file to 100.",
+      "Data type criticality adds the strongest weight: PHI, biometric/genetic data, government IDs, credentials, financial records, HR records, customer data, and online identifiers are scored differently.",
+      "Finding evidence adds weight from finding severity and count, so one low-confidence name match scores lower than repeated health or identity findings.",
+      "Exposure adds limited weight for broad access, writable access, and permission score.",
+      "Location adds smaller context weight for exports, desktop/downloads, backups, shares, and high-density file types such as CSV, XLSX, ZIP, SQL, DB, JSON, and PST.",
+      "Protection can reduce score when a file is encrypted or protected."
+    ],
+    dataTypes: [
+      "Personal data",
+      "Government IDs",
+      "Health / PHI",
+      "Biometric data",
+      "Genetic and special-category data",
+      "Financial records",
+      "Customer data",
+      "HR / employee data",
+      "Online and device identifiers",
+      "Location and behavioral data",
+      "Credentials / identity access"
+    ],
+    evidence: [
+      "Regex and GDPR rule findings such as full name, email, phone, passport, national ID, health record, biometric, salary, employee, customer, and credential signals.",
+      "Matched keywords and redacted samples from GDPR classifier output.",
+      "Path, filename, share, and extension keywords such as customer, employee, payroll, finance, health, legal, export, backup, secret, and credential.",
+      "Permission context such as broad access and writable exposure."
+    ],
+    output: [
+      "Adds a GDPR compliance chip to matching files.",
+      "Adds framework mapping, data categories, reason details, matched keyword/sample evidence, score parts, and remediation text.",
+      "Appears in reports under Compliance mapping and Framework mapping."
+    ]
+  },
+];
 let latestHistoryItems = [];
 let latestAuditEvents = [];
 let rowOverrides = loadRowOverrides();
@@ -361,6 +406,7 @@ let latestDashboard = null;
 let latestHashComparison = null;
 let tenantPortfolio = [];
 let latestRiskRules = [];
+let latestComplianceKeywordLibrary = null;
 let lastRenderedFileKeys = new Set();
 let hasRenderedScanRows = false;
 let renderedRowsLimit = 200;
@@ -427,6 +473,9 @@ function readPayload() {
   const data = new FormData(form);
   const selectedExtensions = readSelectedExtensions();
   const searchedExtension = readSearchExtension(extensionSearch);
+  const selectedComplianceFrameworks = complianceEnabledInput?.checked
+    ? readSelectedComplianceFrameworks("file-server")
+    : [];
   if (searchedExtension && !selectedExtensions.includes(searchedExtension)) {
     selectedExtensions.push(searchedExtension);
   }
@@ -449,7 +498,44 @@ function readPayload() {
     inspect_archives: Boolean(data.get("inspect_archives")),
     async_scan: Boolean(data.get("async_scan")),
     asset_overrides: assetRules,
+    compliance_enabled: selectedComplianceFrameworks.length > 0,
+    compliance_frameworks: selectedComplianceFrameworks,
   };
+}
+
+function readSelectedComplianceFrameworks(scope) {
+  return [...document.querySelectorAll(`[data-compliance-frameworks="${scope}"] input[type='checkbox']:checked`)].map((input) => input.value);
+}
+
+function renderComplianceSelectors() {
+  complianceFrameworkHosts.forEach((host) => {
+    const scope = host.dataset.complianceFrameworks;
+    host.innerHTML = COMPLIANCE_FRAMEWORKS.map((framework) => `
+      <label class="compliance-framework-card">
+        <input type="checkbox" value="${escapeHtml(framework.id)}" />
+        <span class="compliance-framework-copy">
+          <strong>${escapeHtml(framework.name)}</strong>
+          <small>${escapeHtml(framework.desc)}</small>
+        </span>
+        <span class="compliance-framework-check" aria-hidden="true"></span>
+      </label>
+    `).join("");
+    const toggle = scope === "endpoint" ? endpointComplianceEnabledInput : complianceEnabledInput;
+    const refresh = () => {
+      const enabled = Boolean(toggle?.checked);
+      host.classList.toggle("disabled", !enabled);
+      host.querySelectorAll("input[type='checkbox']").forEach((input) => {
+        input.disabled = !enabled;
+        if (!enabled) input.checked = false;
+      });
+    };
+    toggle?.addEventListener("change", refresh);
+    host.addEventListener("change", () => {
+      if (readSelectedComplianceFrameworks(scope).length && toggle) toggle.checked = true;
+      refresh();
+    });
+    refresh();
+  });
 }
 
 function readSelectedExtensions(list = allowedExtensionsList) {
@@ -737,6 +823,9 @@ function readEndpointPayload() {
   const scope = endpointPathScope.value;
   const scopeConfig = getEndpointScopeConfig(scope);
   const targetUsername = document.querySelector("#endpoint-target-username").value.trim();
+  const selectedComplianceFrameworks = endpointComplianceEnabledInput?.checked
+    ? readSelectedComplianceFrameworks("endpoint")
+    : [];
   if (scope === "custom" && !scopeConfig.paths.length) {
     throw new Error("Enter at least one custom endpoint path.");
   }
@@ -764,6 +853,8 @@ function readEndpointPayload() {
     system_filter_enabled: selectedExtensions.includes("__system__"),
     save_report: true,
     asset_overrides: assetRules,
+    compliance_enabled: selectedComplianceFrameworks.length > 0,
+    compliance_frameworks: selectedComplianceFrameworks,
   };
 }
 
@@ -1310,7 +1401,6 @@ function updateSummaryFromFiles(files = []) {
   renderExecutiveExperience();
   renderScanContextPanels();
   renderFindingsWorkspace();
-  renderExposureWorkspace();
 }
 
 function isSampleDataPath(value = "") {
@@ -1468,116 +1558,6 @@ function renderFindingsWorkspace() {
     : '<div class="empty compact">No priority finding queue for the latest scan.</div>';
 }
 
-function renderExposureWorkspace() {
-  if (!exposurePermissionsSummary || !exposureCoverageSummary) return;
-  exposurePermissionsSummary.className = "summary-list exposure-summary-list";
-  exposureCoverageSummary.className = "summary-list coverage-summary-list";
-
-  if (!latestFiles.length) {
-    exposurePermissionsSummary.innerHTML = `
-      <div class="exposure-kpi-grid">
-        <div class="exposure-kpi high"><span>Broad access</span><strong>0</strong><small>ACL signals</small></div>
-        <div class="exposure-kpi medium"><span>Hidden files</span><strong>0</strong><small>discovery scope</small></div>
-        <div class="exposure-kpi low"><span>Sources</span><strong>0</strong><small>active connectors</small></div>
-      </div>
-      <div class="summary-row exposure-row"><span><b>ACL posture</b><small>Enable endpoint ACL reading or SMB permission enrichment.</small></span><strong>READY</strong></div>
-      <div class="summary-row exposure-row"><span><b>Share exposure</b><small>Writable, broad, hidden, and admin-share signals will be grouped here.</small></span><strong>0</strong></div>
-    `;
-    exposureCoverageSummary.innerHTML = `
-      <div class="coverage-overview-card">
-        <div><span>Scan coverage</span><strong>0%</strong><small>No file content has been previewed yet.</small></div>
-        <div class="coverage-meter" aria-hidden="true"><span style="width:4%"></span></div>
-      </div>
-      ${renderCoverageBars([
-        ["Content previewed", 0, "low"],
-        ["Metadata-only files", 0, "medium"],
-        ["Archive entries", 0, "high"],
-        ["Total files", 0, "neutral"],
-      ], 1)}
-    `;
-    return;
-  }
-
-  const broad = latestFiles.filter((file) => file.risk?.reasons?.some((reason) => /everyone|authenticated users|broad|writable|permission|acl/i.test(reason))).length;
-  const hidden = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
-  const protectedFiles = latestFiles.filter(isProtectedFile);
-  const metadataOnly = latestFiles.filter((file) => file.content_status === "metadata_only" || file.content_scannable === false).length;
-  const archiveEntries = latestFiles.filter((file) => file.scan_mode === "archive_entry" || String(file.path || "").includes("!")).length;
-  const previewable = latestFiles.filter((file) => file.preview?.available).length;
-  const previewPercent = Math.max(4, Math.min(100, Math.round((previewable / Math.max(1, latestFiles.length)) * 100)));
-  const sources = new Set(latestFiles.map((file) => file.source || file.share || "unknown")).size;
-
-  const riskyFolders = Array.from(
-    latestFiles.reduce((map, file) => {
-      const path = String(file.path || file.name || "Unknown");
-      const folder = path.includes("\\") ? path.split("\\").slice(0, -1).join("\\") : path.split("/").slice(0, -1).join("/") || file.source || "Workspace";
-      const existing = map.get(folder) || { folder, count: 0, risk: 0, critical: 0 };
-      const effective = getEffectiveRisk(file);
-      existing.count += 1;
-      existing.risk += effective.score;
-      existing.critical += effective.level === "CRITICAL" ? 1 : 0;
-      map.set(folder, existing);
-      return map;
-    }, new Map()).values()
-  ).sort((a, b) => b.risk - a.risk).slice(0, 6);
-
-  exposurePermissionsSummary.innerHTML = `
-    <div class="exposure-kpi-grid">
-      <div class="exposure-kpi high"><span>Broad access</span><strong>${broad}</strong><small>permission signals</small></div>
-      <div class="exposure-kpi medium"><span>Hidden files</span><strong>${hidden}</strong><small>in scan scope</small></div>
-      <div class="exposure-kpi low"><span>Sources</span><strong>${sources}</strong><small>active sources</small></div>
-    </div>
-    <div class="scroll-card-list exposure-folder-list">
-      ${riskyFolders.map((item) => `
-        <div class="summary-row exposure-row">
-          <span>
-            <b>${escapeHtml(item.folder || "Workspace")}</b>
-            <small>${item.count} file${item.count === 1 ? "" : "s"} &middot; ${item.critical} critical &middot; exposure score ${Math.round(item.risk)}</small>
-          </span>
-          <strong>${item.count}</strong>
-        </div>
-      `).join("")}
-    </div>
-  `;
-
-  const coverageRows = [
-    ["Content previewed", previewable, "low"],
-    ["Metadata-only files", metadataOnly, "medium"],
-    ["Archive entries", archiveEntries, "high"],
-    ["Protected / locked", protectedFiles.length, "critical"],
-    ["Total files", latestFiles.length, "neutral"],
-  ];
-
-  exposureCoverageSummary.innerHTML = `
-    <div class="coverage-overview-card">
-      <div>
-        <span>Preview coverage</span>
-        <strong>${previewPercent}%</strong>
-        <small>${previewable} of ${latestFiles.length} files have readable preview content.</small>
-      </div>
-      <div class="coverage-meter" aria-hidden="true"><span style="width:${previewPercent}%"></span></div>
-    </div>
-    ${renderCoverageBars(coverageRows, latestFiles.length)}
-    ${protectedFiles.length ? `<div class="protected-file-stack coverage-scroll-list">${protectedFiles.slice(0, 12).map((file) => `<div class="summary-row coverage-row critical protected-file-row"><span><b>${escapeHtml(file.name || file.path || "Protected file")}</b><small>${escapeHtml(getProtectionLabel(file))} &middot; ${escapeHtml(file.path || "")}</small></span><strong>LOCKED</strong></div>`).join("")}</div>` : ""}
-  `;
-}
-
-function renderCoverageBars(rows, total) {
-  const max = Math.max(Number(total) || 0, ...rows.map(([, value]) => Number(value) || 0), 1);
-  return `
-    <div class="coverage-grid coverage-bar-list">
-      ${rows.map(([label, value, tone]) => `
-        <div class="summary-row coverage-row ${tone}">
-          <span>${escapeHtml(label)}</span>
-          <strong>${value}</strong>
-          <progress max="${max}" value="${Number(value) || 0}"></progress>
-        </div>
-      `).join("")}
-    </div>
-  `;
-}
-
-
 function list(items) {
   if (!items || items.length === 0) {
     return '<span class="subtext">None</span>';
@@ -1648,7 +1628,13 @@ function renderRows(files) {
       const findingChips = displayFindings.length
         ? displayFindings.slice(0, 4).map((finding) => `<span class="finding-chip">${escapeHtml(finding.type || finding.label || "Signal")} <b>${escapeHtml(finding.count || 1)}</b></span>`).join("")
         : '<span class="subtext">No sensitive signals</span>';
-      const moreFindings = displayFindings.length > 4 ? `<span class="finding-chip muted-chip">+${displayFindings.length - 4}</span>` : "";
+      const moreFindings = displayFindings.length > 4
+        ? `<button type="button" class="detail-toggle finding-chip muted-chip" data-detail-type="findings" data-detail-key="${escapeHtml(key)}" title="Show all findings and matched keywords">+${displayFindings.length - 4}</button>`
+        : "";
+      const compliance = file.compliance || {};
+      const complianceChip = compliance.matched_frameworks?.length
+        ? `<span class="finding-chip compliance-chip">${escapeHtml(compliance.compliance_severity)} ${escapeHtml(compliance.compliance_score)} - ${escapeHtml((compliance.matched_framework_names || compliance.matched_frameworks).join(", "))}</span>`
+        : "";
       const sourceName = file.source || file.share || "workspace";
       const path = file.path || file.name || "";
       const sha256 = fileHashValue(file);
@@ -1684,7 +1670,7 @@ function renderRows(files) {
             <div class="source-pill">${escapeHtml(sourceName)}</div>
             <div class="subtext">${escapeHtml(file.share || file.content_status || "scanned")}</div>
           </td>
-          <td><div class="finding-chip-wrap">${findingChips}${moreFindings}</div></td>
+          <td><div class="finding-chip-wrap">${findingChips}${moreFindings}${complianceChip}</div></td>
           <td>
             <span class="badge ${level}">${escapeHtml(level)} ${escapeHtml(score)}</span>
             <div class="risk-mini-meter" style="--risk-score:${Math.max(0, Math.min(100, Number(score) || 0))}%"><span></span></div>
@@ -1969,20 +1955,113 @@ function hashString(value) {
 function openDetailDrawer(key, type) {
   const file = latestFiles.find((item) => fileKey(item) === key);
   const isRecommendation = type === "recommendations";
-  const items = isRecommendation ? file?.risk?.dlp_recommendations || [] : file?.risk?.reasons || [];
-  detailDrawerEyebrow.textContent = isRecommendation ? "DLP recommendations" : "Risk context";
-  detailDrawerTitle.textContent = file?.name || (isRecommendation ? "DLP recommendations" : "Reasons");
+  const isFindings = type === "findings";
+  const items = isRecommendation ? file?.risk?.dlp_recommendations || [] : isFindings ? file?.findings || [] : file?.risk?.reasons || [];
+  detailDrawerEyebrow.textContent = isRecommendation ? "DLP recommendations" : isFindings ? "Finding evidence" : "Risk context";
+  detailDrawerTitle.textContent = file?.name || (isRecommendation ? "DLP recommendations" : isFindings ? "Findings" : "Reasons");
   detailDrawerMeta.textContent = file?.path || "";
-  detailDrawerBody.innerHTML = items.length
-    ? `
-      <ol class="detail-list ${isRecommendation ? "recommendations" : "reasons"}">
-        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-      </ol>
-    `
-    : `<p class="subtext">No ${isRecommendation ? "DLP recommendations" : "risk reasons"} were generated for this file.</p>`;
+  if (isFindings) {
+    detailDrawerBody.innerHTML = renderFindingDetailList(file);
+  } else if (isRecommendation) {
+    detailDrawerBody.innerHTML = items.length
+      ? `<ol class="detail-list recommendations">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`
+      : '<p class="subtext">No DLP recommendations were generated for this file.</p>';
+  } else {
+    detailDrawerBody.innerHTML = renderReasonDetailList(file);
+  }
   detailDrawer.classList.remove("hidden");
   detailDrawer.getBoundingClientRect();
   detailDrawer.classList.add("open");
+}
+
+function renderFindingDetailList(file) {
+  const findings = file?.findings || [];
+  if (!findings.length) {
+    return '<p class="subtext">No findings were generated for this file.</p>';
+  }
+  return `
+    <ol class="detail-list findings">
+      ${findings.map((finding) => {
+        const evidence = finding.matched_keywords || finding.keywords || finding.samples || [];
+        const dataTypes = dataTypesForFinding(finding);
+        return `
+          <li>
+            <strong>${escapeHtml(finding.label || finding.type || "Finding")}</strong>
+            <span class="detail-meta-line">${escapeHtml(finding.risk || "Signal")} &middot; ${escapeHtml(finding.count || 1)} match${Number(finding.count || 1) === 1 ? "" : "es"}</span>
+            ${dataTypes.length ? `<div class="detail-chip-row">${dataTypes.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : ""}
+            ${finding.description ? `<p>${escapeHtml(finding.description)}</p>` : ""}
+            ${evidence.length ? `<div class="detail-evidence"><span>Matched keywords / samples</span><code>${escapeHtml(evidence.slice(0, 10).join(", "))}</code></div>` : ""}
+          </li>
+        `;
+      }).join("")}
+    </ol>
+  `;
+}
+
+function renderReasonDetailList(file) {
+  const complianceDetails = file?.compliance?.reason_details || [];
+  const reasons = file?.risk?.reasons || [];
+  const findingReasonRows = (file?.findings || []).map((finding) => ({
+    category: dataTypesForFinding(finding).join(", ") || "Sensitive signal",
+    reason: finding.description || `${finding.label || finding.type || "Finding"} detected`,
+  }));
+  const rows = [
+    ...complianceDetails.map((item) => ({
+      category: item.category || "Compliance mapping",
+      dataTypes: item.data_types || [],
+      reason: item.reason || "",
+    })),
+    ...findingReasonRows,
+    ...reasons.map((reason) => ({ category: inferReasonCategory(reason), dataTypes: [], reason })),
+  ].filter((item) => item.reason);
+
+  if (!rows.length) {
+    return '<p class="subtext">No risk reasons were generated for this file.</p>';
+  }
+
+  return `
+    <ol class="detail-list reasons">
+      ${rows.map((item) => `
+        <li>
+          <strong>${escapeHtml(item.category || "Risk context")}</strong>
+          ${item.dataTypes?.length ? `<div class="detail-chip-row">${item.dataTypes.map((type) => `<span>${escapeHtml(type)}</span>`).join("")}</div>` : ""}
+          <p>${escapeHtml(item.reason)}</p>
+        </li>
+      `).join("")}
+    </ol>
+  `;
+}
+
+function dataTypesForFinding(finding = {}) {
+  const type = String(finding.type || "").toLowerCase();
+  const category = String(finding.category || "").toLowerCase();
+  const map = [
+    [/full_name|email|phone|address|birth|employee_id|customer|pii/, "Personal data"],
+    [/passport|national_id|ssn|fin|government/, "Government ID"],
+    [/health|medical|phi|diagnosis|insurance/, "Health / PHI"],
+    [/biometric|photo|face|signature|fingerprint/, "Biometric data"],
+    [/genetic|race|religious|political|sexual|union|special_category/, "Special-category data"],
+    [/payment|card|iban|swift|bank|tax|salary|invoice|financial/, "Financial records"],
+    [/hr|employee|benefits|background|timesheet|termination/, "HR / employee data"],
+    [/password|secret|token|key|credential|oauth|jwt|connection/, "Credentials / secrets"],
+    [/legal|contract|nda|litigation/, "Legal documents"],
+    [/source|repo|code|algorithm/, "Source code"],
+    [/security|incident|audit|vulnerability|firewall/, "Security operations"],
+  ];
+  const haystack = `${type} ${category}`;
+  const labels = map.filter(([pattern]) => pattern.test(haystack)).map(([, label]) => label);
+  return [...new Set(labels)];
+}
+
+function inferReasonCategory(reason = "") {
+  const text = String(reason).toLowerCase();
+  if (/hr|employee|payroll|salary|full name|personal|email|phone/.test(text)) return "Personal / HR data";
+  if (/passport|national|ssn|fin|government/.test(text)) return "Government ID";
+  if (/health|medical|patient|phi/.test(text)) return "Health / PHI";
+  if (/password|secret|token|key|credential/.test(text)) return "Credentials / secrets";
+  if (/permission|broad|writable|everyone|access/.test(text)) return "Access exposure";
+  if (/location|path|extension|archive|export/.test(text)) return "File context";
+  return "Risk context";
 }
 
 function closeDetailDrawer() {
@@ -2055,6 +2134,16 @@ function renderRiskRules(rules) {
       </div>
     </section>
 
+    <section class="logic-section compliance-logic-section">
+      <div class="logic-section-title">
+        <span>Compliance mapping</span>
+        <strong>${COMPLIANCE_LOGIC.length} framework${COMPLIANCE_LOGIC.length === 1 ? "" : "s"}</strong>
+      </div>
+      <div class="compliance-logic-list">
+        ${COMPLIANCE_LOGIC.map(renderComplianceLogicItem).join("")}
+      </div>
+    </section>
+
     <section class="logic-section">
       <div class="logic-section-title">
         <span>Detection and control rules</span>
@@ -2085,10 +2174,414 @@ function renderRiskRules(rules) {
   `;
 }
 
+function renderComplianceLogicItem(item) {
+  return `
+    <details class="compliance-logic-item">
+      <summary>
+        <span>
+          <strong>${escapeHtml(item.name)}</strong>
+          <small>${escapeHtml(item.scope)}</small>
+        </span>
+        <b>${escapeHtml(item.dataTypes.length)} data types</b>
+      </summary>
+      <div class="compliance-logic-body">
+        <div class="compliance-logic-hero">
+          <div>
+            <span>Framework mapping model</span>
+            <strong>${escapeHtml(item.name)} evidence pipeline</strong>
+            <p>Signals are normalized into data types, weighted by exposure, then surfaced as file chips and report evidence.</p>
+          </div>
+          <div class="compliance-logic-score">
+            <b>0-100</b>
+            <span>compliance priority</span>
+          </div>
+        </div>
+        <div class="compliance-logic-visual">
+          <div>
+            <em>01</em>
+            <span>Evidence</span>
+            <strong>Findings + keywords</strong>
+          </div>
+          <div>
+            <em>02</em>
+            <span>Mapping</span>
+            <strong>${escapeHtml(item.name)} controls</strong>
+          </div>
+          <div>
+            <em>03</em>
+            <span>Score</span>
+            <strong>Risk weighted</strong>
+          </div>
+          <div>
+            <em>04</em>
+            <span>Output</span>
+            <strong>Report evidence</strong>
+          </div>
+        </div>
+        <div class="compliance-logic-summary">
+          <p>${escapeHtml(item.summary)}</p>
+          <div class="compliance-logic-stats">
+            <span><b>35%</b> risk component cap</span>
+            <span><b>${escapeHtml(item.dataTypes.length)}</b> mapped data types</span>
+            <span><b>4</b> evidence layers</span>
+          </div>
+        </div>
+        <div class="logic-card-grid compliance-logic-grid">
+          ${renderComplianceLogicBlock("Scoring model", item.scoring)}
+          ${renderComplianceLogicBlock("Mapped data types", item.dataTypes)}
+          ${renderComplianceLogicBlock("Evidence used", item.evidence)}
+          ${renderComplianceLogicBlock("Output in scan/report", item.output)}
+        </div>
+        ${renderComplianceKeywordLibraryPanel(item)}
+      </div>
+    </details>
+  `;
+}
+
+function renderComplianceLogicBlock(title, items = []) {
+  return `
+    <article class="logic-card compliance-logic-card">
+      <div class="compliance-logic-card-head">
+        <span>${escapeHtml(title.slice(0, 2).toUpperCase())}</span>
+        <h4>${escapeHtml(title)}</h4>
+      </div>
+      <ul>
+        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+    </article>
+  `;
+}
+
+function renderComplianceKeywordLibraryPanel(item) {
+  const library = latestComplianceKeywordLibrary || {};
+  const groups = library.groups || [];
+  const customGroups = groups.filter((group) => group.source === "custom");
+  const totalTerms = library.total_terms || 0;
+  const customTerms = library.custom_terms || 0;
+  const typeOptions = [
+    ["all", "All finding types"],
+    ["gdpr_full_name", "Full name"],
+    ["gdpr_email_address", "Email address"],
+    ["gdpr_phone_number", "Phone number"],
+    ["gdpr_passport_number", "Passport number"],
+    ["gdpr_national_id", "National ID"],
+    ["gdpr_health_medical_record", "Health / medical"],
+    ["gdpr_salary_compensation", "Salary / compensation"],
+    ["gdpr_hr_employee_file", "HR employee file"],
+    ["gdpr_invoice_billing_transaction_log", "Customer / invoice"],
+    ["gdpr_password_secret", "Password / secret"],
+  ];
+  return `
+    <section class="keyword-library-panel" data-keyword-framework="${escapeHtml(item.id)}">
+      <div class="keyword-library-head">
+        <div>
+          <span>Keyword library</span>
+          <strong>Import / export detection terms</strong>
+          <p>Maintain tenant-specific GDPR dictionaries without replacing the built-in detection layer.</p>
+        </div>
+        <div class="keyword-library-metrics">
+          <span><b>${escapeHtml(totalTerms)}</b>Total terms</span>
+          <span><b>${escapeHtml(customTerms)}</b>Custom terms</span>
+          <span><b>${escapeHtml(customGroups.length)}</b>Custom groups</span>
+        </div>
+      </div>
+      <div class="keyword-library-actions">
+        <label>
+          <span>Finding type</span>
+          <select data-keyword-type>
+            ${typeOptions.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}
+          </select>
+        </label>
+        <label>
+          <span>Import mode</span>
+          <select data-keyword-mode>
+            <option value="merge">Add only new terms</option>
+            <option value="replace_type">Replace matching finding types</option>
+            <option value="replace_category">Replace matching data categories</option>
+            <option value="replace_framework">Replace all custom GDPR terms</option>
+          </select>
+        </label>
+        <label class="keyword-file-picker">
+          <span>Import file</span>
+          <input type="file" data-keyword-file accept=".json,.csv,.txt,text/plain,application/json,text/csv" />
+        </label>
+      </div>
+      <div class="keyword-library-buttons">
+        <button type="button" class="secondary-btn mini-btn" data-keyword-action="validate">Preview import</button>
+        <button type="button" class="secondary-btn mini-btn" data-keyword-action="import">Import keywords</button>
+        <button type="button" class="secondary-btn mini-btn" data-keyword-action="export-json">Export JSON</button>
+        <button type="button" class="secondary-btn mini-btn" data-keyword-action="export-csv">Export CSV</button>
+        <button type="button" class="secondary-btn mini-btn" data-keyword-action="template">Download template</button>
+      </div>
+      <div id="keyword-import-status" class="keyword-import-status">${latestComplianceKeywordLibrary ? "Ready for import/export." : "Keyword library will load after sign-in."}</div>
+      <div class="keyword-import-guide">
+        <div>
+          <strong>TXT import</strong>
+          <span>Choose one finding type, then separate terms with commas, semicolons, pipes, tabs, or new lines.</span>
+          <code>employee legal name, customer full name, beneficiary name</code>
+        </div>
+        <div>
+          <strong>CSV / JSON import</strong>
+          <span>Use CSV/JSON for multiple finding types. CSV should include keyword and type columns.</span>
+          <code>keyword,type,category</code>
+        </div>
+        <div>
+          <strong>Mode policy</strong>
+          <span>Add only is safest for production. Replace modes affect only the custom layer, never built-in GDPR detections.</span>
+          <code>preview before import</code>
+        </div>
+        <div>
+          <strong>Match quality</strong>
+          <span>Imported phrases are matched case-insensitively with word boundaries to reduce accidental hits.</span>
+          <code>clinical diagnosis != misdiagnosis</code>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderRiskRulesCache() {
   if (latestRiskRules.length) {
     renderRiskRules(latestRiskRules);
   }
+}
+
+async function loadComplianceKeywordLibrary() {
+  if (!accessToken) return;
+  try {
+    latestComplianceKeywordLibrary = await api("/api/compliance-keywords?framework=gdpr", null, "GET");
+    renderRiskRulesCache();
+  } catch (error) {
+    try {
+      const response = await fetch("/static/compliance_keywords_gdpr_builtin.json", { cache: "no-store" });
+      if (!response.ok) throw new Error(`Static fallback failed: ${response.status}`);
+      latestComplianceKeywordLibrary = await response.json();
+      renderRiskRulesCache();
+      setKeywordImportStatus("Showing built-in GDPR keywords from static fallback. Restart backend to enable import/preview API.", "warning");
+    } catch {
+      setKeywordImportStatus(`Keyword library failed: ${error.message}`, "danger");
+    }
+  }
+}
+
+function setKeywordImportStatus(message, tone = "") {
+  const status = document.querySelector("#keyword-import-status");
+  if (!status) return;
+  status.textContent = message;
+  status.className = `keyword-import-status ${tone}`.trim();
+}
+
+function keywordPanelPayload(panel) {
+  return {
+    framework: panel?.dataset.keywordFramework || "gdpr",
+    language: "custom",
+    mode: panel?.querySelector("[data-keyword-mode]")?.value || "merge",
+    type: panel?.querySelector("[data-keyword-type]")?.value || "all",
+  };
+}
+
+async function readKeywordImportPayload(panel) {
+  const settings = keywordPanelPayload(panel);
+  const file = panel?.querySelector("[data-keyword-file]")?.files?.[0];
+  if (!file) throw new Error("Choose a JSON, CSV, or TXT keyword file first.");
+  const text = await file.text();
+  const extension = file.name.toLowerCase().split(".").pop();
+  if (extension === "json") {
+    const parsed = JSON.parse(text);
+    return {
+      framework: parsed.framework || settings.framework,
+      language: parsed.language || settings.language,
+      mode: settings.mode || parsed.mode || "merge",
+      keywords: parsed.keywords || parsed.groups || [],
+    };
+  }
+  if (extension === "csv") {
+    return {
+      framework: settings.framework,
+      language: settings.language,
+      mode: settings.mode,
+      keywords: parseKeywordCsv(text, settings),
+    };
+  }
+  if (settings.type === "all") {
+    throw new Error("TXT import needs one specific finding type. Use JSON or CSV when importing multiple finding types.");
+  }
+  const terms = parseKeywordText(text);
+  return {
+    framework: settings.framework,
+    language: settings.language,
+    mode: settings.mode,
+    keywords: [{ framework: settings.framework, language: settings.language, type: settings.type, terms }],
+  };
+}
+
+function parseKeywordText(text) {
+  return text
+    .split(/\r?\n/)
+    .flatMap((line) => line.split(/[,\t;|]+/))
+    .map((item) => item.trim().replace(/^["']|["']$/g, ""))
+    .filter((item) => item && !item.startsWith("#"));
+}
+
+function parseKeywordCsv(text, settings) {
+  const rows = text.split(/\r?\n/).filter((line) => line.trim());
+  if (!rows.length) return [];
+  const headers = splitCsvRow(rows[0]).map((item) => item.trim().toLowerCase());
+  const hasHeader = headers.includes("keyword") || headers.includes("term") || headers.includes("type");
+  const dataRows = hasHeader ? rows.slice(1) : rows;
+  const buckets = new Map();
+  dataRows.forEach((row) => {
+    const cells = splitCsvRow(row);
+    const get = (name, fallback = "") => {
+      const index = headers.indexOf(name);
+      return index >= 0 ? cells[index] || fallback : fallback;
+    };
+    const keyword = hasHeader ? get("keyword", get("term", "")) : cells[0];
+    const type = hasHeader ? get("type", settings.type === "all" ? "" : settings.type) : (settings.type === "all" ? "" : settings.type);
+    const language = hasHeader ? get("language", settings.language) : settings.language;
+    const category = hasHeader ? get("category", "") : "";
+    const keywords = parseKeywordText(keyword);
+    if (!keywords.length || !type) return;
+    const key = `${language}|${category}|${type}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, { framework: settings.framework, language, category, type, terms: [] });
+    }
+    buckets.get(key).terms.push(...keywords);
+  });
+  return [...buckets.values()];
+}
+
+function splitCsvRow(row) {
+  const cells = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < row.length; index += 1) {
+    const char = row[index];
+    if (char === '"' && row[index + 1] === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+async function handleKeywordAction(action, panel) {
+  if (!panel) return;
+  try {
+    if (action === "validate" || action === "import") {
+      const payload = await readKeywordImportPayload(panel);
+      const result = await api(`/api/compliance-keywords/${action === "validate" ? "validate" : "import"}`, payload);
+      const unknown = (result.unknown_types || []).length ? ` Unknown types: ${result.unknown_types.join(", ")}.` : "";
+      setKeywordImportStatus(`${action === "validate" ? "Preview" : "Imported"}: ${result.new_terms || 0} new, ${result.duplicates || 0} duplicates, ${result.group_count || 0} groups.${unknown}`, unknown ? "warning" : "");
+      if (action === "import") await loadComplianceKeywordLibrary();
+      return;
+    }
+    if (action === "template") {
+      const settings = keywordPanelPayload(panel);
+      let template;
+      try {
+        template = await api(`/api/compliance-keywords/template?framework=${encodeURIComponent(settings.framework)}&language=custom`, null, "GET");
+      } catch {
+        template = buildKeywordTemplate(settings.framework);
+      }
+      downloadFile(`${settings.framework}_keyword_template.json`, JSON.stringify(template, null, 2), "application/json;charset=utf-8");
+      setKeywordImportStatus("Template downloaded.");
+      return;
+    }
+    if (action === "export-json" || action === "export-csv") {
+      const settings = keywordPanelPayload(panel);
+      const format = action === "export-csv" ? "csv" : "json";
+      await exportComplianceKeywords(settings.framework, "", format);
+      setKeywordImportStatus(`Exported ${format.toUpperCase()}.`);
+    }
+  } catch (error) {
+    setKeywordImportStatus(error.message, "danger");
+  }
+}
+
+function buildKeywordTemplate(framework = "gdpr") {
+  return {
+    framework,
+    mode: "merge",
+    keywords: [
+      {
+        framework,
+        language: "custom",
+        category: "pii",
+        type: "gdpr_full_name",
+        label: "Full name",
+        terms: ["employee legal name", "customer full name", "beneficiary name"]
+      },
+      {
+        framework,
+        language: "custom",
+        category: "government_ids",
+        type: "gdpr_passport_number",
+        label: "Passport number",
+        terms: ["passport number", "passport document number", "travel document identifier"]
+      },
+      {
+        framework,
+        language: "custom",
+        category: "health",
+        type: "gdpr_health_medical_record",
+        label: "Health / medical",
+        terms: ["medical record number", "clinical diagnosis", "patient treatment plan"]
+      }
+    ]
+  };
+}
+
+async function exportComplianceKeywords(framework, language, format) {
+  const response = await fetch(`/api/compliance-keywords/export?framework=${encodeURIComponent(framework)}&language=${encodeURIComponent(language)}&format=${encodeURIComponent(format)}`, {
+    method: "GET",
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    if (latestComplianceKeywordLibrary) {
+      exportComplianceKeywordsFromClient(framework, language, format);
+      return;
+    }
+    throw new Error(await readErrorMessage(response));
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const filename = match?.[1] || `${framework}_keywords.${format}`;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportComplianceKeywordsFromClient(framework, language, format) {
+  const library = latestComplianceKeywordLibrary || { groups: [] };
+  const groups = (library.groups || []).filter((group) => !language || group.language === language || group.language === "built-in");
+  const filename = `${framework}_keywords_${language || "all"}.${format}`;
+  if (format === "csv") {
+    const rows = [["framework", "language", "category", "type", "label", "source", "keyword"]];
+    groups.forEach((group) => {
+      (group.terms || []).forEach((term) => {
+        rows.push([group.framework, group.language, group.category, group.type, group.label || "", group.source || "", term]);
+      });
+    });
+    const csv = `\uFEFF${rows.map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(",")).join("\n")}`;
+    downloadFile(filename, csv, "text/csv;charset=utf-8");
+    return;
+  }
+  downloadFile(filename, JSON.stringify({ ...library, groups }, null, 2), "application/json;charset=utf-8");
 }
 
 function renderLogicRuleCard(rule) {
@@ -2372,6 +2865,14 @@ function renderReportPreview() {
       </div>
 
       <div class="report-visual-grid">
+        ${renderComplianceSummaryPanel(report.compliance)}
+        <div class="chart-panel report-card-scroll product-panel">
+          <h5>Framework mapping</h5>
+          ${renderComplianceMappingList(report.compliance)}
+        </div>
+      </div>
+
+      <div class="report-visual-grid">
         <div class="chart-panel report-card-scroll report-priority-card product-panel">
           <h5>Priority queue</h5>
           ${renderReportFileList(topFiles)}
@@ -2419,7 +2920,77 @@ function buildReportModel() {
     departments: groupFilesByDepartment(latestFiles),
     folders: groupFilesByFolder(latestFiles),
     comparison: buildReportComparisonRows(),
+    compliance: latestReport?.compliance_summary || { enabled: false, total_compliance_findings: 0 },
   };
+}
+
+function renderComplianceSummaryPanel(compliance = latestReport?.compliance_summary || {}) {
+  if (!compliance.enabled) {
+    return `
+      <div class="chart-panel report-card-scroll product-panel compliance-report-panel">
+        <h5>Compliance mapping</h5>
+        <p class="subtext">Compliance mapping was not enabled for this scan.</p>
+      </div>
+    `;
+  }
+  const frameworks = compliance.selected_framework_names || compliance.selected_frameworks || [];
+  const topFiles = compliance.top_risky_files || [];
+  const categories = compliance.top_violated_categories || [];
+  return `
+    <div class="chart-panel report-card-scroll product-panel compliance-report-panel">
+      <h5>Compliance mapping</h5>
+      <div class="compliance-score-row">
+        <div><span>Findings</span><strong>${escapeHtml(compliance.total_compliance_findings || 0)}</strong></div>
+        <div class="critical"><span>Critical</span><strong>${escapeHtml(compliance.critical || 0)}</strong></div>
+        <div class="high"><span>High</span><strong>${escapeHtml(compliance.high || 0)}</strong></div>
+      </div>
+      <div class="compliance-badge-row">${frameworks.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+      <h6>Top categories</h6>
+      ${categories.length ? categories.slice(0, 5).map((item) => `<div class="report-row"><div><strong>${escapeHtml(item.category)}</strong><span>${escapeHtml(item.count)} files</span></div></div>`).join("") : '<p class="subtext">No category mapping.</p>'}
+      <h6>Top compliance files</h6>
+      ${topFiles.length ? topFiles.slice(0, 5).map((item) => `<div class="report-row"><div><strong>${escapeHtml(item.file)}</strong><span>${escapeHtml((item.frameworks || []).join(", "))}</span></div><span class="badge ${escapeHtml(item.severity)}">${escapeHtml(item.severity)} ${escapeHtml(item.score)}</span></div>`).join("") : '<p class="subtext">No compliance findings.</p>'}
+    </div>
+  `;
+}
+
+function renderComplianceMappingList(compliance = latestReport?.compliance_summary || {}) {
+  if (!compliance.enabled) return '<p class="subtext">Run a scan with Compliance enabled to populate framework mappings.</p>';
+  const priorities = compliance.remediation_priorities || [];
+  const topFiles = compliance.top_risky_files || [];
+  const items = priorities.length
+    ? priorities.map((item) => ({ label: item.control, detail: `${item.count} files` }))
+    : topFiles.map((item) => ({ label: (item.frameworks || []).join(", "), detail: item.remediation || item.path }));
+  return items.slice(0, 8).map((item) => `
+    <div class="report-row">
+      <div>
+        <strong>${escapeHtml(item.label || "Compliance mapping")}</strong>
+        <span>${escapeHtml(item.detail || "Review mapped control and remediation priority.")}</span>
+      </div>
+    </div>
+  `).join("") || '<p class="subtext">No compliance mappings found.</p>';
+}
+
+function reportComplianceText(file) {
+  const compliance = file.compliance || {};
+  if (!compliance.matched_frameworks?.length) return "No compliance mapping";
+  return `${(compliance.matched_framework_names || compliance.matched_frameworks).join(", ")}; ${compliance.compliance_severity} ${compliance.compliance_score}; ${(compliance.data_categories || []).join(", ")}`;
+}
+
+function buildComplianceRows(report) {
+  const summary = report.compliance || {};
+  const topFiles = summary.top_risky_files || [];
+  return topFiles.map((item, index) => `
+    <tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(item.file || "")}</td>
+      <td>${escapeHtml(item.path || "")}</td>
+      <td class="${escapeHtml(item.severity || "LOW")}">${escapeHtml(item.severity || "LOW")}</td>
+      <td>${escapeHtml(item.score || 0)}</td>
+      <td>${escapeHtml((item.frameworks || []).join("; "))}</td>
+      <td>${escapeHtml((item.categories || []).join("; "))}</td>
+      <td>${escapeHtml(item.remediation || "")}</td>
+    </tr>
+  `).join("");
 }
 
 function renderReportFileList(files) {
@@ -3512,6 +4083,9 @@ function buildExecutiveReportHtml(mode = "word") {
   const comparisonRows = report.comparison.length
     ? report.comparison.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.current}</td><td>${item.prior}</td><td class="${item.delta > 0 ? "worse" : item.delta < 0 ? "better" : ""}">${item.delta > 0 ? "+" : ""}${item.delta}</td></tr>`).join("")
     : '<tr><td colspan="4">Run and save at least two scans to populate comparison.</td></tr>';
+  const compliance = report.compliance || {};
+  const complianceRows = buildComplianceRows(report);
+  const complianceFrameworks = compliance.selected_framework_names || compliance.selected_frameworks || [];
   const actionCards = report.priorityFiles.slice(0, 4).map((file, index) => {
     const risk = getEffectiveRisk(file);
     return `
@@ -3682,6 +4256,20 @@ function buildExecutiveReportHtml(mode = "word") {
 
             <section class="grid">
               <div class="panel">
+                <h2>Compliance executive summary</h2>
+                <table>
+                  <thead><tr><th>Enabled</th><th>Frameworks</th><th>Findings</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th></tr></thead>
+                  <tbody><tr><td>${compliance.enabled ? "Yes" : "No"}</td><td>${escapeHtml(complianceFrameworks.join("; "))}</td><td>${escapeHtml(compliance.total_compliance_findings || 0)}</td><td>${escapeHtml(compliance.critical || 0)}</td><td>${escapeHtml(compliance.high || 0)}</td><td>${escapeHtml(compliance.medium || 0)}</td><td>${escapeHtml(compliance.low || 0)}</td></tr></tbody>
+                </table>
+              </div>
+              <div class="panel">
+                <h2>Framework mapping</h2>
+                ${renderComplianceMappingList(compliance)}
+              </div>
+            </section>
+
+            <section class="grid">
+              <div class="panel">
                 <h2>Department risk</h2>
                 ${report.departments.slice(0, 7).map((item) => `<div class="bar"><div class="bar-label"><span>${escapeHtml(item.department)}</span><strong>${item.files}</strong></div><span class="track"><b style="width:${Math.min(100, (item.score / Math.max(...report.departments.map((dep) => dep.score), 1)) * 100)}%"></b></span></div>`).join("") || '<p class="muted">No department data.</p>'}
               </div>
@@ -3724,6 +4312,14 @@ function buildExecutiveReportHtml(mode = "word") {
               <table class="full-register-table">
                 <thead><tr><th>File</th><th>Source</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Findings</th><th>Reasons</th><th>DLP / action</th></tr></thead>
                 <tbody>${fullRows || '<tr><td colspan="9">No file evidence rows available.</td></tr>'}</tbody>
+              </table>
+            </section>
+            <section class="full-register-section page-break">
+              <h2>Appendix B - Compliance findings</h2>
+              <p class="muted">Evidence-based compliance exposure mapping. This is not a legal compliance certification.</p>
+              <table>
+                <thead><tr><th>#</th><th>File</th><th>Path</th><th>Severity</th><th>Score</th><th>Frameworks</th><th>Categories</th><th>Remediation</th></tr></thead>
+                <tbody>${complianceRows || '<tr><td colspan="8">No compliance findings.</td></tr>'}</tbody>
               </table>
             </section>
           </main>
@@ -3895,6 +4491,7 @@ function buildPolishedExcelWorkbookHtml() {
           <td class="${risk.level}">${escapeHtml(risk.level)}</td>
           <td>${escapeHtml(risk.score)}</td>
           <td>${escapeHtml(reportFindingsText(file))}</td>
+          <td>${escapeHtml(reportComplianceText(file))}</td>
           <td>${escapeHtml(reportReasonsText(file))}</td>
           <td>${escapeHtml(reportDlpText(file))}</td>
           <td>${escapeHtml(reportActionsText(file))}</td>
@@ -3921,6 +4518,14 @@ function buildPolishedExcelWorkbookHtml() {
       return `<tr><td>${index + 1}</td><td>${escapeHtml(file.name || file.path || "")}</td><td class="${risk.level}">${risk.level}</td><td>${risk.score}</td><td>${escapeHtml(reportOwnerText(file))}</td><td>${sla}</td><td>${escapeHtml(reportActionsText(file))}</td></tr>`;
     })
     .join("");
+  const complianceRows = buildComplianceRows(report);
+  const compliance = report.compliance || {};
+  const frameworkRows = compliance.enabled
+    ? (compliance.selected_framework_names || compliance.selected_frameworks || []).map((item) => `<tr><td>${escapeHtml(item)}</td><td>${escapeHtml(compliance.total_compliance_findings || 0)}</td><td>${escapeHtml(compliance.critical || 0)}</td><td>${escapeHtml(compliance.high || 0)}</td></tr>`).join("")
+    : '<tr><td colspan="4">Compliance mapping was not enabled for this scan.</td></tr>';
+  const complianceRemediationRows = compliance.enabled
+    ? (compliance.remediation_priorities || []).map((item) => `<tr><td>${escapeHtml(item.control)}</td><td>${escapeHtml(item.count)}</td><td>Review owner, reduce broad access, encrypt sensitive data, and validate retention.</td></tr>`).join("")
+    : '<tr><td colspan="3">No compliance remediation priorities.</td></tr>';
 
   return `
     <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
@@ -3928,7 +4533,9 @@ function buildPolishedExcelWorkbookHtml() {
         <meta charset="utf-8" />
         <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets>
           <x:ExcelWorksheet><x:Name>Executive Summary</x:Name><x:WorksheetOptions><x:DisplayGridlines/><x:FreezePanes/><x:FrozenNoSplit/><x:SplitHorizontal>1</x:SplitHorizontal><x:TopRowBottomPane>1</x:TopRowBottomPane></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Compliance Summary</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
           <x:ExcelWorksheet><x:Name>Risk Register</x:Name><x:WorksheetOptions><x:DisplayGridlines/><x:FreezePanes/></x:WorksheetOptions></x:ExcelWorksheet>
+          <x:ExcelWorksheet><x:Name>Framework Mapping</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
           <x:ExcelWorksheet><x:Name>Remediation Plan</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
           <x:ExcelWorksheet><x:Name>Departments</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
           <x:ExcelWorksheet><x:Name>Folders</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
@@ -3974,17 +4581,30 @@ function buildPolishedExcelWorkbookHtml() {
           <tr><td class="CRITICAL">${report.summary.critical}</td><td class="HIGH">${report.summary.high}</td><td class="MEDIUM">${report.summary.medium}</td><td class="LOW">${report.summary.low}</td><td>${hiddenCount}</td><td>${protectedCount}</td><td>${report.summary.total_files}</td></tr>
         </table>
 
+        <h2 class="section-break">Compliance Summary</h2>
+        <table class="kpi">
+          <tr><th>Enabled</th><th>Frameworks</th><th>Findings</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th></tr>
+          <tr><td>${compliance.enabled ? "Yes" : "No"}</td><td>${escapeHtml((compliance.selected_framework_names || compliance.selected_frameworks || []).join("; "))}</td><td>${escapeHtml(compliance.total_compliance_findings || 0)}</td><td class="CRITICAL">${escapeHtml(compliance.critical || 0)}</td><td class="HIGH">${escapeHtml(compliance.high || 0)}</td><td class="MEDIUM">${escapeHtml(compliance.medium || 0)}</td><td class="LOW">${escapeHtml(compliance.low || 0)}</td></tr>
+        </table>
+        <table><tr><th>#</th><th>File</th><th>Path</th><th>Severity</th><th>Score</th><th>Frameworks</th><th>Categories</th><th>Remediation</th></tr>${complianceRows || '<tr><td colspan="8">No compliance findings</td></tr>'}</table>
+
         <h2>Risk Distribution</h2>
         <table><tr><th>Level</th><th>Files</th><th>Percent of scan</th></tr>${report.distribution.map((item) => `<tr><td class="${item.level}">${item.label}</td><td>${item.count}</td><td>${Math.round((item.count / Math.max(report.summary.total_files, 1)) * 100)}%</td></tr>`).join("")}</table>
 
         <h2 class="section-break">Risk Register - All Files</h2>
         <table>
-          <tr><th>#</th><th>File</th><th>Path</th><th>Source</th><th>Share</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Score</th><th>Findings</th><th>Reasons</th><th>DLP Recommendation</th><th>Remediation Action</th></tr>
-          ${riskRows || '<tr><td colspan="14">No risk rows available</td></tr>'}
+          <tr><th>#</th><th>File</th><th>Path</th><th>Source</th><th>Share</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Score</th><th>Findings</th><th>Compliance</th><th>Reasons</th><th>DLP Recommendation</th><th>Remediation Action</th></tr>
+          ${riskRows || '<tr><td colspan="15">No risk rows available</td></tr>'}
         </table>
+
+        <h2 class="section-break">Framework Mapping</h2>
+        <table><tr><th>Framework</th><th>Total compliance findings</th><th>Critical</th><th>High</th></tr>${frameworkRows}</table>
 
         <h2 class="section-break">Remediation Plan</h2>
         <table><tr><th>#</th><th>File</th><th>Risk</th><th>Score</th><th>Owner</th><th>SLA</th><th>Action</th></tr>${remediationRows || '<tr><td colspan="7">No remediation actions required</td></tr>'}</table>
+
+        <h2>Compliance Remediation</h2>
+        <table><tr><th>Mapped control/category</th><th>Files</th><th>Priority action</th></tr>${complianceRemediationRows}</table>
 
         <h2 class="section-break">Departments</h2>
         <table><tr><th>Department</th><th>Files</th><th>Critical</th><th>High</th><th>Total risk score</th><th>Average risk</th></tr>${departmentRows || '<tr><td colspan="6">No department data</td></tr>'}</table>
@@ -5052,6 +5672,11 @@ document.addEventListener("click", (event) => {
     renderRows(latestFiles);
     return;
   }
+  const keywordAction = event.target.closest("[data-keyword-action]");
+  if (keywordAction) {
+    handleKeywordAction(keywordAction.dataset.keywordAction, keywordAction.closest(".keyword-library-panel"));
+    return;
+  }
   const tabButton = event.target.closest(".tab[data-tab]");
   const tabJump = event.target.closest("[data-tab-jump]");
   if (tabButton) {
@@ -5340,6 +5965,7 @@ tenantSwitcher.addEventListener("change", async () => {
   updateSummaryFromFiles([]);
   scanMeta.textContent = "No scan has been run yet.";
   setStatus(`Switched MSSP customer to ${currentTenant}.`);
+  await loadComplianceKeywordLibrary().catch(() => {});
   await loadHistory().catch((error) => setStatus(`Tenant switch failed: ${error.message}`));
 });
 
@@ -5357,6 +5983,7 @@ applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
 renderExtensionFilter(allowedExtensionsList, extensionSearch);
 renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
+renderComplianceSelectors();
 initSimpleExtensionPolicies();
 applyDefaultSimpleExtensionPolicies();
 renderProfile();
@@ -5365,7 +5992,6 @@ renderReportPreview();
 renderExecutiveExperience();
 renderScanContextPanels();
 renderFindingsWorkspace();
-renderExposureWorkspace();
 renderIntegrations();
 if (safeSessionGet("dspm-sidebar-collapsed") === "1") {
   setSidebarCollapsed(true);
@@ -5391,6 +6017,7 @@ async function loadProtectedMetadata() {
   try {
     const data = await api("/api/risk-rules", null, "GET");
     renderRiskRules(data.rules);
+    await loadComplianceKeywordLibrary();
   } catch {
     riskRulesBody.innerHTML = '<div class="empty compact">Risk logic could not be loaded.</div>';
   }

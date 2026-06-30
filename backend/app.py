@@ -14,11 +14,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from backend.alerts import evaluate_alerts
+from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.jobs import cancel_job, cleanup_jobs, create_job, create_scan_job, get_job
 from backend.security import (
     Principal,
@@ -57,6 +58,12 @@ from backend.store import (
     update_user_active,
 )
 from backend.vault import CredentialVault
+from classification.compliance.keyword_library import (
+    export_keyword_groups,
+    import_keyword_groups,
+    list_keyword_groups,
+    validate_keyword_import,
+)
 from collectors.file_scanner import normalize_extension_filter, scan_directory
 from collectors.winrm_endpoint_scanner import (
     ENDPOINT_PATH_ALIASES,
@@ -207,6 +214,16 @@ class ScanRequest(ConnectionRequest):
     save_report: bool = True
     async_scan: bool = False
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
+    compliance_enabled: bool = False
+    compliance_frameworks: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("compliance_frameworks")
+    @classmethod
+    def _validate_compliance_frameworks(cls, values: list[str]) -> list[str]:
+        try:
+            return normalize_framework_ids(values)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class EndpointScanRequest(BaseModel):
@@ -230,11 +247,21 @@ class EndpointScanRequest(BaseModel):
     system_filter_enabled: bool = False
     save_report: bool = True
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
+    compliance_enabled: bool = False
+    compliance_frameworks: list[str] = Field(default_factory=list, max_length=12)
 
     @field_validator("host", "domain", "username", "credential_ref")
     @classmethod
     def _clean_endpoint_text(cls, value: str) -> str:
         return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
+
+    @field_validator("compliance_frameworks")
+    @classmethod
+    def _validate_endpoint_compliance_frameworks(cls, values: list[str]) -> list[str]:
+        try:
+            return normalize_framework_ids(values)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("target_username")
     @classmethod
@@ -265,6 +292,41 @@ class EndpointScanRequest(BaseModel):
                 continue
             raise ValueError("Endpoint paths must be known aliases or absolute Windows paths")
         return cleaned or ["desktop", "documents", "downloads"]
+
+
+class ComplianceKeywordGroup(BaseModel):
+    framework: str = Field(default="gdpr", max_length=40)
+    language: str = Field(default="custom", max_length=32)
+    category: str = Field(default="", max_length=80)
+    type: str = Field(default="", max_length=80)
+    finding_type: str = Field(default="", max_length=80)
+    label: str = Field(default="", max_length=160)
+    terms: list[str] = Field(default_factory=list, max_length=5000)
+
+    @field_validator("framework", "language", "category", "type", "label")
+    @classmethod
+    def _clean_keyword_text(cls, value: str) -> str:
+        return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
+
+    @field_validator("terms")
+    @classmethod
+    def _clean_terms(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in values or []:
+            term = " ".join(re.sub(r"[\x00-\x1f\x7f]", "", str(item or "")).strip().split())
+            key = term.lower()
+            if term and key not in seen:
+                cleaned.append(term[:160])
+                seen.add(key)
+        return cleaned
+
+
+class ComplianceKeywordImportRequest(BaseModel):
+    framework: str = Field(default="gdpr", max_length=40)
+    language: str = Field(default="custom", max_length=32)
+    mode: str = Field(default="merge", pattern="^(merge|replace_type|replace_category|replace_framework|replace_language|replace_custom)$")
+    keywords: list[ComplianceKeywordGroup] = Field(default_factory=list, max_length=1000)
 
 
 class LocalWinRMActivationRequest(BaseModel):
@@ -370,6 +432,94 @@ def health() -> dict:
 @app.get("/api/risk-rules")
 def risk_rules(_: Principal = Depends(require_role("viewer"))) -> dict:
     return {"rules": get_risk_rules()}
+
+
+@app.get("/api/compliance-keywords")
+def compliance_keywords(
+    framework: str = Query(default="gdpr", max_length=40),
+    language: str = Query(default="", max_length=32),
+    category: str = Query(default="", max_length=80),
+    source: str = Query(default="all", max_length=20),
+    principal: Principal = Depends(require_role("viewer")),
+) -> dict:
+    return list_keyword_groups(principal.tenant_id, framework, language=language, category=category, source=source)
+
+
+@app.post("/api/compliance-keywords/validate")
+def compliance_keywords_validate(payload: ComplianceKeywordImportRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    return validate_keyword_import(principal.tenant_id, payload.model_dump())
+
+
+@app.post("/api/compliance-keywords/import")
+def compliance_keywords_import(payload: ComplianceKeywordImportRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    try:
+        result = import_keyword_groups(principal.tenant_id, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "compliance_keywords.imported",
+        {
+            "framework": result.get("framework"),
+            "mode": result.get("mode"),
+            "new_terms": result.get("new_terms"),
+            "duplicates": result.get("duplicates"),
+        },
+    )
+    return result
+
+
+@app.get("/api/compliance-keywords/export")
+def compliance_keywords_export(
+    framework: str = Query(default="gdpr", max_length=40),
+    language: str = Query(default="", max_length=32),
+    source: str = Query(default="all", max_length=20),
+    format: str = Query(default="json", max_length=10),
+    principal: Principal = Depends(require_role("viewer")),
+) -> Response:
+    filename, media_type, content = export_keyword_groups(principal.tenant_id, framework, language=language, source=source, fmt=format)
+    return Response(content=content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/compliance-keywords/template")
+def compliance_keywords_template(
+    framework: str = Query(default="gdpr", max_length=40),
+    language: str = Query(default="ru", max_length=32),
+    principal: Principal = Depends(require_role("viewer")),
+) -> dict:
+    _ = principal
+    return {
+        "framework": framework,
+        "language": language,
+        "mode": "merge",
+        "keywords": [
+            {
+                "framework": framework,
+                "language": language,
+                "category": "pii",
+                "type": "gdpr_full_name",
+                "label": "Full name",
+                "terms": ["subject full legal name", "employee legal name", "customer full name"],
+            },
+            {
+                "framework": framework,
+                "language": language,
+                "category": "government_ids",
+                "type": "gdpr_passport_number",
+                "label": "Passport number",
+                "terms": ["passport number", "passport document number", "travel document identifier"],
+            },
+            {
+                "framework": framework,
+                "language": language,
+                "category": "health",
+                "type": "gdpr_health_medical_record",
+                "label": "Health / medical",
+                "terms": ["medical record number", "clinical diagnosis", "patient treatment plan"],
+            },
+        ],
+    }
 
 
 @app.post("/api/auth/login")
@@ -776,13 +926,14 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_role("anal
         if not _is_local_endpoint_host(payload.server):
             _validate_scan_target(payload.server)
         if payload.async_scan:
-            job = create_scan_job(principal.tenant_id, _to_config(payload, principal.tenant_id), lambda data: _persist_scan(data, payload, principal))
+            job = create_scan_job(principal.tenant_id, _to_config(payload, principal.tenant_id), lambda data: _persist_compliance_scan(data, payload, principal))
             audit(principal.tenant_id, principal.subject, "scan.queued", {"job_id": job.id, "server": _safe_target_label(payload.server)})
             return job.to_dict()
 
         engine = DSPMDiscoveryEngine(_to_config(payload, principal.tenant_id))
         report = engine.run()
         data = report.to_dict()
+        _apply_compliance(data, payload)
         _persist_scan(data, payload, principal)
         audit(principal.tenant_id, principal.subject, "scan.completed", {"scan_id": data.get("scan_id")})
         return data
@@ -1213,6 +1364,19 @@ def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, princi
         generate_report(data, REPORT_DIR / f"{principal.tenant_id}_{report_id}.json")
 
 
+def _apply_compliance(data: dict, payload: ScanRequest | EndpointScanRequest) -> dict:
+    return enrich_report_with_compliance(
+        data,
+        bool(getattr(payload, "compliance_enabled", False)),
+        getattr(payload, "compliance_frameworks", []),
+    )
+
+
+def _persist_compliance_scan(data: dict, payload: ScanRequest | EndpointScanRequest, principal: Principal) -> None:
+    _apply_compliance(data, payload)
+    _persist_scan(data, payload, principal)
+
+
 def _run_endpoint_scan_payload(
     config: WinRMEndpointConfig,
     payload: EndpointScanRequest,
@@ -1234,8 +1398,11 @@ def _run_endpoint_scan_payload(
         job.message = "Analyzing endpoint files"
     report = DSPMDiscoveryEngine(
         ScanConfig(
+            tenant_id=principal.tenant_id,
             server="",
             use_sample_when_empty=False,
+            compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
+            compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
             asset_overrides=[
                 {
                     "pattern": item.pattern.strip(),
@@ -1276,6 +1443,7 @@ def _run_endpoint_scan_payload(
             "scan_diagnostics": scanner.last_scan_diagnostics,
         },
     }
+    _apply_compliance(data, payload)
     if job:
         job.progress = 92
         job.message = "Saving endpoint report"
@@ -1356,8 +1524,11 @@ def _run_local_endpoint_scan_payload(
 
     report = DSPMDiscoveryEngine(
         ScanConfig(
+            tenant_id=principal.tenant_id,
             server="",
             use_sample_when_empty=False,
+            compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
+            compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
             asset_overrides=[
                 {
                     "pattern": item.pattern.strip(),
@@ -1404,6 +1575,7 @@ def _run_local_endpoint_scan_payload(
             },
         },
     }
+    _apply_compliance(data, payload)
     if job:
         job.progress = 92
         job.message = "Saving local endpoint report"
@@ -1584,6 +1756,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         domain = secret.get("domain", domain)
 
     return ScanConfig(
+        tenant_id=tenant_id,
         server=server,
         username=username,
         password=password,
@@ -1598,6 +1771,8 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         system_filter_enabled=payload.system_filter_enabled,
         include_admin_shares=payload.include_admin_shares,
         inspect_archives=payload.inspect_archives,
+        compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
+        compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
         asset_overrides=[
             {
                 "pattern": item.pattern.strip(),

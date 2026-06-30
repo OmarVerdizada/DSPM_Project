@@ -1,10 +1,10 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DSPM Command Center</title>
-    <link rel="stylesheet" href="/static/styles.css?v=125" />
+    <link rel="stylesheet" href="/static/styles.css?v=133" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -51,10 +51,6 @@
           <button type="button" class="tab" data-tab="findings" data-nav-icon="FN">
             <span>Findings</span>
             <small>Secrets, PII, regulated data</small>
-          </button>
-          <button type="button" class="tab" data-tab="exposure" data-nav-icon="EX">
-            <span>Exposure</span>
-            <small>Permissions and coverage</small>
           </button>
           <button type="button" class="tab" data-tab="reports" data-nav-icon="RP">
             <span>Reports</span>
@@ -249,6 +245,18 @@
                 <button type="button" id="ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
               </div>
 
+              <div class="compliance-selector scan-form-wide" data-compliance-scope="file-server">
+                <div class="compliance-selector-head">
+                  <label class="checkbox-row option-tile compliance-toggle">
+                    <input id="compliance-enabled" type="checkbox" />
+                    <span class="compliance-toggle-switch" aria-hidden="true"></span>
+                    <span>Enable compliance mapping</span>
+                  </label>
+                  <span class="compliance-hint">Enable to choose compliance frameworks. GDPR is currently available.</span>
+                </div>
+                <div class="compliance-framework-grid" data-compliance-frameworks="file-server"></div>
+              </div>
+
               <div class="scan-run-card scan-form-wide">
                 <section class="demo-data-card" aria-label="Demo data generator">
                   <div>
@@ -438,49 +446,6 @@
                 <span>Critical and high sensitivity</span>
               </div>
               <div id="findings-priority-summary" class="empty compact">Sensitive files will appear in Data Inventory and Risk & Remediation.</div>
-            </section>
-          </div>
-        </section>
-
-        <section id="tab-exposure" class="tab-panel">
-          <div class="section-header">
-            <div>
-              <p class="eyebrow">Access posture</p>
-              <h3>Exposure and permissions</h3>
-              <p>Track broad access, writable permissions, share exposure, hidden files, and archive inspection coverage.</p>
-            </div>
-          </div>
-          <section class="tab-spotlight spotlight-exposure" aria-label="Exposure workspace overview">
-            <div class="tab-spotlight-copy">
-              <p class="eyebrow">Exposure map</p>
-              <h3>See where sensitive data meets broad access and weak coverage.</h3>
-              <p>Keep permission risk, archive coverage, and metadata-only files visible before remediation starts.</p>
-            </div>
-            <div class="tab-spotlight-board" aria-hidden="true">
-              <span>Access workflow</span>
-              <div class="spotlight-flow"><b>Scope</b><i></i><b>Review</b><i></i><b>Reduce</b></div>
-              <div class="spotlight-tile-grid">
-                <div><strong>ACL</strong><small>Broad access</small></div>
-                <div><strong>Shares</strong><small>Writable paths</small></div>
-                <div><strong>Hidden</strong><small>Coverage gaps</small></div>
-                <div><strong>Archive</strong><small>Deep scan</small></div>
-              </div>
-            </div>
-          </section>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Permission exposure</h4>
-                <span>ACL and share posture</span>
-              </div>
-              <div id="exposure-permissions-summary" class="empty compact">Enable ACL reading in endpoint scans or enrich SMB ACL collection to populate this view.</div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Scan coverage</h4>
-                <span>Hidden, system, archive, and metadata-only files</span>
-              </div>
-              <div id="exposure-coverage-summary" class="empty compact">Coverage signals are recorded per file as scan mode and content status.</div>
             </section>
           </div>
         </section>
@@ -912,6 +877,17 @@
               </div>
               <button type="button" id="endpoint-ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
             </div>
+            <div class="compliance-selector endpoint-compliance-selector" data-compliance-scope="endpoint">
+              <div class="compliance-selector-head">
+                <label class="checkbox-row option-tile compliance-toggle">
+                  <input id="endpoint-compliance-enabled" type="checkbox" />
+                  <span class="compliance-toggle-switch" aria-hidden="true"></span>
+                  <span>Enable compliance mapping</span>
+                </label>
+                <span class="compliance-hint">Enable to choose compliance frameworks. GDPR is currently available.</span>
+              </div>
+              <div class="compliance-framework-grid" data-compliance-frameworks="endpoint"></div>
+            </div>
             <div class="actions endpoint-actions">
               <button type="button" id="endpoint-test-btn" class="secondary-btn">Test endpoint</button>
               <button type="button" id="endpoint-scan-btn">Scan endpoint</button>
@@ -1211,6 +1187,6 @@
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <script src="/static/app.js?v=125"></script>
+    <script src="/static/app.js?v=131"></script>
   </body>
 </html>

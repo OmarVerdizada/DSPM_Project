@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable
 
+from classification.compliance import classify_gdpr_content
+from classification.compliance.keyword_library import custom_keyword_groups_for_scan
 from classification.regex_classifier import classify_content
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
@@ -16,6 +18,7 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class ScanConfig:
+    tenant_id: str = "default"
     server: str = ""
     username: str = ""
     password: str = ""
@@ -32,6 +35,8 @@ class ScanConfig:
     system_filter_enabled: bool = False
     include_admin_shares: bool = False
     inspect_archives: bool = False
+    compliance_enabled: bool = False
+    compliance_frameworks: list[str] = field(default_factory=list)
     cancel_check: Callable[[], bool] | None = None
 
 
@@ -83,6 +88,7 @@ class DSPMDiscoveryEngine:
     def __init__(self, config: ScanConfig):
         self.config = config
         self.last_scan_diagnostics: dict = {}
+        self._gdpr_custom_keywords: list[dict] | None = None
 
     def test_connection(self) -> dict:
         if not self.config.server:
@@ -180,6 +186,14 @@ class DSPMDiscoveryEngine:
     def _analyze_record(self, record: dict) -> dict:
         record["asset_overrides"] = self.config.asset_overrides
         findings = classify_content(record.get("content", ""))
+        if self.config.compliance_enabled and "gdpr" in {str(item).lower() for item in self.config.compliance_frameworks}:
+            if self._gdpr_custom_keywords is None:
+                self._gdpr_custom_keywords = custom_keyword_groups_for_scan(self.config.tenant_id, "gdpr")
+            existing = {finding.get("type") for finding in findings}
+            for finding in classify_gdpr_content(record.get("content", ""), record, self._gdpr_custom_keywords):
+                if finding.get("type") not in existing:
+                    findings.append(finding)
+                    existing.add(finding.get("type"))
         record["finding_signals"] = [
             f"{finding.get('type', '')} {finding.get('description', '')}".strip()
             for finding in findings

@@ -1,0 +1,100 @@
+[
+  {
+    "id": "gdpr",
+    "name": "GDPR",
+    "scope": "EU personal data protection and special-category data exposure",
+    "source_basis": [
+      "GDPR Article 4 defines personal data as information relating to an identified or identifiable natural person.",
+      "GDPR Article 9 gives heightened treatment to special categories such as health and biometric data."
+    ],
+    "confidence": "high",
+    "risk_multiplier": 1.35,
+    "critical_data_categories": ["pii", "government_ids", "phi", "biometric_data", "genetic_data", "special_category_context", "financial_records", "customer_data", "hr_documents", "online_identifiers", "device_identifiers", "location_data", "behavioral_data", "credentials_secrets", "identity_access"],
+    "control_categories": {
+      "personal_data": "Personal Data Processing Risk",
+      "special_category": "Special Category Data Risk",
+      "exposure": "Unauthorized Disclosure Risk",
+      "retention": "Retention and Data Minimization Risk"
+    },
+    "recommended_for": "Organizations processing EU personal data, identity documents, employee records, customer exports, health or biometric data.",
+    "remediation": "Restrict access, minimize retained copies, encrypt sensitive files, validate lawful basis, and apply retention controls."
+  },
+  {
+    "id": "pci_dss",
+    "name": "PCI DSS",
+    "scope": "Cardholder data, sensitive authentication data, and payment environment secrets",
+    "source_basis": [
+      "PCI DSS defines account data around cardholder data and sensitive authentication data.",
+      "PAN, cardholder data stores, payment processor exports, and payment secrets should be tightly scoped and protected."
+    ],
+    "confidence": "high",
+    "risk_multiplier": 1.45,
+    "critical_data_categories": ["pci_payment", "credentials_secrets", "financial_records"],
+    "control_categories": {
+      "cardholder_data": "Cardholder Data Storage Risk",
+      "payment_secret": "Payment Credential Exposure Risk",
+      "access": "Payment Data Access Control Risk"
+    },
+    "recommended_for": "Merchants, service providers, payment processors, billing teams, and systems storing cardholder data.",
+    "remediation": "Remove unapproved cardholder data, restrict access to payment owners, encrypt retained data, rotate exposed payment keys, and validate PCI scope."
+  },
+  {
+    "id": "hipaa",
+    "name": "HIPAA",
+    "scope": "Protected health information and healthcare identity context",
+    "source_basis": [
+      "HHS guidance treats health information with direct identifiers as protected health information.",
+      "Safe Harbor de-identification lists identifiers such as names, geographic details, dates, phone numbers, email addresses, account numbers, certificate numbers, and biometric identifiers."
+    ],
+    "confidence": "high",
+    "risk_multiplier": 1.4,
+    "critical_data_categories": ["phi", "pii", "government_ids", "biometric_data", "financial_records"],
+    "control_categories": {
+      "phi": "Protected Health Information Risk",
+      "identifier": "Health Identifier Exposure Risk",
+      "access": "Minimum Necessary Access Risk"
+    },
+    "recommended_for": "Healthcare providers, insurers, HR benefit teams, clinics, patient support, and systems handling medical records.",
+    "remediation": "Apply PHI labeling, limit access to healthcare or benefits owners, encrypt files, validate retention, and remove unnecessary PHI exports."
+  },
+  {
+    "id": "nist_csf",
+    "name": "NIST CSF",
+    "scope": "Cybersecurity posture across identify, protect, detect, respond, and recover outcomes",
+    "source_basis": [
+      "NIST Cybersecurity Framework 2.0 organizes cybersecurity outcomes into core functions and categories.",
+      "DSPM evidence maps especially well to asset management, data security, identity/access control, monitoring, and risk response."
+    ],
+    "confidence": "medium_high",
+    "risk_multiplier": 1.2,
+    "critical_data_categories": ["credentials_secrets", "security_operations", "identity_access", "confidential_business", "source_code", "audit_accounting"],
+    "control_categories": {
+      "asset": "Asset and Data Inventory Risk",
+      "protect": "Data Security Protection Risk",
+      "access": "Identity and Access Control Risk",
+      "detect": "Security Monitoring Evidence Risk"
+    },
+    "recommended_for": "Security teams measuring data security, access exposure, credential leakage, and operational risk posture.",
+    "remediation": "Inventory exposed data, reduce broad access, protect secrets, improve monitoring, and track remediation through risk treatment."
+  },
+  {
+    "id": "iso27001",
+    "name": "ISO/IEC 27001",
+    "scope": "Information security management, risk treatment, access control, asset handling, and protection of information",
+    "source_basis": [
+      "ISO/IEC 27001 is an information security management system standard focused on managing information security risk.",
+      "DSPM evidence can support risk assessment and control areas such as access control, asset management, cryptography, logging, and supplier/customer information protection."
+    ],
+    "confidence": "medium_high",
+    "risk_multiplier": 1.18,
+    "critical_data_categories": ["credentials_secrets", "confidential_business", "intellectual_property", "legal_documents", "audit_accounting", "customer_data", "source_code"],
+    "control_categories": {
+      "classification": "Information Classification Risk",
+      "access": "Access Control Risk",
+      "cryptography": "Cryptographic Protection Risk",
+      "supplier_customer": "Third-Party or Customer Information Risk"
+    },
+    "recommended_for": "Organizations building ISMS evidence, information classification, access review, and risk treatment workflows.",
+    "remediation": "Classify information, assign owners, reduce unnecessary access, protect sensitive repositories, and document risk treatment decisions."
+  }
+]
