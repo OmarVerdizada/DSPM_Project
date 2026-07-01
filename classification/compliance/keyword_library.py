@@ -16,6 +16,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 CUSTOM_KEYWORD_DIR = BASE_DIR / "data" / "compliance_keywords"
 SUPPORTED_FRAMEWORKS = {"gdpr"}
 IMPORT_MODES = {"merge", "replace_type", "replace_category", "replace_framework", "replace_language"}
+SUPPORTED_RISKS = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
 _lock = threading.Lock()
 
 
@@ -106,7 +107,7 @@ def validate_keyword_import(tenant_id: str, payload: dict) -> dict:
     rule_map = gdpr_rule_map()
 
     for group in groups:
-        if group["type"] not in rule_map:
+        if group["type"] not in rule_map and not _is_custom_group(group):
             unknown_types.add(group["type"])
             continue
         terms: list[str] = []
@@ -214,6 +215,7 @@ def normalize_import_groups(payload: dict) -> list[dict]:
                 "category": _clean_token(item.get("category") or getattr(rule, "category", "custom")),
                 "type": finding_type,
                 "label": str(item.get("label") or getattr(rule, "label", finding_type.replace("_", " ").title())).strip(),
+                "risk": _clean_risk(item.get("risk") or getattr(rule, "risk", "MEDIUM")),
                 "source": "custom",
                 "terms": terms,
                 "count": len(terms),
@@ -233,8 +235,9 @@ def parse_csv_import(text: str, framework: str = "gdpr", language: str = "custom
             continue
         lang = _clean_language(row.get("language") or language) or "custom"
         category = _clean_token(row.get("category") or "custom")
+        risk = _clean_risk(row.get("risk") or "MEDIUM")
         key = (lang, category, finding_type)
-        bucket = buckets.setdefault(key, {"framework": framework, "language": lang, "category": category, "type": finding_type, "terms": []})
+        bucket = buckets.setdefault(key, {"framework": framework, "language": lang, "category": category, "type": finding_type, "risk": risk, "terms": []})
         bucket["terms"].append(term)
     return {"framework": framework, "language": language, "keywords": list(buckets.values())}
 
@@ -265,6 +268,7 @@ def _normalize_group(group: dict, default_framework: str = "gdpr") -> dict:
         "category": _clean_token(group.get("category") or getattr(rule, "category", "custom")),
         "type": _clean_token(group.get("type") or ""),
         "label": str(group.get("label") or getattr(rule, "label", "")).strip(),
+        "risk": _clean_risk(group.get("risk") or getattr(rule, "risk", "MEDIUM")),
         "source": group.get("source") or "custom",
         "terms": terms,
         "count": len(terms),
@@ -346,6 +350,15 @@ def _clean_language(value: str) -> str:
 
 def _clean_token(value: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", str(value or "").strip().lower().replace("-", "_")).strip("_")[:80]
+
+
+def _clean_risk(value: str) -> str:
+    risk = str(value or "MEDIUM").strip().upper()
+    return risk if risk in SUPPORTED_RISKS else "MEDIUM"
+
+
+def _is_custom_group(group: dict) -> bool:
+    return bool(group.get("category") and group.get("label") and group.get("risk"))
 
 
 def _clean_term(value) -> str:

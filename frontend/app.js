@@ -2258,19 +2258,8 @@ function renderComplianceKeywordLibraryPanel(item) {
   const customGroups = groups.filter((group) => group.source === "custom");
   const totalTerms = library.total_terms || 0;
   const customTerms = library.custom_terms || 0;
-  const typeOptions = [
-    ["all", "All finding types"],
-    ["gdpr_full_name", "Full name"],
-    ["gdpr_email_address", "Email address"],
-    ["gdpr_phone_number", "Phone number"],
-    ["gdpr_passport_number", "Passport number"],
-    ["gdpr_national_id", "National ID"],
-    ["gdpr_health_medical_record", "Health / medical"],
-    ["gdpr_salary_compensation", "Salary / compensation"],
-    ["gdpr_hr_employee_file", "HR employee file"],
-    ["gdpr_invoice_billing_transaction_log", "Customer / invoice"],
-    ["gdpr_password_secret", "Password / secret"],
-  ];
+  const typeOptions = keywordFindingTypeOptions(groups);
+  const categoryOptions = keywordCategoryOptions(typeOptions);
   return `
     <section class="keyword-library-panel" data-keyword-framework="${escapeHtml(item.id)}">
       <div class="keyword-library-head">
@@ -2287,9 +2276,18 @@ function renderComplianceKeywordLibraryPanel(item) {
       </div>
       <div class="keyword-library-actions">
         <label>
+          <span>Category</span>
+          <select data-keyword-category-select>
+            ${categoryOptions.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}
+            <option value="__custom__">Custom category...</option>
+          </select>
+        </label>
+        <label>
           <span>Finding type</span>
           <select data-keyword-type>
-            ${typeOptions.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("")}
+            <option value="all" data-keyword-option-category="all">All finding types</option>
+            ${typeOptions.map((option) => `<option value="${escapeHtml(option.type)}" data-keyword-option-category="${escapeHtml(option.category)}" data-keyword-option-label="${escapeHtml(option.label)}" data-keyword-option-risk="${escapeHtml(option.risk)}">${escapeHtml(option.label)}</option>`).join("")}
+            <option value="__custom__" data-keyword-option-category="__custom__" hidden>Custom finding type...</option>
           </select>
         </label>
         <label>
@@ -2306,6 +2304,29 @@ function renderComplianceKeywordLibraryPanel(item) {
           <input type="file" data-keyword-file accept=".json,.csv,.txt,text/plain,application/json,text/csv" />
         </label>
       </div>
+      <div class="keyword-custom-grid">
+        <label>
+          <span>Custom category</span>
+          <input type="text" data-keyword-category placeholder="custom, legal, finance" disabled />
+        </label>
+        <label>
+          <span>Custom finding</span>
+          <input type="text" data-keyword-custom-type placeholder="custom_sensitive_marker" disabled />
+        </label>
+        <label>
+          <span>Display label</span>
+          <input type="text" data-keyword-label placeholder="Sensitive marker" disabled />
+        </label>
+        <label>
+          <span>Risk</span>
+          <select data-keyword-risk disabled>
+            <option value="MEDIUM">Medium</option>
+            <option value="LOW">Low</option>
+            <option value="HIGH">High</option>
+            <option value="CRITICAL">Critical</option>
+          </select>
+        </label>
+      </div>
       <div class="keyword-library-buttons">
         <button type="button" class="secondary-btn mini-btn" data-keyword-action="validate">Preview import</button>
         <button type="button" class="secondary-btn mini-btn" data-keyword-action="import">Import keywords</button>
@@ -2314,16 +2335,17 @@ function renderComplianceKeywordLibraryPanel(item) {
         <button type="button" class="secondary-btn mini-btn" data-keyword-action="template">Download template</button>
       </div>
       <div id="keyword-import-status" class="keyword-import-status">${latestComplianceKeywordLibrary ? "Ready for import/export." : "Keyword library will load after sign-in."}</div>
+      <div id="keyword-import-preview" class="keyword-import-preview hidden"></div>
       <div class="keyword-import-guide">
         <div>
           <strong>TXT import</strong>
-          <span>Choose one finding type, then separate terms with commas, semicolons, pipes, tabs, or new lines.</span>
+          <span>Choose a category, then pick a finding type. Select Custom category to enable custom category, finding, label, and risk fields.</span>
           <code>employee legal name, customer full name, beneficiary name</code>
         </div>
         <div>
           <strong>CSV / JSON import</strong>
-          <span>Use CSV/JSON for multiple finding types. CSV should include keyword and type columns.</span>
-          <code>keyword,type,category</code>
+          <span>Use CSV/JSON for multiple finding types. Include category, label, and risk when adding custom findings.</span>
+          <code>keyword,type,category,label,risk</code>
         </div>
         <div>
           <strong>Mode policy</strong>
@@ -2338,6 +2360,74 @@ function renderComplianceKeywordLibraryPanel(item) {
       </div>
     </section>
   `;
+}
+
+function keywordFindingTypeOptions(groups = []) {
+  const fallback = [
+    { type: "gdpr_full_name", label: "Full name", category: "pii" },
+    { type: "gdpr_email_address", label: "Email address", category: "contact" },
+    { type: "gdpr_phone_number", label: "Phone number", category: "contact" },
+    { type: "gdpr_passport_number", label: "Passport number", category: "government_ids" },
+    { type: "gdpr_national_id", label: "National ID", category: "government_ids" },
+    { type: "gdpr_health_medical_record", label: "Health / medical", category: "health" },
+    { type: "gdpr_salary_compensation", label: "Salary / compensation", category: "hr" },
+    { type: "gdpr_hr_employee_file", label: "HR employee file", category: "hr" },
+    { type: "gdpr_invoice_billing_transaction_log", label: "Customer / invoice", category: "financial" },
+    { type: "gdpr_password_secret", label: "Password / secret", category: "credentials" },
+  ];
+  const source = groups.length ? groups : fallback;
+  const seen = new Set();
+  const options = [];
+  source.forEach((group) => {
+    const type = group.type || "";
+    if (!type || seen.has(type)) return;
+    seen.add(type);
+    const label = group.label || type.replaceAll("_", " ");
+    const category = group.category || "custom";
+    const risk = group.risk || "MEDIUM";
+    options.push({ type, label, category, risk });
+  });
+  return options;
+}
+
+function keywordCategoryOptions(typeOptions = []) {
+  const categories = [...new Set(typeOptions.map((option) => option.category).filter(Boolean))].sort();
+  return [["all", "All categories"], ...categories.map((category) => [category, category.replaceAll("_", " ")])];
+}
+
+function updateKeywordCustomState(panel) {
+  if (!panel) return;
+  const categorySelect = panel.querySelector("[data-keyword-category-select]");
+  const typeSelect = panel.querySelector("[data-keyword-type]");
+  const isCustom = categorySelect?.value === "__custom__";
+  if (isCustom && typeSelect) {
+    typeSelect.value = "__custom__";
+    typeSelect.disabled = true;
+  } else if (typeSelect) {
+    typeSelect.disabled = false;
+  }
+  panel.querySelectorAll("[data-keyword-category], [data-keyword-custom-type], [data-keyword-label], [data-keyword-risk]").forEach((field) => {
+    field.disabled = !isCustom;
+    field.closest("label")?.classList.toggle("disabled", !isCustom);
+  });
+}
+
+function updateKeywordTypeOptions(panel) {
+  if (!panel) return;
+  const category = panel.querySelector("[data-keyword-category-select]")?.value || "all";
+  const typeSelect = panel.querySelector("[data-keyword-type]");
+  if (!typeSelect) return;
+  [...typeSelect.options].forEach((option) => {
+    const optionCategory = option.dataset.keywordOptionCategory || "";
+    option.hidden = optionCategory === "__custom__"
+      ? category !== "__custom__"
+      : category !== "all" && category !== "__custom__" && !["all", category].includes(optionCategory);
+  });
+  const selected = typeSelect.selectedOptions[0];
+  if (category !== "__custom__" && selected?.hidden) {
+    typeSelect.value = "all";
+  }
+  updateKeywordCustomState(panel);
 }
 
 function renderRiskRulesCache() {
@@ -2364,6 +2454,16 @@ async function loadComplianceKeywordLibrary() {
   }
 }
 
+async function reloadComplianceKeywordLibraryInPlace() {
+  const scrollX = window.scrollX;
+  const scrollY = window.scrollY;
+  latestComplianceKeywordLibrary = await api("/api/compliance-keywords?framework=gdpr", null, "GET");
+  window.requestAnimationFrame(() => {
+    window.scrollTo(scrollX, scrollY);
+    window.requestAnimationFrame(() => window.scrollTo(scrollX, scrollY));
+  });
+}
+
 function setKeywordImportStatus(message, tone = "") {
   const status = document.querySelector("#keyword-import-status");
   if (!status) return;
@@ -2372,12 +2472,34 @@ function setKeywordImportStatus(message, tone = "") {
 }
 
 function keywordPanelPayload(panel) {
+  const selectedCategory = panel?.querySelector("[data-keyword-category-select]")?.value || "all";
+  const selectedType = panel?.querySelector("[data-keyword-type]")?.value || "all";
+  const selectedOption = panel?.querySelector("[data-keyword-type]")?.selectedOptions?.[0];
+  const isCustom = selectedCategory === "__custom__";
+  const customType = cleanKeywordToken(panel?.querySelector("[data-keyword-custom-type]")?.value || "");
+  const category = isCustom
+    ? cleanKeywordToken(panel?.querySelector("[data-keyword-category]")?.value || "custom") || "custom"
+    : (selectedCategory === "all" ? (selectedOption?.dataset.keywordOptionCategory || "") : selectedCategory);
+  const label = isCustom
+    ? (panel?.querySelector("[data-keyword-label]")?.value || "").trim()
+    : (selectedOption?.dataset.keywordOptionLabel || "");
+  const risk = isCustom
+    ? (panel?.querySelector("[data-keyword-risk]")?.value || "MEDIUM").toUpperCase()
+    : (selectedOption?.dataset.keywordOptionRisk || "MEDIUM").toUpperCase();
   return {
     framework: panel?.dataset.keywordFramework || "gdpr",
     language: "custom",
     mode: panel?.querySelector("[data-keyword-mode]")?.value || "merge",
-    type: panel?.querySelector("[data-keyword-type]")?.value || "all",
+    type: isCustom || selectedType === "__custom__" ? customType : selectedType,
+    category,
+    label,
+    risk,
+    isCustomType: isCustom,
   };
+}
+
+function cleanKeywordToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/-/g, "_").replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
 }
 
 async function readKeywordImportPayload(panel) {
@@ -2391,7 +2513,7 @@ async function readKeywordImportPayload(panel) {
     return {
       framework: parsed.framework || settings.framework,
       language: parsed.language || settings.language,
-      mode: settings.mode || parsed.mode || "merge",
+      mode: parsed.mode || settings.mode || "merge",
       keywords: parsed.keywords || parsed.groups || [],
     };
   }
@@ -2403,7 +2525,7 @@ async function readKeywordImportPayload(panel) {
       keywords: parseKeywordCsv(text, settings),
     };
   }
-  if (settings.type === "all") {
+  if (!settings.type || settings.type === "all") {
     throw new Error("TXT import needs one specific finding type. Use JSON or CSV when importing multiple finding types.");
   }
   const terms = parseKeywordText(text);
@@ -2411,7 +2533,15 @@ async function readKeywordImportPayload(panel) {
     framework: settings.framework,
     language: settings.language,
     mode: settings.mode,
-    keywords: [{ framework: settings.framework, language: settings.language, type: settings.type, terms }],
+    keywords: [{
+      framework: settings.framework,
+      language: settings.language,
+      category: settings.category,
+      type: settings.type,
+      label: settings.label || settings.type.replaceAll("_", " "),
+      risk: settings.risk,
+      terms,
+    }],
   };
 }
 
@@ -2439,12 +2569,14 @@ function parseKeywordCsv(text, settings) {
     const keyword = hasHeader ? get("keyword", get("term", "")) : cells[0];
     const type = hasHeader ? get("type", settings.type === "all" ? "" : settings.type) : (settings.type === "all" ? "" : settings.type);
     const language = hasHeader ? get("language", settings.language) : settings.language;
-    const category = hasHeader ? get("category", "") : "";
+    const category = hasHeader ? get("category", settings.category) : settings.category;
+    const label = hasHeader ? get("label", settings.label) : settings.label;
+    const risk = (hasHeader ? get("risk", settings.risk) : settings.risk || "MEDIUM").toUpperCase();
     const keywords = parseKeywordText(keyword);
     if (!keywords.length || !type) return;
-    const key = `${language}|${category}|${type}`;
+    const key = `${language}|${category}|${type}|${label}|${risk}`;
     if (!buckets.has(key)) {
-      buckets.set(key, { framework: settings.framework, language, category, type, terms: [] });
+      buckets.set(key, { framework: settings.framework, language, category, type, label, risk, terms: [] });
     }
     buckets.get(key).terms.push(...keywords);
   });
@@ -2480,8 +2612,14 @@ async function handleKeywordAction(action, panel) {
       const payload = await readKeywordImportPayload(panel);
       const result = await api(`/api/compliance-keywords/${action === "validate" ? "validate" : "import"}`, payload);
       const unknown = (result.unknown_types || []).length ? ` Unknown types: ${result.unknown_types.join(", ")}.` : "";
-      setKeywordImportStatus(`${action === "validate" ? "Preview" : "Imported"}: ${result.new_terms || 0} new, ${result.duplicates || 0} duplicates, ${result.group_count || 0} groups.${unknown}`, unknown ? "warning" : "");
-      if (action === "import") await loadComplianceKeywordLibrary();
+      const summary = `${result.new_terms || 0} new, ${result.duplicates || 0} duplicates, ${result.group_count || 0} groups.${unknown}`;
+      if (action === "import") {
+        await reloadComplianceKeywordLibraryInPlace();
+        showToast(unknown ? "Keyword import needs review" : "Keywords imported", summary, unknown ? "warning" : "success");
+      } else {
+        setKeywordImportStatus(`Preview: ${summary}`, unknown ? "warning" : "");
+      }
+      renderKeywordImportPreview(result, document);
       return;
     }
     if (action === "template") {
@@ -2494,6 +2632,7 @@ async function handleKeywordAction(action, panel) {
       }
       downloadFile(`${settings.framework}_keyword_template.json`, JSON.stringify(template, null, 2), "application/json;charset=utf-8");
       setKeywordImportStatus("Template downloaded.");
+      renderKeywordImportPreview({ groups: template.keywords || [], new_terms: (template.keywords || []).reduce((total, group) => total + (group.terms || []).length, 0) }, panel);
       return;
     }
     if (action === "export-json" || action === "export-csv") {
@@ -2504,7 +2643,45 @@ async function handleKeywordAction(action, panel) {
     }
   } catch (error) {
     setKeywordImportStatus(error.message, "danger");
+    renderKeywordImportPreview(null, panel);
   }
+}
+
+function renderKeywordImportPreview(result, panel = document) {
+  const preview = panel?.querySelector("#keyword-import-preview") || document.querySelector("#keyword-import-preview");
+  if (!preview) return;
+  const groups = result?.groups || [];
+  if (!groups.length) {
+    preview.classList.add("hidden");
+    preview.innerHTML = "";
+    return;
+  }
+  preview.classList.remove("hidden");
+  preview.innerHTML = `
+    <div class="keyword-preview-head">
+      <strong>Import preview</strong>
+      <span>${escapeHtml(result.new_terms || 0)} new terms &middot; ${escapeHtml(result.duplicates || 0)} duplicates</span>
+    </div>
+    <div class="keyword-preview-grid">
+      ${groups.map((group) => `
+        <article class="keyword-preview-card">
+          <div class="keyword-preview-card-head">
+            <span class="badge ${escapeHtml(group.risk || "MEDIUM")}">${escapeHtml(group.risk || "MEDIUM")}</span>
+            <strong>${escapeHtml(group.label || group.type || "Custom finding")}</strong>
+          </div>
+          <dl>
+            <div><dt>Category</dt><dd>${escapeHtml(group.category || "custom")}</dd></div>
+            <div><dt>Type</dt><dd>${escapeHtml(group.type || "")}</dd></div>
+            <div><dt>Language</dt><dd>${escapeHtml(group.language || "custom")}</dd></div>
+          </dl>
+          <div class="keyword-preview-terms">
+            ${(group.terms || []).slice(0, 8).map((term) => `<span>${escapeHtml(term)}</span>`).join("")}
+            ${(group.terms || []).length > 8 ? `<span>+${escapeHtml((group.terms || []).length - 8)} more</span>` : ""}
+          </div>
+        </article>
+      `).join("")}
+    </div>
+  `;
 }
 
 function buildKeywordTemplate(framework = "gdpr") {
@@ -2518,6 +2695,7 @@ function buildKeywordTemplate(framework = "gdpr") {
         category: "pii",
         type: "gdpr_full_name",
         label: "Full name",
+        risk: "LOW",
         terms: ["employee legal name", "customer full name", "beneficiary name"]
       },
       {
@@ -2526,6 +2704,7 @@ function buildKeywordTemplate(framework = "gdpr") {
         category: "government_ids",
         type: "gdpr_passport_number",
         label: "Passport number",
+        risk: "HIGH",
         terms: ["passport number", "passport document number", "travel document identifier"]
       },
       {
@@ -2534,8 +2713,23 @@ function buildKeywordTemplate(framework = "gdpr") {
         category: "health",
         type: "gdpr_health_medical_record",
         label: "Health / medical",
+        risk: "HIGH",
         terms: ["medical record number", "clinical diagnosis", "patient treatment plan"]
+      },
+      {
+        framework,
+        language: "custom",
+        category: "custom",
+        type: "custom_sensitive_marker",
+        label: "Custom sensitive marker",
+        risk: "MEDIUM",
+        terms: ["custom approval marker", "restricted project codename"]
       }
+    ],
+    notes: [
+      "JSON supports framework, language, category, type, label, risk, and terms.",
+      "CSV supports keyword,type,category,label,risk columns.",
+      "TXT uses the selected finding type or custom fields in the UI."
     ]
   };
 }
@@ -5685,6 +5879,18 @@ document.addEventListener("click", (event) => {
   }
   if (tabJump) {
     switchTab(tabJump.dataset.tabJump);
+  }
+});
+
+document.addEventListener("change", (event) => {
+  const keywordCategory = event.target.closest("[data-keyword-category-select]");
+  if (keywordCategory) {
+    updateKeywordTypeOptions(keywordCategory.closest(".keyword-library-panel"));
+    return;
+  }
+  const keywordType = event.target.closest("[data-keyword-type]");
+  if (keywordType) {
+    updateKeywordCustomState(keywordType.closest(".keyword-library-panel"));
   }
 });
 

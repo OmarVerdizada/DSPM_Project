@@ -9792,21 +9792,137 @@ body.sidebar-collapsed .sidebar-toggle {
 
 .keyword-library-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   gap: 10px;
 }
 
-.keyword-library-actions label {
+.keyword-library-actions label,
+.keyword-custom-grid label {
   min-width: 0;
 }
 
-.keyword-library-actions label > span {
+.keyword-library-actions label > span,
+.keyword-custom-grid label > span {
   display: block;
   margin-bottom: 5px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.keyword-custom-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 94%, var(--accent) 6%);
+  padding: 12px;
+}
+
+.keyword-custom-grid label.disabled {
+  opacity: 0.58;
+}
+
+.keyword-custom-grid input:disabled,
+.keyword-custom-grid select:disabled {
+  cursor: not-allowed;
+  background: color-mix(in srgb, var(--surface-soft) 72%, var(--surface));
+}
+
+.keyword-import-preview {
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.keyword-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.keyword-preview-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.keyword-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 10px;
+}
+
+.keyword-preview-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-soft) 34%, var(--surface));
+  padding: 12px;
+}
+
+.keyword-preview-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.keyword-preview-card-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.keyword-preview-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.keyword-preview-card dl div {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.keyword-preview-card dt,
+.keyword-preview-card dd {
+  margin: 0;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.keyword-preview-card dt {
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.keyword-preview-card dd {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-weight: 800;
+}
+
+.keyword-preview-terms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.keyword-preview-terms span {
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  padding: 4px 7px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 750;
 }
 
 .keyword-file-picker input {
@@ -9919,6 +10035,7 @@ body.sidebar-collapsed .sidebar-toggle {
 @media (max-width: 980px) {
   .keyword-library-head,
   .keyword-library-actions,
+  .keyword-custom-grid,
   .keyword-import-guide {
     grid-template-columns: 1fr;
   }
@@ -10108,4 +10225,43 @@ body.sidebar-collapsed .sidebar-toggle {
   .app-shell > .sidebar .side-nav {
     overflow: visible !important;
   }
+}
+
+/* Collapsed sidebar polish: keep the menu control as a standalone icon, not a framed block. */
+body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
+  width: fit-content !important;
+  min-height: 0 !important;
+  margin: 0 auto 12px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+body.sidebar-collapsed .app-shell > .sidebar .sidebar-toggle {
+  width: 44px !important;
+  min-width: 44px !important;
+  height: 44px !important;
+  min-height: 44px !important;
+  border-radius: 999px !important;
+  border: 0 !important;
+  background:
+    radial-gradient(circle at 28% 22%, rgba(255,255,255,.34), transparent 38%),
+    linear-gradient(135deg, var(--accent), #7c3aed) !important;
+  box-shadow: 0 12px 26px color-mix(in srgb, var(--accent) 28%, rgba(0,0,0,.22)) !important;
+}
+
+body.sidebar-collapsed .app-shell > .sidebar .sidebar-toggle:hover {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 16px 30px color-mix(in srgb, var(--accent) 34%, rgba(0,0,0,.26)) !important;
+}
+
+/* Expanded sidebar polish: remove the framed header block behind the logo. */
+body:not(.sidebar-collapsed) .app-shell > .sidebar .brand.logo-lockup {
+  margin: 0 0 16px !important;
+  padding: 0 2px 14px !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
 }

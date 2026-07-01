@@ -64,7 +64,7 @@ def _apply_custom_keyword_groups(evidence_blob: str, findings: list[dict], findi
     for group in groups:
         finding_type = str(group.get("type") or "").strip()
         rule = rule_map.get(finding_type)
-        if not rule:
+        if not rule and not _is_custom_group(group):
             continue
         matched_keywords = []
         for term in group.get("terms") or []:
@@ -77,16 +77,19 @@ def _apply_custom_keyword_groups(evidence_blob: str, findings: list[dict], findi
             continue
         finding = finding_index.get(finding_type)
         if not finding:
+            category = str(group.get("category") or getattr(rule, "category", "custom") or "custom").strip() or "custom"
+            label = str(group.get("label") or getattr(rule, "label", "") or finding_type.replace("_", " ").title()).strip()
+            risk = str(group.get("risk") or getattr(rule, "risk", "MEDIUM") or "MEDIUM").strip().upper()
             finding = {
-                "type": rule.finding_type,
-                "risk": rule.risk,
-                "description": rule.description,
+                "type": finding_type,
+                "risk": risk if risk in {"LOW", "MEDIUM", "HIGH", "CRITICAL"} else "MEDIUM",
+                "description": getattr(rule, "description", "") or f"Custom GDPR keyword group matched for {label}.",
                 "count": 0,
                 "samples": [],
                 "framework": "gdpr",
-                "category": rule.category,
-                "tier": rule.tier,
-                "label": rule.label,
+                "category": category,
+                "tier": getattr(rule, "tier", "custom"),
+                "label": label,
                 "matched_keywords": [],
             }
             findings.append(finding)
@@ -107,3 +110,7 @@ def _keyword_matches(evidence_blob: str, keyword: str) -> bool:
     if normalized[0].isalnum() and normalized[-1].isalnum():
         return re.search(rf"(?<![A-Za-z0-9_]){re.escape(normalized)}(?![A-Za-z0-9_])", evidence_blob) is not None
     return normalized in evidence_blob
+
+
+def _is_custom_group(group: dict) -> bool:
+    return bool(group.get("category") and group.get("label") and group.get("risk"))

@@ -301,9 +301,10 @@ class ComplianceKeywordGroup(BaseModel):
     type: str = Field(default="", max_length=80)
     finding_type: str = Field(default="", max_length=80)
     label: str = Field(default="", max_length=160)
+    risk: str = Field(default="MEDIUM", pattern="^(LOW|MEDIUM|HIGH|CRITICAL|low|medium|high|critical)$")
     terms: list[str] = Field(default_factory=list, max_length=5000)
 
-    @field_validator("framework", "language", "category", "type", "label")
+    @field_validator("framework", "language", "category", "type", "label", "risk")
     @classmethod
     def _clean_keyword_text(cls, value: str) -> str:
         return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
@@ -500,6 +501,7 @@ def compliance_keywords_template(
                 "category": "pii",
                 "type": "gdpr_full_name",
                 "label": "Full name",
+                "risk": "LOW",
                 "terms": ["subject full legal name", "employee legal name", "customer full name"],
             },
             {
@@ -508,6 +510,7 @@ def compliance_keywords_template(
                 "category": "government_ids",
                 "type": "gdpr_passport_number",
                 "label": "Passport number",
+                "risk": "HIGH",
                 "terms": ["passport number", "passport document number", "travel document identifier"],
             },
             {
@@ -516,8 +519,23 @@ def compliance_keywords_template(
                 "category": "health",
                 "type": "gdpr_health_medical_record",
                 "label": "Health / medical",
+                "risk": "HIGH",
                 "terms": ["medical record number", "clinical diagnosis", "patient treatment plan"],
             },
+            {
+                "framework": framework,
+                "language": language,
+                "category": "custom",
+                "type": "custom_sensitive_contract",
+                "label": "Custom sensitive contract",
+                "risk": "MEDIUM",
+                "terms": ["custom board contract marker", "restricted vendor agreement"],
+            },
+        ],
+        "notes": [
+            "JSON imports accept keywords/groups with framework, language, category, type, label, risk, and terms.",
+            "CSV imports should include keyword,type,category,label,risk columns when adding custom findings.",
+            "TXT imports use the selected finding type/category/risk from the UI and split terms by comma, semicolon, pipe, tab, or new line.",
         ],
     }
 

@@ -1,4 +1,3 @@
-import tempfile
 import unittest
 import tempfile
 from pathlib import Path
@@ -102,6 +101,41 @@ class ComplianceKeywordLibraryTests(unittest.TestCase):
 
         self.assertIn("gdpr_health_medical_record", {finding["type"] for finding in positive})
         self.assertNotIn("gdpr_health_medical_record", {finding["type"] for finding in negative})
+
+    def test_custom_finding_type_imports_with_category_and_risk(self):
+        original_dir = keyword_library.CUSTOM_KEYWORD_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            keyword_library.CUSTOM_KEYWORD_DIR = Path(temp_dir)
+            try:
+                payload = {
+                    "framework": "gdpr",
+                    "language": "custom",
+                    "mode": "merge",
+                    "keywords": [
+                        {
+                            "type": "custom_contract_marker",
+                            "category": "legal",
+                            "label": "Custom contract marker",
+                            "risk": "HIGH",
+                            "terms": ["restricted contract phrase"],
+                        }
+                    ],
+                }
+
+                preview = keyword_library.validate_keyword_import("tenant_custom", payload)
+                result = keyword_library.import_keyword_groups("tenant_custom", payload)
+                custom_groups = keyword_library.custom_keyword_groups_for_scan("tenant_custom", "gdpr")
+                findings = classify_gdpr_content("This file has a restricted contract phrase.", {}, custom_groups)
+                finding = next(item for item in findings if item["type"] == "custom_contract_marker")
+
+                self.assertTrue(preview["valid"])
+                self.assertEqual(preview["unknown_types"], [])
+                self.assertTrue(result["imported"])
+                self.assertEqual(finding["type"], "custom_contract_marker")
+                self.assertEqual(finding["category"], "legal")
+                self.assertEqual(finding["risk"], "HIGH")
+            finally:
+                keyword_library.CUSTOM_KEYWORD_DIR = original_dir
 
 
 if __name__ == "__main__":

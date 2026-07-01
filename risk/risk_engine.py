@@ -443,7 +443,7 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
         elif finding_level == "HIGH":
             score = max(score, 70)
         reasons.append(_finding_reason(finding))
-        recommendations.extend(_finding_recommendations(finding_type, finding_level))
+        recommendations.extend(_finding_recommendations(finding, finding_level))
 
     path = str(file_obj.get("path", "")).lower()
     extension = str(file_obj.get("extension", "")).lower()
@@ -549,8 +549,12 @@ def get_risk_rules() -> list[dict]:
 
 def _build_remediation(level: str, score: int, file_obj: dict, findings: list[dict], acl_assessment: dict) -> dict:
     finding_types = {str(finding.get("type", "")).lower() for finding in findings}
+    finding_categories = {str(finding.get("category", "")).lower().replace("-", "_").replace(" ", "_") for finding in findings if finding.get("category")}
     has_secret = any("key" in item or "token" in item or "secret" in item or "password" in item for item in finding_types)
+    has_secret = has_secret or any("secret" in item or "credential" in item for item in finding_categories)
     has_regulated = any(item in finding_types for item in {"credit_card", "iban", "swift_bic", "passport_number", "national_id"})
+    has_regulated = has_regulated or bool(finding_categories & {"pii", "personal_data", "government_ids", "phi", "health", "medical", "financial", "financial_records", "pci_payment", "special_category", "biometric_data", "genetic_data"})
+    has_compliance_category = bool(finding_categories & {"legal", "contracts", "hr", "hr_documents", "confidential_business", "custom"})
     has_acl_issue = bool(acl_assessment.get("issues"))
 
     if level == "CRITICAL":
@@ -575,6 +579,8 @@ def _build_remediation(level: str, score: int, file_obj: dict, findings: list[di
         actions.extend(["Quarantine file copy", "Rotate exposed secret", "Invalidate tokens and review access logs"])
     if has_regulated:
         actions.extend(["Apply regulated-data label", "Restrict external sharing", "Create DLP block rule for matching identifiers"])
+    if has_compliance_category:
+        actions.extend(["Apply custom GDPR/category label", "Route category-specific owner review", "Validate retention and business need"])
     protected_content = bool(file_obj.get("protected")) or any(
         marker in str(file_obj.get("content_status") or file_obj.get("scan_error") or "").lower()
         for marker in ("protected", "password", "encrypted", "locked", "unreadable", "unsupported_archive", "bad_archive")
@@ -665,11 +671,44 @@ def _finding_reason(finding: dict) -> str:
         "confidential_keyword": "Confidentiality keyword indicates business-sensitive content that needs owner and access review.",
         "source_code_secret_context": "Source-code secret assignment indicates credential material embedded in code or configuration.",
     }
-    reason = enterprise_reasons.get(finding_type, description)
+    reason = enterprise_reasons.get(finding_type)
+    if not reason:
+        reason = _dynamic_finding_reason(finding, description)
     return f"{reason} ({suffix})"
 
 
-def _finding_recommendations(finding_type: str, finding_level: str) -> list[str]:
+def _dynamic_finding_reason(finding: dict, fallback: str) -> str:
+    label = str(finding.get("label") or finding.get("type") or "Sensitive data").replace("_", " ").strip()
+    category = str(finding.get("category") or "custom").strip().lower().replace("-", "_").replace(" ", "_")
+    keywords = finding.get("matched_keywords") or finding.get("keywords") or finding.get("samples") or []
+    keyword_hint = ""
+    if keywords:
+        keyword_hint = f" Matched evidence includes {', '.join(str(item) for item in keywords[:3])}."
+    category_reasons = {
+        "pii": f"{label} indicates GDPR personal data and should be handled with privacy controls, purpose limitation, and owner review.",
+        "personal_data": f"{label} indicates GDPR personal data and should be handled with privacy controls, purpose limitation, and owner review.",
+        "government_ids": f"{label} indicates government or identity-document data that needs strict access control, lawful-basis validation, and retention review.",
+        "phi": f"{label} indicates health or medical privacy data that requires strict access control and privacy/compliance owner review.",
+        "health": f"{label} indicates health or medical privacy data that requires strict access control and privacy/compliance owner review.",
+        "medical": f"{label} indicates health or medical privacy data that requires strict access control and privacy/compliance owner review.",
+        "financial": f"{label} indicates financial data that should be restricted to approved finance or compliance owners.",
+        "financial_records": f"{label} indicates financial data that should be restricted to approved finance or compliance owners.",
+        "credentials": f"{label} indicates credential or access material that should be validated, vaulted, and rotated if active.",
+        "credentials_secrets": f"{label} indicates credential or access material that should be validated, vaulted, and rotated if active.",
+        "legal": f"{label} indicates legal or contractual data that should be limited to legal owners and need-to-know reviewers.",
+        "contracts": f"{label} indicates legal or contractual data that should be limited to legal owners and need-to-know reviewers.",
+        "hr": f"{label} indicates workforce or HR data that should be restricted to HR/payroll owners.",
+        "hr_documents": f"{label} indicates workforce or HR data that should be restricted to HR/payroll owners.",
+        "custom": f"{label} matched a custom GDPR keyword group and should be reviewed according to the configured category and risk.",
+    }
+    return f"{category_reasons.get(category, fallback)}{keyword_hint}"
+
+
+def _finding_recommendations(finding: dict | str, finding_level: str) -> list[str]:
+    if isinstance(finding, dict):
+        finding_type = str(finding.get("type") or "sensitive_data")
+    else:
+        finding_type = str(finding or "sensitive_data")
     recommendations_by_type = {
         "private_key": ["Quarantine the exposed key file, rotate the key pair, and verify no dependent service still trusts the leaked material.", "Move approved key material into a managed vault or HSM-backed storage path."],
         "aws_access_key": ["Validate the AWS key owner, rotate the credential, and review CloudTrail activity for use after exposure.", "Create a DLP block rule for AWS key prefixes outside approved vault exports."],
@@ -730,12 +769,65 @@ def _finding_recommendations(finding_type: str, finding_level: str) -> list[str]
         "confidential_keyword": ["Apply classification label and route owner review before broad sharing.", "Use confidentiality keyword context as a booster with path and access signals."],
         "source_code_secret_context": ["Remove the hardcoded secret and replace it with a vault reference.", "Create a secure-code remediation task for the owning engineering team."],
     }
+    if isinstance(finding, dict):
+        dynamic = _dynamic_finding_recommendations(finding, finding_level)
+        if dynamic:
+            return dynamic
+
     generic = ["Create or tune a DLP detection rule for this finding type and route owner review based on data domain."]
     if finding_level in {"CRITICAL", "HIGH"}:
         generic.append("Block external movement until the owner confirms business need and remediation status.")
     else:
         generic.append("Monitor movement and validate whether the file belongs in an approved repository.")
     return recommendations_by_type.get(finding_type, generic)
+
+
+def _dynamic_finding_recommendations(finding: dict, finding_level: str) -> list[str]:
+    finding_type = str(finding.get("type") or "").lower()
+    if finding_type in {
+        "private_key", "aws_access_key", "aws_secret_key", "jwt", "azure_storage_key", "azure_sas_token",
+        "google_api_key", "gcp_service_account", "github_token", "gitlab_token", "npm_token", "slack_token",
+        "stripe_key", "sendgrid_key", "twilio_key", "datadog_key", "sentry_dsn", "pagerduty_key",
+        "splunk_token", "newrelic_key", "okta_token", "auth0_secret", "oauth_client_secret", "bearer_token",
+        "password", "api_key", "connection_string", "database_uri", "jdbc_connection", "basic_auth_url",
+        "docker_auth_config", "kubeconfig_secret", "terraform_state_secret", "saml_private_key",
+        "mfa_recovery_context", "credit_card", "iban", "swift_bic", "routing_account", "passport_number",
+        "national_id", "ssn", "azerbaijan_fin", "email", "phone_number", "employee_id", "phi_context",
+        "payroll_context", "customer_context", "board_context", "legal_contract_context", "security_ops_context",
+        "repo_archive_context", "build_log_context", "special_category_context", "retention_policy_context",
+        "confidential_keyword", "source_code_secret_context",
+    }:
+        return []
+    if str(finding.get("framework") or "").lower() != "gdpr" and not finding.get("category"):
+        return []
+
+    label = str(finding.get("label") or finding.get("type") or "custom finding").replace("_", " ").strip()
+    category = str(finding.get("category") or "custom").strip().lower().replace("-", "_").replace(" ", "_")
+    actions_by_category = {
+        "pii": [f"Apply a GDPR personal-data label for {label} and route review to the privacy or data owner.", "Validate lawful basis, retention need, and whether the file belongs in an approved system."],
+        "personal_data": [f"Apply a GDPR personal-data label for {label} and route review to the privacy or data owner.", "Validate lawful basis, retention need, and whether the file belongs in an approved system."],
+        "government_ids": [f"Apply an identity-data label for {label} and restrict access to approved HR, legal, or compliance owners.", "Validate lawful basis and retention requirement before keeping this copy."],
+        "phi": [f"Apply a health/privacy label for {label} and block external sharing until the privacy owner reviews it.", "Validate storage location, access scope, and retention requirements."],
+        "health": [f"Apply a health/privacy label for {label} and block external sharing until the privacy owner reviews it.", "Validate storage location, access scope, and retention requirements."],
+        "medical": [f"Apply a health/privacy label for {label} and block external sharing until the privacy owner reviews it.", "Validate storage location, access scope, and retention requirements."],
+        "financial": [f"Apply a financial-data label for {label} and restrict sharing to finance owners.", "Review business justification and retention for this financial export."],
+        "financial_records": [f"Apply a financial-data label for {label} and restrict sharing to finance owners.", "Review business justification and retention for this financial export."],
+        "credentials": [f"Validate whether {label} is active credential material, then rotate and move it to a managed secret store if confirmed.", "Block movement of this custom credential marker outside approved vault-backed workflows."],
+        "credentials_secrets": [f"Validate whether {label} is active credential material, then rotate and move it to a managed secret store if confirmed.", "Block movement of this custom credential marker outside approved vault-backed workflows."],
+        "legal": [f"Apply legal/confidential handling for {label} and route owner review to legal operations.", "Restrict access to contract owners and need-to-know reviewers."],
+        "contracts": [f"Apply legal/confidential handling for {label} and route owner review to legal operations.", "Restrict access to contract owners and need-to-know reviewers."],
+        "hr": [f"Apply HR restricted handling for {label} and limit access to HR/payroll owners.", "Monitor bulk export or external movement of this workforce-data marker."],
+        "hr_documents": [f"Apply HR restricted handling for {label} and limit access to HR/payroll owners.", "Monitor bulk export or external movement of this workforce-data marker."],
+    }
+    actions = actions_by_category.get(category, [
+        f"Create or tune a DLP rule for custom GDPR finding '{label}' in category '{category}'.",
+        "Route owner review based on the configured custom category and validate business need.",
+    ])
+    if finding_level in {"CRITICAL", "HIGH"}:
+        actions.append("Block external movement until the owner confirms remediation or an approved exception.")
+    else:
+        actions.append("Monitor movement and confirm the file remains in an approved repository.")
+    return actions
 
 
 def _dedupe(items: list[str]) -> list[str]:
