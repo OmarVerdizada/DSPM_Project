@@ -238,6 +238,20 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
     return scan_id
 
 
+def count_scan_history(tenant_id: str) -> int:
+    """Total number of persisted scans for a tenant (DATA-003).
+
+    list_tenants previously derived scan_count from len(read_scan_history(...,
+    limit=1)), which is always 0 or 1. MSSP portfolio dashboards need the real
+    total, so count it in SQL.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM scan_reports WHERE tenant_id = ?", (tenant_id,)
+        ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
     query = """
             SELECT scan_id, timestamp, source, summary_json
@@ -607,7 +621,7 @@ def list_tenants() -> list[dict]:
                 "registration_code": registration_code,
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
-                "scan_count": len(history),
+                "scan_count": count_scan_history(tenant_id),
                 "latest": latest,
                 "retention": data_retention_summary(tenant_id),
             }
