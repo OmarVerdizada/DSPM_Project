@@ -19,7 +19,7 @@ from classification.compliance.gdpr_classifier import GDPR_DETECTOR_VERSION, GDP
 from classification.compliance.keyword_library import custom_keyword_groups_for_scan, keyword_catalog_status
 from classification.compliance.nist_catalog import nist_catalog_status
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
-from classification.regex_classifier import classify_content
+from classification.regex_classifier import RULES, classify_content
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
 from permissions.acl_analyzer import analyze_acl
@@ -29,7 +29,10 @@ from scripts.logger import get_logger
 logger = get_logger(__name__)
 GENERIC_DETECTOR_VERSION = "generic-regex-ml-v1"
 PCI_DETECTOR_VERSION = "pci-detector-v2"
-PARSER_VERSION = "content-parser-v2"
+# Bumped v2 -> v3 for SC-1: previews and the classification cache are now
+# produced by the universal evidence sanitizer, so every pre-existing findings
+# cache entry and preview sidecar must be regenerated rather than reused.
+PARSER_VERSION = "content-parser-v3"
 
 
 @dataclass(slots=True)
@@ -792,10 +795,15 @@ def _safe_preview(content: str, max_lines: int = 8, max_chars: int = 1800) -> di
     if not content:
         return {"available": False, "lines": [], "truncated": False}
 
-    lines = _redact_pci_preview(content).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # Sanitize a bounded head slice (larger than what is displayed) so a secret
+    # sitting near the display cutoff is still fully masked before truncation,
+    # without paying to scan an entire (up to 100 MB) file for a preview.
+    head = content[: max(max_chars * 8, 16384)]
+    sanitized = sanitize_evidence_text(head)
+    lines = sanitized.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     selected = lines[:max_lines]
     text = "\n".join(selected)
-    truncated = len(lines) > max_lines or len(text) > max_chars
+    truncated = len(content) > len(head) or len(lines) > max_lines or len(text) > max_chars
 
     if len(text) > max_chars:
         text = text[:max_chars]
@@ -862,6 +870,33 @@ def _redact_pci_preview(content: str) -> str:
         if raw:
             redacted = redacted.replace(raw, mask_track_data(track))
     return PAN_CANDIDATE_RE.sub(replace_candidate, redacted)
+
+
+# Generic detector rules whose match IS a sensitive value (not a routing
+# keyword). Only these get masked in evidence text; context-keyword rules
+# (redact=False) are left intact so previews stay legible.
+_EVIDENCE_MASKING_RULES = tuple(rule for rule in RULES if rule.redact)
+
+
+def sanitize_evidence_text(content: str) -> str:
+    """Mask every detected sensitive class in free text before it is persisted
+    or served as evidence (SC-1).
+
+    PCI card data is masked by the dedicated PCI pipeline; all other detector
+    classes (private keys, tokens, credentials, connection strings, PII) are
+    replaced with a non-reversible ``[redacted:<class>]`` marker. This is the
+    single choke point that generalises the previous PCI-only preview redaction
+    to every sensitive class. Raw, unmasked passthrough is opt-in via
+    ``DSPM_RAW_EVIDENCE_PREVIEW=1`` and is OFF by default.
+    """
+    if not content:
+        return content
+    if os.getenv("DSPM_RAW_EVIDENCE_PREVIEW", "0") == "1":
+        return content
+    masked = _redact_pci_preview(content)
+    for rule in _EVIDENCE_MASKING_RULES:
+        masked = rule.pattern.sub(lambda match, name=rule.name: f"[redacted:{name}]", masked)
+    return masked
 
 
 def _detector_version(framework_ids: set[str]) -> str:

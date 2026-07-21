@@ -385,9 +385,9 @@ RULES = [
 
 
 def _redact(value: str) -> str:
-    if len(value) <= 6:
-        return "***"
-    return f"{value[:3]}***{value[-2:]}"
+    # SC-3: never reveal edge characters of a detected secret/PII value. The
+    # previous first3***last2 form leaked up to 5 chars of every generic match.
+    return "***"
 
 
 def classify_content(content: str) -> list[dict]:
