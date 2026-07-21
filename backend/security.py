@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import string
 import time
 from dataclasses import dataclass
 from typing import Annotated
@@ -111,20 +112,51 @@ def sanitize_username(username: str) -> str:
     return cleaned[:80]
 
 
+def _generate_dev_admin_password(length: int = 20) -> str:
+    """Random password guaranteed to satisfy validate_password_strength()."""
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        candidate = "".join(secrets.choice(alphabet) for _ in range(length))
+        if any(c.isalpha() for c in candidate) and any(c.isdigit() for c in candidate):
+            return candidate
+
+
+def _dev_admin_password() -> str:
+    """Resolve the local built-in admin password without a static default (SC-5).
+
+    Uses DSPM_DEV_ADMIN_PASSWORD when set; otherwise generates a strong random
+    password and prints it once so a local operator can sign in. Only reached in
+    non-production (production requires DSPM_ADMIN_PASSWORD and raises above).
+    The previous hardcoded 'admin123' default allowed trivial admin takeover on
+    any install that forgot to set an env var.
+    """
+    configured = os.getenv("DSPM_DEV_ADMIN_PASSWORD", "").strip()
+    if configured:
+        return configured
+    generated = _generate_dev_admin_password()
+    print(
+        "[dspm] No DSPM_ADMIN_PASSWORD or DSPM_DEV_ADMIN_PASSWORD is set. "
+        f"Generated a one-time local admin password for 'admin': {generated}",
+        flush=True,
+    )
+    return generated
+
+
 def ensure_default_admin() -> None:
     """Create the built-in admin only when explicitly safe.
 
-    Production must set DSPM_ADMIN_PASSWORD. Local/demo installs get a strong
-    development default, and existing admin passwords are not silently reset
-    unless DSPM_SYNC_BUILTIN_ADMIN=1 is explicitly enabled.
+    Production must set DSPM_ADMIN_PASSWORD. Local installs use
+    DSPM_DEV_ADMIN_PASSWORD or a generated one-time password (never a static
+    default), and existing admin passwords are not silently reset unless
+    DSPM_SYNC_BUILTIN_ADMIN=1 is explicitly enabled.
     """
     username = "admin"
     configured_password = os.getenv("DSPM_ADMIN_PASSWORD", "").strip()
     if IS_PRODUCTION and not configured_password:
         raise RuntimeError("DSPM_ADMIN_PASSWORD must be set in production")
-    password = configured_password or os.getenv("DSPM_DEV_ADMIN_PASSWORD", "admin123")
     user = get_user(username)
     if user is None:
+        password = configured_password or _dev_admin_password()
         create_user(
             username,
             hash_password(password),

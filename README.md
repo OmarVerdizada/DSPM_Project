@@ -65,11 +65,18 @@ http://127.0.0.1:8000
 
 Default local login:
 
+The built-in user is `admin`. There is no hardcoded default password. On first
+start, set `DSPM_DEV_ADMIN_PASSWORD` to choose the local password, or leave it
+unset and the app generates a strong one-time password and prints it to the
+console:
+
 ```text
-admin / admin123
+[dspm] No DSPM_ADMIN_PASSWORD or DSPM_DEV_ADMIN_PASSWORD is set. Generated a
+one-time local admin password for 'admin': <shown once at startup>
 ```
 
-For production-like use, set `DSPM_ADMIN_PASSWORD` before starting the app.
+For production, set `DSPM_ADMIN_PASSWORD` before starting the app (the server
+refuses to start without it when `DSPM_ENV=production`).
 
 ## Demo Data
 
