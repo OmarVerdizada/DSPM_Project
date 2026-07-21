@@ -15,6 +15,7 @@ from backend.store import read_scan_history, read_scan_report
 from backend.copilot import audit, controlled_verbalizer, conversation_polish, correction_controller, correction_detection, evidence_sensitivity, fast_situation_arbiter, file_queries, memory, meta_renderers, product_help, provider_health, response_brainmap, route_dispatcher, routing_authority, situation_arbiter, situation_classifier, situation_guardrails, situation_policy, situation_runtime, state_writer, task_frame_controller, task_types, tools, verbalizer
 from backend.copilot.artifacts import ArtifactError, create_report_artifact
 from backend.copilot.answer_validator import safe_fallback_for_route, validate_contract_answer
+from backend.copilot.masking import mask_sensitive_text
 from backend.copilot.az_canned import get_canned_response, is_unsupported_language_message
 from backend.copilot.canonical_answer import (
     CanonicalAnswer,
@@ -4387,7 +4388,7 @@ async def generate_selected_item_answer(message: str, tool_result: ToolResult, m
     deterministic = deterministic_selected_item_template(tool_result, metadata.language, plan.task_type)
     if deterministic:
         return _ensure_structured_evidence_block(deterministic, tool_result), False
-    evidence = to_json_text(_payload(tool_result))
+    evidence = mask_sensitive_text(to_json_text(_payload(tool_result)))  # SC-12
     prompt_language = metadata.answer_language if metadata.answer_language in {"en", "ru"} else "en"
     canonical_metadata = _metadata_with_answer_language(metadata, prompt_language)
     try:
@@ -4435,7 +4436,11 @@ async def generate_answer(message: str, tool_results: list[ToolResult], conversa
     try:
         prompt_language = metadata.answer_language if metadata.answer_language in {"en", "ru"} else "en"
         canonical_metadata = _metadata_with_answer_language(metadata, prompt_language)
-        messages = build_answer_messages(message, context, history, canonical_metadata)
+        # SC-12: mask evidence context and replayed history before they leave
+        # the box to the LLM. Defense-in-depth: SC-1 already masks previews and
+        # samples at the scan source, but this guards anything not covered and
+        # the case where OLLAMA_HOST is repointed off localhost.
+        messages = build_answer_messages(message, mask_sensitive_text(context), mask_sensitive_text(history), canonical_metadata)
         return await _call_ollama_with_language_retry(messages, canonical_metadata, task_type="short_answer")
     except LLMError:
         return _raw_evidence_fallback(tool_results)
