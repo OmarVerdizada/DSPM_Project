@@ -9,6 +9,7 @@ import unicodedata
 from typing import Any
 
 from classification.compliance.canonical_entities import canonical_entity_fingerprint
+from classification.compliance.evidence_keys import evidence_hmac_key
 from classification.compliance.nist_catalog import load_nist_catalog, nist_catalog_status
 from classification.compliance.nist_mappings import nist_data_categories_for_finding
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
@@ -398,7 +399,7 @@ def _masked_preview(value: str) -> str:
 
 
 def _secure_fingerprint(value: str, tenant_id: str) -> str:
-    secret = os.environ.get("DSPM_EVIDENCE_HMAC_KEY") or "dspm-local-evidence-key"
+    secret = evidence_hmac_key()
     return hmac.new(f"{secret}:{tenant_id}:nist".encode("utf-8"), str(value or "").encode("utf-8", errors="ignore"), hashlib.sha256).hexdigest()
 
 

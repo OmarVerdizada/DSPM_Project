@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import os
 
+from classification.compliance.evidence_keys import evidence_hmac_key
+
 
 ENTITY_TYPE_BY_FINDING = {
     "gdpr_full_name": "PERSON_NAME",
@@ -32,7 +34,7 @@ ENTITY_TYPE_BY_FINDING = {
 
 
 def canonical_entity_fingerprint(entity_type: str, value: str, tenant_id: str = "default") -> str:
-    secret = os.environ.get("DSPM_EVIDENCE_HMAC_KEY") or "dspm-local-evidence-key"
+    secret = evidence_hmac_key()
     normalized = _normalize_entity_value(entity_type, value)
     payload = f"canonical-entity-v1:{str(entity_type or '').upper()}:{normalized}"
     return hmac.new(f"{secret}:{tenant_id}".encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()

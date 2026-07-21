@@ -10,6 +10,7 @@ from urllib.parse import unquote
 from collections.abc import Iterable
 from datetime import date
 
+from classification.compliance.evidence_keys import evidence_hmac_key
 from classification.compliance.keyword_index import keyword_hits_indexed
 from classification.compliance.validators import is_luhn_valid
 
@@ -99,7 +100,7 @@ def mask_fragment(value: str) -> str:
 
 
 def _tenant_evidence_key(tenant_id: str = "default") -> bytes:
-    secret = os.environ.get("DSPM_EVIDENCE_HMAC_KEY") or "dspm-local-evidence-key"
+    secret = evidence_hmac_key()
     return f"{secret}:{tenant_id or 'default'}".encode("utf-8")
 
 

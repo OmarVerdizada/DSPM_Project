@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import os
 
+from classification.compliance.evidence_keys import evidence_hmac_key
+
 
 GDPR_ARTICLE_CATALOG = {
     "personal_data_definition": {"article": "Article 4(1)", "title": "Personal data definition"},
@@ -139,7 +141,7 @@ def custom_context_metadata(group: dict, matched_keywords: list[str]) -> dict:
 
 
 def secure_value_fingerprint(value: str, tenant_id: str = "default") -> str:
-    secret = os.environ.get("DSPM_EVIDENCE_HMAC_KEY") or "dspm-local-evidence-key"
+    secret = evidence_hmac_key()
     normalized = " ".join(str(value or "").strip().split()).lower()
     return hmac.new(f"{secret}:{tenant_id}".encode("utf-8"), f"gdpr-value-v1:{normalized}".encode("utf-8"), hashlib.sha256).hexdigest()
 

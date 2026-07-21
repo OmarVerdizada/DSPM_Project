@@ -47,6 +47,7 @@ node_modules/
 *.pfx
 *.p12
 .jwt_secret
+.evidence_hmac_key
 
 # ---------------------------------------------------------------------------
 # Runtime state and generated artifacts (never source)
