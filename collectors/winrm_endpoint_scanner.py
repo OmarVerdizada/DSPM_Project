@@ -3,6 +3,7 @@
 import base64
 import ipaddress
 import json
+import os
 import platform
 import re
 import socket
@@ -127,9 +128,50 @@ def _join_windows_path(root: str, suffix: str) -> str:
     return f"{clean_root}\\{_normalize_windows_relative_path(suffix)}"
 
 
+def _in_production() -> bool:
+    return os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}
+
+
+def _winrm_ssl_required() -> bool:
+    """SC-7: refuse cleartext WinRM by default in production.
+
+    Explicit DSPM_REQUIRE_WINRM_SSL wins ("1" always require, "0" always allow
+    HTTP). When unset, SSL is required in production and HTTP is tolerated only
+    in local/dev.
+    """
+    override = os.getenv("DSPM_REQUIRE_WINRM_SSL")
+    if override is not None and override.strip() != "":
+        return override.strip() == "1"
+    return _in_production()
+
+
+def _winrm_activation_allowed() -> bool:
+    """SC-7: WinRM activation mutates the target (opens an HTTP listener and
+    firewall, enables DCOM/WMI, runs ExecutionPolicy Bypass). Disabled in
+    production unless an operator explicitly opts in, so a normal deployment
+    never reconfigures scanned endpoints."""
+    if _in_production():
+        return os.getenv("DSPM_ALLOW_WINRM_ACTIVATION", "0").strip() == "1"
+    return True
+
+
+def _activation_disabled_result() -> dict:
+    return {
+        "activated": False,
+        "requires_admin": False,
+        "message": (
+            "WinRM activation is disabled in production. Set "
+            "DSPM_ALLOW_WINRM_ACTIVATION=1 to allow it through an explicit, "
+            "audited admin workflow."
+        ),
+    }
+
+
 def activate_local_winrm(username: str = "", password: str = "", domain: str = "WORKGROUP") -> dict:
     if platform.system().lower() != "windows":
         raise RuntimeError("Local WinRM activation requires the DSPM backend to run on Windows.")
+    if not _winrm_activation_allowed():
+        return _activation_disabled_result()
 
     activation = _run_local_activation_script(require_current_admin=True)
     if activation.get("activated") or not activation.get("requires_admin") or not username.strip() or not password:
@@ -340,6 +382,8 @@ class WinRMEndpointScanner:
     def activate_winrm(self) -> dict:
         if platform.system().lower() != "windows":
             raise RuntimeError("WinRM activation requires the DSPM backend to run on Windows with WMI tools available.")
+        if not _winrm_activation_allowed():
+            return _activation_disabled_result()
         if not self.config.host.strip():
             raise ValueError("Endpoint host is required.")
         if not self.config.username.strip() or not self.config.password:
@@ -555,8 +599,8 @@ class WinRMEndpointScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        if not self.config.use_ssl and __import__("os").getenv("DSPM_REQUIRE_WINRM_SSL", "0") == "1":
-            raise RuntimeError("WinRM over HTTP is disabled by configuration")
+        if not self.config.use_ssl and _winrm_ssl_required():
+            raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
         last_error: Exception | None = None
         for connection_host in self._connection_hosts():
             try:
@@ -577,8 +621,8 @@ class WinRMEndpointScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        if not self.config.use_ssl and __import__("os").getenv("DSPM_REQUIRE_WINRM_SSL", "0") == "1":
-            raise RuntimeError("WinRM over HTTP is disabled by configuration")
+        if not self.config.use_ssl and _winrm_ssl_required():
+            raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
         last_error: Exception | None = None
         for connection_host in self._connection_hosts():
             try:

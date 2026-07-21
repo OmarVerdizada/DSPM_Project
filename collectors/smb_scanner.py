@@ -5,6 +5,7 @@ import io
 import base64
 import ipaddress
 import json
+import os
 import socket
 import subprocess
 import tempfile
@@ -635,10 +636,13 @@ class SMBScanner:
             return self._acl_cache[unc_path]
         self.last_scan_diagnostics["owner_read_attempts"] = int(self.last_scan_diagnostics.get("owner_read_attempts") or 0) + 1
         username, domain = self._windows_credential()
+        # SC-6: the password is NOT embedded in the (base64) script/argv, which
+        # is visible to any local process listing command lines. It is passed to
+        # the child PowerShell process through an environment variable instead,
+        # which does not appear on the command line.
         payload = {
             "unc_path": unc_path,
             "username": username,
-            "password": self.config.password,
         }
         encoded_payload = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
         script = f"""
@@ -646,7 +650,7 @@ class SMBScanner:
         $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_payload}')) | ConvertFrom-Json
         $path = [string]$payload.unc_path
         $username = [string]$payload.username
-        $password = [string]$payload.password
+        $password = [string]$env:DSPM_SMB_ACL_PW
         try {{
           $directAcl = Get-Acl -LiteralPath $path -ErrorAction Stop
           if ($directAcl) {{
@@ -698,6 +702,7 @@ class SMBScanner:
                 capture_output=True,
                 text=True,
                 timeout=12,
+                env={**os.environ, "DSPM_SMB_ACL_PW": self.config.password or ""},
             )
         except (OSError, subprocess.SubprocessError):
             self.last_scan_diagnostics["owner_read_failed"] = int(self.last_scan_diagnostics.get("owner_read_failed") or 0) + 1
@@ -788,9 +793,17 @@ class SMBScanner:
             if extension in BINARY_TEXT_EXTENSIONS:
                 temp_path = None
                 try:
+                    # SC-8: retrieved document bytes touch disk only briefly and
+                    # under a restrictive mode. On POSIX chmod 0600 keeps other
+                    # local users out; on Windows it is a best-effort no-op and
+                    # host ACLs govern access.
                     with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
-                        temp_file.write(data)
                         temp_path = temp_file.name
+                        try:
+                            os.chmod(temp_path, 0o600)
+                        except OSError:
+                            pass
+                        temp_file.write(data)
                     from pathlib import Path
 
                     return extract_binary_text(Path(temp_path))
@@ -798,6 +811,18 @@ class SMBScanner:
                     if temp_path:
                         from pathlib import Path
 
+                        # Best-effort secure delete: overwrite before unlinking so
+                        # the raw document bytes are not left recoverable in free
+                        # space.
+                        try:
+                            with open(temp_path, "r+b") as handle:
+                                length = handle.seek(0, io.SEEK_END)
+                                handle.seek(0)
+                                handle.write(b"\x00" * length)
+                                handle.flush()
+                                os.fsync(handle.fileno())
+                        except OSError:
+                            pass
                         Path(temp_path).unlink(missing_ok=True)
             return data.decode("utf-8", errors="replace")
         except Exception as exc:
