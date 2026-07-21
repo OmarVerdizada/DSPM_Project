@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 from dataclasses import dataclass
 
@@ -385,9 +387,19 @@ RULES = [
 
 
 def _redact(value: str) -> str:
-    # SC-3: never reveal edge characters of a detected secret/PII value. The
-    # previous first3***last2 form leaked up to 5 chars of every generic match.
-    return "***"
+    # SC-3: non-reversible, keyed fingerprint of the matched value. Reveals
+    # neither the value nor its edges (the old first3***last2 form leaked up to
+    # 5 chars), while staying distinct per distinct value so unique-value counts
+    # (canonical_model._unique_value_count, which falls back to len(set(samples))
+    # for generic findings that carry no secure fingerprints) stay accurate.
+    from classification.compliance.evidence_keys import evidence_hmac_key
+
+    digest = hmac.new(
+        evidence_hmac_key().encode("utf-8"),
+        value.encode("utf-8", "ignore"),
+        hashlib.sha256,
+    ).hexdigest()[:12]
+    return f"[redacted:{digest}]"
 
 
 def classify_content(content: str) -> list[dict]:

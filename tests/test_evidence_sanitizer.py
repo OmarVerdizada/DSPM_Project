@@ -47,6 +47,25 @@ class EvidenceSanitizerTests(unittest.TestCase):
         for raw in ["SuperSecretP@ss99", "AKIAIOSFODNN7EXAMPLE", "alice.smith@example.com", "123-45-6789"]:
             self.assertNotIn(raw, serialized, f"raw secret leaked into samples: {raw!r}")
 
+    def test_masked_samples_stay_distinct_for_distinct_values(self) -> None:
+        # SC-3 must not collapse distinct values to one token: unique-value
+        # counting (canonical_model._unique_value_count) falls back to
+        # len(set(samples)) for generic findings, so three distinct passwords
+        # must yield three distinct masked samples, none containing the raw value.
+        content = "\n".join(
+            [
+                "password: FirstPassword11",
+                "password: SecondPassword22",
+                "password: ThirdPassword33",
+            ]
+        )
+        findings = classify_content(content)
+        pw = next(f for f in findings if f["type"] == "password")
+        self.assertEqual(len(set(pw["samples"])), 3)
+        blob = json.dumps(pw["samples"])
+        for raw in ["FirstPassword11", "SecondPassword22", "ThirdPassword33"]:
+            self.assertNotIn(raw, blob)
+
     def test_preview_shape_is_stable(self) -> None:
         preview = _safe_preview(CONTENT)
         self.assertEqual(set(preview.keys()), {"available", "lines", "truncated"})
