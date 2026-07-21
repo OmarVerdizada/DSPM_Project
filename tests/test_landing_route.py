@@ -1,0 +1,75 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from fastapi.testclient import TestClient
+
+from backend.app import FRONTEND_DIR, LANDING_DIST, ConnectionRequest, _persist_scan, _prepare_local_scan_data, app
+from backend.security import Principal
+
+
+class LandingRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_root_serves_built_sentro_landing(self):
+        self.assertTrue((LANDING_DIST / "index.html").is_file())
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("SENTRO", response.text)
+        self.assertIn("Data Security Posture Management", response.text)
+
+    def test_dashboard_remains_separate_from_landing(self):
+        response = self.client.get("/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("SENTRO Copilot", response.text)
+        self.assertIn("inventory-workspace", response.text)
+
+    def test_copilot_launcher_is_a_true_open_close_toggle(self):
+        script = (FRONTEND_DIR / "copilot.js").read_text(encoding="utf-8")
+
+        self.assertIn('if (popup.classList.contains("hidden")) open();', script)
+        self.assertIn("else close();", script)
+
+    def test_toasts_are_positioned_above_the_copilot_launcher(self):
+        styles = (FRONTEND_DIR / "styles.css").read_text(encoding="utf-8")
+
+        toast_rule = styles[styles.index(".toast-host {"):styles.index(".toast {", styles.index(".toast-host {"))]
+        self.assertIn("bottom: 96px", toast_rule)
+        self.assertIn("z-index: 10001", toast_rule)
+
+    @patch("backend.app.generate_enterprise_test_data")
+    @patch("backend.app.Path.exists", return_value=False)
+    def test_missing_default_synthetic_dataset_is_generated_automatically(self, _exists, generate):
+        _prepare_local_scan_data(ConnectionRequest())
+
+        generate.assert_called_once()
+
+    @patch("backend.app.Path.exists", return_value=False)
+    def test_missing_custom_local_path_is_reported(self, _exists):
+        with self.assertRaisesRegex(FileNotFoundError, "Local scan path does not exist"):
+            _prepare_local_scan_data(ConnectionRequest(local_path="missing-custom-scan-folder"))
+
+    @patch("backend.app.audit")
+    @patch("backend.app.generate_report", side_effect=OSError("disk full"))
+    @patch("backend.app.evaluate_alerts", side_effect=RuntimeError("alert sink unavailable"))
+    @patch("backend.app.save_scan_history", return_value="scan-1")
+    def test_secondary_post_scan_failures_do_not_fail_the_scan(self, _save, _alerts, _report, _audit):
+        data = {"files": [], "summary": {"total_files": 0}}
+        payload = SimpleNamespace(save_report=True)
+        principal = Principal("admin", "admin", "default")
+
+        _persist_scan(data, payload, principal)
+
+        self.assertEqual(data["scan_id"], "scan-1")
+        self.assertEqual(data["alerts"], [])
+        stages = {warning["stage"] for warning in data["scan_warnings"]}
+        self.assertIn("alerts", stages)
+        self.assertIn("report_export", stages)
+
+
+if __name__ == "__main__":
+    unittest.main()

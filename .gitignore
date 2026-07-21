@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+sdist/
+
+# Test / coverage / type-checker caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# ---------------------------------------------------------------------------
+# Node / frontend-landing
+# ---------------------------------------------------------------------------
+node_modules/
+.npm/
+*.tsbuildinfo
+
+# NOTE: frontend-landing/dist/ is deliberately NOT ignored.
+# backend/app.py:104-106 serves that directory at "/" and "/login" at runtime,
+# so the built bundle is currently a required deployment artifact rather than
+# disposable build output. See docs/phase0_production_readiness_report.md
+# ("Remaining production blockers") for the plan to build it in CI instead.
+
+# ---------------------------------------------------------------------------
+# Secrets and local configuration
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+.jwt_secret
+
+# ---------------------------------------------------------------------------
+# Runtime state and generated artifacts (never source)
+# ---------------------------------------------------------------------------
+data/
+tmp/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+report.json
+
+# Generated demo/scan corpora. Regenerate with:
+#   python scripts/generate_enterprise_test_data.py --output enterprise_test_data
+enterprise_test_data/
+enterprise_test_data_repro/
+
+# ---------------------------------------------------------------------------
+# Editor, tooling and OS cruft (developer-only, must not ship)
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+.obsidian/
+.claude/
+.agents/
+.DS_Store
+Thumbs.db
+desktop.ini

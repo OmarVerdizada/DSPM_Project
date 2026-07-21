@@ -1,0 +1,36 @@
+# Runtime dependencies only. Development and test tooling lives in
+# requirements-dev.txt; optional ML classification extras live in
+# requirements-ml.txt.
+#
+# Requires Python 3.10 - 3.13 (PEP 604 unions are evaluated at runtime by
+# Pydantic v2 models, so 3.9 fails at import time, not at install time).
+#
+# All direct dependencies are pinned exactly. Transitive dependencies are NOT
+# locked - see docs/phase0_production_readiness_report.md for the hash-locking
+# follow-up required for fully reproducible builds.
+
+# Runtime API and web server
+fastapi==0.136.1
+uvicorn==0.46.0
+pydantic==2.13.4
+
+# SMB/file-server and Windows endpoint connectors
+pysmb==1.2.10
+pywinrm==0.5.0
+pypdf==6.14.2
+
+# Encrypted credential vault
+cryptography==45.0.7
+
+# Async HTTP client used by the copilot LLM client (backend/copilot/llm_client.py)
+httpx==0.28.1
+
+# Local .env loading. Currently declared but not imported anywhere; all config
+# is read via os.getenv(). Retained for backward compatibility with existing
+# deployment environments - safe to drop once confirmed unused by operators.
+python-dotenv==1.2.2
+
+# SQLite is provided by Python's built-in sqlite3 module.
+# The operator console in frontend/ is static HTML/CSS/JavaScript and needs no
+# npm install. The separate marketing site in frontend-landing/ IS a Vite/React
+# build and does require Node - see README "Building the landing page".
