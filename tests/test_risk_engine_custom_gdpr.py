@@ -25,7 +25,9 @@ class CustomGdprRiskEngineTests(unittest.TestCase):
 
         self.assertIn("Custom contract marker", " ".join(risk["reasons"]))
         self.assertIn("legal", " ".join(risk["reasons"]).lower())
-        self.assertIn("restricted vendor agreement", " ".join(risk["reasons"]))
+        # SC-11: the matched keyword must NOT be echoed into risk reasons (it
+        # would flow into copilot context, chat answers and the HTML register).
+        self.assertNotIn("restricted vendor agreement", " ".join(risk["reasons"]))
         self.assertIn("legal operations", " ".join(risk["dlp_recommendations"]))
         self.assertIn("Block external movement", " ".join(risk["dlp_recommendations"]))
         self.assertIn("Apply custom GDPR/category label", risk["remediation"]["actions"])

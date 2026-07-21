@@ -7,6 +7,7 @@ from typing import Any
 
 from backend.security import Principal
 from backend.store import audit
+from backend.copilot.masking import mask_sensitive_text
 from backend.copilot.llm_client import OLLAMA_MODEL, OLLAMA_MODEL_PROFILE
 from backend.copilot import situation_runtime
 
@@ -55,7 +56,7 @@ class AuditBuilder:
 
     def __init__(self, message: str, user_id: str, conversation_id: str):
         self._data: dict[str, Any] = {
-            "message_preview": _safe_text(message, 100),
+            "message_preview": _safe_text(mask_sensitive_text(message), 100),
             "user_id": _safe_text(user_id, 120),
             "conversation_id": _safe_text(conversation_id, 120),
             "timestamp": datetime.utcnow().isoformat(),

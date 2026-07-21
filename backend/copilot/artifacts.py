@@ -25,6 +25,14 @@ def _safe(value: str) -> str:
     return "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_"})[:80] or "default"
 
 
+def _basename(value: str) -> str:
+    """SC-13: reduce a scanned file path to its basename for the HTML report,
+    matching the path-exposure policy chat and the PDF already apply. Full
+    absolute/UNC paths must not be printed into the evidence register."""
+    text = str(value or "").replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1] if text else ""
+
+
 def _artifact_dir(principal: Principal) -> Path:
     return ARTIFACT_ROOT / _safe(principal.tenant_id) / "artifacts" / _safe(principal.subject)
 
@@ -88,7 +96,7 @@ def _render_report_html(model: dict) -> str:
         model.get("evidence_register") or [],
         lambda row: [
             f"<strong>{e(str(row.get('name','')))}</strong>",
-            e(str(row.get("path", ""))),
+            e(_basename(row.get("path", ""))),
             e(str(row.get("source", ""))),
             f'<span class="risk {e(str(row.get("severity","")))}">{e(str(row.get("severity","")))} {e(str(row.get("risk_score","")))}</span>',
             e("; ".join(row.get("findings") or []) or "None"),

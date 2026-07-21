@@ -854,10 +854,11 @@ def _finding_reason(finding: dict) -> str:
 def _dynamic_finding_reason(finding: dict, fallback: str) -> str:
     label = str(finding.get("label") or finding.get("type") or "Sensitive data").replace("_", " ").strip()
     category = str(finding.get("category") or "custom").strip().lower().replace("-", "_").replace(" ", "_")
-    keywords = finding.get("matched_keywords") or finding.get("keywords") or finding.get("samples") or []
+    # SC-11: never echo matched keywords or sample fragments into risk reasons.
+    # These strings flow into copilot LLM context, chat answers and the HTML
+    # evidence register. Keep the qualitative reason only; counts and types are
+    # carried by structured fields elsewhere.
     keyword_hint = ""
-    if keywords:
-        keyword_hint = f" Matched evidence includes {', '.join(str(item) for item in keywords[:3])}."
     category_reasons = {
         "pii": f"{label} indicates GDPR personal data and should be handled with privacy controls, purpose limitation, and owner review.",
         "personal_data": f"{label} indicates GDPR personal data and should be handled with privacy controls, purpose limitation, and owner review.",

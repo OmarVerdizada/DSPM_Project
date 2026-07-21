@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from backend.store import DATA_DIR
+from backend.copilot.masking import mask_sensitive_text
 
 COPILOT_MEMORY_MAX_LINES = int(os.getenv("COPILOT_MEMORY_MAX_LINES", "500"))
 COPILOT_MEMORY_MAX_BYTES = int(os.getenv("COPILOT_MEMORY_MAX_BYTES", "2097152"))
@@ -70,8 +71,12 @@ async def load_history(tenant_id: str, conversation_id: str, max_turns: int = 6)
 async def save_turn(tenant_id: str, conversation_id: str, user_message: str, assistant_message: str, tools_used: list[str], sources: list[dict]) -> None:
     path = _conversation_path(tenant_id, conversation_id)
     now = datetime.now(timezone.utc).isoformat()
+    # SC-10: mask the user message before it is persisted to the conversation
+    # JSONL. This is the copy that is later replayed into LLM prompt history
+    # (read_recent), so masking here covers both at-rest persistence and replay,
+    # preventing a pasted secret/PII from lingering and propagating.
     rows = [
-        {"role": "user", "content": user_message, "timestamp": now},
+        {"role": "user", "content": mask_sensitive_text(user_message), "timestamp": now},
         {"role": "assistant", "content": assistant_message, "timestamp": now, "tools_used": tools_used, "sources": sources},
     ]
 
