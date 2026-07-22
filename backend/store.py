@@ -9,6 +9,9 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from scripts.logger import get_logger
+
+logger = get_logger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -161,6 +164,75 @@ def init_db() -> None:
                     ON revoked_tokens (expires_at);
                 CREATE INDEX IF NOT EXISTS idx_users_tenant
                     ON users (tenant_id, role);
+
+                -- Phase 1 (DATA-001) normalized model. Written alongside the
+                -- report_json blob (dual-write); reads still use the blob.
+                CREATE TABLE IF NOT EXISTS scan_runs (
+                    tenant_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    source TEXT,
+                    mode TEXT,
+                    policy_version TEXT,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    status TEXT,
+                    total_files INTEGER NOT NULL DEFAULT 0,
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (tenant_id, id)
+                );
+
+                CREATE TABLE IF NOT EXISTS assets (
+                    tenant_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    source TEXT,
+                    stable_object_id TEXT,
+                    path TEXT,
+                    name TEXT,
+                    PRIMARY KEY (tenant_id, id)
+                );
+
+                CREATE TABLE IF NOT EXISTS asset_versions (
+                    tenant_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    mtime TEXT,
+                    content_hash TEXT,
+                    coverage TEXT,
+                    PRIMARY KEY (tenant_id, asset_id, version)
+                );
+
+                CREATE TABLE IF NOT EXISTS findings (
+                    tenant_id TEXT NOT NULL,
+                    id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    rule TEXT,
+                    severity TEXT,
+                    category TEXT,
+                    framework TEXT,
+                    status TEXT,
+                    first_seen TEXT,
+                    last_seen TEXT,
+                    PRIMARY KEY (tenant_id, id)
+                );
+
+                CREATE TABLE IF NOT EXISTS finding_occurrences (
+                    tenant_id TEXT NOT NULL,
+                    finding_id TEXT NOT NULL,
+                    scan_id TEXT NOT NULL,
+                    locator TEXT,
+                    fingerprint TEXT,
+                    occurrence_count INTEGER NOT NULL DEFAULT 1
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scan_runs_tenant
+                    ON scan_runs (tenant_id, started_at);
+                CREATE INDEX IF NOT EXISTS idx_findings_tenant_asset
+                    ON findings (tenant_id, asset_id);
+                CREATE INDEX IF NOT EXISTS idx_occurrences_scan
+                    ON finding_occurrences (tenant_id, scan_id);
+                CREATE INDEX IF NOT EXISTS idx_occurrences_finding
+                    ON finding_occurrences (finding_id);
                 """
             )
             now = datetime.now(timezone.utc).isoformat()
@@ -235,7 +307,76 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                     created_at,
                 ),
             )
+            _dual_write_normalized(conn, tenant_id, report)
     return scan_id
+
+
+def _dual_write_normalized(conn, tenant_id: str, report: dict) -> None:
+    """Mirror the scan into the normalized tables (Phase 1, DATA-001).
+
+    Best-effort and savepoint-isolated: the report_json blob remains the source
+    of truth during migration, so any failure here rolls back only the mirror
+    rows and never fails the primary save.
+    """
+    try:
+        conn.execute("SAVEPOINT dspm_norm")
+        _write_normalized_rows(conn, tenant_id, report)
+        conn.execute("RELEASE SAVEPOINT dspm_norm")
+    except Exception as exc:  # pragma: no cover - defensive migration guard
+        try:
+            conn.execute("ROLLBACK TO SAVEPOINT dspm_norm")
+            conn.execute("RELEASE SAVEPOINT dspm_norm")
+        except Exception:
+            pass
+        logger.warning("Normalized dual-write skipped for scan %s: %s", report.get("scan_id"), exc)
+
+
+def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
+    from backend.domain import normalize_scan_report
+
+    scan = normalize_scan_report(tenant_id, report)
+    scan_id = scan.scan_run.id
+    if not scan_id:
+        return
+    # Refresh this scan's occurrences so a re-save (e.g. a lifecycle update) is
+    # idempotent rather than duplicating rows.
+    conn.execute("DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
+
+    run = scan.scan_run
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO scan_runs
+            (tenant_id, id, source, mode, policy_version, started_at, ended_at, status, total_files, summary_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at, run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
+    )
+    for asset in scan.assets:
+        conn.execute(
+            "INSERT OR REPLACE INTO assets (tenant_id, id, source, stable_object_id, path, name) VALUES (?, ?, ?, ?, ?, ?)",
+            (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name),
+        )
+    for version in scan.asset_versions:
+        conn.execute(
+            "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage),
+        )
+    for finding in scan.findings:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO findings
+                (tenant_id, id, asset_id, rule, severity, category, framework, status, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT first_seen FROM findings WHERE tenant_id = ? AND id = ?), ?), ?)
+            """,
+            (tenant_id, finding.id, finding.asset_id, finding.rule, finding.severity, finding.category, finding.framework, finding.status,
+             tenant_id, finding.id, finding.first_seen, finding.last_seen),
+        )
+    for occurrence in scan.occurrences:
+        conn.execute(
+            "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
+            (tenant_id, occurrence.finding_id, occurrence.scan_id, occurrence.locator, occurrence.fingerprint, occurrence.occurrence_count),
+        )
 
 
 def count_scan_history(tenant_id: str) -> int:
