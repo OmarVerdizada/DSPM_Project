@@ -326,7 +326,7 @@ const EXTENSION_PRESETS = {
 const SIMPLE_EXTENSION_MEDIA_EXCLUSIONS = new Set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".svg", ".mp3", ".wav", ".mp4", ".mov", ".avi", ".mkv"]);
 const SIMPLE_EXTENSION_PRESETS = {
   secrets: [".env", ".pem", ".key", ".crt", ".cer", ".pfx", ".p12", ".kdbx", ".npmrc", ".pypirc", ".netrc", ".aws", ".ovpn", ".pcf", ".mobileconfig", ".rdp", ".tfvars", ".tfstate", ".kubeconfig"],
-  recommended: [".env", ".pem", ".key", ".crt", ".cer", ".pfx", ".p12", ".kdbx", ".npmrc", ".pypirc", ".netrc", ".aws", ".ovpn", ".pcf", ".mobileconfig", ".rdp", ".tfvars", ".tfstate", ".kubeconfig", ".doc", ".docx", ".docm", ".pdf", ".xls", ".xlsx", ".xlsm", ".ppt", ".pptx", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".sql", ".db", ".sqlite", ".sqlite3", ".bak", ".dump", ".backup", ".msg", ".eml", ".pst", ".ost"],
+  recommended: [".txt", ".log", ".md", ".adoc", ".rst", ".rtf", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".config", ".properties", ".tf", ".tfvars", ".tfstate", ".hcl", ".npmrc", ".pypirc", ".netrc", ".aws", ".reg", ".env", ".pem", ".key", ".crt", ".cer", ".pfx", ".p12", ".kdbx", ".ovpn", ".pcf", ".mobileconfig", ".rdp", ".gpg", ".pgp", ".sql", ".dump", ".bak", ".backup", ".db", ".sqlite", ".sqlite3", ".mdb", ".accdb", ".pst", ".ost", ".msg", ".eml", ".mbox", ".ics", ".doc", ".docx", ".docm", ".dotx", ".dotm", ".odt", ".ott", ".pages", ".xls", ".xlsx", ".xlsm", ".xlsb", ".ods", ".ots", ".numbers", ".ppt", ".pptx", ".pptm", ".odp", ".otp", ".keynote", ".pdf", ".one", ".pub", ".vsd", ".vsdx"],
   broad: EXTENSION_PRESETS.all.filter((extension) => !SIMPLE_EXTENSION_MEDIA_EXCLUSIONS.has(extension)),
   all: EXTENSION_PRESETS.all,
 };
