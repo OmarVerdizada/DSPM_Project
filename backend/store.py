@@ -291,6 +291,18 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
     created_at = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:
+            # DATA-002: a scan run's creation timestamp is immutable. Finding-
+            # lifecycle updates re-save the same scan_id to refresh the blob, but
+            # must NOT reset created_at (that broke history/audit ordering). The
+            # immutable scan-run record itself lives in the normalized scan_runs
+            # table (dual-written below); the blob remains a mutable projection
+            # until the read-switch retires it.
+            existing = conn.execute(
+                "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+                (tenant_id, scan_id),
+            ).fetchone()
+            if existing and existing["created_at"]:
+                created_at = existing["created_at"]
             conn.execute(
                 """
                 INSERT OR REPLACE INTO scan_reports
@@ -343,9 +355,13 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
     conn.execute("DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
 
     run = scan.scan_run
+    # DATA-002: a scan run is immutable and append-only. The first write creates
+    # it; later re-saves (finding-lifecycle updates that refresh the blob) must
+    # NOT overwrite it. INSERT OR IGNORE keeps the original run record; mutable
+    # finding lifecycle lives in the `findings` aggregate below, not here.
     conn.execute(
         """
-        INSERT OR REPLACE INTO scan_runs
+        INSERT OR IGNORE INTO scan_runs
             (tenant_id, id, source, mode, policy_version, started_at, ended_at, status, total_files, summary_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
