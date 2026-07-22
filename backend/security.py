@@ -267,6 +267,17 @@ def generate_api_key() -> tuple[str, str]:
     return raw, hash_api_key(raw)
 
 
+def is_platform_admin(principal: Principal) -> bool:
+    """The built-in platform admin (the ``admin`` user in the ``default`` tenant).
+
+    Only this identity may operate across tenants. A tenant-scoped admin (role
+    ``admin`` in their own tenant) must not. This is the same definition already
+    enforced on the tenant-management routes; SC-15 makes the X-Tenant-ID pivot
+    consistent with it.
+    """
+    return principal.role == "admin" and principal.subject == "admin" and principal.tenant_id == "default"
+
+
 def require_principal(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
@@ -274,7 +285,11 @@ def require_principal(
 ) -> Principal:
     if credentials and credentials.scheme.lower() == "bearer":
         principal = verify_token(credentials.credentials)
-        if x_tenant_id and principal.role == "admin":
+        # SC-15: only the platform admin may pivot tenants via X-Tenant-ID. A
+        # tenant-scoped admin previously could read any other tenant by setting
+        # this header (existence was the only check). Non-platform callers now
+        # simply operate in their own token tenant; the header is ignored.
+        if x_tenant_id and is_platform_admin(principal):
             requested_tenant = "".join(ch for ch in x_tenant_id.strip() if ch.isalnum() or ch in {"-", "_"})
             if not requested_tenant or not tenant_exists(requested_tenant):
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant is not valid")

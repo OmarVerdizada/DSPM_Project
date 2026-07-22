@@ -32,6 +32,7 @@ from backend.security import (
     create_token,
     generate_api_key,
     hash_password,
+    is_platform_admin,
     require_principal,
     require_role,
     revoke_token,
@@ -1574,7 +1575,8 @@ def _clear_login_failures(key: str) -> None:
 
 
 def _is_platform_admin(principal: Principal) -> bool:
-    return principal.role == "admin" and principal.subject == "admin" and principal.tenant_id == "default"
+    # Single source of truth in backend.security (SC-15).
+    return is_platform_admin(principal)
 
 
 def _can_manage_tenant(principal: Principal, tenant_id: str) -> bool:
