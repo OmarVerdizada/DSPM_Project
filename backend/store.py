@@ -225,6 +225,19 @@ def init_db() -> None:
                     occurrence_count INTEGER NOT NULL DEFAULT 1
                 );
 
+                -- Materialized per-finding read index (DATA-001 read-switch).
+                -- Stores the exact list_findings response per finding so the
+                -- read path can serve findings without loading full report
+                -- blobs. Behind DSPM_READ_FROM_NORMALIZED (default off).
+                CREATE TABLE IF NOT EXISTS finding_index (
+                    tenant_id TEXT NOT NULL,
+                    scan_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    finding_id TEXT NOT NULL,
+                    status TEXT,
+                    response_json TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_scan_runs_tenant
                     ON scan_runs (tenant_id, started_at);
                 CREATE INDEX IF NOT EXISTS idx_findings_tenant_asset
@@ -233,6 +246,8 @@ def init_db() -> None:
                     ON finding_occurrences (tenant_id, scan_id);
                 CREATE INDEX IF NOT EXISTS idx_occurrences_finding
                     ON finding_occurrences (finding_id);
+                CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan
+                    ON finding_index (tenant_id, scan_id);
                 """
             )
             now = datetime.now(timezone.utc).isoformat()
@@ -393,6 +408,32 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
             "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
             (tenant_id, occurrence.finding_id, occurrence.scan_id, occurrence.locator, occurrence.fingerprint, occurrence.occurrence_count),
         )
+
+    _write_finding_index(conn, tenant_id, report)
+
+
+def _write_finding_index(conn, tenant_id: str, report: dict) -> None:
+    """Materialize the exact per-finding list_findings response (read-switch).
+
+    Stores what list_findings would produce for each finding of this scan, so
+    the read path can serve findings without loading full report blobs. Refreshed
+    per scan so a re-save is idempotent.
+    """
+    scan_id = str(report.get("scan_id") or "")
+    if not scan_id:
+        return
+    conn.execute("DELETE FROM finding_index WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
+    seq = 0
+    for row in _iter_report_findings(report):
+        finding = row["finding"]
+        finding_id = str(finding.get("finding_id") or "")
+        if not finding_id:
+            continue
+        conn.execute(
+            "INSERT INTO finding_index (tenant_id, scan_id, seq, finding_id, status, response_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (tenant_id, scan_id, seq, finding_id, _finding_status(finding), json.dumps(_finding_response(row), ensure_ascii=False)),
+        )
+        seq += 1
 
 
 def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
@@ -605,6 +646,15 @@ FINDING_LIFECYCLE_STATUSES = {
 
 
 def list_findings(tenant_id: str, status: str = "", limit: int = 200) -> list[dict]:
+    # Read-switch (DATA-001): when enabled, serve findings from the materialized
+    # finding_index instead of loading every report blob. Default off; any error
+    # falls back to the authoritative blob path below.
+    if os.getenv("DSPM_READ_FROM_NORMALIZED", "0") == "1":
+        try:
+            return _list_findings_normalized(tenant_id, status, limit)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Normalized list_findings failed, falling back to blob: %s", exc)
+
     wanted_status = str(status or "").strip().upper()
     findings: dict[str, dict] = {}
     for item in reversed(read_scan_history(tenant_id, limit=1000)):
@@ -622,6 +672,49 @@ def list_findings(tenant_id: str, status: str = "", limit: int = 200) -> list[di
             findings[finding_id] = _finding_response(row)
             if len(findings) >= max(1, min(int(limit or 200), 1000)):
                 return list(findings.values())
+    return list(findings.values())
+
+
+def _list_findings_normalized(tenant_id: str, status: str, limit: int) -> list[dict]:
+    """Read-switch implementation of list_findings over the finding_index.
+
+    Mirrors the blob path exactly: newest scan first (created_at DESC, scan_id
+    DESC), findings in report order (seq), dedup by finding_id on what has been
+    kept, then the status filter, bounded to the 1000 newest scans and `limit`
+    findings. Because the index stores the exact _finding_response output, the
+    result is identical to the blob path.
+    """
+    wanted_status = str(status or "").strip().upper()
+    cap = max(1, min(int(limit or 200), 1000))
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT fi.finding_id AS finding_id, fi.status AS status, fi.response_json AS response_json
+            FROM finding_index AS fi
+            JOIN scan_reports AS sr
+              ON sr.tenant_id = fi.tenant_id AND sr.scan_id = fi.scan_id
+            WHERE fi.tenant_id = ?
+              AND fi.scan_id IN (
+                  SELECT scan_id FROM scan_reports
+                  WHERE tenant_id = ?
+                  ORDER BY created_at DESC, scan_id DESC
+                  LIMIT 1000
+              )
+            ORDER BY sr.created_at DESC, sr.scan_id DESC, fi.seq ASC
+            """,
+            (tenant_id, tenant_id),
+        ).fetchall()
+
+    findings: dict[str, dict] = {}
+    for row in rows:
+        finding_id = str(row["finding_id"] or "")
+        if not finding_id or finding_id in findings:
+            continue
+        if wanted_status and str(row["status"] or "") != wanted_status:
+            continue
+        findings[finding_id] = json.loads(row["response_json"])
+        if len(findings) >= cap:
+            break
     return list(findings.values())
 
 
