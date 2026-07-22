@@ -379,6 +379,57 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
         )
 
 
+def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
+    """Populate the normalized tables from existing report_json rows (DATA-001).
+
+    Idempotent and safe to re-run: reads still use the blob, so this only fills
+    the mirror for historical scans. Each scan is savepoint-isolated, so a single
+    bad/legacy report is skipped rather than aborting the whole backfill. Pass a
+    tenant_id to bound the work; omit it for a full (maintenance-window) backfill.
+
+    Returns ``{"scanned": int, "mirrored": int, "failed": int}``.
+    """
+    scanned = mirrored = failed = 0
+    with _lock:
+        with _connect() as conn:
+            query = "SELECT tenant_id, scan_id FROM scan_reports"
+            params: tuple = ()
+            if tenant_id:
+                query += " WHERE tenant_id = ?"
+                params = (tenant_id,)
+            keys = conn.execute(query, params).fetchall()
+            for key in keys:
+                scanned += 1
+                blob = conn.execute(
+                    "SELECT report_json FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+                    (key["tenant_id"], key["scan_id"]),
+                ).fetchone()
+                if not blob or not blob["report_json"]:
+                    failed += 1
+                    continue
+                try:
+                    report = json.loads(blob["report_json"])
+                except (json.JSONDecodeError, TypeError):
+                    failed += 1
+                    continue
+                if isinstance(report, dict):
+                    report.setdefault("scan_id", key["scan_id"])
+                try:
+                    conn.execute("SAVEPOINT dspm_backfill")
+                    _write_normalized_rows(conn, key["tenant_id"], report)
+                    conn.execute("RELEASE SAVEPOINT dspm_backfill")
+                    mirrored += 1
+                except Exception as exc:  # pragma: no cover - defensive per-row guard
+                    try:
+                        conn.execute("ROLLBACK TO SAVEPOINT dspm_backfill")
+                        conn.execute("RELEASE SAVEPOINT dspm_backfill")
+                    except Exception:
+                        pass
+                    failed += 1
+                    logger.warning("Backfill skipped scan %s: %s", key["scan_id"], exc)
+    return {"scanned": scanned, "mirrored": mirrored, "failed": failed}
+
+
 def count_scan_history(tenant_id: str) -> int:
     """Total number of persisted scans for a tenant (DATA-003).
 
