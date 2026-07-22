@@ -31,12 +31,12 @@ This slice implements all entities and a `normalize_scan_report(tenant_id, repor
 
 ## 3. Migration strategy (non-breaking, incremental)
 
-1. **This slice:** domain model + report→domain mapper (pure, additive, tested). Nothing rewired.
-2. **Next:** create the normalized SQLite tables alongside `scan_reports` (Postgres is the eventual target per the assessment; starting on the existing SQLite engine keeps the change reversible and testable).
-3. **Dual-write:** `save_scan_history` also writes the normalized rows (via the mapper) in the same transaction. Reads still use the blob. Zero behavioural change.
-4. **Backfill:** one-off job maps existing `report_json` rows through `normalize_scan_report`.
-5. **Read-switch:** move `list_findings`/history/lifecycle onto the normalized tables; then DATA-002 (append-only `scan_runs`, INSERT-only) becomes trivial because lifecycle lives in the mutable `findings` aggregate, not in a re-saved blob.
-6. **Retire the blob** (or keep it as an audit artifact behind a hash).
+1. ✅ **Domain model + report→domain mapper** (pure, additive, tested) — `89f4128`.
+2. ✅ **Normalized SQLite tables** created idempotently in `init_db()` alongside `scan_reports` — `fb861e8`.
+3. ✅ **Dual-write:** `save_scan_history` mirrors normalized rows via the mapper in the same transaction, savepoint-isolated/best-effort so it never breaks the blob save. Reads still use the blob; zero behavioural change — `fb861e8`.
+4. ⬜ **Backfill:** one-off job maps existing `report_json` rows through `normalize_scan_report`. ← next
+5. ⬜ **Read-switch:** move `list_findings`/history/lifecycle onto the normalized tables; then DATA-002 (append-only `scan_runs`, INSERT-only) becomes trivial because lifecycle lives in the mutable `findings` aggregate, not in a re-saved blob.
+6. ⬜ **Retire the blob** (or keep it as an audit artifact behind a hash).
 
 Each step is independently shippable and reversible. No step requires the big-bang control/data-plane split — that is a separate Phase 1 workstream.
 
