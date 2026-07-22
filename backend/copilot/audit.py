@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import contextvars
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.security import Principal
@@ -59,7 +59,7 @@ class AuditBuilder:
             "message_preview": _safe_text(mask_sensitive_text(message), 100),
             "user_id": _safe_text(user_id, 120),
             "conversation_id": _safe_text(conversation_id, 120),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "intent": None,
             "task_type": None,
             "language": None,

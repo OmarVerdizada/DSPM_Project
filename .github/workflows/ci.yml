@@ -138,3 +138,19 @@ jobs:
             fi
           done
           exit $missing
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Fails the build if a credential/secret is committed. The repo ships
+      # deliberate secret-like test fixtures under enterprise_test_data/, but
+      # that path is gitignored and never tracked, so it is not scanned.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
