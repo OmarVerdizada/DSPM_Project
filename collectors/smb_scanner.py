@@ -124,8 +124,9 @@ class SMBScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pysmb'. Install requirements.txt before SMB scans.") from exc
 
+        reached_server = False
         for server in self._server_candidates():
-            remote_name = server.split(".")[0].strip() or server
+            remote_name = self._remote_name_for(server)
             for username, domain, label in self._credential_candidates():
                 conn = SMBConnection(
                     username,
@@ -142,12 +143,32 @@ class SMBScanner:
                         self.credential_used = label
                         self.server_used = server
                         return True
+                    # TCP + SMB negotiation succeeded but authentication was
+                    # rejected (pysmb returns False rather than raising here).
+                    reached_server = True
                 except Exception:
                     conn.close()
                     continue
                 conn.close()
 
+        self._auth_rejected = reached_server
         return False
+
+    def _remote_name_for(self, server: str) -> str:
+        server = server.strip()
+        try:
+            ipaddress.ip_address(server)
+            return server  # an IP has no NetBIOS name; do not split it into "10"
+        except ValueError:
+            return server.split(".")[0].strip() or server
+
+    def _server_short_name(self) -> str:
+        server = self.config.server.strip()
+        try:
+            ipaddress.ip_address(server)
+            return ""  # an IP octet is not a valid NetBIOS domain or machine name
+        except ValueError:
+            return server.split(".")[0].strip()
 
     def close(self) -> None:
         if self.connection is not None:
@@ -185,7 +206,17 @@ class SMBScanner:
         self.last_scan_diagnostics = {}
         self._progress_counters = {"visited": 0, "matched": 0, "reused": 0}
         if not self.connect():
-            raise ConnectionError(f"Could not connect to SMB server {self.config.server}:{self.config.port}")
+            if getattr(self, "_auth_rejected", False):
+                raise ConnectionError(
+                    f"SMB authentication was rejected by {self.config.server} for user "
+                    f"'{self.config.username or '(anonymous)'}'. Verify the password and the "
+                    f"domain - a domain/AD service account must authenticate with its AD "
+                    f"domain (the NetBIOS domain name), not WORKGROUP."
+                )
+            raise ConnectionError(
+                f"Could not reach SMB server {self.config.server}:{self.config.port}. "
+                f"Check the host, port, and network path/firewall."
+            )
 
         try:
             records: list[dict] = []
@@ -265,7 +296,7 @@ class SMBScanner:
     def _credential_candidates(self) -> list[tuple[str, str, str]]:
         username = self.config.username.strip()
         domain = (self.config.domain.strip() or "WORKGROUP").strip()
-        server_name = self.config.server.split(".")[0].strip()
+        server_name = self._server_short_name()
         candidates: list[tuple[str, str, str]] = []
 
         def add(user: str, dom: str) -> None:
@@ -744,7 +775,7 @@ class SMBScanner:
             return username, domain
         if domain and domain.upper() != "WORKGROUP":
             return f"{domain}\\{username}", domain
-        server_name = self.config.server.split(".")[0].strip()
+        server_name = self._server_short_name()
         return (f"{server_name}\\{username}" if server_name else username), domain
 
     def _hash_file(self, share_name: str, path: str, size: int, chunk_size: int = 1024 * 1024) -> str:
