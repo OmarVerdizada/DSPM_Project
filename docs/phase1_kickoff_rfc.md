@@ -35,8 +35,8 @@ This slice implements all entities and a `normalize_scan_report(tenant_id, repor
 2. ✅ **Normalized SQLite tables** created idempotently in `init_db()` alongside `scan_reports` — `fb861e8`.
 3. ✅ **Dual-write:** `save_scan_history` mirrors normalized rows via the mapper in the same transaction, savepoint-isolated/best-effort so it never breaks the blob save. Reads still use the blob; zero behavioural change — `fb861e8`.
 4. ✅ **Backfill:** `store.backfill_normalized_scans()` + `scripts/backfill_normalized.py` map existing `report_json` rows through the mapper (idempotent, per-scan isolated) — `9585043`.
-5. ⬜ **Read-switch:** move `list_findings`/history/lifecycle onto the normalized tables; then DATA-002 (append-only `scan_runs`, INSERT-only) becomes trivial because lifecycle lives in the mutable `findings` aggregate, not in a re-saved blob. ← **next; first step that changes read behaviour (checkpoint before starting).**
-6. ⬜ **Retire the blob** (or keep it as an audit artifact behind a hash).
+5. ✅ **Read-switch:** `list_findings` now serves from a materialized `finding_index` when `DSPM_READ_FROM_NORMALIZED=1` (default off, blob fallback on error), avoiding per-scan blob loads. Parity-tested byte-for-byte against the blob path — `90ac42e`. DATA-002's core (immutable runs + stable created_at) already landed in `4e435f1`.
+6. ⬜ **Retire the blob** (or keep it as an audit artifact behind a hash). ← last step; needs the flag defaulted on + a soak period first.
 
 Each step is independently shippable and reversible. No step requires the big-bang control/data-plane split — that is a separate Phase 1 workstream.
 
