@@ -402,20 +402,33 @@ def _redact(value: str) -> str:
     return f"[redacted:{digest}]"
 
 
+# SC/SCAN-003: samples are capped for evidence hygiene, but the occurrence
+# COUNT must not be capped with them - otherwise 10 and 1,000,000 matches look
+# identical and risk prioritisation / DLP thresholds are wrong. Count is bounded
+# only by COUNT_CAP as a safety limit against pathological inputs.
+SAMPLE_CAP = 10
+COUNT_CAP = 10_000
+
+
 def classify_content(content: str) -> list[dict]:
     if not content:
         return []
 
     findings: list[dict] = []
     for rule in RULES:
-        matches = []
+        samples: list[str] = []
+        total = 0
+        count_capped = False
         for match in rule.pattern.finditer(content):
-            value = match.group(0)
-            matches.append(_redact(value) if rule.redact else value)
-            if len(matches) >= 10:
+            if len(samples) < SAMPLE_CAP:
+                value = match.group(0)
+                samples.append(_redact(value) if rule.redact else value)
+            total += 1
+            if total >= COUNT_CAP:
+                count_capped = True
                 break
 
-        if not matches:
+        if total == 0:
             continue
 
         findings.append(
@@ -423,8 +436,12 @@ def classify_content(content: str) -> list[dict]:
                 "type": rule.name,
                 "risk": rule.risk,
                 "description": rule.description,
-                "count": len(matches),
-                "samples": matches,
+                "count": total,
+                "occurrence_count": total,
+                "sample_count": len(samples),
+                "occurrence_truncated": total > len(samples),
+                "count_capped": count_capped,
+                "samples": samples,
             }
         )
 
