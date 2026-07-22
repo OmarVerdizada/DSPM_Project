@@ -5,9 +5,12 @@
 # Requires Python 3.10 - 3.13 (PEP 604 unions are evaluated at runtime by
 # Pydantic v2 models, so 3.9 fails at import time, not at install time).
 #
-# All direct dependencies are pinned exactly. Transitive dependencies are NOT
-# locked - see docs/phase0_production_readiness_report.md for the hash-locking
-# follow-up required for fully reproducible builds.
+# Direct dependencies are pinned exactly here. For a fully reproducible,
+# hash-verified install of the entire transitive tree, use the generated lock:
+#     pip install --require-hashes -r requirements.lock
+# Regenerate it after changing this file:
+#     pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+# (CI verifies requirements.lock stays in sync and builds the SBOM from it.)
 
 # Runtime API and web server
 fastapi==0.136.1

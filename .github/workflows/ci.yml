@@ -154,3 +154,29 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  supply-chain:
+    name: Lock + SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SBOM tooling
+        run: python -m pip install cyclonedx-bom
+
+      # Reproducibility gate: every runtime dependency installs from the pinned,
+      # hash-verified lock. A stale or tampered lock fails here.
+      - name: Hash-verified install from requirements.lock
+        run: python -m pip install --require-hashes -r requirements.lock
+
+      - name: Generate CycloneDX SBOM from the locked tree
+        run: python -m cyclonedx_py requirements requirements.lock --of JSON --output-reproducible -o sbom.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json

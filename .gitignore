@@ -22,6 +22,11 @@ htmlcov/
 .coverage.*
 coverage.xml
 
+# Generated supply-chain artifacts. requirements.lock IS tracked; the SBOM is
+# produced fresh in CI, and requirements.lock.ci is a CI verification temp.
+sbom.json
+requirements.lock.ci
+
 # ---------------------------------------------------------------------------
 # Node / frontend-landing
 # ---------------------------------------------------------------------------
