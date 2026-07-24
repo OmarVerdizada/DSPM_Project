@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from classification.ml_classifier import classify_with_ml
@@ -15,6 +16,47 @@ class DetectionRule:
     risk: str
     description: str
     redact: bool = True
+    # Optional structural validator applied to each raw match. When set, only
+    # matches for which validator(value) is True are emitted. This is how we
+    # stop "any 16 digits" being a card, "any 7-letter word" being a FIN, etc.
+    # Rules without a validator behave exactly as before.
+    validator: Callable[[str], bool] | None = None
+
+
+def _luhn_ok(value: str) -> bool:
+    """Payment card: 13-19 digits AND a valid Luhn checksum (rejects arbitrary
+    long digit runs such as phone numbers, order ids, timestamps)."""
+    digits = [int(ch) for ch in value if ch.isdigit()]
+    if not 13 <= len(digits) <= 19:
+        return False
+    checksum = 0
+    for index, digit in enumerate(reversed(digits)):
+        if index % 2 == 1:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        checksum += digit
+    return checksum % 10 == 0
+
+
+def _iban_ok(value: str) -> bool:
+    """IBAN: country+length shape AND the ISO 7064 mod-97 checksum."""
+    compact = re.sub(r"\s", "", value).upper()
+    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]{11,30}", compact):
+        return False
+    rearranged = compact[4:] + compact[:4]
+    numeric = "".join(str(ord(ch) - 55) if ch.isalpha() else ch for ch in rearranged)
+    try:
+        return int(numeric) % 97 == 1
+    except ValueError:
+        return False
+
+
+def _fin_ok(value: str) -> bool:
+    """Azerbaijan FIN: 7 alphanumerics containing BOTH a letter and a digit, so
+    ordinary 7-letter words (PROJECT, COMPANY) and 7-digit runs are not FINs."""
+    token = value.strip()
+    return len(token) == 7 and any(ch.isalpha() for ch in token) and any(ch.isdigit() for ch in token)
 
 
 RULES = [
@@ -244,19 +286,26 @@ RULES = [
         name="credit_card",
         pattern=re.compile(r"\b(?:\d[ -]*?){13,19}\b"),
         risk="HIGH",
-        description="Possible payment card number detected",
+        description="Payment card number detected (Luhn-valid)",
+        validator=_luhn_ok,
     ),
     DetectionRule(
         name="swift_bic",
-        pattern=re.compile(r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b"),
+        # Context-anchored: a bare 8/11-char uppercase token (e.g. "CUSTOMER")
+        # is not a SWIFT/BIC. Require an explicit swift/bic label nearby.
+        pattern=re.compile(
+            r"\b(?:swift|bic)\b(?:\s*code)?[\s:=#.\-]{0,4}([A-Za-z]{6}[A-Za-z0-9]{2}(?:[A-Za-z0-9]{3})?)\b",
+            re.IGNORECASE,
+        ),
         risk="HIGH",
-        description="Possible SWIFT/BIC bank identifier detected",
+        description="SWIFT/BIC bank identifier detected in context",
     ),
     DetectionRule(
         name="iban",
         pattern=re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b"),
         risk="HIGH",
-        description="Possible IBAN bank account identifier detected",
+        description="IBAN bank account identifier detected (mod-97 valid)",
+        validator=_iban_ok,
     ),
     DetectionRule(
         name="passport_number",
@@ -298,7 +347,8 @@ RULES = [
         name="azerbaijan_fin",
         pattern=re.compile(r"\b[A-Z0-9]{7}\b"),
         risk="MEDIUM",
-        description="Possible Azerbaijan FIN-like identifier detected",
+        description="Azerbaijan FIN-like identifier detected",
+        validator=_fin_ok,
     ),
     DetectionRule(
         name="confidential_keyword",
@@ -420,8 +470,10 @@ def classify_content(content: str) -> list[dict]:
         total = 0
         count_capped = False
         for match in rule.pattern.finditer(content):
+            value = match.group(0)
+            if rule.validator is not None and not rule.validator(value):
+                continue
             if len(samples) < SAMPLE_CAP:
-                value = match.group(0)
                 samples.append(_redact(value) if rule.redact else value)
             total += 1
             if total >= COUNT_CAP:
