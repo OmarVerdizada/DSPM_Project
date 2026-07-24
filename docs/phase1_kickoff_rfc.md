@@ -41,7 +41,12 @@ This slice implements all entities and a `normalize_scan_report(tenant_id, repor
 Each step is independently shippable and reversible. No step requires the big-bang control/data-plane split — that is a separate Phase 1 workstream.
 
 ## Persistence track status: FUNCTIONALLY COMPLETE
-Steps 1–5 done: the normalized model is dual-written, backfillable, and every finding read can run off it behind a default-off, fully-reversible flag with a blob fallback. Only step 6 (retire the blob) remains, and it is deliberately gated on flipping the flag on in a real deployment and soaking first. The **other Phase 1 workstreams are separate and not started**: ARCH-003 durable jobs/queue, ARCH-004 control/scan-plane split, ARCH-005 connector SDK, SCAN-001/002 streaming pipeline + real cancellation, ARCH-001 app.py router split, ARCH-002 copilot isolation, SEC-003/006/009, QUAL-001, OpenTelemetry.
+Steps 1–5 done: the normalized model is dual-written, backfillable, and every finding read can run off it behind a default-off, fully-reversible flag with a blob fallback. Only step 6 (retire the blob) remains, and it is deliberately gated on flipping the flag on in a real deployment and soaking first.
+
+## Other Phase 1 workstreams — status
+- ✅ **ARCH-003 durable job state + restart recovery** — `121e3ac`. Job lifecycle persisted to `scan_jobs`; orphaned running jobs recovered to failed on startup; API falls back to the durable record. (Durable job *execution*/resume still needs a real broker — infra-blocked.)
+- ✅ **ARCH-002 Copilot feature-flag** — `90eeddf`. `DSPM_COPILOT_ENABLED=0` deploys the core without the Copilot (router, sweeper, post-scan hook all gated).
+- ⬜ **Infra-blocked or large rearchitectures (need explicit scoping / a checkpoint):** ARCH-004 control/scan-plane split, ARCH-005 connector SDK, SCAN-001/002 streaming pipeline + real (process-level) cancellation, ARCH-001 app.py router split, SEC-006 API-key lifecycle, SEC-009 SSRF source-registration, QUAL-001 connector coverage ≥80%, OpenTelemetry. Several require Postgres / a durable broker / multi-node that this environment cannot provide.
 
 ## 4. Recommended workstream order (Phase 1)
 
