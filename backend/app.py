@@ -131,19 +131,23 @@ LOGIN_WINDOW_SECONDS = int(os.getenv("DSPM_LOGIN_WINDOW_SECONDS", "600"))
 LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
 ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
 IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
+# ARCH-002: Copilot is an optional subsystem. DSPM_COPILOT_ENABLED=0 deploys the
+# core platform without it - no router, no session sweeper, no post-scan hook.
+COPILOT_ENABLED = os.getenv("DSPM_COPILOT_ENABLED", "1").strip() != "0"
 REPORT_DIR = Path(os.getenv("DSPM_REPORT_DIR", BASE_DIR / "data" / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI):
-    sweeper = asyncio.create_task(session_context_sweeper())
+    sweeper = asyncio.create_task(session_context_sweeper()) if COPILOT_ENABLED else None
     try:
         yield
     finally:
-        sweeper.cancel()
-        with suppress(asyncio.CancelledError):
-            await sweeper
+        if sweeper is not None:
+            sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper
 
 
 app = FastAPI(
@@ -168,7 +172,8 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
-app.include_router(copilot_router)
+if COPILOT_ENABLED:  # ARCH-002: flag defined near IS_PRODUCTION above
+    app.include_router(copilot_router)
 if (LANDING_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=LANDING_DIST / "assets"), name="landing-assets")
 
@@ -1800,12 +1805,13 @@ def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, princi
             generate_report(data, REPORT_DIR / f"{principal.tenant_id}_{report_id}.json")
         except Exception as exc:
             warnings.append({"stage": "report_export", "error": type(exc).__name__})
-    try:
-        from backend.copilot.insight_hooks import on_scan_complete
+    if COPILOT_ENABLED:
+        try:
+            from backend.copilot.insight_hooks import on_scan_complete
 
-        on_scan_complete(principal.tenant_id, scan_id)
-    except Exception as exc:
-        warnings.append({"stage": "copilot_insights", "error": type(exc).__name__})
+            on_scan_complete(principal.tenant_id, scan_id)
+        except Exception as exc:
+            warnings.append({"stage": "copilot_insights", "error": type(exc).__name__})
     if warnings:
         data["scan_warnings"] = warnings
         try:
