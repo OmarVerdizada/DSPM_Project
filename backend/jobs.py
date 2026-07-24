@@ -44,13 +44,10 @@ executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 _jobs: dict[str, "ScanJob"] = {}
 _lock = threading.Lock()
 
-# ARCH-003: on startup, jobs left queued/running by a prior (now-dead) process
-# are orphaned - the in-memory executor cannot resume them. Mark them failed so
-# they are not shown as eternally running. Best-effort; never blocks startup.
-try:
-    store.recover_interrupted_jobs()
-except Exception:
-    pass
+# ARCH-003 note: recovery of jobs orphaned by a restart is triggered once from
+# the app startup (app_lifespan), NOT at import time - importing this module for
+# tooling/tests must not mutate persisted job state. The in-memory executor is
+# single-process; run the server with a single worker.
 
 
 @dataclass(slots=True)

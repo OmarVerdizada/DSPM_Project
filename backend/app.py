@@ -51,10 +51,12 @@ from backend.store import (
     get_user,
     list_tenants,
     list_users,
+    prune_job_records,
     read_audit_log,
     read_job,
     read_scan_history,
     read_scan_report,
+    recover_interrupted_jobs,
     record_login_failure,
     rotate_registration_code,
     save_scan_history,
@@ -140,6 +142,14 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI):
+    # ARCH-003: at server startup, mark jobs orphaned by a prior process as
+    # failed and prune old terminal records. Done here (not at import) so tools
+    # and tests that import the app do not mutate persisted job state.
+    try:
+        recover_interrupted_jobs()
+        prune_job_records(30 * 24 * 3600)
+    except Exception:
+        pass
     sweeper = asyncio.create_task(session_context_sweeper()) if COPILOT_ENABLED else None
     try:
         yield

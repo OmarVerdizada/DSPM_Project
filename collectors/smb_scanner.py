@@ -697,7 +697,7 @@ class SMBScanner:
         if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {{
           exit 1
         }}
-        $parts = $path.TrimStart([char]92) -split [regex]::Escape('\'), 3
+        $parts = $path.TrimStart([char]92) -split [regex]::Escape('\\'), 3
         if ($parts.Count -lt 2) {{ throw 'Invalid UNC path' }}
         $root = '\\\\' + $parts[0] + '\\' + $parts[1]
         $relative = if ($parts.Count -ge 3) {{ $parts[2] }} else {{ '' }}

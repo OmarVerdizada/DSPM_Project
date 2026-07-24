@@ -63,7 +63,7 @@ RULES = [
     DetectionRule(
         name="private_key",
         pattern=re.compile(
-            r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]{0,2000}?-----END (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
+            r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]{0,12000}?-----END (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----",
             re.IGNORECASE,
         ),
         risk="CRITICAL",
@@ -458,6 +458,11 @@ def _redact(value: str) -> str:
 # only by COUNT_CAP as a safety limit against pathological inputs.
 SAMPLE_CAP = 10
 COUNT_CAP = 10_000
+# Hard ceiling on candidates EXAMINED per rule. Validated rules (card/iban/fin)
+# skip invalid matches without incrementing `total`, so a pathological input
+# with millions of near-miss candidates would otherwise never hit COUNT_CAP and
+# iterate unbounded. This bounds the work regardless of validity.
+MATCH_SCAN_CAP = 200_000
 
 
 def classify_content(content: str) -> list[dict]:
@@ -468,15 +473,16 @@ def classify_content(content: str) -> list[dict]:
     for rule in RULES:
         samples: list[str] = []
         total = 0
+        examined = 0
         count_capped = False
         for match in rule.pattern.finditer(content):
+            examined += 1
             value = match.group(0)
-            if rule.validator is not None and not rule.validator(value):
-                continue
-            if len(samples) < SAMPLE_CAP:
-                samples.append(_redact(value) if rule.redact else value)
-            total += 1
-            if total >= COUNT_CAP:
+            if rule.validator is None or rule.validator(value):
+                if len(samples) < SAMPLE_CAP:
+                    samples.append(_redact(value) if rule.redact else value)
+                total += 1
+            if total >= COUNT_CAP or examined >= MATCH_SCAN_CAP:
                 count_capped = True
                 break
 

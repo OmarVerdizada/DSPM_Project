@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -877,6 +878,16 @@ def _redact_pci_preview(content: str) -> str:
 # (redact=False) are left intact so previews stay legible.
 _EVIDENCE_MASKING_RULES = tuple(rule for rule in RULES if rule.redact)
 
+# SC-1 hardening: an unbounded private-key block matcher. The generic
+# private_key detection rule caps the body at ~2000 chars, so RSA-3072/4096,
+# OpenSSH-format, or encrypted PEM keys (base64 bodies well over 2000 chars)
+# slip past the rule-based masking below and would leak into the preview. This
+# masks a key block of ANY length (or a truncated block up to end-of-slice).
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def sanitize_evidence_text(content: str) -> str:
     """Mask every detected sensitive class in free text before it is persisted
@@ -894,6 +905,9 @@ def sanitize_evidence_text(content: str) -> str:
     if os.getenv("DSPM_RAW_EVIDENCE_PREVIEW", "0") == "1":
         return content
     masked = _redact_pci_preview(content)
+    # Mask private-key blocks of ANY size first (the rule-based pass below caps
+    # the body length and would otherwise leak large keys).
+    masked = _PRIVATE_KEY_BLOCK_RE.sub("[redacted:private_key]", masked)
     for rule in _EVIDENCE_MASKING_RULES:
         masked = rule.pattern.sub(lambda match, name=rule.name: f"[redacted:{name}]", masked)
     return masked

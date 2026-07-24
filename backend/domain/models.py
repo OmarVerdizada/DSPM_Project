@@ -31,6 +31,15 @@ def finding_identity(tenant_id: str, asset_id: str, rule: str, locator: str) -> 
     return _sha(tenant_id, asset_id, rule, locator)
 
 
+def _finding_lifecycle_status(finding: dict) -> str:
+    """Real lifecycle status carried into the normalized Finding aggregate, so a
+    RESOLVED/SUPPRESSED finding is not silently stored as OPEN (F1)."""
+    raw = str(finding.get("status") or finding.get("review_status") or "").strip().upper()
+    if raw == "UNREVIEWED":
+        return "NEW"
+    return raw or "OPEN"
+
+
 # --- Immutable / append-only entities ---------------------------------------
 
 
@@ -251,7 +260,7 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
                     severity=str(finding.get("risk") or "LOW").upper(),
                     category=str(finding.get("category") or ""),
                     framework=str(finding.get("framework") or ""),
-                    status="OPEN",
+                    status=_finding_lifecycle_status(finding),
                     first_seen=timestamp,
                     last_seen=timestamp,
                 )

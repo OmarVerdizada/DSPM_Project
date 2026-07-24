@@ -592,6 +592,19 @@ def recover_interrupted_jobs() -> int:
             return cursor.rowcount
 
 
+def prune_job_records(max_age_seconds: int) -> int:
+    """Delete terminal (completed/failed/cancelled) job records older than
+    max_age_seconds, so scan_jobs does not grow without bound (ARCH-003/F8)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(0, int(max_age_seconds)))).isoformat()
+    with _lock:
+        with _connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM scan_jobs WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at < ?",
+                (cutoff,),
+            )
+            return cursor.rowcount
+
+
 def count_scan_history(tenant_id: str) -> int:
     """Total number of persisted scans for a tenant (DATA-003).
 
@@ -842,10 +855,16 @@ def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict |
             JOIN scan_reports AS sr
               ON sr.tenant_id = fi.tenant_id AND sr.scan_id = fi.scan_id
             WHERE fi.tenant_id = ? AND fi.finding_id = ?
+              AND fi.scan_id IN (
+                  SELECT scan_id FROM scan_reports
+                  WHERE tenant_id = ?
+                  ORDER BY created_at DESC, scan_id DESC
+                  LIMIT 1000
+              )
             ORDER BY sr.created_at DESC, sr.scan_id DESC, fi.seq ASC
             LIMIT 1
             """,
-            (tenant_id, finding_id),
+            (tenant_id, finding_id, tenant_id),
         ).fetchone()
     return json.loads(row["response_json"]) if row and row["response_json"] else None
 
@@ -1156,6 +1175,11 @@ def delete_tenant_with_data(tenant_id: str) -> dict:
             conn.execute("DELETE FROM audit_events WHERE tenant_id = ?", (tenant_id,))
             conn.execute("DELETE FROM alert_events WHERE tenant_id = ?", (tenant_id,))
             conn.execute("DELETE FROM secrets WHERE tenant_id = ?", (tenant_id,))
+            # Phase 1 normalized tables + durable jobs must be erased too -
+            # finding_index.response_json holds the full finding evidence, so
+            # leaving these behind is a data-erasure/GDPR completeness bug.
+            for table in ("scan_runs", "assets", "asset_versions", "findings", "finding_occurrences", "finding_index", "scan_jobs"):
+                conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (tenant_id,))
             conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))
     return usage
 
