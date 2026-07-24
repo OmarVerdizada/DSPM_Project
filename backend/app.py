@@ -52,6 +52,7 @@ from backend.store import (
     list_tenants,
     list_users,
     read_audit_log,
+    read_job,
     read_scan_history,
     read_scan_report,
     record_login_failure,
@@ -1237,9 +1238,14 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_role("anal
 def scan_job(job_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
     cleanup_jobs()
     job = get_job(job_id)
-    if job is None or job.tenant_id != principal.tenant_id:
-        raise HTTPException(status_code=404, detail="Scan job not found")
-    return job.to_dict()
+    if job is not None and job.tenant_id == principal.tenant_id:
+        return job.to_dict()
+    # ARCH-003: fall back to the durable record so a job that outlived its
+    # in-memory entry (retention cleanup, or a backend restart) is still visible.
+    record = read_job(principal.tenant_id, job_id)
+    if record is not None:
+        return record
+    raise HTTPException(status_code=404, detail="Scan job not found")
 
 
 @app.post("/api/scans/{job_id}/cancel")

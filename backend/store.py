@@ -248,6 +248,23 @@ def init_db() -> None:
                     ON finding_occurrences (finding_id);
                 CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan
                     ON finding_index (tenant_id, scan_id);
+
+                -- Durable job state (ARCH-003). The executor is still in-memory,
+                -- but the job RECORD survives a restart so status/history are not
+                -- lost and an orphaned "running" job can be recovered to failed.
+                CREATE TABLE IF NOT EXISTS scan_jobs (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    message TEXT,
+                    created_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    error TEXT,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_scan_jobs_tenant
+                    ON scan_jobs (tenant_id, created_at);
                 """
             )
             now = datetime.now(timezone.utc).isoformat()
@@ -485,6 +502,94 @@ def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
                     failed += 1
                     logger.warning("Backfill skipped scan %s: %s", key["scan_id"], exc)
     return {"scanned": scanned, "mirrored": mirrored, "failed": failed}
+
+
+def record_job(job: dict) -> None:
+    """Best-effort persistence of a scan job's lifecycle state (ARCH-003).
+
+    The large/transient result payload is deliberately NOT stored - the scan
+    report is persisted separately via save_scan_history. A DB error here must
+    never break the running job, so callers wrap this defensively.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scan_jobs
+                    (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(job.get("id")),
+                    str(job.get("tenant_id")),
+                    str(job.get("status") or "queued"),
+                    int(job.get("progress") or 0),
+                    job.get("message"),
+                    str(job.get("created_at")),
+                    job.get("finished_at"),
+                    job.get("error"),
+                    now,
+                ),
+            )
+
+
+def read_job(tenant_id: str, job_id: str) -> dict | None:
+    """Persisted job record, shaped like ScanJob.to_dict() (no result payload)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, tenant_id, status, progress, message, created_at, finished_at, error FROM scan_jobs WHERE id = ? AND tenant_id = ?",
+            (job_id, tenant_id),
+        ).fetchone()
+    if not row:
+        return None
+
+    def _ts(value: str | None) -> float:
+        if not value:
+            return 0.0
+        try:
+            return datetime.fromisoformat(value).timestamp()
+        except ValueError:
+            return 0.0
+
+    created, finished = row["created_at"], row["finished_at"]
+    end = _ts(finished) if finished else datetime.now(timezone.utc).timestamp()
+    return {
+        "id": row["id"],
+        "tenant_id": row["tenant_id"],
+        "status": row["status"],
+        "progress": row["progress"],
+        "message": row["message"],
+        "created_at": created,
+        "finished_at": finished,
+        "elapsed_seconds": round(max(0.0, end - _ts(created)), 3),
+        "result": None,
+        "error": row["error"],
+    }
+
+
+def recover_interrupted_jobs() -> int:
+    """Mark jobs left queued/running by a prior process as failed (ARCH-003).
+
+    Called at startup: the in-memory executor cannot survive a restart, so any
+    still-open job is orphaned. Returns the number recovered.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE scan_jobs
+                SET status = 'failed',
+                    message = 'Interrupted',
+                    error = 'Scan was interrupted by a backend restart. Re-run the scan.',
+                    finished_at = COALESCE(finished_at, ?),
+                    updated_at = ?
+                WHERE status IN ('queued', 'running')
+                """,
+                (now, now),
+            )
+            return cursor.rowcount
 
 
 def count_scan_history(tenant_id: str) -> int:

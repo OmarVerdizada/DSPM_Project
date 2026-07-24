@@ -13,6 +13,15 @@ from datetime import datetime, timezone
 from typing import Callable, Iterator
 
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
+from backend import store
+
+
+def _persist(job: "ScanJob") -> None:
+    """Best-effort durable-state write (ARCH-003); never breaks a running job."""
+    try:
+        store.record_job(job.to_dict())
+    except Exception:
+        pass
 
 
 MAX_WORKERS = int(os.getenv("DSPM_JOB_WORKERS", "4"))
@@ -34,6 +43,14 @@ SCAN_MAX_SECONDS = int(os.getenv("DSPM_SCAN_MAX_SECONDS", "1800"))
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 _jobs: dict[str, "ScanJob"] = {}
 _lock = threading.Lock()
+
+# ARCH-003: on startup, jobs left queued/running by a prior (now-dead) process
+# are orphaned - the in-memory executor cannot resume them. Mark them failed so
+# they are not shown as eternally running. Best-effort; never blocks startup.
+try:
+    store.recover_interrupted_jobs()
+except Exception:
+    pass
 
 
 @dataclass(slots=True)
@@ -116,6 +133,7 @@ def create_job(tenant_id: str, runner: Callable[[ScanJob], dict]) -> ScanJob:
             raise RuntimeError("Too many active scans for this tenant")
         job = ScanJob(id=str(uuid.uuid4()), tenant_id=tenant_id)
         _jobs[job.id] = job
+    _persist(job)
     executor.submit(_run_custom_job, job, runner)
     return job
 
@@ -133,6 +151,7 @@ def cancel_job(job_id: str) -> bool:
     job.status = "cancelled"
     job.message = "Cancellation requested"
     job.finished_at = datetime.now(timezone.utc).isoformat()
+    _persist(job)
     return True
 
 
@@ -177,6 +196,7 @@ def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
         job.status = "running"
         job.progress = max(job.progress, 5)
         job.message = job.message if job.message != "Queued" else "Running"
+        _persist(job)
         data = runner(job)
         if job.cancel_requested:
             return
@@ -193,6 +213,7 @@ def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
         print(f"[scan-job-error] job={job.id} error={exc}\n{traceback.format_exc()}", file=sys.stderr)
     finally:
         job.finished_at = datetime.now(timezone.utc).isoformat()
+        _persist(job)
 
 
 @contextlib.contextmanager
@@ -223,6 +244,7 @@ def collection_heartbeat(job: ScanJob | None, *, ceiling: int = COLLECT_HEARTBEA
                 )
                 job.message = "Failed"
                 job.finished_at = datetime.now(timezone.utc).isoformat()
+                _persist(job)
                 return
             if job.progress < ceiling:
                 job.progress = min(ceiling, job.progress + 1)
