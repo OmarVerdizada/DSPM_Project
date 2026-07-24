@@ -718,12 +718,53 @@ def _list_findings_normalized(tenant_id: str, status: str, limit: int) -> list[d
     return list(findings.values())
 
 
+def _read_from_normalized() -> bool:
+    return os.getenv("DSPM_READ_FROM_NORMALIZED", "0") == "1"
+
+
+def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict | None:
+    """Newest stored list_findings response for a finding, from the index.
+
+    Mirrors _find_finding_row's "newest scan containing this finding wins"
+    (created_at DESC, scan_id DESC). Returns None when the finding is not in the
+    index, so callers fall back to the authoritative blob path.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT fi.response_json AS response_json
+            FROM finding_index AS fi
+            JOIN scan_reports AS sr
+              ON sr.tenant_id = fi.tenant_id AND sr.scan_id = fi.scan_id
+            WHERE fi.tenant_id = ? AND fi.finding_id = ?
+            ORDER BY sr.created_at DESC, sr.scan_id DESC, fi.seq ASC
+            LIMIT 1
+            """,
+            (tenant_id, finding_id),
+        ).fetchone()
+    return json.loads(row["response_json"]) if row and row["response_json"] else None
+
+
 def get_finding(tenant_id: str, finding_id: str) -> dict | None:
+    if _read_from_normalized():
+        try:
+            response = _find_finding_response_normalized(tenant_id, finding_id)
+            if response is not None:
+                return response
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Normalized get_finding failed, falling back to blob: %s", exc)
     row = _find_finding_row(tenant_id, finding_id)
     return _finding_response(row) if row else None
 
 
 def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
+    if _read_from_normalized():
+        try:
+            response = _find_finding_response_normalized(tenant_id, finding_id)
+            if response is not None:
+                return response.get("status_history") or response.get("history") or []
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Normalized get_finding_history failed, falling back to blob: %s", exc)
     row = _find_finding_row(tenant_id, finding_id)
     if not row:
         return None
@@ -732,6 +773,13 @@ def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
 
 
 def get_finding_occurrences(tenant_id: str, finding_id: str) -> list[dict] | None:
+    if _read_from_normalized():
+        try:
+            response = _find_finding_response_normalized(tenant_id, finding_id)
+            if response is not None:
+                return response.get("occurrences") or []
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Normalized get_finding_occurrences failed, falling back to blob: %s", exc)
     row = _find_finding_row(tenant_id, finding_id)
     if not row:
         return None
