@@ -21,6 +21,11 @@ class DetectionRule:
     # stop "any 16 digits" being a card, "any 7-letter word" being a FIN, etc.
     # Rules without a validator behave exactly as before.
     validator: Callable[[str], bool] | None = None
+    # Which capture group carries the sensitive value. 0 (the whole match) by
+    # default; context-anchored rules set this to the group holding the value
+    # alone (e.g. the BIC after a "SWIFT:" label) so the validator, redaction,
+    # and unique-value fingerprint all operate on the value, not the label.
+    value_group: int = 0
 
 
 def _luhn_ok(value: str) -> bool:
@@ -57,6 +62,34 @@ def _fin_ok(value: str) -> bool:
     ordinary 7-letter words (PROJECT, COMPANY) and 7-digit runs are not FINs."""
     token = value.strip()
     return len(token) == 7 and any(ch.isalpha() for ch in token) and any(ch.isdigit() for ch in token)
+
+
+# ISO 3166-1 alpha-2 country codes. A real BIC embeds one of these at positions
+# 5-6; a lookalike word such as "CUSTOMER" (CUST-OM-ER) can collide, so this is
+# a filter, not a full guarantee - paired with the uppercase-token requirement
+# below it removes the common prose false positives ("swift customer service").
+_ISO_COUNTRY = frozenset(
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ "
+    "BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR "
+    "CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR "
+    "GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU "
+    "ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ "
+    "LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ "
+    "MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF "
+    "PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI "
+    "SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR "
+    "TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW".split()
+)
+
+
+def _bic_ok(value: str) -> bool:
+    """SWIFT/BIC: exactly 8 or 11 chars, uppercase, with a valid ISO country
+    code at positions 5-6. Receives the BIC alone (rule.value_group=1), never
+    the surrounding label."""
+    token = value.strip().upper()
+    if not re.fullmatch(r"[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?", token):
+        return False
+    return token[4:6] in _ISO_COUNTRY
 
 
 RULES = [
@@ -291,14 +324,19 @@ RULES = [
     ),
     DetectionRule(
         name="swift_bic",
-        # Context-anchored: a bare 8/11-char uppercase token (e.g. "CUSTOMER")
-        # is not a SWIFT/BIC. Require an explicit swift/bic label nearby.
+        # Context-anchored AND structurally validated. The label (swift/bic/code)
+        # is case-insensitive via inline (?i:...), but the BIC itself is matched
+        # case-SENSITIVELY as uppercase only - so lowercase prose after the word
+        # "swift" ("swift customer service") no longer captures a token. The
+        # captured group (value_group=1) is the BIC alone; _bic_ok then requires
+        # a valid ISO country code at positions 5-6.
         pattern=re.compile(
-            r"\b(?:swift|bic)\b(?:\s*code)?[\s:=#.\-]{0,4}([A-Za-z]{6}[A-Za-z0-9]{2}(?:[A-Za-z0-9]{3})?)\b",
-            re.IGNORECASE,
+            r"\b(?i:swift|bic)\b(?i:\s*code)?[\s:=#.\-]{0,4}([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b",
         ),
         risk="HIGH",
         description="SWIFT/BIC bank identifier detected in context",
+        validator=_bic_ok,
+        value_group=1,
     ),
     DetectionRule(
         name="iban",
@@ -477,7 +515,11 @@ def classify_content(content: str) -> list[dict]:
         count_capped = False
         for match in rule.pattern.finditer(content):
             examined += 1
-            value = match.group(0)
+            # value_group isolates the sensitive value from any anchoring label,
+            # so validation/redaction/unique-count all key off the value alone.
+            value = match.group(rule.value_group) if rule.value_group else match.group(0)
+            if value is None:
+                value = match.group(0)
             if rule.validator is None or rule.validator(value):
                 if len(samples) < SAMPLE_CAP:
                     samples.append(_redact(value) if rule.redact else value)

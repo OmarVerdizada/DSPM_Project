@@ -24,6 +24,35 @@ def _persist(job: "ScanJob") -> None:
         pass
 
 
+_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _finalize(job: "ScanJob", status: str, *, message: str, error: str | None = None,
+              progress: int | None = None, result: dict | None = None) -> bool:
+    """Atomically move a job to a terminal state, first-writer-wins (F5).
+
+    The heartbeat thread (deadline -> failed) and the worker thread (runner
+    result -> completed/failed) race for the final state. Without this guard a
+    late heartbeat could overwrite a completed job as failed, or a completing
+    worker could overwrite a deadline failure as success. Under ``_lock`` we
+    refuse to overwrite an already-terminal job, so exactly one outcome sticks.
+    Returns True if this call is the one that finalized the job.
+    """
+    with _lock:
+        if job.status in _TERMINAL_STATES:
+            return False
+        if result is not None:
+            job.result = result
+        if progress is not None:
+            job.progress = progress
+        job.status = status
+        job.message = message
+        job.error = error
+        job.finished_at = datetime.now(timezone.utc).isoformat()
+    _persist(job)
+    return True
+
+
 MAX_WORKERS = int(os.getenv("DSPM_JOB_WORKERS", "4"))
 MAX_JOBS_TOTAL = int(os.getenv("DSPM_MAX_JOBS_TOTAL", "200"))
 MAX_JOBS_PER_TENANT = int(os.getenv("DSPM_MAX_JOBS_PER_TENANT", "10"))
@@ -144,12 +173,11 @@ def cancel_job(job_id: str) -> bool:
     job = get_job(job_id)
     if not job or job.status not in {"queued", "running"}:
         return False
+    # Signal the runner to stop at its next checkpoint, then take the terminal
+    # slot atomically. If the worker/heartbeat finalized first (race), _finalize
+    # no-ops and we report that we did not cancel it.
     job.cancel_requested = True
-    job.status = "cancelled"
-    job.message = "Cancellation requested"
-    job.finished_at = datetime.now(timezone.utc).isoformat()
-    _persist(job)
-    return True
+    return _finalize(job, "cancelled", message="Cancellation requested")
 
 
 def _shrink_result(data: dict) -> dict:
@@ -189,28 +217,29 @@ def _safe_job_error(exc: Exception) -> str:
 def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
     if job.cancel_requested:
         return
-    try:
+    # Enter "running" only if a cancel/terminal has not already landed (a job can
+    # be cancelled while still queued). Guarded so it composes with _finalize's
+    # first-writer-wins rule below.
+    with _lock:
+        if job.status in _TERMINAL_STATES:
+            return
         job.status = "running"
         job.progress = max(job.progress, 5)
         job.message = job.message if job.message != "Queued" else "Running"
-        _persist(job)
+    _persist(job)
+    try:
         data = runner(job)
-        if job.cancel_requested:
-            return
-        job.result = _shrink_result(data)
-        job.status = "completed"
-        job.progress = 100
-        job.message = "Completed"
     except Exception as exc:
         if job.cancel_requested:
             return
-        job.status = "failed"
-        job.error = _safe_job_error(exc)
-        job.message = "Failed"
+        _finalize(job, "failed", message="Failed", error=_safe_job_error(exc))
         print(f"[scan-job-error] job={job.id} error={exc}\n{traceback.format_exc()}", file=sys.stderr)
-    finally:
-        job.finished_at = datetime.now(timezone.utc).isoformat()
-        _persist(job)
+        return
+    if job.cancel_requested:
+        return
+    # If the deadline heartbeat already failed this job, _finalize no-ops and the
+    # failure stands; otherwise this completes it.
+    _finalize(job, "completed", message="Completed", progress=100, result=_shrink_result(data))
 
 
 @contextlib.contextmanager
@@ -234,14 +263,15 @@ def collection_heartbeat(job: ScanJob | None, *, ceiling: int = COLLECT_HEARTBEA
                 return
             if SCAN_MAX_SECONDS > 0 and (time.monotonic() - started) > SCAN_MAX_SECONDS:
                 job.cancel_requested = True
-                job.status = "failed"
-                job.error = (
-                    "Scan exceeded the maximum allowed time and was stopped. The target may be "
-                    "unreachable or too large; narrow the scope and retry."
+                _finalize(
+                    job,
+                    "failed",
+                    message="Failed",
+                    error=(
+                        "Scan exceeded the maximum allowed time and was stopped. The target may be "
+                        "unreachable or too large; narrow the scope and retry."
+                    ),
                 )
-                job.message = "Failed"
-                job.finished_at = datetime.now(timezone.utc).isoformat()
-                _persist(job)
                 return
             if job.progress < ceiling:
                 job.progress = min(ceiling, job.progress + 1)

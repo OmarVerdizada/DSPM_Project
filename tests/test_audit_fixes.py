@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 import unittest
 from uuid import uuid4
 
-from backend import store
+from backend import jobs, store
 from backend.domain import normalize_scan_report
+from classification.regex_classifier import classify_content
 from discovery.discovery_engine import _safe_preview
+
+
+def _swift_hits(text: str) -> int:
+    return sum(f["count"] for f in classify_content(text) if f["type"] == "swift_bic")
+
+
+def _save_one_scan(tenant: str, scan_id: str) -> None:
+    store.save_scan_history(tenant, {
+        "scan_id": scan_id, "source": "local", "timestamp": "2026-07-23T00:00:00Z",
+        "summary": {"total_files": 1},
+        "files": [{"name": "f.txt", "path": "/f.txt", "size": 1, "findings": [
+            {"finding_id": "fa", "type": "password", "risk": "HIGH"},
+            {"finding_id": "fb", "type": "email", "risk": "LOW"}]}],
+    })
 
 
 class SanitizerLargeKeyTests(unittest.TestCase):
@@ -75,6 +92,97 @@ class JobPruneTests(unittest.TestCase):
         store.prune_job_records(86400)  # 1 day
         self.assertIsNone(store.read_job(tenant, old_id))       # old terminal -> pruned
         self.assertIsNotNone(store.read_job(tenant, run_id))    # running -> kept
+
+
+class SwiftBicPrecisionTests(unittest.TestCase):
+    def test_real_bic_detected_prose_and_bad_country_rejected(self) -> None:
+        # FINDING 3: context + uppercase-token + ISO-country validation.
+        self.assertEqual(_swift_hits("Beneficiary SWIFT: DEUTDEFF for the wire"), 1)
+        self.assertEqual(_swift_hits("BIC code DEUTDEFF500 on file"), 1)
+        # lowercase prose after the word "swift" is no longer a capture
+        self.assertEqual(_swift_hits("our swift customer service team"), 0)
+        # structurally sound but positions 5-6 ('ZZ') are not a real country
+        self.assertEqual(_swift_hits("SWIFT: ABCDZZ12"), 0)
+        # bare token with no swift/bic anchor
+        self.assertEqual(_swift_hits("CUSTOMER records attached"), 0)
+
+
+class NormalizedReadinessTests(unittest.TestCase):
+    def test_incomplete_or_stale_mirror_falls_back_to_blob(self) -> None:
+        # F2: the read-switch must serve the blob unless the mirror is provably
+        # complete (every scan mirrored) and current (index_version matches).
+        tenant = f"f2-{uuid4().hex[:8]}"
+        store.create_tenant(tenant, "F2")
+        _save_one_scan(tenant, f"{tenant}-s1")
+
+        def ids() -> list[str]:
+            return sorted(f.get("finding_id") for f in store.list_findings(tenant))
+
+        prev = os.environ.get("DSPM_READ_FROM_NORMALIZED")
+        os.environ["DSPM_READ_FROM_NORMALIZED"] = "1"
+        try:
+            self.assertTrue(store._normalized_ready(tenant))
+            self.assertEqual(ids(), ["fa", "fb"])
+
+            # (a) completeness: drop the scan_run the dual-write would have written
+            with store._connect() as conn:
+                conn.execute("DELETE FROM scan_runs WHERE tenant_id = ?", (tenant,))
+            self.assertFalse(store._normalized_ready(tenant))
+            self.assertEqual(ids(), ["fa", "fb"])  # blob fallback, nothing dropped
+
+            store.backfill_normalized_scans(tenant)
+            self.assertTrue(store._normalized_ready(tenant))
+
+            # (b) currency: stamp an older logic version
+            with store._connect() as conn:
+                conn.execute("UPDATE finding_index SET index_version = 'OLD' WHERE tenant_id = ?", (tenant,))
+            self.assertFalse(store._normalized_ready(tenant))
+            self.assertEqual(ids(), ["fa", "fb"])  # blob fallback again
+        finally:
+            if prev is None:
+                os.environ.pop("DSPM_READ_FROM_NORMALIZED", None)
+            else:
+                os.environ["DSPM_READ_FROM_NORMALIZED"] = prev
+
+
+class JobFinalizeRaceTests(unittest.TestCase):
+    def test_first_terminal_writer_wins(self) -> None:
+        # F5: heartbeat(deadline->failed) vs worker(->completed) must not clobber.
+        done = jobs.ScanJob(id=f"j-{uuid4().hex[:6]}", tenant_id="t")
+        self.assertTrue(jobs._finalize(done, "completed", message="Completed", progress=100, result={"ok": 1}))
+        self.assertFalse(jobs._finalize(done, "failed", message="Failed", error="late deadline"))
+        self.assertEqual(done.status, "completed")
+
+        failed = jobs.ScanJob(id=f"j-{uuid4().hex[:6]}", tenant_id="t")
+        self.assertTrue(jobs._finalize(failed, "failed", message="Failed", error="deadline"))
+        self.assertFalse(jobs._finalize(failed, "completed", message="Completed", progress=100, result={}))
+        self.assertEqual(failed.status, "failed")
+
+
+class RecordJobRetryTests(unittest.TestCase):
+    def test_transient_lock_is_retried(self) -> None:
+        # F6: a lock that outlives SQLite's busy-timeout must not silently drop
+        # the terminal write.
+        tenant = f"lock-{uuid4().hex[:8]}"
+        job_id = f"{tenant}-j"
+        real_connect = store._connect
+        calls = {"n": 0}
+
+        @contextlib.contextmanager
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise store.sqlite3.OperationalError("database is locked")
+            with real_connect() as conn:
+                yield conn
+
+        store._connect = flaky
+        try:
+            store.record_job({"id": job_id, "tenant_id": tenant, "status": "completed", "created_at": "2020-01-01T00:00:00Z"})
+        finally:
+            store._connect = real_connect
+        self.assertGreaterEqual(calls["n"], 2)  # retried past the injected lock
+        self.assertIsNotNone(store.read_job(tenant, job_id))
 
 
 if __name__ == "__main__":

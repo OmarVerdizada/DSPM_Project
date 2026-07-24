@@ -10,7 +10,6 @@ import socket
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
@@ -254,7 +253,6 @@ def _local_activation_script(require_current_admin: bool) -> str:
 
 def _activate_local_winrm_with_task(username: str, password: str, domain: str) -> dict:
     task_name = f"DSPM_Activate_WinRM_{uuid4().hex}"
-    run_at = (datetime.now() + timedelta(minutes=1)).strftime("%H:%M")
     private_tmp = Path(tempfile.gettempdir()) / "dspm-winrm"
     private_tmp.mkdir(parents=True, exist_ok=True)
     try:
@@ -267,35 +265,11 @@ def _activate_local_winrm_with_task(username: str, password: str, domain: str) -
         script_path.chmod(0o600)
     except OSError:
         pass
-    task_command = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
+    task_command = f'-NoProfile -ExecutionPolicy Bypass -File "{script_path}"'
     run_as = _format_windows_username(username, domain)
 
     try:
-        create = subprocess.run(
-            [
-                "schtasks.exe",
-                "/Create",
-                "/TN",
-                task_name,
-                "/SC",
-                "ONCE",
-                "/ST",
-                run_at,
-                "/RL",
-                "HIGHEST",
-                "/RU",
-                run_as,
-                "/RP",
-                password,
-                "/TR",
-                task_command,
-                "/F",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        create = _create_activation_task(task_name, run_as, password, task_command)
         if create.returncode != 0:
             return {
                 "activated": False,
@@ -325,6 +299,48 @@ def _activate_local_winrm_with_task(username: str, password: str, domain: str) -
             script_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# FINDING 5: never place the admin password on a process command line. The old
+# `schtasks /Create ... /RP <password>` exposed it to command-line auditing
+# (Sysmon EventID 1, Security 4688 with cmdline capture) and to any
+# Win32_Process/CommandLine reader for the life of the schtasks.exe process.
+# Register-ScheduledTask receives the password - and every other dynamic value,
+# so a crafted username/domain cannot inject PowerShell - through the child's
+# *environment block* instead, which command-line auditing does not capture. The
+# later /Run and /Delete carry no secret and stay on schtasks.exe.
+_REGISTER_TASK_PS = (
+    "$ErrorActionPreference='Stop';"
+    "$pw=$env:DSPM_TASK_PW;$tn=$env:DSPM_TASK_TN;$ru=$env:DSPM_TASK_RU;$arg=$env:DSPM_TASK_ARG;"
+    "if([string]::IsNullOrEmpty($pw)){throw 'missing credential'};"
+    "$action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arg;"
+    "$trigger=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1));"
+    "$settings=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries;"
+    "Register-ScheduledTask -TaskName $tn -Action $action -Trigger $trigger "
+    "-Settings $settings -User $ru -Password $pw -RunLevel Highest -Force | Out-Null"
+)
+
+
+def _create_activation_task(task_name: str, run_as: str, password: str, task_arg: str) -> subprocess.CompletedProcess:
+    """Register the elevated activation task without the password ever touching a
+    command line (see FINDING 5 note above). Secrets and injectable values are
+    handed to the child powershell.exe via its environment block, not argv."""
+    encoded = base64.b64encode(_REGISTER_TASK_PS.encode("utf-16le")).decode("ascii")
+    child_env = {
+        **os.environ,
+        "DSPM_TASK_PW": password,
+        "DSPM_TASK_TN": task_name,
+        "DSPM_TASK_RU": run_as,
+        "DSPM_TASK_ARG": task_arg,
+    }
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+        env=child_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
 
 
 def _run_encoded_powershell(script: str) -> subprocess.CompletedProcess:

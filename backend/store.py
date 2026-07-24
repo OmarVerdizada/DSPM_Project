@@ -5,6 +5,7 @@ import os
 import secrets
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -235,7 +236,12 @@ def init_db() -> None:
                     seq INTEGER NOT NULL,
                     finding_id TEXT NOT NULL,
                     status TEXT,
-                    response_json TEXT NOT NULL
+                    response_json TEXT NOT NULL,
+                    -- F2: stamps the logic version that produced response_json. A
+                    -- read only trusts rows whose stamp == FINDING_INDEX_VERSION,
+                    -- so a change to _finding_response/_finding_status invalidates
+                    -- stale rows (they fall back to the blob until re-backfilled).
+                    index_version TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_scan_runs_tenant
@@ -271,6 +277,16 @@ def init_db() -> None:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(tenants)").fetchall()}
             if "registration_code" not in columns:
                 conn.execute("ALTER TABLE tenants ADD COLUMN registration_code TEXT NOT NULL DEFAULT ''")
+            # F2: bring pre-version-stamp finding_index rows up to the current
+            # schema. They land with index_version='' (i.e. "unknown logic"), so
+            # the read-switch treats them as stale and serves the blob until a
+            # backfill re-stamps them - the safe default for a migration mirror.
+            fi_columns = {row["name"] for row in conn.execute("PRAGMA table_info(finding_index)").fetchall()}
+            if "index_version" not in fi_columns:
+                conn.execute("ALTER TABLE finding_index ADD COLUMN index_version TEXT NOT NULL DEFAULT ''")
+            # Created here (not in the schema script above) because the column it
+            # covers may have just been added by the ALTER on a pre-existing DB.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_finding_index_version ON finding_index (tenant_id, index_version)")
             conn.execute(
                 """
                 INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -353,6 +369,13 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
             )
             _dual_write_normalized(conn, tenant_id, report)
     return scan_id
+
+
+# F2: logic version of the materialized finding_index. Bump this whenever
+# _finding_response or _finding_status changes shape, so already-stored rows are
+# recognized as stale and the read-switch falls back to the blob until a
+# re-backfill (scripts/backfill_normalized.py) re-stamps them.
+FINDING_INDEX_VERSION = "fi-v1"
 
 
 def _dual_write_normalized(conn, tenant_id: str, report: dict) -> None:
@@ -447,8 +470,8 @@ def _write_finding_index(conn, tenant_id: str, report: dict) -> None:
         if not finding_id:
             continue
         conn.execute(
-            "INSERT INTO finding_index (tenant_id, scan_id, seq, finding_id, status, response_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (tenant_id, scan_id, seq, finding_id, _finding_status(finding), json.dumps(_finding_response(row), ensure_ascii=False)),
+            "INSERT INTO finding_index (tenant_id, scan_id, seq, finding_id, status, response_json, index_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (tenant_id, scan_id, seq, finding_id, _finding_status(finding), json.dumps(_finding_response(row), ensure_ascii=False), FINDING_INDEX_VERSION),
         )
         seq += 1
 
@@ -512,26 +535,39 @@ def record_job(job: dict) -> None:
     never break the running job, so callers wrap this defensively.
     """
     now = datetime.now(timezone.utc).isoformat()
-    with _lock:
-        with _connect() as conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO scan_jobs
-                    (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(job.get("id")),
-                    str(job.get("tenant_id")),
-                    str(job.get("status") or "queued"),
-                    int(job.get("progress") or 0),
-                    job.get("message"),
-                    str(job.get("created_at")),
-                    job.get("finished_at"),
-                    job.get("error"),
-                    now,
-                ),
-            )
+    params = (
+        str(job.get("id")),
+        str(job.get("tenant_id")),
+        str(job.get("status") or "queued"),
+        int(job.get("progress") or 0),
+        job.get("message"),
+        str(job.get("created_at")),
+        job.get("finished_at"),
+        job.get("error"),
+        now,
+    )
+    # F6: the terminal state write is a job's last chance to record its outcome;
+    # if it is lost the row is stuck "running" until a restart-recovery sweep.
+    # SQLite's busy-timeout already absorbs brief contention, but add a small
+    # bounded retry so a lock that outlives it still lands the row instead of
+    # silently dropping the transition. Non-lock errors propagate immediately.
+    for attempt in range(3):
+        try:
+            with _lock:
+                with _connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO scan_jobs
+                            (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        params,
+                    )
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == 2:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def read_job(tenant_id: str, job_id: str) -> dict | None:
@@ -764,10 +800,11 @@ FINDING_LIFECYCLE_STATUSES = {
 
 
 def list_findings(tenant_id: str, status: str = "", limit: int = 200) -> list[dict]:
-    # Read-switch (DATA-001): when enabled, serve findings from the materialized
-    # finding_index instead of loading every report blob. Default off; any error
-    # falls back to the authoritative blob path below.
-    if os.getenv("DSPM_READ_FROM_NORMALIZED", "0") == "1":
+    # Read-switch (DATA-001): when enabled AND the mirror is provably complete
+    # and current for this tenant (F2), serve findings from the materialized
+    # finding_index instead of loading every report blob. Default off; a stale or
+    # incomplete mirror - or any error - falls back to the authoritative blob.
+    if _read_from_normalized(tenant_id):
         try:
             return _list_findings_normalized(tenant_id, status, limit)
         except Exception as exc:  # pragma: no cover - defensive fallback
@@ -836,8 +873,40 @@ def _list_findings_normalized(tenant_id: str, status: str, limit: int) -> list[d
     return list(findings.values())
 
 
-def _read_from_normalized() -> bool:
-    return os.getenv("DSPM_READ_FROM_NORMALIZED", "0") == "1"
+def _normalized_ready(tenant_id: str) -> bool:
+    """True only when the normalized mirror can be trusted to answer for this
+    tenant (F2). Guards the two ways the read-switch could silently return wrong
+    data, so on either the caller serves the authoritative blob instead:
+
+      * Completeness - a best-effort dual-write can roll back, leaving the blob
+        (scan_reports) with a scan the mirror never received. scan_runs is
+        written in the SAME savepoint as finding_index, so a scan_report with no
+        matching scan_run proves the mirror is missing that scan's findings.
+      * Currency - a change to the response/status logic makes already-stored
+        finding_index rows stale; any row not stamped with the current
+        FINDING_INDEX_VERSION is from older logic.
+
+    Both are indexed existence probes that short-circuit on the first offender.
+    """
+    with _connect() as conn:
+        incomplete = conn.execute(
+            "SELECT 1 FROM scan_reports sr "
+            "WHERE sr.tenant_id = ? AND NOT EXISTS ("
+            "  SELECT 1 FROM scan_runs r WHERE r.tenant_id = sr.tenant_id AND r.id = sr.scan_id) "
+            "LIMIT 1",
+            (tenant_id,),
+        ).fetchone()
+        if incomplete:
+            return False
+        stale = conn.execute(
+            "SELECT 1 FROM finding_index WHERE tenant_id = ? AND index_version <> ? LIMIT 1",
+            (tenant_id, FINDING_INDEX_VERSION),
+        ).fetchone()
+    return stale is None
+
+
+def _read_from_normalized(tenant_id: str) -> bool:
+    return os.getenv("DSPM_READ_FROM_NORMALIZED", "0") == "1" and _normalized_ready(tenant_id)
 
 
 def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict | None:
@@ -870,7 +939,7 @@ def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict |
 
 
 def get_finding(tenant_id: str, finding_id: str) -> dict | None:
-    if _read_from_normalized():
+    if _read_from_normalized(tenant_id):
         try:
             response = _find_finding_response_normalized(tenant_id, finding_id)
             if response is not None:
@@ -882,7 +951,7 @@ def get_finding(tenant_id: str, finding_id: str) -> dict | None:
 
 
 def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
-    if _read_from_normalized():
+    if _read_from_normalized(tenant_id):
         try:
             response = _find_finding_response_normalized(tenant_id, finding_id)
             if response is not None:
@@ -897,7 +966,7 @@ def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
 
 
 def get_finding_occurrences(tenant_id: str, finding_id: str) -> list[dict] | None:
-    if _read_from_normalized():
+    if _read_from_normalized(tenant_id):
         try:
             response = _find_finding_response_normalized(tenant_id, finding_id)
             if response is not None:
