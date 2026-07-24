@@ -35,10 +35,13 @@ This slice implements all entities and a `normalize_scan_report(tenant_id, repor
 2. ✅ **Normalized SQLite tables** created idempotently in `init_db()` alongside `scan_reports` — `fb861e8`.
 3. ✅ **Dual-write:** `save_scan_history` mirrors normalized rows via the mapper in the same transaction, savepoint-isolated/best-effort so it never breaks the blob save. Reads still use the blob; zero behavioural change — `fb861e8`.
 4. ✅ **Backfill:** `store.backfill_normalized_scans()` + `scripts/backfill_normalized.py` map existing `report_json` rows through the mapper (idempotent, per-scan isolated) — `9585043`.
-5. ✅ **Read-switch:** `list_findings` now serves from a materialized `finding_index` when `DSPM_READ_FROM_NORMALIZED=1` (default off, blob fallback on error), avoiding per-scan blob loads. Parity-tested byte-for-byte against the blob path — `90ac42e`. DATA-002's core (immutable runs + stable created_at) already landed in `4e435f1`.
-6. ⬜ **Retire the blob** (or keep it as an audit artifact behind a hash). ← last step; needs the flag defaulted on + a soak period first.
+5. ✅ **Read-switch (COMPLETE):** `list_findings` (`90ac42e`) plus `get_finding`, `get_finding_history` and `get_finding_occurrences` (`c95c4da`) all serve from the materialized `finding_index` when `DSPM_READ_FROM_NORMALIZED=1` (default off, blob fallback on index-miss or error), avoiding per-scan blob loads. Every finding read is parity-tested byte-for-byte against the blob path. DATA-002's core (immutable runs + stable created_at) landed in `4e435f1`.
+6. ⬜ **Retire the blob** (or keep it as an audit artifact behind a hash). ← last step; needs the flag defaulted on + a real-deployment soak first, so intentionally NOT done here.
 
 Each step is independently shippable and reversible. No step requires the big-bang control/data-plane split — that is a separate Phase 1 workstream.
+
+## Persistence track status: FUNCTIONALLY COMPLETE
+Steps 1–5 done: the normalized model is dual-written, backfillable, and every finding read can run off it behind a default-off, fully-reversible flag with a blob fallback. Only step 6 (retire the blob) remains, and it is deliberately gated on flipping the flag on in a real deployment and soaking first. The **other Phase 1 workstreams are separate and not started**: ARCH-003 durable jobs/queue, ARCH-004 control/scan-plane split, ARCH-005 connector SDK, SCAN-001/002 streaming pipeline + real cancellation, ARCH-001 app.py router split, ARCH-002 copilot isolation, SEC-003/006/009, QUAL-001, OpenTelemetry.
 
 ## 4. Recommended workstream order (Phase 1)
 
