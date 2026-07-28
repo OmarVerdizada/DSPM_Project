@@ -239,7 +239,7 @@ def _local_activation_script(require_current_admin: bool) -> str:
     $portOpen = $false
     try {
       $client = New-Object Net.Sockets.TcpClient
-      $async = $client.BeginConnect("127.0.0.1", 5985, $null, $null)
+      $async = $client.BeginConnect("127.0.0.1", __WINRM_PORT__, $null, $null)
       $portOpen = $async.AsyncWaitHandle.WaitOne(3000, $false)
       if ($portOpen) { $client.EndConnect($async) }
       $client.Close()
@@ -252,9 +252,9 @@ def _local_activation_script(require_current_admin: bool) -> str:
       service_status = if ($service) { $service.Status.ToString() } else { "Missing" }
       port_5985_open = [bool]$portOpen
       requires_admin = $false
-      message = if ($service -and $service.Status -eq "Running" -and $portOpen) { "Local WinRM is running and port 5985 is reachable." } else { "Local activation command ran, but WinRM is not fully reachable. Run the backend as Administrator and check local firewall policy." }
+      message = if ($service -and $service.Status -eq "Running" -and $portOpen) { "Local WinRM is running and port __WINRM_PORT__ is reachable." } else { "Local activation command ran, but WinRM is not fully reachable. Run the backend as Administrator and check local firewall policy." }
     } | ConvertTo-Json -Compress
-    """.replace("__ADMIN_GUARD__", admin_guard).replace("__WINRM_CONFIG__", _winrm_hardening_config_ps(""))
+    """.replace("__ADMIN_GUARD__", admin_guard).replace("__WINRM_CONFIG__", _winrm_hardening_config_ps("")).replace("__WINRM_PORT__", str(_winrm_active_port()))
 
 
 def _activate_local_winrm_with_task(username: str, password: str, domain: str) -> dict:
@@ -388,7 +388,36 @@ def _collector_source_ip(target_host: str) -> str:
         return ""
 
 
-def _winrm_hardening_config_ps(collector_ip: str = "") -> str:
+def _winrm_activation_https() -> bool:
+    """Whether activation provisions an HTTPS(5986) listener instead of HTTP 5985.
+    Default OFF: the HTTPS switch requires a trusted cert + matching client cert
+    handling and must be validated on a live target (0.3 runbook) before it
+    replaces the working, already-hardened HTTP path."""
+    return os.getenv("DSPM_WINRM_ACTIVATION_HTTPS", "0") == "1"
+
+
+def _winrm_active_port() -> int:
+    return 5986 if _winrm_activation_https() else 5985
+
+
+def _winrm_listener_ps(use_https: bool) -> str:
+    if use_https:
+        # Provision an HTTPS(5986) listener and remove the HTTP one so the endpoint
+        # is HTTPS-only. Reuses a matching machine cert if present, else creates a
+        # self-signed one (a lab default - production should provision a CA-issued
+        # cert and have the client trust it; see the 0.3 runbook).
+        return (
+            '\n    $dnsName = $env:COMPUTERNAME'
+            '\n    $cert = Get-ChildItem Cert:\\LocalMachine\\My -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq "CN=$dnsName" -and $_.NotAfter -gt (Get-Date) } | Select-Object -First 1'
+            '\n    if (-not $cert) { $cert = New-SelfSignedCertificate -DnsName $dnsName -CertStoreLocation Cert:\\LocalMachine\\My -NotAfter (Get-Date).AddYears(2) -ErrorAction SilentlyContinue }'
+            '\n    Get-ChildItem WSMan:\\localhost\\Listener -ErrorAction SilentlyContinue | Where-Object { $_.Keys -contains "Transport=HTTPS" } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue'
+            '\n    if ($cert) { New-Item -Path WSMan:\\localhost\\Listener -Address * -Transport HTTPS -CertificateThumbPrint $cert.Thumbprint -Force -ErrorAction SilentlyContinue | Out-Null }'
+            '\n    winrm delete "winrm/config/Listener?Address=*+Transport=HTTP" 2>$null'
+        )
+    return '\n    winrm create "winrm/config/Listener?Address=*+Transport=HTTP" \'@{Port="5985"}\' 2>$null'
+
+
+def _winrm_hardening_config_ps(collector_ip: str = "", use_https: bool | None = None) -> str:
     """Shared WinRM enable + harden PowerShell (M10/M11, roadmap 0.3).
 
     Security posture, deliberately different from the pre-0.3 script:
@@ -398,21 +427,24 @@ def _winrm_hardening_config_ps(collector_ip: str = "") -> str:
         / ``profile=any``) and, when the collector IP is known, to that source
         address; prior broad ``DSPM WinRM*`` rules are removed first.
       * WinRM service IPv4 source filter is pinned to the collector when known.
-    The listener stays HTTP 5985 here; switching it to an HTTPS(5986) listener
-    with a trusted certificate (and matching client cert handling) is the
-    live-validation-gated step documented in the 0.3 runbook, not done blind."""
+      * Listener is HTTP 5985 by default; HTTPS(5986) with a cert when use_https
+        (DSPM_WINRM_ACTIVATION_HTTPS=1) - the live-validation-gated transport."""
+    if use_https is None:
+        use_https = _winrm_activation_https()
     ipv4_filter = collector_ip if collector_ip else "*"
     remote_addr = f" -RemoteAddress {collector_ip}" if collector_ip else ""
+    port = 5986 if use_https else 5985
+    rule_name = "DSPM WinRM HTTPS" if use_https else "DSPM WinRM HTTP"
     return (
         '\n    Set-Service -Name WinRM -StartupType Automatic'
         '\n    Start-Service -Name WinRM'
         '\n    Enable-PSRemoting -Force -SkipNetworkProfileCheck'
         '\n    winrm quickconfig -quiet'
         '\n    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Ole" -Name EnableDCOM -Type String -Value "Y" -ErrorAction SilentlyContinue'
-        '\n    winrm create "winrm/config/Listener?Address=*+Transport=HTTP" \'@{Port="5985"}\' 2>$null'
-        f'\n    winrm set "winrm/config/service" \'@{{IPv4Filter="{ipv4_filter}"}}\''
-        '\n    Remove-NetFirewallRule -DisplayName "DSPM WinRM*" -ErrorAction SilentlyContinue'
-        f'\n    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Domain,Private{remote_addr} -ErrorAction SilentlyContinue | Out-Null'
+        + _winrm_listener_ps(use_https)
+        + f'\n    winrm set "winrm/config/service" \'@{{IPv4Filter="{ipv4_filter}"}}\''
+        + '\n    Remove-NetFirewallRule -DisplayName "DSPM WinRM*" -ErrorAction SilentlyContinue'
+        + f'\n    New-NetFirewallRule -DisplayName "{rule_name}" -Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow -Profile Domain,Private{remote_addr} -ErrorAction SilentlyContinue | Out-Null'
     )
 
 
@@ -430,6 +462,39 @@ def _deactivation_script() -> str:
         '\n    winrm set "winrm/config/service" \'@{IPv4Filter=""}\''
         '\n    [PSCustomObject]@{ deactivated = $true; host = $env:COMPUTERNAME; message = "DSPM WinRM firewall rule and HTTP listener removed; WinRM service source filter reset." } | ConvertTo-Json -Compress'
     )
+
+
+def _remote_deactivation_script(payload: dict) -> str:
+    """Run the deactivation body on a remote target via WMI, mirroring activation
+    (roadmap 0.3, Part C). The admin password is passed via the child env block
+    (H1) - never in the payload or on a command line. Not live-validated here."""
+    payload = {key: value for key, value in payload.items() if key != "password"}
+    encoded_payload = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    encoded_inner = base64.b64encode(_deactivation_script().encode("utf-16le")).decode("ascii")
+    remote_command = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_inner}"
+    return f"""
+    $ProgressPreference = "SilentlyContinue"
+    $ErrorActionPreference = "Stop"
+    $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_payload}"))
+    $payload = ConvertFrom-Json $payloadJson
+    $securePassword = ConvertTo-SecureString ([string]$env:DSPM_ACTIVATION_PW) -AsPlainText -Force
+    $rawUsername = ([string]$payload.username).Trim()
+    $domain = ([string]$payload.domain).Trim()
+    $credentialNames = New-Object System.Collections.Generic.List[string]
+    if ($rawUsername -match "\\\\" -or $rawUsername -match "@") {{ $credentialNames.Add($rawUsername) }}
+    elseif ($domain -and $domain -ne "WORKGROUP") {{ $credentialNames.Add("$domain\\$rawUsername"); $credentialNames.Add($rawUsername); $credentialNames.Add(".\\$rawUsername") }}
+    else {{ $credentialNames.Add($rawUsername); $credentialNames.Add(".\\$rawUsername") }}
+    $done = $false
+    $errors = New-Object System.Collections.Generic.List[string]
+    foreach ($candidateName in @($credentialNames | Select-Object -Unique)) {{
+      try {{
+        $cred = New-Object System.Management.Automation.PSCredential($candidateName, $securePassword)
+        Invoke-WmiMethod -Class Win32_Process -Name Create -ComputerName ([string]$payload.host) -Credential $cred -ArgumentList @("{remote_command}") -ErrorAction Stop | Out-Null
+        $done = $true; break
+      }} catch {{ $errors.Add("${{candidateName}}: $($_.Exception.Message)") | Out-Null }}
+    }}
+    [PSCustomObject]@{{ deactivated = $done; host = [string]$payload.host; message = if ($done) {{ "Deactivation command sent to target." }} else {{ "Target rejected the admin credential for deactivation: $($errors -join ' | ')" }} }} | ConvertTo-Json -Compress
+    """
 
 
 def _delete_task(task_name: str) -> None:
@@ -535,6 +600,35 @@ class WinRMEndpointScanner:
             activation["activated"] = True
             activation["message"] = "WinRM activated and connection verified."
         return activation
+
+    def deactivate_winrm(self) -> dict:
+        """Revert a remote target's WinRM changes activation made (roadmap 0.3,
+        Part C): remove the DSPM firewall rule and HTTP listener and reset the
+        service source filter, run on the target via the same WMI mechanism as
+        activation. The admin password travels via the child env block (H1).
+        NOT live-validated in this environment - see the 0.3 runbook."""
+        if platform.system().lower() != "windows":
+            raise RuntimeError("WinRM deactivation requires the DSPM backend to run on Windows with WMI tools available.")
+        if not self.config.host.strip():
+            raise ValueError("Endpoint host is required.")
+        if not self.config.username.strip() or not self.config.password:
+            raise ValueError("Admin username and password are required to deactivate WinRM.")
+        script = _remote_deactivation_script(
+            {
+                "host": self._connection_host(),
+                "username": self.config.username.strip(),
+                "domain": self.config.domain.strip() or "WORKGROUP",
+            }
+        )
+        result = _run_encoded_powershell(script, env={"DSPM_ACTIVATION_PW": self.config.password})
+        parsed = _read_json(result.stdout)
+        if isinstance(parsed, dict):
+            return parsed
+        return {
+            "deactivated": result.returncode == 0,
+            "host": self.config.host,
+            "message": _clean_error(result.stdout or result.stderr) or "Deactivation command ran.",
+        }
 
     def test_connection(self) -> dict:
         try:
@@ -692,9 +786,36 @@ class WinRMEndpointScanner:
         port = self.config.port or (5986 if self.config.use_ssl else 5985)
         return f"http{'s' if self.config.use_ssl else ''}://{connection_host}:{port}/wsman"
 
+    def _winrm_transports(self) -> list[str]:
+        # M11 (0.3): prefer Kerberos (mutual auth, not NTLM-relayable) for domain
+        # targets when enabled, always with an NTLM fallback. Kerberos needs
+        # requests-kerberos + a usable ticket; if unavailable the attempt fails
+        # and the loop falls through to NTLM. Read-only scan scripts are
+        # idempotent, so a re-run after a failed transport is safe.
+        if os.getenv("DSPM_WINRM_KERBEROS", "0") == "1":
+            return ["kerberos", "ntlm"]
+        return ["ntlm"]
+
+    def _winrm_cert_validation(self) -> str:
+        # Default 'validate' - no cert-validation bypass. 'ignore' is an explicit,
+        # documented opt-in (DSPM_WINRM_SSL_SKIP_CA_CHECK=1) for the self-signed
+        # cert an HTTPS activation creates on a trusted internal network: it still
+        # encrypts the channel but drops MITM protection, so prefer pinning/CA
+        # trust in production (see the 0.3 runbook).
+        if self.config.use_ssl and os.getenv("DSPM_WINRM_SSL_SKIP_CA_CHECK", "0") == "1":
+            return "ignore"
+        return "validate"
+
+    def _winrm_session(self, connection_host: str, transport: str):
+        import winrm
+        kwargs = {"auth": (self._username(), self.config.password), "transport": transport}
+        if self.config.use_ssl:
+            kwargs["server_cert_validation"] = self._winrm_cert_validation()
+        return winrm.Session(self._endpoint_url(connection_host), **kwargs)
+
     def _run_ps(self, script: str):
         try:
-            import winrm
+            import winrm  # noqa: F401 - dependency presence check
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
@@ -702,21 +823,22 @@ class WinRMEndpointScanner:
             raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
         last_error: Exception | None = None
         for connection_host in self._connection_hosts():
-            try:
-                session = winrm.Session(self._endpoint_url(connection_host), auth=(self._username(), self.config.password), transport="ntlm")
-                result = session.run_ps(script)
-                self.last_connection_host = connection_host
-                return result
-            except Exception as exc:
-                last_error = exc
-                continue
+            for transport in self._winrm_transports():
+                try:
+                    session = self._winrm_session(connection_host, transport)
+                    result = session.run_ps(script)
+                    self.last_connection_host = connection_host
+                    return result
+                except Exception as exc:
+                    last_error = exc
+                    continue
         if last_error:
             raise last_error
         raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
 
     def _run_ps_file(self, script: str):
         try:
-            import winrm
+            import winrm  # noqa: F401 - dependency presence check
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
@@ -724,14 +846,15 @@ class WinRMEndpointScanner:
             raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
         last_error: Exception | None = None
         for connection_host in self._connection_hosts():
-            try:
-                session = winrm.Session(self._endpoint_url(connection_host), auth=(self._username(), self.config.password), transport="ntlm")
-                result = self._run_ps_file_with_session(session, script)
-                self.last_connection_host = connection_host
-                return result
-            except Exception as exc:
-                last_error = exc
-                continue
+            for transport in self._winrm_transports():
+                try:
+                    session = self._winrm_session(connection_host, transport)
+                    result = self._run_ps_file_with_session(session, script)
+                    self.last_connection_host = connection_host
+                    return result
+                except Exception as exc:
+                    last_error = exc
+                    continue
         if last_error:
             raise last_error
         raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
@@ -1624,9 +1747,11 @@ def _activation_script(payload: dict, collector_ip: str = "") -> str:
     )
     encoded_remote = base64.b64encode(remote_script.encode("utf-16le")).decode("ascii")
     remote_command = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_remote}"
+    active_port = _winrm_active_port()
     return f"""
     $ProgressPreference = "SilentlyContinue"
     $ErrorActionPreference = "Stop"
+    $activePort = {active_port}
     $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_payload}"))
     $payload = ConvertFrom-Json $payloadJson
     $securePassword = ConvertTo-SecureString ([string]$env:DSPM_ACTIVATION_PW) -AsPlainText -Force
@@ -1703,7 +1828,7 @@ def _activation_script(payload: dict, collector_ip: str = "") -> str:
       Start-Sleep -Seconds 3
       try {{
         $client = New-Object Net.Sockets.TcpClient
-        $async = $client.BeginConnect(([string]$payload.host), 5985, $null, $null)
+        $async = $client.BeginConnect(([string]$payload.host), $activePort, $null, $null)
         $portOpen = $async.AsyncWaitHandle.WaitOne(5000, $false)
         if ($portOpen) {{ $client.EndConnect($async) }}
         $client.Close()
@@ -1712,13 +1837,13 @@ def _activation_script(payload: dict, collector_ip: str = "") -> str:
       }}
     }}
     $message = if ($portOpen) {{
-      "Activation command sent and WinRM port 5985 is reachable."
+      "Activation command sent and WinRM port $activePort is reachable."
     }} elseif ($serviceState -eq "Running") {{
-      "WinRM service is running on the target, but port 5985 is not reachable from the DSPM server. Check target firewall/GPO, network ACLs, or endpoint security blocking inbound TCP 5985."
+      "WinRM service is running on the target, but port $activePort is not reachable from the DSPM server. Check target firewall/GPO, network ACLs, or endpoint security blocking inbound TCP $activePort."
     }} elseif ($serviceQueryError) {{
-      "Activation command was sent, but WinRM port 5985 is not reachable. WMI service check also failed: $serviceQueryError"
+      "Activation command was sent, but WinRM port $activePort is not reachable. WMI service check also failed: $serviceQueryError"
     }} else {{
-      "Activation command was sent, but WinRM service state is '$serviceState' and port 5985 is not reachable. Verify the credential has local administrator rights and target policy allows remote service changes."
+      "Activation command was sent, but WinRM service state is '$serviceState' and port $activePort is not reachable. Verify the credential has local administrator rights and target policy allows remote service changes."
     }}
     [PSCustomObject]@{{
       activated = [bool]$portOpen

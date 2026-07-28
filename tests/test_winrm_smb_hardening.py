@@ -159,6 +159,46 @@ class WinrmActivationPostureTests(unittest.TestCase):
         self.assertIn("winrm delete", script)
         self.assertIn('IPv4Filter=""', script)
 
+    def test_https_mode_provisions_cert_and_removes_http_listener(self) -> None:
+        # 0.3 Part B: DSPM_WINRM_ACTIVATION_HTTPS=1 → HTTPS(5986) listener with a
+        # cert, HTTP listener removed, still no Pass-the-Hash enabler.
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_ACTIVATION_HTTPS": "1"}):
+            for script in self._local_and_remote_scripts():
+                self.assertIn("New-SelfSignedCertificate", script)
+                self.assertIn("Transport HTTPS", script)
+                self.assertIn("winrm delete", script)  # removes the HTTP listener
+                self.assertIn("LocalPort 5986", script)
+                self.assertNotIn("LocalAccountTokenFilterPolicy", script)
+
+    def test_remote_deactivation_passes_password_via_env_not_payload(self) -> None:
+        # 0.3 Part C: remote deactivation runs via WMI with the H1-safe env
+        # password (never in the payload / on a command line).
+        script = winrm._remote_deactivation_script({"host": "h", "username": "u", "domain": "D"})
+        self.assertIn("$env:DSPM_ACTIVATION_PW", script)
+        self.assertNotIn('"password"', script)
+        self.assertIn("Invoke-WmiMethod", script)
+
+
+class WinrmTransportTests(unittest.TestCase):
+    """0.3 Part A (M11): Kerberos-preferred transport and cert-validation control."""
+
+    def _scanner(self, use_ssl: bool = False) -> WinRMEndpointScanner:
+        return WinRMEndpointScanner(WinRMEndpointConfig(host="h", username="u", password="p", domain="D", use_ssl=use_ssl))
+
+    def test_kerberos_preferred_with_ntlm_fallback_when_enabled(self) -> None:
+        scanner = self._scanner()
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_KERBEROS": "1"}):
+            self.assertEqual(scanner._winrm_transports(), ["kerberos", "ntlm"])
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_KERBEROS": "0"}):
+            self.assertEqual(scanner._winrm_transports(), ["ntlm"])
+
+    def test_cert_validation_defaults_validate_opts_into_ignore(self) -> None:
+        scanner = self._scanner(use_ssl=True)
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_SSL_SKIP_CA_CHECK": "0"}):
+            self.assertEqual(scanner._winrm_cert_validation(), "validate")
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_SSL_SKIP_CA_CHECK": "1"}):
+            self.assertEqual(scanner._winrm_cert_validation(), "ignore")
+
 
 class SmbSigningTests(unittest.TestCase):
     def test_smb_session_requests_signing_when_supported(self) -> None:
