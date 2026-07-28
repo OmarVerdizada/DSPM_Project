@@ -792,6 +792,10 @@ def nist_catalog_validate(payload: NISTCatalogPayload, principal: Principal = De
 
 @app.post("/api/nist/catalog/import")
 def nist_catalog_import(payload: NISTCatalogPayload, principal: Principal = Depends(require_role("admin"))) -> dict:
+    # H3: the NIST catalog is a platform-global, vendor-maintained baseline shared
+    # by every tenant's classifier. Only the platform admin may mutate it - a
+    # tenant-scoped admin must not be able to change detection for other tenants.
+    _require_platform_admin(principal)
     try:
         result = import_nist_catalog(payload.catalog, dry_run=payload.dry_run, actor=principal.subject)
     except ValueError as exc:
@@ -802,6 +806,7 @@ def nist_catalog_import(payload: NISTCatalogPayload, principal: Principal = Depe
 
 @app.post("/api/nist/catalog/activate")
 def nist_catalog_activate(payload: NISTCatalogActivationPayload, principal: Principal = Depends(require_role("admin"))) -> dict:
+    _require_platform_admin(principal)  # H3: platform-global resource (see import)
     try:
         result = activate_nist_catalog(payload.catalog_hash, actor=principal.subject)
     except ValueError as exc:
@@ -812,6 +817,7 @@ def nist_catalog_activate(payload: NISTCatalogActivationPayload, principal: Prin
 
 @app.post("/api/nist/catalog/rollback")
 def nist_catalog_rollback(principal: Principal = Depends(require_role("admin"))) -> dict:
+    _require_platform_admin(principal)  # H3: platform-global resource (see import)
     try:
         result = rollback_nist_catalog(actor=principal.subject)
     except ValueError as exc:
