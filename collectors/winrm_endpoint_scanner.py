@@ -183,6 +183,24 @@ def activate_local_winrm(username: str = "", password: str = "", domain: str = "
     return scheduled
 
 
+def deactivate_local_winrm() -> dict:
+    """Revert the local WinRM changes activation made (roadmap 0.3): remove the
+    DSPM firewall rule and HTTP listener and reset the WinRM service source
+    filter. Idempotent. A remote target is reverted by running the same
+    deactivation body on it (see the 0.3 runbook); that path is not wired here
+    because the remote WMI mechanism cannot be validated without a live target."""
+    if platform.system().lower() != "windows":
+        raise RuntimeError("WinRM deactivation requires the DSPM backend to run on Windows.")
+    result = _run_encoded_powershell(_deactivation_script())
+    parsed = _read_json(result.stdout)
+    if isinstance(parsed, dict):
+        return parsed
+    return {
+        "deactivated": result.returncode == 0,
+        "message": _clean_error(result.stdout or result.stderr) or "Deactivation command ran.",
+    }
+
+
 def _run_local_activation_script(require_current_admin: bool) -> dict:
     script = _local_activation_script(require_current_admin)
     result = _run_encoded_powershell(script)
@@ -216,19 +234,7 @@ def _local_activation_script(require_current_admin: bool) -> str:
     $ProgressPreference = "SilentlyContinue"
     __ADMIN_GUARD__
     $ErrorActionPreference = "SilentlyContinue"
-    Set-Service -Name WinRM -StartupType Automatic
-    Start-Service -Name WinRM
-    Enable-PSRemoting -Force -SkipNetworkProfileCheck
-    winrm quickconfig -quiet
-    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Ole" -Name EnableDCOM -Type String -Value "Y" -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" -Name LocalAccountTokenFilterPolicy -Type DWord -Value 1 -Force
-    winrm create "winrm/config/Listener?Address=*+Transport=HTTP" '@{Port="5985"}' 2>$null
-    winrm set "winrm/config/service" '@{IPv4Filter="*";IPv6Filter="*"}'
-    netsh advfirewall firewall set rule group="Windows Remote Management" new enable=yes | Out-Null
-    netsh advfirewall firewall set rule group="Windows Management Instrumentation (WMI)" new enable=yes | Out-Null
-    netsh advfirewall firewall set rule group="Remote Administration" new enable=yes | Out-Null
-    netsh advfirewall firewall add rule name="DSPM WinRM HTTP 5985" dir=in action=allow protocol=TCP localport=5985 profile=any | Out-Null
-    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
+    __WINRM_CONFIG__
     $service = Get-Service -Name WinRM -ErrorAction SilentlyContinue
     $portOpen = $false
     try {
@@ -248,7 +254,7 @@ def _local_activation_script(require_current_admin: bool) -> str:
       requires_admin = $false
       message = if ($service -and $service.Status -eq "Running" -and $portOpen) { "Local WinRM is running and port 5985 is reachable." } else { "Local activation command ran, but WinRM is not fully reachable. Run the backend as Administrator and check local firewall policy." }
     } | ConvertTo-Json -Compress
-    """.replace("__ADMIN_GUARD__", admin_guard)
+    """.replace("__ADMIN_GUARD__", admin_guard).replace("__WINRM_CONFIG__", _winrm_hardening_config_ps(""))
 
 
 def _activate_local_winrm_with_task(username: str, password: str, domain: str) -> dict:
@@ -362,6 +368,70 @@ def _run_encoded_powershell(script: str, env: dict[str, str] | None = None) -> s
     )
 
 
+def _collector_source_ip(target_host: str) -> str:
+    """Best-effort: the DSPM host's source IP toward ``target_host`` - the address
+    the target sees the collector connect from. Used to scope the target's WinRM
+    firewall rule and IPv4 source filter to the collector only. Returns "" if it
+    cannot be determined (the caller then keeps the filter broad, but the firewall
+    is still Domain/Private-scoped). Reliable on a flat on-prem LAN; if the
+    collector is NAT'd relative to the target the operator must scope manually."""
+    host = (target_host or "").strip()
+    if not host:
+        return ""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(2.0)
+            probe.connect((host, 135))  # UDP connect sends nothing; just resolves the source IP/route
+            ip = str(probe.getsockname()[0] or "")
+        return ip if ip and not ip.startswith("0.") else ""
+    except OSError:
+        return ""
+
+
+def _winrm_hardening_config_ps(collector_ip: str = "") -> str:
+    """Shared WinRM enable + harden PowerShell (M10/M11, roadmap 0.3).
+
+    Security posture, deliberately different from the pre-0.3 script:
+      * Does NOT set LocalAccountTokenFilterPolicy=1 - that registry value enables
+        local-admin Pass-the-Hash remote elevation and must not be turned on.
+      * Firewall rule is scoped to the Domain/Private profiles only (never Public
+        / ``profile=any``) and, when the collector IP is known, to that source
+        address; prior broad ``DSPM WinRM*`` rules are removed first.
+      * WinRM service IPv4 source filter is pinned to the collector when known.
+    The listener stays HTTP 5985 here; switching it to an HTTPS(5986) listener
+    with a trusted certificate (and matching client cert handling) is the
+    live-validation-gated step documented in the 0.3 runbook, not done blind."""
+    ipv4_filter = collector_ip if collector_ip else "*"
+    remote_addr = f" -RemoteAddress {collector_ip}" if collector_ip else ""
+    return (
+        '\n    Set-Service -Name WinRM -StartupType Automatic'
+        '\n    Start-Service -Name WinRM'
+        '\n    Enable-PSRemoting -Force -SkipNetworkProfileCheck'
+        '\n    winrm quickconfig -quiet'
+        '\n    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Ole" -Name EnableDCOM -Type String -Value "Y" -ErrorAction SilentlyContinue'
+        '\n    winrm create "winrm/config/Listener?Address=*+Transport=HTTP" \'@{Port="5985"}\' 2>$null'
+        f'\n    winrm set "winrm/config/service" \'@{{IPv4Filter="{ipv4_filter}"}}\''
+        '\n    Remove-NetFirewallRule -DisplayName "DSPM WinRM*" -ErrorAction SilentlyContinue'
+        f'\n    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Domain,Private{remote_addr} -ErrorAction SilentlyContinue | Out-Null'
+    )
+
+
+def _deactivation_script() -> str:
+    """Revert what activation added (roadmap 0.3): remove the DSPM firewall rule
+    and the HTTP listener, and reset the WinRM service source filter. Does NOT
+    touch LocalAccountTokenFilterPolicy - 0.3 activation no longer sets it, so
+    there is nothing to revert (and blindly clearing a policy we did not set could
+    break an unrelated configuration)."""
+    return (
+        '\n    $ProgressPreference = "SilentlyContinue"'
+        '\n    $ErrorActionPreference = "SilentlyContinue"'
+        '\n    Remove-NetFirewallRule -DisplayName "DSPM WinRM*" -ErrorAction SilentlyContinue'
+        '\n    winrm delete "winrm/config/Listener?Address=*+Transport=HTTP" 2>$null'
+        '\n    winrm set "winrm/config/service" \'@{IPv4Filter=""}\''
+        '\n    [PSCustomObject]@{ deactivated = $true; host = $env:COMPUTERNAME; message = "DSPM WinRM firewall rule and HTTP listener removed; WinRM service source filter reset." } | ConvertTo-Json -Compress'
+    )
+
+
 def _delete_task(task_name: str) -> None:
     subprocess.run(["schtasks.exe", "/Delete", "/TN", task_name, "/F"], capture_output=True, text=True, timeout=30, check=False)
 
@@ -429,12 +499,15 @@ class WinRMEndpointScanner:
         # H1: build the script WITHOUT the password (host/username/domain only),
         # and hand the credential to the local powershell.exe via its environment
         # block - never on the command line. Mirrors _create_activation_task.
+        # M10/M11 (0.3): scope the target's firewall/source-filter to the collector.
+        connection_host = self._connection_host()
         script = _activation_script(
             {
-                "host": self._connection_host(),
+                "host": connection_host,
                 "username": self.config.username.strip(),
                 "domain": self.config.domain.strip() or "WORKGROUP",
-            }
+            },
+            _collector_source_ip(connection_host),
         )
         result = _run_encoded_powershell(script, env={"DSPM_ACTIVATION_PW": self.config.password})
         if result.returncode != 0:
@@ -1533,7 +1606,7 @@ def _scan_script(
     """
 
 
-def _activation_script(payload: dict) -> str:
+def _activation_script(payload: dict, collector_ip: str = "") -> str:
     # H1: the password must NOT be part of `payload` - it would be base64'd into
     # the script and land on the powershell.exe command line. The caller passes
     # it via the child env block (DSPM_ACTIVATION_PW); this script reads it from
@@ -1541,23 +1614,14 @@ def _activation_script(payload: dict) -> str:
     # operational identifiers and stay in the encoded payload.
     payload = {key: value for key, value in payload.items() if key != "password"}
     encoded_payload = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
-    remote_script = """
-    $ProgressPreference = "SilentlyContinue"
-    $ErrorActionPreference = "SilentlyContinue"
-    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Ole" -Name EnableDCOM -Type String -Value "Y" -ErrorAction SilentlyContinue
-    Set-ItemProperty -Path "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" -Name LocalAccountTokenFilterPolicy -Type DWord -Value 1 -Force
-    Set-Service -Name WinRM -StartupType Automatic
-    Start-Service -Name WinRM
-    Enable-PSRemoting -Force -SkipNetworkProfileCheck
-    winrm quickconfig -quiet
-    winrm create "winrm/config/Listener?Address=*+Transport=HTTP" '@{Port="5985"}' 2>$null
-    winrm set "winrm/config/service" '@{IPv4Filter="*";IPv6Filter="*"}'
-    netsh advfirewall firewall set rule group="Windows Remote Management" new enable=yes | Out-Null
-    netsh advfirewall firewall set rule group="Windows Management Instrumentation (WMI)" new enable=yes | Out-Null
-    netsh advfirewall firewall set rule group="Remote Administration" new enable=yes | Out-Null
-    netsh advfirewall firewall add rule name="DSPM WinRM HTTP 5985" dir=in action=allow protocol=TCP localport=5985 profile=any | Out-Null
-    New-NetFirewallRule -DisplayName "DSPM WinRM HTTP" -Direction Inbound -Protocol TCP -LocalPort 5985 -Action Allow -Profile Any -ErrorAction SilentlyContinue | Out-Null
-    """
+    # M10/M11 (0.3): shared hardened config - no LocalAccountTokenFilterPolicy,
+    # firewall scoped to Domain/Private + the collector, source filter pinned to
+    # the collector when known.
+    remote_script = (
+        '\n    $ProgressPreference = "SilentlyContinue"'
+        '\n    $ErrorActionPreference = "SilentlyContinue"'
+        + _winrm_hardening_config_ps(collector_ip)
+    )
     encoded_remote = base64.b64encode(remote_script.encode("utf-16le")).decode("ascii")
     remote_command = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_remote}"
     return f"""

@@ -135,6 +135,11 @@ class SMBScanner:
                     remote_name,
                     domain=domain,
                     use_ntlm_v2=True,
+                    # M11 (0.3): sign the SMB session whenever the server supports
+                    # it (the default SIGN_WHEN_REQUIRED only signs if the server
+                    # forces it). Protects NTLMv2 material and file bytes in transit
+                    # against tampering. No-op if the server does not support signing.
+                    sign_options=SMBConnection.SIGN_WHEN_SUPPORTED,
                     is_direct_tcp=True,
                 )
                 try:

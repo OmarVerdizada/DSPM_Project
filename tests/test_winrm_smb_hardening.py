@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import unittest
 from unittest import mock
 
@@ -122,6 +123,66 @@ class WinrmActivationCredentialTests(unittest.TestCase):
         )
         self.assertNotIn(self.SECRET, script)
         self.assertIn("$env:DSPM_ACTIVATION_PW", script)
+
+
+class WinrmActivationPostureTests(unittest.TestCase):
+    """M10/M11 (roadmap 0.3): activation must not weaken the onboarded endpoint -
+    no Pass-the-Hash enabler, no any-profile firewall, scoped to the collector."""
+
+    def _local_and_remote_scripts(self) -> tuple[str, str]:
+        local = winrm._local_activation_script(False)
+        outer = winrm._activation_script(
+            {"host": "10.0.0.5", "username": "svc", "domain": "CORP"}, "192.168.1.50"
+        )
+        encoded = re.search(r"-EncodedCommand ([A-Za-z0-9+/=]+)", outer).group(1)
+        remote = base64.b64decode(encoded).decode("utf-16le")
+        return local, remote
+
+    def test_activation_does_not_enable_pass_the_hash(self) -> None:
+        for script in self._local_and_remote_scripts():
+            self.assertNotIn("LocalAccountTokenFilterPolicy", script)
+
+    def test_activation_firewall_is_scoped_not_any_profile(self) -> None:
+        for script in self._local_and_remote_scripts():
+            self.assertNotIn("profile=any", script)
+            self.assertNotIn("-Profile Any", script)
+            self.assertIn("-Profile Domain,Private", script)
+
+    def test_remote_activation_scopes_source_to_the_collector(self) -> None:
+        _, remote = self._local_and_remote_scripts()
+        self.assertIn("-RemoteAddress 192.168.1.50", remote)
+        self.assertIn('IPv4Filter="192.168.1.50"', remote)
+
+    def test_deactivation_reverts_rule_listener_and_source_filter(self) -> None:
+        script = winrm._deactivation_script()
+        self.assertIn("Remove-NetFirewallRule", script)
+        self.assertIn("winrm delete", script)
+        self.assertIn('IPv4Filter=""', script)
+
+
+class SmbSigningTests(unittest.TestCase):
+    def test_smb_session_requests_signing_when_supported(self) -> None:
+        # M11 (0.3): the SMB session opts into signing whenever the server
+        # supports it, rather than the pysmb default (sign only when required).
+        from smb.SMBConnection import SMBConnection as RealSMB
+
+        sign_supported = RealSMB.SIGN_WHEN_SUPPORTED
+        captured: dict = {}
+
+        class FakeConn:
+            SIGN_WHEN_SUPPORTED = sign_supported
+
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+
+            def connect(self, *args, **kwargs):
+                return True
+
+        with mock.patch("smb.SMBConnection.SMBConnection", FakeConn):
+            scanner = SMBScanner(SMBConfig(server="fs", username="u1", password="Pw123456", domain="CORP"))
+            scanner.connect()
+
+        self.assertEqual(captured.get("sign_options"), sign_supported)
 
 
 if __name__ == "__main__":
