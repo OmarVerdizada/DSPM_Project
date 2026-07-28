@@ -234,6 +234,11 @@ class SMBScanner:
 
                 records.extend(self._walk_share(share_name, "/", depth=0))
 
+            # Collapse the same physical file surfaced via overlapping shares
+            # (e.g. a nested `HR` share also reachable under a parent `Shares`
+            # share) so it is not scanned/reported twice.
+            records = self._dedupe_overlapping_shares(records)
+
             self._emit_collection_progress(force=True)
             owner_missing = sum(1 for record in records if not str(record.get("owner") or "").strip())
             self.last_scan_diagnostics = {
@@ -248,6 +253,51 @@ class SMBScanner:
             return records
         finally:
             self.close()
+
+    @staticmethod
+    def _norm_share_path(value: str) -> str:
+        return "/" + str(value or "").replace("\\", "/").strip("/")
+
+    def _dedupe_overlapping_shares(self, records: list[dict]) -> list[dict]:
+        """Collapse the SAME physical file surfaced through overlapping SMB shares.
+
+        When a server exports both a nested share (e.g. ``HR`` -> D:\\Shares\\HR)
+        and a parent share (e.g. ``Shares`` -> D:\\Shares), one physical file is
+        walked twice: ``HR:/Benefits/f.docx`` and ``Shares:/HR/Benefits/f.docx``.
+        Those are the same bytes at the same location, so reporting both double-
+        counts findings and risk.
+
+        Collapse ONLY when it is provably the same physical file: identical content
+        hash AND the broader share's path equals ``/<narrow-share-name><narrow-
+        path>``. We deliberately do NOT collapse mere content duplicates (two
+        different files that share the same bytes) - for a DLP tool that is real
+        data proliferation and must stay visible. The kept record notes the
+        redundant location in ``also_accessible_via``.
+        """
+        by_hash: dict[str, list[dict]] = {}
+        for record in records:
+            digest = record.get("sha256")
+            if digest and not record.get("is_dir"):
+                by_hash.setdefault(str(digest), []).append(record)
+        drop: set[tuple] = set()
+        for group in by_hash.values():
+            if len(group) < 2:
+                continue
+            # Shortest path first = the most-specific (nested) share -> the keeper.
+            ordered = sorted(group, key=lambda r: len(self._norm_share_path(r.get("path"))))
+            keeper = ordered[0]
+            keep_share = str(keeper.get("share") or "").strip("/")
+            expected_broad = self._norm_share_path(keep_share + self._norm_share_path(keeper.get("path")))
+            for other in ordered[1:]:
+                if self._norm_share_path(other.get("path")) == expected_broad:
+                    drop.add((other.get("share"), other.get("path")))
+                    keeper.setdefault("also_accessible_via", []).append(
+                        {"share": other.get("share"), "path": other.get("path")}
+                    )
+        if not drop:
+            return records
+        self.last_scan_diagnostics["overlapping_share_duplicates_collapsed"] = len(drop)
+        return [r for r in records if (r.get("share"), r.get("path")) not in drop]
 
     def _safe_list_shares(self) -> list[str]:
         if self.connection is None:
