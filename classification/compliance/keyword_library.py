@@ -495,10 +495,14 @@ def _normalize_terms(value) -> list[str]:
 
 
 def _normalize_regex_patterns(value) -> list[str]:
+    # H4 (roadmap 0.5): length + compile-validity only, no complexity heuristic.
+    # These stored patterns are NOT executed today (the keyword matcher is a
+    # literal Aho-Corasick automaton - see keyword_index.py); if that ever
+    # changes, they MUST run on a non-backtracking engine, not behind a denylist.
     patterns = _normalize_terms(value)
     valid: list[str] = []
     for pattern in patterns:
-        if len(pattern) > MAX_REGEX_LENGTH or _regex_complexity_score(pattern) > 80:
+        if len(pattern) > MAX_REGEX_LENGTH:
             continue
         try:
             re.compile(pattern)
@@ -565,14 +569,6 @@ def _clean_rule_status(value: str) -> str:
     return status if status in allowed else "draft"
 
 
-def _regex_complexity_score(pattern: str) -> int:
-    nested = len(re.findall(r"\([^)]*[+*][^)]*\)[+*]", pattern))
-    broad = len(re.findall(r"\.\*|\.\+", pattern))
-    groups = pattern.count("(")
-    alternation = pattern.count("|")
-    return nested * 40 + broad * 10 + groups * 2 + alternation
-
-
 def _validate_import_limits(tenant_id: str, framework: str, payload: dict) -> list[str]:
     errors: list[str] = []
     payload_bytes = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -592,8 +588,8 @@ def _validate_import_limits(tenant_id: str, framework: str, payload: dict) -> li
             errors.append(f"Terms per group exceeds {MAX_TERMS_PER_GROUP}")
             break
         for pattern in _normalize_terms(item.get("regex") or item.get("patterns") or []):
-            if len(pattern) > MAX_REGEX_LENGTH or _regex_complexity_score(pattern) > 80:
-                errors.append("Regex complexity limit exceeded")
+            if len(pattern) > MAX_REGEX_LENGTH:
+                errors.append("Regex length limit exceeded")
                 break
     if total_terms > MAX_TOTAL_TERMS_PER_REQUEST:
         errors.append(f"Total terms per request exceeds {MAX_TOTAL_TERMS_PER_REQUEST}")

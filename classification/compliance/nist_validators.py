@@ -147,24 +147,23 @@ def _validate_score_model(rule: dict[str, Any], errors: list[str], warnings: lis
 
 
 def _regex_issue(pattern: dict[str, Any]) -> str:
+    # H4 (roadmap 0.5): keep a cheap length bound and a compile-validity check,
+    # but NOT a backtracking-cost "complexity score". A heuristic score is not a
+    # security boundary - a single overlapping alternation like (a|ab)* scores
+    # near zero yet backtracks catastrophically, while a benign (\d{3})+ trips a
+    # naive nested-quantifier rule. The catalog is a vendor baseline that only the
+    # platform admin can mutate (H3), so no untrusted regex reaches here. If a
+    # customer-facing regex feature is ever added, it MUST run on a non-backtracking
+    # engine (e.g. google-re2) or a preemptible executor with a hard time budget
+    # (roadmap M-DoS / 1.2) - a denylist heuristic must not be relied on again.
     raw = str(pattern.get("pattern") or "")
     if len(raw) > MAX_REGEX_LENGTH:
         return "regex length exceeds limit"
-    if _regex_complexity_score(raw) > 85:
-        return "regex complexity exceeds limit"
     try:
         re.compile(raw, _regex_flags(str(pattern.get("flags") or "")))
     except re.error as exc:
         return str(exc)
     return ""
-
-
-def _regex_complexity_score(pattern: str) -> int:
-    nested = len(re.findall(r"\([^)]*[+*][^)]*\)[+*]", pattern))
-    broad = len(re.findall(r"\.\*|\.\+", pattern))
-    groups = pattern.count("(")
-    alternation = pattern.count("|")
-    return nested * 45 + broad * 12 + groups * 2 + alternation
 
 
 def _regex_flags(value: str) -> int:
