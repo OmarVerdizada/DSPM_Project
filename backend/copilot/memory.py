@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from backend.security import Principal
 from backend.store import DATA_DIR
 from backend.copilot.masking import mask_sensitive_text
 
@@ -16,11 +17,20 @@ COPILOT_MEMORY_MAX_BYTES = int(os.getenv("COPILOT_MEMORY_MAX_BYTES", "2097152"))
 
 
 def _safe(value: str) -> str:
-    return "".join(ch for ch in value if ch.isalnum() or ch in {"-", "_"})[:80] or "default"
+    return "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_"})[:80] or "default"
 
 
-def _conversation_path(tenant_id: str, conversation_id: str) -> Path:
-    return DATA_DIR / "copilot" / _safe(tenant_id) / "conversations" / f"{_safe(conversation_id)}.jsonl"
+def _conversations_root(principal: Principal) -> Path:
+    # H2 (roadmap 0.6): conversations are scoped per (tenant, subject), not just
+    # per tenant. The subject subdirectory is the ownership boundary - because
+    # both segments are _safe()-sanitized (no "/" or ".."), a caller's requests
+    # can only ever resolve under their OWN subject dir, so one user cannot list,
+    # read, or truncate another user's transcript. Mirrors session_context.py.
+    return DATA_DIR / "copilot" / _safe(principal.tenant_id) / "conversations" / _safe(principal.subject)
+
+
+def _conversation_path(principal: Principal, conversation_id: str) -> Path:
+    return _conversations_root(principal) / f"{_safe(conversation_id)}.jsonl"
 
 
 def new_conversation_id() -> str:
@@ -54,8 +64,8 @@ def _rotate(path: Path) -> None:
         tmp_path.unlink(missing_ok=True)
 
 
-async def load_history(tenant_id: str, conversation_id: str, max_turns: int = 6) -> list[dict]:
-    path = _conversation_path(tenant_id, conversation_id)
+async def load_history(principal: Principal, conversation_id: str, max_turns: int = 6) -> list[dict]:
+    path = _conversation_path(principal, conversation_id)
 
     def read() -> list[dict]:
         if not path.exists():
@@ -68,8 +78,8 @@ async def load_history(tenant_id: str, conversation_id: str, max_turns: int = 6)
     except (OSError, json.JSONDecodeError):
         return []
 
-async def save_turn(tenant_id: str, conversation_id: str, user_message: str, assistant_message: str, tools_used: list[str], sources: list[dict]) -> None:
-    path = _conversation_path(tenant_id, conversation_id)
+async def save_turn(principal: Principal, conversation_id: str, user_message: str, assistant_message: str, tools_used: list[str], sources: list[dict]) -> None:
+    path = _conversation_path(principal, conversation_id)
     now = datetime.now(timezone.utc).isoformat()
     # SC-10: mask the user message before it is persisted to the conversation
     # JSONL. This is the copy that is later replayed into LLM prompt history
@@ -91,8 +101,8 @@ async def save_turn(tenant_id: str, conversation_id: str, user_message: str, ass
     await asyncio.to_thread(write)
 
 
-async def list_conversations(tenant_id: str) -> list[dict]:
-    root = DATA_DIR / "copilot" / _safe(tenant_id) / "conversations"
+async def list_conversations(principal: Principal) -> list[dict]:
+    root = _conversations_root(principal)
 
     def scan() -> list[dict]:
         if not root.exists():
@@ -109,8 +119,8 @@ async def list_conversations(tenant_id: str) -> list[dict]:
         return []
 
 
-async def load_full_conversation(tenant_id: str, conversation_id: str) -> list[dict]:
-    path = _conversation_path(tenant_id, conversation_id)
+async def load_full_conversation(principal: Principal, conversation_id: str) -> list[dict]:
+    path = _conversation_path(principal, conversation_id)
 
     def read() -> list[dict]:
         if not path.exists():
@@ -123,9 +133,9 @@ async def load_full_conversation(tenant_id: str, conversation_id: str) -> list[d
         return []
 
 
-async def truncate_conversation(tenant_id: str, conversation_id: str, turn_index: int) -> dict:
+async def truncate_conversation(principal: Principal, conversation_id: str, turn_index: int) -> dict:
     """Remove the selected user turn and every message after it atomically."""
-    path = _conversation_path(tenant_id, conversation_id)
+    path = _conversation_path(principal, conversation_id)
 
     def truncate() -> dict:
         if turn_index < 0 or not path.exists():

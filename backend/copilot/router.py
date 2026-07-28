@@ -85,12 +85,12 @@ async def health(_: Principal = Depends(require_role("viewer"))) -> HealthRespon
 
 @router.get("/conversations")
 async def conversations(principal: Principal = Depends(require_role("viewer"))) -> dict:
-    return {"conversations": await list_conversations(principal.tenant_id)}
+    return {"conversations": await list_conversations(principal)}
 
 
 @router.get("/conversations/{conversation_id}")
 async def conversation_detail(conversation_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
-    return {"conversation_id": conversation_id, "messages": await load_full_conversation(principal.tenant_id, conversation_id)}
+    return {"conversation_id": conversation_id, "messages": await load_full_conversation(principal, conversation_id)}
 
 
 @router.put("/conversations/{conversation_id}/messages/{turn_index}", response_model=ChatResponse)
@@ -104,7 +104,7 @@ async def replace_conversation_message(
     if payload.conversation_id and payload.conversation_id != conversation_id:
         raise HTTPException(status_code=400, detail="Conversation ID does not match the edit target")
     try:
-        await truncate_conversation(principal.tenant_id, conversation_id, turn_index)
+        await truncate_conversation(principal, conversation_id, turn_index)
     except IndexError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     await clear_session_context(principal, conversation_id)

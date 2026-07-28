@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.copilot import memory
+from backend.security import Principal
 
 
 def _run(awaitable):
@@ -24,30 +25,51 @@ class CopilotConversationEditMemoryTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_truncate_conversation_removes_edited_turn_and_every_later_message(self) -> None:
-        tenant = "edit-tenant"
+        principal = Principal("edit-user", "analyst", "edit-tenant")
         conversation = "edit-conversation"
-        _run(memory.save_turn(tenant, conversation, "first question", "first answer", [], []))
-        _run(memory.save_turn(tenant, conversation, "old second question", "old second answer", [], []))
-        _run(memory.save_turn(tenant, conversation, "third question", "third answer", [], []))
+        _run(memory.save_turn(principal, conversation, "first question", "first answer", [], []))
+        _run(memory.save_turn(principal, conversation, "old second question", "old second answer", [], []))
+        _run(memory.save_turn(principal, conversation, "third question", "third answer", [], []))
 
         truncate = getattr(memory, "truncate_conversation", None)
         self.assertIsNotNone(truncate, "memory.truncate_conversation is required")
-        result = _run(truncate(tenant, conversation, 1))
-        messages = _run(memory.load_full_conversation(tenant, conversation))
+        result = _run(truncate(principal, conversation, 1))
+        messages = _run(memory.load_full_conversation(principal, conversation))
 
         self.assertEqual(result["kept_messages"], 2)
         self.assertEqual(result["removed_messages"], 4)
         self.assertEqual([row["content"] for row in messages], ["first question", "first answer"])
 
     def test_truncate_rejects_an_out_of_range_user_turn(self) -> None:
-        tenant = "edit-range-tenant"
+        principal = Principal("edit-range-user", "analyst", "edit-range-tenant")
         conversation = "edit-range-conversation"
-        _run(memory.save_turn(tenant, conversation, "first question", "first answer", [], []))
+        _run(memory.save_turn(principal, conversation, "first question", "first answer", [], []))
 
         truncate = getattr(memory, "truncate_conversation", None)
         self.assertIsNotNone(truncate, "memory.truncate_conversation is required")
         with self.assertRaises(IndexError):
-            _run(truncate(tenant, conversation, 3))
+            _run(truncate(principal, conversation, 3))
+
+    def test_conversation_is_isolated_per_user_within_a_tenant(self) -> None:
+        # H2 (0.6): a user must not be able to list, read, or truncate another
+        # user's transcript in the SAME tenant.
+        alice = Principal("alice", "analyst", "acme")
+        mallory = Principal("mallory", "viewer", "acme")  # same tenant, other user
+        conversation = "shared-conversation-id"
+        _run(memory.save_turn(alice, conversation, "alice question", "alice answer", [], []))
+
+        # Mallory cannot see, read, or tamper with Alice's conversation.
+        self.assertEqual(_run(memory.list_conversations(mallory)), [])
+        self.assertEqual(_run(memory.load_full_conversation(mallory, conversation)), [])
+        with self.assertRaises(IndexError):
+            _run(memory.truncate_conversation(mallory, conversation, 0))
+
+        # Alice still owns an intact, listable conversation.
+        self.assertEqual(len(_run(memory.load_full_conversation(alice, conversation))), 2)
+        self.assertEqual(
+            [row["conversation_id"] for row in _run(memory.list_conversations(alice))],
+            [conversation],
+        )
 
 
 class CopilotFrontendInteractionContractTests(unittest.TestCase):

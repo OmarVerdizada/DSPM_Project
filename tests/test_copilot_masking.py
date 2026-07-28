@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import backend.copilot.memory as memory
+from backend.security import Principal
 from backend.copilot.artifacts import _basename
 from backend.copilot.audit import AuditBuilder
 from risk.risk_engine import _dynamic_finding_reason
@@ -51,12 +52,13 @@ class CopilotMaskingTests(unittest.TestCase):
             with mock.patch.object(memory, "DATA_DIR", Path(tmp)):
                 asyncio.run(
                     memory.save_turn(
-                        "t1", "c1",
+                        Principal("operator", "analyst", "t1"), "c1",
                         "here is my key AKIAIOSFODNN7EXAMPLE please store it",
                         "acknowledged", [], [],
                     )
                 )
-                path = Path(tmp) / "copilot" / "t1" / "conversations" / "c1.jsonl"
+                # H2 (0.6): conversations are now scoped under the subject subdir.
+                path = Path(tmp) / "copilot" / "t1" / "conversations" / "operator" / "c1.jsonl"
                 content = path.read_text(encoding="utf-8")
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", content)
         self.assertIn("[KEY_MASKED]", content)

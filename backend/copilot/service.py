@@ -1098,7 +1098,7 @@ async def _meta_no_provider_response(
     next_session_state = state_writer.sync(next_session_state)
     await save_session_context(principal, conv_id, next_session_state)
     used_tools = list(tools_used or [])
-    await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], used_tools)
+    await memory.save_turn(principal, conv_id, message, answer, [], used_tools)
     total_ms = _elapsed_ms(start)
     audit_extra = dict(audit_extra or {})
     role_summary = audit_extra.get("provider_role_budget_summary")
@@ -2054,7 +2054,7 @@ async def _handle_risk_type_breakdown(
     next_session_state = _with_language_preference(next_session_state, principal, conv_id, language, message)
     next_session_state = _with_canonical_answer_payload(next_session_state, canonical_answer)
     await save_session_context(principal, conv_id, next_session_state)
-    await memory.save_turn(principal.tenant_id, conv_id, message, answer, used, [s.model_dump() for s in sources])
+    await memory.save_turn(principal, conv_id, message, answer, used, [s.model_dump() for s in sources])
     total_ms = _elapsed_ms(start)
     await audit.log_interaction(
         principal, conv_id, len(message), "risk_type_breakdown", used, {}, len(answer),
@@ -2175,7 +2175,7 @@ async def _repair_no_provider(
     next_session_state = _normalize_conversation_state(next_session_state)
     await save_session_context(principal, conv_id, next_session_state)
     used = tools_used or []
-    await memory.save_turn(principal.tenant_id, conv_id, message, answer, used, [])
+    await memory.save_turn(principal, conv_id, message, answer, used, [])
     total_ms = _elapsed_ms(start)
     audit_extra = audit_extra or {}
     await audit.log_interaction(
@@ -3838,7 +3838,7 @@ async def _handle_contract_route(
     if route.intent == "count_findings" and task_frame:
         combined_situation_audit.update(task_frame.audit_metadata(source="count_route", selected_suppressed=False))
     await save_session_context(principal, conv_id, next_session_state)
-    await memory.save_turn(principal.tenant_id, conv_id, message, answer, used, [source.model_dump() for source in response_sources])
+    await memory.save_turn(principal, conv_id, message, answer, used, [source.model_dump() for source in response_sources])
     total_ms = int((time.perf_counter() - start) * 1000)
     if route.intent in {"greeting", "small_talk_status", "greeting_status"}:
         final_answer_mode = "fast_verbalizer" if verbalizer_audit.get("fast_verbalizer_used") else "canned_variant"
@@ -4746,7 +4746,7 @@ async def _handle_chat_impl(
     audit_language_token = None
     try:
         validate_input(message, principal)
-        history = await memory.load_history(principal.tenant_id, conv_id)
+        history = await memory.load_history(principal, conv_id)
         metadata = analyze_message(message)
         language_understanding = understand_message(message)
         language_understanding_audit = language_understanding_audit_metadata(language_understanding)
@@ -4804,7 +4804,7 @@ async def _handle_chat_impl(
             answer = file_queries.render_file_query(file_query, payload)
             answer = validate_output(answer, principal, [tool_result] if file_tools else [])
             await memory.save_turn(
-                principal.tenant_id,
+                principal,
                 conv_id,
                 message,
                 answer,
@@ -5084,7 +5084,7 @@ async def _handle_chat_impl(
                     next_session_state = _with_selected_language_metadata(session_state, principal, conv_id, render_language, selected_language, language_source)
                     next_session_state = _with_language_preference(next_session_state, principal, conv_id, render_language, message)
                     await save_session_context(principal, conv_id, next_session_state)
-                    await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+                    await memory.save_turn(principal, conv_id, message, answer, [], [])
                     total_ms = _elapsed_ms(start)
                     await audit.log_interaction(
                         principal, conv_id, len(message), "translate_previous_answer", [], {}, len(answer),
@@ -5255,7 +5255,7 @@ async def _handle_chat_impl(
             next_session_state = _with_selected_language_metadata(session_state, principal, conv_id, render_language, selected_language, language_source)
             next_session_state = _with_language_preference(next_session_state, principal, conv_id, render_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             total_ms = _elapsed_ms(start)
             await audit.log_interaction(
                 principal, conv_id, len(message), "translate_previous_answer", [], {}, len(answer),
@@ -5287,7 +5287,7 @@ async def _handle_chat_impl(
             next_session_state = _with_selected_language_metadata(session_state, principal, conv_id, target_language, selected_language, language_source)
             next_session_state = _with_language_preference(next_session_state, principal, conv_id, target_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             total_ms = _elapsed_ms(start)
             await audit.log_interaction(
                 principal, conv_id, len(message), "language_complaint", [], {}, len(answer),
@@ -5443,7 +5443,7 @@ async def _handle_chat_impl(
             next_session_state = _with_selected_language_metadata(session_state, principal, conv_id, target_language, selected_language, language_source)
             next_session_state = _with_language_preference(next_session_state, principal, conv_id, target_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             total_ms = _elapsed_ms(start)
             await audit.log_interaction(
                 principal, conv_id, len(message), "followup_another_one", [], {}, len(answer),
@@ -5527,7 +5527,7 @@ async def _handle_chat_impl(
             next_session_state = _with_selected_language_metadata(session_state, principal, conv_id, target_language, selected_language, language_source)
             next_session_state = _with_language_preference(next_session_state, principal, conv_id, target_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, final_answer, [], [])
+            await memory.save_turn(principal, conv_id, message, final_answer, [], [])
             provider_call_count = int(verbalizer_audit.get("verbalizer_call_count") or 0)
             final_answer_mode = "fast_verbalizer" if verbalizer_audit.get("fast_verbalizer_used") else "canned_variant"
             await audit.log_interaction(
@@ -5607,7 +5607,7 @@ async def _handle_chat_impl(
             next_session_state = _merge_language_lock(next_session_state, session_state)
             next_session_state = _with_language_preference(next_session_state, principal, conv_id, target_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, used_tools, [source.model_dump() for source in sources if isinstance(source, SourceRef)])
+            await memory.save_turn(principal, conv_id, message, answer, used_tools, [source.model_dump() for source in sources if isinstance(source, SourceRef)])
             skill_names = [step.skill_id for step in workflow_result.steps]
             provider_call_count = (1 if workflow_result.total_llm_calls > 0 else 0) + (1 if plan.provider_planning_called else 0)
             elapsed_ms_total = int((time.perf_counter() - start) * 1000)
@@ -5653,7 +5653,7 @@ async def _handle_chat_impl(
             next_session_state["last_intent"] = "teaching"
             next_session_state["last_teaching_topic"] = topic
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             _trace_plan(conv_id, message, plan, [], False, False, "teaching")
             await audit.log_interaction(
                 principal, conv_id, len(message), intent_value, [], {}, len(answer),
@@ -5675,7 +5675,7 @@ async def _handle_chat_impl(
             answer = await _finalize_visible_answer(canonical_answer, target_language)
             next_session_state = _with_language_preference(session_state, principal, conv_id, target_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             _trace_plan(conv_id, message, plan, [], False, False, "artifact_lookup")
             await audit.log_interaction(principal, conv_id, len(message), intent_value, [], {}, len(answer), int((time.perf_counter() - start) * 1000), 0, None, target_language)
             return ChatResponse(answer=answer, intent=intent_value, task_type=plan.task_type, language=target_language, sources=[], tools_used=[], conversation_id=conv_id, message_id=message_id, artifact=artifact if isinstance(artifact, dict) else None, session_context_summary=_session_summary(next_session_state))
@@ -5689,7 +5689,7 @@ async def _handle_chat_impl(
             except ArtifactError as exc:
                 canonical_answer = f"I could not create a report artifact: {exc}"
                 answer = canonical_answer
-                await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+                await memory.save_turn(principal, conv_id, message, answer, [], [])
                 _trace_plan(conv_id, message, plan, [], False, False, "artifact_error")
                 await audit.log_interaction(principal, conv_id, len(message), intent_value, [], {}, len(answer), int((time.perf_counter() - start) * 1000), 0, "ARTIFACT_UNAVAILABLE", target_language)
                 return ChatResponse(answer=answer, intent=intent_value, task_type=plan.task_type, language=target_language, sources=[], tools_used=[], conversation_id=conv_id, message_id=message_id, error=None, session_context_summary=_session_summary(session_state))
@@ -5698,7 +5698,7 @@ async def _handle_chat_impl(
             next_session_state = _with_language_preference(session_state, principal, conv_id, target_language, message)
             next_session_state["latest_artifact"] = artifact
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             _trace_plan(conv_id, message, plan, [], False, True, "artifact")
             await audit.log_interaction(principal, conv_id, len(message), intent_value, [], {}, len(answer), int((time.perf_counter() - start) * 1000), 0, None, target_language)
             return ChatResponse(answer=answer, intent=intent_value, task_type=plan.task_type, language=target_language, sources=[], tools_used=[], conversation_id=conv_id, message_id=message_id, artifact=artifact, session_context_summary=_session_summary(next_session_state))
@@ -5712,7 +5712,7 @@ async def _handle_chat_impl(
                 answer = "I will answer in English."
             next_session_state = _with_language_preference(session_state, principal, conv_id, target_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             _trace_plan(conv_id, message, plan, [], False, False, "language_switch")
             await audit.log_interaction(
                 principal, conv_id, len(message), intent_value, [], {}, len(answer),
@@ -5733,7 +5733,7 @@ async def _handle_chat_impl(
             if isinstance(next_session_state, dict):
                 next_session_state.pop("current_item", None)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             _trace_plan(conv_id, message, plan, [], False, False, "complaint_repair")
             total_ms = int((time.perf_counter() - start) * 1000)
             await audit.log_interaction(
@@ -5752,7 +5752,7 @@ async def _handle_chat_impl(
 
         if plan.task_type == "clarification":
             answer = plan.clarifying_question or (plan.plan_fixup or {}).get("clarifying_question") or _clarification_answer(target_language)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             _trace_plan(conv_id, message, plan, [], False, False, "fallback")
             total_ms = int((time.perf_counter() - start) * 1000)
             await audit.log_interaction(
@@ -5818,7 +5818,7 @@ async def _handle_chat_impl(
             answer = await _finalize_visible_answer(canonical_answer, target_language)
             next_session_state = _with_language_preference(session_state, principal, conv_id, target_language, message)
             await save_session_context(principal, conv_id, next_session_state)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+            await memory.save_turn(principal, conv_id, message, answer, [], [])
             _trace_plan(conv_id, message, plan, [], True, False, "llm_explanation")
             await audit.log_interaction(principal, conv_id, len(message), intent_value, [], {}, len(answer), int((time.perf_counter() - start) * 1000), 0, None, target_language)
             return ChatResponse(answer=answer, intent=intent_value, task_type=plan.task_type, language=target_language, sources=[], tools_used=[], conversation_id=conv_id, message_id=message_id, session_context_summary=_session_summary(next_session_state))
@@ -5830,7 +5830,7 @@ async def _handle_chat_impl(
             sources = _sources(tool_results)
             canonical_answer = validate_output(_render_functional_answer(tool_result, plan.task_type), principal, tool_results)
             answer = await _finalize_visible_answer(canonical_answer, target_language)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
+            await memory.save_turn(principal, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
             next_session_state = build_context(principal, conv_id, intent_value, target_language, tool_results, answer)
             next_session_state = _merge_previous_list_context(next_session_state, session_state)
             next_session_state = _merge_language_lock(next_session_state, session_state)
@@ -5875,7 +5875,7 @@ async def _handle_chat_impl(
                     answer = f"Son skanda {severity_value} tapinti tapilmadi."
                 else:
                     answer = f"No {severity_value} findings were found in the latest scan."
-                await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+                await memory.save_turn(principal, conv_id, message, answer, [], [])
                 await audit.log_interaction(
                     principal, conv_id, len(message), intent_value, [], {}, len(answer),
                     int((time.perf_counter() - start) * 1000), 0, None, target_language,
@@ -5900,7 +5900,7 @@ async def _handle_chat_impl(
             else:
                 canonical_answer = _render_severity_findings_list(payload, severity_value, limit, target_language)
             answer = clean_answer_text(validate_output(canonical_answer, principal, tool_results))
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
+            await memory.save_turn(principal, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
             next_session_state = build_context(principal, conv_id, intent_value, target_language, tool_results, answer)
             next_session_state = _merge_previous_list_context(next_session_state, session_state)
             next_session_state = _merge_language_lock(next_session_state, session_state)
@@ -5958,7 +5958,7 @@ async def _handle_chat_impl(
                 canonical_answer = render_list_plus_remediation(items, payload.get("scan_id"), target_language)
             canonical_answer = validate_output(canonical_answer, principal, tool_results)
             answer = clean_answer_text(canonical_answer) if target_language == "az" else await _finalize_visible_answer(canonical_answer, target_language)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
+            await memory.save_turn(principal, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
             next_session_state = build_context(principal, conv_id, intent_value, target_language, tool_results, answer)
             if plan.needs_step_by_step and len(items) == 1:
                 next_session_state = _mark_step_by_step_payload(next_session_state)
@@ -5995,7 +5995,7 @@ async def _handle_chat_impl(
                     canonical_answer = render_list_plus_remediation(plural_items[:limit], scan_id, target_language)
                     canonical_answer = validate_output(canonical_answer, principal, [])
                     answer = clean_answer_text(canonical_answer) if target_language == "az" else await _finalize_visible_answer(canonical_answer, target_language)
-                    await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+                    await memory.save_turn(principal, conv_id, message, answer, [], [])
                     next_session_state = _merge_previous_list_context({}, session_state)
                     next_session_state = _merge_language_lock(next_session_state, session_state)
                     next_session_state = _with_language_preference(next_session_state, principal, conv_id, target_language, message)
@@ -6017,7 +6017,7 @@ async def _handle_chat_impl(
             selected_item = _resolve_plan_item(session_state, plan)
             if not selected_item:
                 answer = _clarification_answer(target_language)
-                await memory.save_turn(principal.tenant_id, conv_id, message, answer, [], [])
+                await memory.save_turn(principal, conv_id, message, answer, [], [])
                 _trace_plan(conv_id, message, plan, [], False, False, "fallback")
                 await audit.log_interaction(
                     principal, conv_id, len(message), intent_value, [], {}, len(answer),
@@ -6063,7 +6063,7 @@ async def _handle_chat_impl(
                 selected_answer_already_localized = False
             canonical_answer = validate_output(canonical_answer, principal, tool_results)
             answer = clean_answer_text(canonical_answer) if selected_answer_already_localized else await _finalize_visible_answer(canonical_answer, target_language)
-            await memory.save_turn(principal.tenant_id, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
+            await memory.save_turn(principal, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
             next_session_state = build_context(principal, conv_id, intent_value, target_language, tool_results, answer)
             next_session_state = _merge_previous_list_context(next_session_state, session_state)
             next_session_state = _merge_language_lock(next_session_state, session_state)
@@ -6113,7 +6113,7 @@ async def _handle_chat_impl(
         canonical_answer = validate_output(canonical_answer, principal, tool_results)
         answer = await _finalize_visible_answer(canonical_answer, target_language)
         sources = _sources(tool_results)
-        await memory.save_turn(principal.tenant_id, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
+        await memory.save_turn(principal, conv_id, message, answer, used_tools, [source.model_dump() for source in sources])
         next_session_state = build_context(principal, conv_id, intent_value, target_language, tool_results, answer)
         next_session_state = _merge_language_lock(next_session_state, session_state)
         next_session_state = _with_language_preference(next_session_state, principal, conv_id, target_language, message)
@@ -6155,7 +6155,7 @@ async def _fallback_response(principal: Principal, conversation_id: str, message
     next_session_state = _with_language_preference(session_state, principal, conversation_id, target_language, message)
     await save_session_context(principal, conversation_id, next_session_state)
     await audit.log_interaction(principal, conversation_id, len(message), intent, tools_used, {}, len(answer), int((time.perf_counter() - start) * 1000), 0, None, target_language)
-    await memory.save_turn(principal.tenant_id, conversation_id, message, answer, tools_used, [])
+    await memory.save_turn(principal, conversation_id, message, answer, tools_used, [])
     return ChatResponse(answer=answer, intent=intent, language=target_language, sources=[], tools_used=tools_used, conversation_id=conversation_id)
 
 
