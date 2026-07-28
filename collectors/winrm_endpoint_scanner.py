@@ -343,14 +343,22 @@ def _create_activation_task(task_name: str, run_as: str, password: str, task_arg
     )
 
 
-def _run_encoded_powershell(script: str) -> subprocess.CompletedProcess:
+def _run_encoded_powershell(script: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    # H1 / completes FINDING 5: `env` carries any secret (e.g. the activation
+    # admin password) to the child through its environment block instead of the
+    # command line. The script text is base64'd onto -EncodedCommand and IS
+    # visible on the process command line (4688/Sysmon), so nothing sensitive
+    # may be interpolated into it - callers pass secrets via `env` and read
+    # them as $env:NAME in the script.
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    child_env = {**os.environ, **env} if env else None
     return subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
         capture_output=True,
         text=True,
         timeout=90,
         check=False,
+        env=child_env,
     )
 
 
@@ -418,15 +426,17 @@ class WinRMEndpointScanner:
                 "skipped_wmi_activation": True,
             }
 
+        # H1: build the script WITHOUT the password (host/username/domain only),
+        # and hand the credential to the local powershell.exe via its environment
+        # block - never on the command line. Mirrors _create_activation_task.
         script = _activation_script(
             {
                 "host": self._connection_host(),
                 "username": self.config.username.strip(),
-                "password": self.config.password,
                 "domain": self.config.domain.strip() or "WORKGROUP",
             }
         )
-        result = _run_encoded_powershell(script)
+        result = _run_encoded_powershell(script, env={"DSPM_ACTIVATION_PW": self.config.password})
         if result.returncode != 0:
             return {
                 "activated": False,
@@ -1524,6 +1534,12 @@ def _scan_script(
 
 
 def _activation_script(payload: dict) -> str:
+    # H1: the password must NOT be part of `payload` - it would be base64'd into
+    # the script and land on the powershell.exe command line. The caller passes
+    # it via the child env block (DSPM_ACTIVATION_PW); this script reads it from
+    # $env:DSPM_ACTIVATION_PW below. host/username/domain are non-secret
+    # operational identifiers and stay in the encoded payload.
+    payload = {key: value for key, value in payload.items() if key != "password"}
     encoded_payload = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
     remote_script = """
     $ProgressPreference = "SilentlyContinue"
@@ -1549,7 +1565,7 @@ def _activation_script(payload: dict) -> str:
     $ErrorActionPreference = "Stop"
     $payloadJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_payload}"))
     $payload = ConvertFrom-Json $payloadJson
-    $securePassword = ConvertTo-SecureString ([string]$payload.password) -AsPlainText -Force
+    $securePassword = ConvertTo-SecureString ([string]$env:DSPM_ACTIVATION_PW) -AsPlainText -Force
     $rawUsername = ([string]$payload.username).Trim()
     $domain = ([string]$payload.domain).Trim()
     $credentialNames = New-Object System.Collections.Generic.List[string]
