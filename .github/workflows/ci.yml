@@ -139,6 +139,11 @@ jobs:
           done
           exit $missing
 
+      # H1 recurrence guard (security roadmap 0.2): a credential must never reach
+      # a subprocess command line - it must be passed via the child env block.
+      - name: Assert no credential reaches a command line
+        run: python3 scripts/check_no_cmdline_secrets.py
+
   secret-scan:
     name: Secret scan
     runs-on: ubuntu-latest
