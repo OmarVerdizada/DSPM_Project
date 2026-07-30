@@ -8,9 +8,11 @@ This module replaces that shared fallback with a single policy:
 
 * Production (``DSPM_ENV`` in {prod, production}) is fail-closed: the key MUST be
   set explicitly, or fingerprint generation raises rather than use a shared key.
-* Local/dev generates and persists a per-install key under ``data/`` (mirroring
-  the JWT-secret handling in ``backend/security.py``), so fingerprints are still
-  unique per install without requiring env setup for local work.
+* Local/dev generates and persists a per-install key **outside** ``data/`` -
+  default ``~/.dspm/evidence_hmac_key`` (M1, mirroring the vault key and the
+  JWT-secret handling in ``backend/security.py``), so a ``data/`` backup never
+  carries key material while fingerprints stay unique per install without env
+  setup. An existing ``data/`` key is migrated (preserved) on first load.
 """
 
 from __future__ import annotations
@@ -30,21 +32,39 @@ def _is_production() -> bool:
     return os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}
 
 
+def _chmod_600(path: Path) -> None:
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # chmod is a no-op on Windows; host ACLs govern access there.
+        pass
+
+
 def _load_or_generate_dev_key() -> str:
-    key_path = _BASE_DIR / "data" / _KEY_FILENAME
+    # M1 (Phase 1.1): the dev key lives OUTSIDE data/ so a data/ backup never
+    # carries evidence key material (a key holder can otherwise de-anonymise
+    # low-entropy masked evidence). Default ~/.dspm/ mirrors the vault key.
+    key_path = Path(os.getenv("DSPM_LOCAL_EVIDENCE_KEY_PATH", str(Path.home() / ".dspm" / "evidence_hmac_key")))
+    legacy_path = _BASE_DIR / "data" / _KEY_FILENAME
     try:
         if key_path.exists():
             existing = key_path.read_text(encoding="utf-8").strip()
             if existing:
                 return existing
         key_path.parent.mkdir(parents=True, exist_ok=True)
+        # Unlike the JWT secret, the evidence key is MIGRATED (preserved) out of
+        # data/ so existing masked-evidence fingerprints stay consistent; the old
+        # copy is then removed from the backup path.
+        if legacy_path.exists():
+            migrated = legacy_path.read_text(encoding="utf-8").strip()
+            if migrated:
+                key_path.write_text(migrated, encoding="utf-8")
+                _chmod_600(key_path)
+                legacy_path.unlink(missing_ok=True)
+                return migrated
         generated = secrets.token_urlsafe(48)
         key_path.write_text(generated, encoding="utf-8")
-        try:
-            os.chmod(key_path, 0o600)
-        except OSError:
-            # chmod is a no-op on Windows; host ACLs govern access there.
-            pass
+        _chmod_600(key_path)
         return generated
     except OSError as exc:
         raise RuntimeError(f"Unable to load or persist {_ENV_VAR}") from exc

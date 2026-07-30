@@ -43,17 +43,25 @@ def _load_secret_key() -> str:
         return configured
     if IS_PRODUCTION:
         raise RuntimeError("DSPM_SECRET_KEY must be set in production")
-    key_path = BASE_DIR / "data" / ".jwt_secret"
+    # M1 (Phase 1.1): the dev signing key lives OUTSIDE data/ so a data/ backup
+    # never carries auth key material (a stolen backup could otherwise forge an
+    # admin token). Default ~/.dspm/ mirrors the vault key's externalization.
+    key_path = Path(os.getenv("DSPM_LOCAL_JWT_SECRET_PATH", str(Path.home() / ".dspm" / "jwt_secret")))
+    legacy_path = BASE_DIR / "data" / ".jwt_secret"
     try:
         if key_path.exists():
             return key_path.read_text(encoding="utf-8").strip()
         key_path.parent.mkdir(parents=True, exist_ok=True)
+        # The old data/.jwt_secret was duplicated across working trees, so it is
+        # ROTATED (a fresh key is generated), not migrated, and the old copy is
+        # removed from data/ so it can no longer reach a backup.
         generated = secrets.token_urlsafe(48)
         key_path.write_text(generated, encoding="utf-8")
         try:
             os.chmod(key_path, 0o600)
         except OSError:
             pass
+        legacy_path.unlink(missing_ok=True)
         return generated
     except OSError:
         raise RuntimeError("Unable to load or persist DSPM_SECRET_KEY")
