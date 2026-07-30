@@ -17,6 +17,7 @@ import re
 from typing import Callable
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
+from collectors.ocr import extract_text_from_image, is_ocr_scannable
 from collectors.file_scanner import (
     ARCHIVE_EXTENSIONS,
     CONTENT_EXTENSIONS,
@@ -470,7 +471,7 @@ class SMBScanner:
                             "acl": snapshot.get("acl") or {},
                             "scan_mode": scan_mode_for_extension(extension),
                             "content_status": str(snapshot.get("content_status") or "reused_from_cache"),
-                            "content_scannable": bool(snapshot.get("content_scannable", extension in CONTENT_EXTENSIONS)),
+                            "content_scannable": bool(snapshot.get("content_scannable", (extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension)))),
                             "protected": bool(snapshot.get("protected", False)),
                             "protection_type": str(snapshot.get("protection_type") or ""),
                             "scan_error": str(snapshot.get("scan_error") or ""),
@@ -517,7 +518,7 @@ class SMBScanner:
                     "acl": acl,
                     "scan_mode": scan_mode_for_extension(extension),
                     "content_status": protected_metadata.get("content_status") or content_status_for_extension(extension, content, self.config.read_content),
-                    "content_scannable": bool(protected_metadata.get("content_scannable", extension in CONTENT_EXTENSIONS)),
+                    "content_scannable": bool(protected_metadata.get("content_scannable", (extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension)))),
                     "protected": bool(protected_metadata.get("protected", False)),
                     "protection_type": protected_metadata.get("protection_type", ""),
                     "scan_error": protected_metadata.get("scan_error", ""),
@@ -575,7 +576,7 @@ class SMBScanner:
                     content = ""
                     protected = False
                     content_status = content_status_for_extension(extension, content, self.config.read_content)
-                    content_scannable = extension in CONTENT_EXTENSIONS
+                    content_scannable = (extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension))
                     protection_type = ""
                     scan_error = ""
                     if entry.flag_bits & 0x1:
@@ -861,7 +862,11 @@ class SMBScanner:
     def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
         if self.connection is None or not self.config.read_content:
             return ""
-        if extension not in TEXT_EXTENSIONS and extension not in BINARY_TEXT_EXTENSIONS:
+        if (
+            extension not in TEXT_EXTENSIONS
+            and extension not in BINARY_TEXT_EXTENSIONS
+            and not is_ocr_scannable(extension)
+        ):
             return ""
 
         try:
@@ -876,7 +881,7 @@ class SMBScanner:
                 max_length=self.config.max_read_bytes,
             )
             data = buffer.getvalue()
-            if extension in BINARY_TEXT_EXTENSIONS:
+            if extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension):
                 temp_path = None
                 try:
                     # SC-8: retrieved document bytes touch disk only briefly and
@@ -892,6 +897,8 @@ class SMBScanner:
                         temp_file.write(data)
                     from pathlib import Path
 
+                    if is_ocr_scannable(extension):
+                        return extract_text_from_image(Path(temp_path))
                     return extract_binary_text(Path(temp_path))
                 finally:
                     if temp_path:

@@ -12,6 +12,7 @@ import time
 import zipfile
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
+from collectors.ocr import extract_text_from_image, is_ocr_scannable
 
 
 TEXT_EXTENSIONS = {
@@ -189,6 +190,8 @@ def scan_mode_for_extension(extension: str) -> str:
         return "protected_metadata"
     if extension in ARCHIVE_EXTENSIONS:
         return "archive_metadata"
+    if is_ocr_scannable(extension):
+        return "image_ocr"
     if extension in METADATA_EXTENSIONS:
         return "metadata_only"
     return "unknown"
@@ -201,7 +204,7 @@ def content_status_for_extension(extension: str, content: str, read_content: boo
         return "protected"
     if extension in UNSUPPORTED_ARCHIVE_EXTENSIONS:
         return "protected_or_uninspectable_archive"
-    if extension in CONTENT_EXTENSIONS:
+    if extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension):
         return "scanned" if content else "empty_or_unreadable"
     return "metadata_only"
 
@@ -323,7 +326,7 @@ class FileRecord:
     def to_dict(self) -> dict:
         scan_mode = scan_mode_for_extension(self.extension)
         status = self.content_status or content_status_for_extension(self.extension, self.content)
-        scannable = self.content_scannable if self.content_scannable is not None else self.extension in CONTENT_EXTENSIONS
+        scannable = self.content_scannable if self.content_scannable is not None else (self.extension in CONTENT_EXTENSIONS or is_ocr_scannable(self.extension))
         protected = self.protected or status in {"protected", "password_protected", "encrypted", "locked", "protected_or_uninspectable_archive"}
         return {
             "cache_reused": self.cache_reused,
@@ -365,6 +368,8 @@ def read_text_preview(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_MAX_BYTES) 
     extension = detect_extension(path)
     if extension in BINARY_TEXT_EXTENSIONS:
         return extract_binary_text(path)
+    if is_ocr_scannable(extension):
+        return extract_text_from_image(path)
     if extension not in TEXT_EXTENSIONS:
         return ""
     content, _sha256 = read_text_preview_and_sha256(path, max_bytes)
@@ -375,6 +380,9 @@ def read_text_preview_and_sha256(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_
     extension = detect_extension(path)
     if extension in BINARY_TEXT_EXTENSIONS:
         return extract_binary_text(path), sha256_file(path)
+
+    if is_ocr_scannable(extension):
+        return extract_text_from_image(path), sha256_file(path)
 
     if extension not in TEXT_EXTENSIONS:
         return "", sha256_file(path)
@@ -409,7 +417,7 @@ def scan_completeness_for_path(path: Path, content: str, protected: bool = False
     if extension in TEXT_EXTENSIONS:
         bytes_scanned = min(total_bytes, max(0, int(max_bytes or 0)))
         truncated = total_bytes > max(0, int(max_bytes or 0))
-    elif extension in BINARY_TEXT_EXTENSIONS:
+    elif extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension):
         bytes_scanned = total_bytes if content else 0
         truncated = len(content) >= 120_000
     else:
