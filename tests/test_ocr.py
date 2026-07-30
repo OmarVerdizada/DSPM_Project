@@ -165,5 +165,52 @@ class OcrHardeningTests(unittest.TestCase):
             self.assertEqual(ocr.extract_text_from_image(Path("does_not_exist.png")), "")
 
 
+class SmbImageOcrTests(unittest.TestCase):
+    """The SMB content path downloads image bytes to a temp file and OCRs them."""
+
+    def _scanner_with_bytes(self, data: bytes):
+        from collectors.smb_scanner import SMBConfig, SMBScanner
+
+        class _FakeConn:
+            def retrieveFileFromOffset(self, _share, _path, buffer, offset=0, max_length=0):
+                buffer.write(data)
+                return (len(data), len(data))
+
+        scanner = SMBScanner(SMBConfig(server="x", read_content=True))
+        scanner.connection = _FakeConn()
+        return scanner
+
+    def _png_bytes(self) -> bytes:
+        from io import BytesIO
+
+        buf = BytesIO()
+        img = Image.new("RGB", (420, 90), "white")
+        ImageDraw.Draw(img).text((10, 10), "Card: 4111 1111 1111 1111", fill="black")
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_smb_image_is_ocred_when_enabled(self) -> None:
+        result = [[[[0, 0]], "Card: 4111 1111 1111 1111", 0.9]]
+        scanner = self._scanner_with_bytes(self._png_bytes())
+        with _enabled(), mock.patch.object(ocr, "_get_engine", return_value=_FakeEngine(result)):
+            text = scanner._read_file_preview("Finance", "/photo.png", ".png")
+        self.assertIn("4111 1111 1111 1111", text)
+
+    def test_smb_image_ignored_when_disabled(self) -> None:
+        os.environ.pop("DSPM_OCR_ENABLED", None)
+        scanner = self._scanner_with_bytes(self._png_bytes())
+        with mock.patch.object(ocr, "_get_engine", return_value=_FakeEngine([["x", "Y", 0.9]])):
+            self.assertEqual(scanner._read_file_preview("Finance", "/photo.png", ".png"), "")
+
+
+class OcrStatusTests(unittest.TestCase):
+    def test_status_reflects_flag(self) -> None:
+        os.environ.pop("DSPM_OCR_ENABLED", None)
+        self.assertFalse(ocr.ocr_status()["enabled"])
+        with _enabled():
+            self.assertTrue(ocr.ocr_status()["enabled"])
+            self.assertIn("ENABLED", ocr.ocr_status_line())
+
+
 if __name__ == "__main__":
     unittest.main()

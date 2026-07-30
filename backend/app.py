@@ -150,6 +150,15 @@ async def app_lifespan(_: FastAPI):
         prune_job_records(30 * 24 * 3600)
     except Exception:
         pass
+    # Make the OCR posture observable: opt-in OCR was silently off before, so a
+    # user who enabled it had no way to confirm. Log it once at startup.
+    try:
+        from collectors.ocr import ocr_status_line
+        from scripts.logger import get_logger
+
+        get_logger("backend.app").info(ocr_status_line())
+    except Exception:
+        pass
     sweeper = asyncio.create_task(session_context_sweeper()) if COPILOT_ENABLED else None
     try:
         yield
@@ -555,7 +564,9 @@ def dashboard() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"status": "ok", "service": "dspm-discovery"}
+    from collectors.ocr import ocr_status
+
+    return {"status": "ok", "service": "dspm-discovery", "ocr": ocr_status()}
 
 
 @app.get("/api/risk-rules")

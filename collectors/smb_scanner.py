@@ -391,10 +391,14 @@ class SMBScanner:
         try:
             entries = self.connection.listPath(share_name, folder)
         except Exception as exc:
-            logger.warning("Could not list %s:%s: %s", share_name, folder, exc)
+            # pysmb's OperationFailure.__str__ embeds the full SMB message history
+            # (raw packet hex dumps), which floods the console and leaks internal
+            # path/handle bytes. Log only the concise first line.
+            brief = str(exc).splitlines()[0][:200] if str(exc) else exc.__class__.__name__
+            logger.warning("Could not list %s:%s: %s", share_name, folder, brief)
             errors = self.last_scan_diagnostics.setdefault("list_errors", [])
             if isinstance(errors, list) and len(errors) < 20:
-                errors.append({"share": share_name, "path": folder, "error": str(exc).splitlines()[0][:180]})
+                errors.append({"share": share_name, "path": folder, "error": brief})
             return records
 
         for entry in entries:
@@ -449,6 +453,9 @@ class SMBScanner:
                 and modified_at
                 and extension not in ARCHIVE_EXTENSIONS
                 and extension not in PROTECTED_CONTENT_EXTENSIONS
+                # A cache snapshot taken before OCR was enabled has no OCR text and
+                # would mask the image; always read images freshly when OCR is on.
+                and not is_ocr_scannable(extension)
             ):
                 snapshot = None
                 try:

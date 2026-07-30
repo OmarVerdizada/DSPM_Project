@@ -125,6 +125,55 @@ def is_ocr_scannable(extension: str) -> bool:
     return ocr_enabled() and str(extension or "").lower() in OCR_IMAGE_EXTENSIONS
 
 
+def dependency_installed() -> bool:
+    """True if the rapidocr extra is importable, WITHOUT loading the model
+    (cheap enough for a startup / health check)."""
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec("rapidocr_onnxruntime") is not None
+    except Exception:
+        return False
+
+
+def ocr_status() -> dict:
+    """Machine-readable OCR posture for /api/health and diagnostics."""
+    enabled = ocr_enabled()
+    installed = dependency_installed()
+    if enabled and installed:
+        state = "enabled"
+    elif enabled and not installed:
+        state = "enabled_but_dependency_missing"
+    elif installed:
+        state = "disabled_dependency_present"
+    else:
+        state = "disabled"
+    return {
+        "enabled": enabled,
+        "dependency_installed": installed,
+        "state": state,
+        "image_extensions": sorted(OCR_IMAGE_EXTENSIONS),
+    }
+
+
+def ocr_status_line() -> str:
+    """One-line human summary for the startup log - the answer to 'is OCR on?'."""
+    return {
+        "enabled": "OCR: ENABLED (RapidOCR available) - images/scanned docs will be text-extracted.",
+        "enabled_but_dependency_missing": (
+            "OCR: enabled (DSPM_OCR_ENABLED=1) but rapidocr-onnxruntime is NOT installed - "
+            "OCR will be SKIPPED. Install it: pip install -r requirements-ocr.txt"
+        ),
+        "disabled_dependency_present": (
+            "OCR: OFF. The dependency is installed; set DSPM_OCR_ENABLED=1 to turn it on."
+        ),
+        "disabled": (
+            "OCR: OFF (optional). To enable: pip install -r requirements-ocr.txt "
+            "and set DSPM_OCR_ENABLED=1."
+        ),
+    }[ocr_status()["state"]]
+
+
 def _load_bounded_image(path: Path):
     """Open an image with strict file-size / pixel caps and downscale it, without
     fully decoding a pathological (decompression-bomb) image. Returns a numpy RGB
@@ -132,7 +181,6 @@ def _load_bounded_image(path: Path):
     are never passed to opencv's decoders directly."""
     from PIL import Image
 
-    Image.MAX_IMAGE_PIXELS = _max_pixels()  # Pillow raises DecompressionBombError above this
     try:
         size = path.stat().st_size
     except OSError:
@@ -141,6 +189,12 @@ def _load_bounded_image(path: Path):
         return None
     try:
         with Image.open(path) as image:
+            # Bomb guard: reject on the header's declared pixel count BEFORE any
+            # decode. This is authoritative (both Pillow and we derive pixels from
+            # width*height, so a small file that "decodes huge" is caught here).
+            # We deliberately do NOT touch the process-global Image.MAX_IMAGE_PIXELS
+            # (that would leak to other scans/threads); Pillow's own default guard
+            # remains a backstop and any DecompressionBombError is caught below.
             width, height = image.size  # header only - no full decode yet
             if width <= 0 or height <= 0 or (width * height) > _max_pixels():
                 return None
