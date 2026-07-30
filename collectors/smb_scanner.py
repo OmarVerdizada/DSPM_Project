@@ -287,29 +287,40 @@ class SMBScanner:
                     skipped_shares.append(share_name)
                     continue
                 scanned_shares.append(share_name)
-                try:
-                    records.extend(self._walk_share(share_name, "/", depth=0))
-                    consecutive_resets = 0
-                except _SmbConnectionLost as lost:
-                    # The session died mid-share (server RST on a share this account
-                    # may not touch, or an SMB signing/transport issue). Reconnect so
-                    # the REMAINING shares still get a live socket instead of failing
-                    # every one on a dead connection.
-                    reset_shares.append(share_name)
-                    consecutive_resets += 1
-                    logger.warning(
-                        "Connection reset scanning share %s (%s); reconnecting for the remaining shares",
-                        share_name, lost.detail,
-                    )
-                    if consecutive_resets >= 5 or not self._reconnect():
-                        aborted_reason = "smb_connection_reset"
-                        logger.error(
-                            "The SMB server keeps resetting the connection; aborting the "
-                            "remaining shares. This is a connection-level failure (network, "
-                            "SMB signing/encryption mismatch, or server-side policy) - not a "
-                            "per-share permission issue."
-                        )
+                # Attempt the share; on a connection reset, reconnect and retry it
+                # ONCE. The reset is often transient - a single share trips it and the
+                # reconnected session reads it fine - so retrying avoids silently
+                # skipping a whole share. A failed attempt adds no records (the walk
+                # raises before its list is extended in), so the retry cannot duplicate.
+                # If it still resets, record it and carry on to the next share with a
+                # live connection.
+                share_done = False
+                for attempt in range(2):
+                    try:
+                        records.extend(self._walk_share(share_name, "/", depth=0))
+                        consecutive_resets = 0
+                        share_done = True
                         break
+                    except _SmbConnectionLost as lost:
+                        consecutive_resets += 1
+                        logger.warning(
+                            "Connection reset scanning share %s (%s); reconnecting%s",
+                            share_name, lost.detail,
+                            " and retrying the share" if attempt == 0 else " for the remaining shares",
+                        )
+                        if consecutive_resets >= 5 or not self._reconnect():
+                            aborted_reason = "smb_connection_reset"
+                            logger.error(
+                                "The SMB server keeps resetting the connection; aborting the "
+                                "remaining shares. This is a connection-level failure (network, "
+                                "SMB signing/encryption mismatch, or server-side policy) - not a "
+                                "per-share permission issue."
+                            )
+                            break
+                if not share_done:
+                    reset_shares.append(share_name)  # only shares that never completed
+                if aborted_reason:
+                    break
 
             # Collapse the same physical file surfaced via overlapping shares
             # (e.g. a nested `HR` share also reachable under a parent `Shares`

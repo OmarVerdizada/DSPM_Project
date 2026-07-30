@@ -81,14 +81,15 @@ class _ResettingConn:
 
 
 class SmbConnectionResetTests(unittest.TestCase):
-    def test_reset_reconnects_continues_and_is_categorized(self) -> None:
+    def test_transient_reset_recovers_on_retry(self) -> None:
         scanner = SMBScanner(SMBConfig(server="dc"))
         scanner.last_scan_diagnostics = {}
         calls = {"connect": 0}
 
         def fake_connect():
             calls["connect"] += 1
-            # First connection resets on Executive; the reconnected one is clean.
+            # First connection resets Executive; the reconnected one is clean, so
+            # the one-shot retry reads Executive successfully.
             scanner.connection = _ResettingConn({"Executive"} if calls["connect"] == 1 else set())
             scanner.server_used = "dc"
             return True
@@ -99,13 +100,34 @@ class SmbConnectionResetTests(unittest.TestCase):
             scanner.scan()
 
         diag = scanner.last_scan_diagnostics
-        # The reset is categorized as connection-reset, NOT access-denied...
+        # A TRANSIENT reset must not silently drop the share: Executive is retried,
+        # succeeds, is scanned, and is NOT left marked as reset.
+        self.assertNotIn("Executive", diag.get("shares_connection_reset", []))
+        self.assertIn("Executive", diag["shares_scanned"])
+        self.assertGreaterEqual(calls["connect"], 2)  # reconnected and retried
+        self.assertIn("Public", diag["shares_scanned"])
+        self.assertNotIn("scan_aborted_reason", diag)
+
+    def test_persistent_per_share_reset_recorded_but_scan_continues(self) -> None:
+        scanner = SMBScanner(SMBConfig(server="dc"))
+        scanner.last_scan_diagnostics = {}
+
+        def fake_connect():
+            scanner.connection = _ResettingConn({"Executive"})  # resets on every attempt
+            scanner.server_used = "dc"
+            return True
+
+        with mock.patch.object(scanner, "connect", side_effect=fake_connect), \
+             mock.patch.object(scanner, "_skip_path", return_value=False), \
+             mock.patch.object(scanner, "_emit_collection_progress"):
+            scanner.scan()
+
+        diag = scanner.last_scan_diagnostics
+        # Reset on both attempts -> recorded as connection-reset (not access-denied),
+        # but the scan reconnects and still reaches the other shares.
         self.assertEqual(diag["shares_connection_reset"], ["Executive"])
         self.assertNotIn("Executive", diag.get("shares_access_denied", []))
-        # ...the scan reconnected and still reached the next share...
-        self.assertGreaterEqual(calls["connect"], 2)
         self.assertIn("Public", diag["shares_scanned"])
-        # ...and did not abort (it recovered).
         self.assertNotIn("scan_aborted_reason", diag)
 
     def test_persistent_reset_aborts_with_reason(self) -> None:
