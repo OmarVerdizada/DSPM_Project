@@ -56,6 +56,39 @@ def _format_smb_timestamp(value) -> str:
         return ""
 
 
+class _SmbConnectionLost(Exception):
+    """Raised when an SMB operation fails because the CONNECTION died (reset by
+    the peer / broken pipe / WinError 10054) rather than a per-object
+    ACCESS_DENIED. Lets the scan reconnect and continue to the next share instead
+    of hammering a dead socket and emitting one misleading error per remaining
+    share."""
+
+    def __init__(self, share: str, detail: str) -> None:
+        super().__init__(detail)
+        self.share = share
+        self.detail = detail
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    """True for socket-level failures (connection reset/aborted/broken) as opposed
+    to a clean protocol error like ACCESS_DENIED that leaves the session usable."""
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return True
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "10054", "10053", "10058",  # WSAECONNRESET / ECONNABORTED / ESHUTDOWN
+            "forcibly closed",
+            "connection reset",
+            "connection was aborted",
+            "broken pipe",
+            "not connected",
+            "server disconnected",
+        )
+    )
+
+
 @dataclass(slots=True)
 class SMBConfig:
     server: str
@@ -178,8 +211,21 @@ class SMBScanner:
 
     def close(self) -> None:
         if self.connection is not None:
-            self.connection.close()
+            try:
+                self.connection.close()
+            except Exception:
+                pass
             self.connection = None
+
+    def _reconnect(self) -> bool:
+        """Tear down a dead session and establish a fresh one. Used to recover
+        from a mid-scan connection reset so the remaining shares still get a live
+        connection."""
+        self.close()
+        try:
+            return self.connect()
+        except Exception:
+            return False
 
     def test_connection(self) -> dict:
         try:
@@ -229,7 +275,10 @@ class SMBScanner:
             discovered_shares: list[str] = []
             scanned_shares: list[str] = []
             skipped_shares: list[str] = []
-            for share in self.connection.listShares():
+            reset_shares: list[str] = []
+            aborted_reason = ""
+            consecutive_resets = 0
+            for share in list(self.connection.listShares()):  # materialised once
                 if self._cancelled():
                     raise RuntimeError("Scan cancelled")
                 share_name = share.name
@@ -238,7 +287,29 @@ class SMBScanner:
                     skipped_shares.append(share_name)
                     continue
                 scanned_shares.append(share_name)
-                records.extend(self._walk_share(share_name, "/", depth=0))
+                try:
+                    records.extend(self._walk_share(share_name, "/", depth=0))
+                    consecutive_resets = 0
+                except _SmbConnectionLost as lost:
+                    # The session died mid-share (server RST on a share this account
+                    # may not touch, or an SMB signing/transport issue). Reconnect so
+                    # the REMAINING shares still get a live socket instead of failing
+                    # every one on a dead connection.
+                    reset_shares.append(share_name)
+                    consecutive_resets += 1
+                    logger.warning(
+                        "Connection reset scanning share %s (%s); reconnecting for the remaining shares",
+                        share_name, lost.detail,
+                    )
+                    if consecutive_resets >= 5 or not self._reconnect():
+                        aborted_reason = "smb_connection_reset"
+                        logger.error(
+                            "The SMB server keeps resetting the connection; aborting the "
+                            "remaining shares. This is a connection-level failure (network, "
+                            "SMB signing/encryption mismatch, or server-side policy) - not a "
+                            "per-share permission issue."
+                        )
+                        break
 
             # Collapse the same physical file surfaced via overlapping shares
             # (e.g. a nested `HR` share also reachable under a parent `Shares`
@@ -252,17 +323,19 @@ class SMBScanner:
                 for e in self.last_scan_diagnostics.get("list_errors", [])
                 if isinstance(e, dict) and e.get("path") in ("/", "")
             })
-            # Coverage visibility: an operator must be able to see WHICH shares
-            # were found vs scanned vs access-denied. Without this, a share that is
-            # not exported (or is unreadable by the scan account) silently yields
-            # no findings and is indistinguishable from "nothing sensitive here".
+            reset_unique = sorted(set(reset_shares))
+            # Coverage visibility: an operator must be able to see WHICH shares were
+            # found vs scanned vs access-denied vs connection-reset. Without this, a
+            # share that is not exported, is unreadable, or whose session was reset
+            # silently yields no findings and looks like "nothing sensitive here".
             logger.info(
-                "SMB scan of %s: %d share(s) found [%s]; scanned %d; access-denied [%s]",
+                "SMB scan of %s: %d share(s) found [%s]; scanned %d; access-denied [%s]; connection-reset [%s]",
                 self.server_used or self.config.server,
                 len(discovered_shares),
                 ", ".join(discovered_shares) or "-",
                 len(scanned_shares),
                 ", ".join(denied_shares) or "-",
+                ", ".join(reset_unique) or "-",
             )
             self.last_scan_diagnostics = {
                 **self.last_scan_diagnostics,
@@ -276,6 +349,8 @@ class SMBScanner:
                 "shares_scanned": scanned_shares,
                 "shares_skipped": skipped_shares,
                 "shares_access_denied": denied_shares,
+                "shares_connection_reset": reset_unique,
+                **({"scan_aborted_reason": aborted_reason} if aborted_reason else {}),
             }
             return records
         finally:
@@ -421,6 +496,12 @@ class SMBScanner:
             # (raw packet hex dumps), which floods the console and leaks internal
             # path/handle bytes. Log only the concise first line.
             brief = str(exc).splitlines()[0][:200] if str(exc) else exc.__class__.__name__
+            # A socket-level reset (WinError 10054 etc.) kills the whole session:
+            # every later listPath would fail instantly on the dead socket. Signal
+            # it so scan() can reconnect once and carry on, instead of logging one
+            # misleading error per remaining share.
+            if _is_connection_error(exc):
+                raise _SmbConnectionLost(share_name, brief) from exc
             logger.warning("Could not list %s:%s: %s", share_name, folder, brief)
             errors = self.last_scan_diagnostics.setdefault("list_errors", [])
             if isinstance(errors, list) and len(errors) < 20:
