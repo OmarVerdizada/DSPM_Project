@@ -68,14 +68,15 @@ def nist_catalog_status() -> dict[str, Any]:
         }
 
 
-def validate_nist_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
+def validate_nist_catalog(catalog: dict[str, Any], *, probe_regexes: bool = False) -> dict[str, Any]:
     _enforce_catalog_size(catalog)
     active = _try_load_active()
-    return validate_nist_catalog_payload(catalog, active_catalog=active).model_dump()
+    return validate_nist_catalog_payload(catalog, active_catalog=active, probe_regexes=probe_regexes).model_dump()
 
 
 def import_nist_catalog(catalog: dict[str, Any], *, dry_run: bool = True, actor: str = "system") -> dict[str, Any]:
-    preview = validate_nist_catalog(catalog)
+    # H4 (1.2): probe patterns for catastrophic backtracking at the import gate.
+    preview = validate_nist_catalog(catalog, probe_regexes=True)
     if not preview["valid"]:
         return {**preview, "imported": False, "dry_run": dry_run}
     if dry_run:
@@ -92,7 +93,7 @@ def activate_nist_catalog(catalog_hash: str, *, actor: str = "system") -> dict[s
     if not pending.exists():
         raise ValueError("Pending catalog not found")
     catalog = _load_catalog_from_path(pending, bypass_cache=True)
-    preview = validate_nist_catalog(catalog)
+    preview = validate_nist_catalog(catalog, probe_regexes=True)
     if not preview["valid"]:
         raise ValueError("; ".join(preview["errors"]))
     if ACTIVE_PATH.exists():

@@ -23,13 +23,16 @@ ALLOWED_HANDLING = {"PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"}
 MAX_REGEX_LENGTH = 500
 
 
-def validate_nist_catalog_payload(payload: dict[str, Any], *, active_catalog: dict[str, Any] | None = None) -> NISTValidationResult:
+def validate_nist_catalog_payload(payload: dict[str, Any], *, active_catalog: dict[str, Any] | None = None, probe_regexes: bool = False) -> NISTValidationResult:
     errors: list[str] = []
     warnings: list[str] = []
     invalid_regex: list[dict[str, str]] = []
     duplicate_rule_ids: list[str] = []
     duplicate_types: list[str] = []
     invalid_mappings: list[str] = []
+    # (rule_id, pattern_id, raw, flags) for patterns that passed the cheap
+    # length/compile checks - probed for catastrophic backtracking below (H4).
+    probe_patterns: list[tuple[str, str, str, int]] = []
 
     if not isinstance(payload, dict):
         return NISTValidationResult(valid=False, errors=["catalog root must be an object"])
@@ -81,11 +84,37 @@ def validate_nist_catalog_payload(payload: dict[str, Any], *, active_catalog: di
             issue = _regex_issue(pattern)
             if issue:
                 invalid_regex.append({"rule_id": str(rule.get("rule_id") or ""), "pattern_id": str(pattern.get("id") or ""), "error": issue})
+            else:
+                probe_patterns.append((
+                    str(rule.get("rule_id") or ""),
+                    str(pattern.get("id") or ""),
+                    str(pattern.get("pattern") or ""),
+                    _regex_flags(str(pattern.get("flags") or "")),
+                ))
         for mapping in rule.get("framework_mappings") or []:
             if not isinstance(mapping, dict) or not mapping.get("framework"):
                 invalid_mappings.append(str(rule.get("rule_id") or ""))
         if len(rule.get("test_cases") or []) < 2:
             errors.append(f"at least two test_cases required for {rule.get('rule_id')}")
+
+    # H4 (roadmap 1.2): prove-or-reject. Patterns that passed the length/compile
+    # checks are run under a hard PROCESS timeout on adversarial input; any that
+    # backtrack catastrophically (e.g. (a+)+$) are rejected here, at admin-gated
+    # import time, so they can never hang a scan. A heuristic scorer was not a
+    # boundary (0.5) - this is: the pattern is actually run and killed if slow.
+    # Only at the import/activate gate (probe_regexes), not on the read-only
+    # /validate preview, since each probe spawns a process (~1s).
+    if probe_regexes and probe_patterns:
+        from classification.compliance.preemptible import catastrophic_regexes
+
+        bad = set(catastrophic_regexes([(raw, flags) for _, _, raw, flags in probe_patterns]))
+        for rule_id, pattern_id, raw, _flags in probe_patterns:
+            if raw in bad:
+                invalid_regex.append({
+                    "rule_id": rule_id,
+                    "pattern_id": pattern_id,
+                    "error": "regex backtracks catastrophically on adversarial input (rejected)",
+                })
 
     for category in categories:
         if not isinstance(category, dict):
