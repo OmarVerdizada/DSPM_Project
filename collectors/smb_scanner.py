@@ -226,13 +226,18 @@ class SMBScanner:
 
         try:
             records: list[dict] = []
+            discovered_shares: list[str] = []
+            scanned_shares: list[str] = []
+            skipped_shares: list[str] = []
             for share in self.connection.listShares():
                 if self._cancelled():
                     raise RuntimeError("Scan cancelled")
                 share_name = share.name
+                discovered_shares.append(share_name)
                 if self._skip_share(share_name):
+                    skipped_shares.append(share_name)
                     continue
-
+                scanned_shares.append(share_name)
                 records.extend(self._walk_share(share_name, "/", depth=0))
 
             # Collapse the same physical file surfaced via overlapping shares
@@ -242,6 +247,23 @@ class SMBScanner:
 
             self._emit_collection_progress(force=True)
             owner_missing = sum(1 for record in records if not str(record.get("owner") or "").strip())
+            denied_shares = sorted({
+                str(e.get("share"))
+                for e in self.last_scan_diagnostics.get("list_errors", [])
+                if isinstance(e, dict) and e.get("path") in ("/", "")
+            })
+            # Coverage visibility: an operator must be able to see WHICH shares
+            # were found vs scanned vs access-denied. Without this, a share that is
+            # not exported (or is unreadable by the scan account) silently yields
+            # no findings and is indistinguishable from "nothing sensitive here".
+            logger.info(
+                "SMB scan of %s: %d share(s) found [%s]; scanned %d; access-denied [%s]",
+                self.server_used or self.config.server,
+                len(discovered_shares),
+                ", ".join(discovered_shares) or "-",
+                len(scanned_shares),
+                ", ".join(denied_shares) or "-",
+            )
             self.last_scan_diagnostics = {
                 **self.last_scan_diagnostics,
                 "server_used": self.server_used or self.config.server,
@@ -250,6 +272,10 @@ class SMBScanner:
                 "owner_resolved": max(0, len(records) - owner_missing),
                 "cache_reused_files": self._progress_counters["reused"],
                 "files_discovered": self._progress_counters["matched"],
+                "shares_discovered": discovered_shares,
+                "shares_scanned": scanned_shares,
+                "shares_skipped": skipped_shares,
+                "shares_access_denied": denied_shares,
             }
             return records
         finally:
