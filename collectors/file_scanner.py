@@ -8,6 +8,7 @@ import hashlib
 import os
 import platform
 import subprocess
+import time
 import zipfile
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
@@ -170,7 +171,11 @@ MAX_ARCHIVE_TOTAL_BYTES = 200 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 2000
 MAX_ARCHIVE_COMPRESSION_RATIO = 100
 MAX_ARCHIVE_NESTING = 2
-ARCHIVE_ENTRY_TIMEOUT_SECONDS = 3
+# M9 (roadmap 1.2): a REAL, enforced wall-clock budget for processing one
+# archive (cooperative - checked between entries), replacing the previously
+# advertised-but-cosmetic per-entry timeout. Bounds a slow/pathological multi-
+# entry archive; a single hung entry parse is bounded separately (M8/extraction).
+ARCHIVE_TOTAL_TIMEOUT_SECONDS = int(os.getenv("DSPM_ARCHIVE_TIMEOUT_SECONDS", "30"))
 DEFAULT_TEXT_SCAN_MAX_BYTES = int(os.getenv("DSPM_TEXT_SCAN_MAX_BYTES", str(100 * 1024 * 1024)))
 TEXT_SCAN_CHUNK_BYTES = 1024 * 1024
 
@@ -222,7 +227,10 @@ def _archive_safety_metadata(extension: str) -> dict:
         "max_archive_total_bytes": MAX_ARCHIVE_TOTAL_BYTES,
         "max_archive_entries": MAX_ARCHIVE_ENTRIES,
         "max_compression_ratio": MAX_ARCHIVE_COMPRESSION_RATIO,
-        "per_entry_timeout_seconds": ARCHIVE_ENTRY_TIMEOUT_SECONDS,
+        # M9: this budget is now actually enforced (cooperative, between entries),
+        # unlike the old advertised-only per-entry timeout.
+        "archive_timeout_seconds": ARCHIVE_TOTAL_TIMEOUT_SECONDS,
+        "timeout_enforced": True,
         "zip_bomb_protection": True,
         "path_traversal_prevention": True,
         "symlink_prevention": True,
@@ -740,7 +748,14 @@ def scan_directory(
                 if diagnostics is not None and len(archive.infolist()) > MAX_ARCHIVE_ENTRIES:
                     diagnostics["archive_entries_skipped"] = int(diagnostics.get("archive_entries_skipped") or 0) + (len(archive.infolist()) - MAX_ARCHIVE_ENTRIES)
                 inflated_total = 0
+                archive_deadline = time.monotonic() + ARCHIVE_TOTAL_TIMEOUT_SECONDS
                 for entry in entries:
+                    # M9: enforced total budget - stop processing further entries
+                    # once this archive has consumed its wall-clock allowance.
+                    if time.monotonic() > archive_deadline:
+                        if diagnostics is not None:
+                            diagnostics["archive_timed_out"] = True
+                        break
                     inflated_total += int(entry.file_size or 0)
                     if not _is_safe_archive_entry(entry) or inflated_total > MAX_ARCHIVE_TOTAL_BYTES:
                         if diagnostics is not None:

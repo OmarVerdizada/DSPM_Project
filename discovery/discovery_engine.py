@@ -109,6 +109,13 @@ class ScanReport:
         return data
 
 
+# M14 (roadmap 1.2): a hard wall-clock budget for the whole scan (collection +
+# analysis), shared with jobs.SCAN_MAX_SECONDS. When exceeded the engine stops,
+# returns a partial/truncated report, and releases its worker slot instead of
+# running (or hanging) unbounded. 0 disables it.
+SCAN_MAX_SECONDS = int(os.getenv("DSPM_SCAN_MAX_SECONDS", "1800"))
+
+
 class DSPMDiscoveryEngine:
     def __init__(self, config: ScanConfig):
         self.config = config
@@ -119,6 +126,23 @@ class DSPMDiscoveryEngine:
         self._cache_lock = threading.RLock()
         self._keyword_lock = threading.RLock()
         self._version_signature: tuple | None = None
+        self._deadline: float | None = None
+
+    def _cancelled(self) -> bool:
+        """True if the caller cancelled (e.g. the job heartbeat set cancel) OR the
+        engine's own wall-clock deadline has passed (M14). Polled in the collection
+        and analysis loops so a hung/over-budget scan stops and frees its worker."""
+        if self.config.cancel_check and self.config.cancel_check():
+            return True
+        return self._deadline is not None and time.monotonic() > self._deadline
+
+    def _mark_truncated(self, analyzed_count: int, total: int) -> None:
+        diagnostics = dict(self.last_scan_diagnostics or {})
+        diagnostics["scan_truncated"] = True
+        diagnostics["scan_truncated_analyzed"] = analyzed_count
+        diagnostics["scan_truncated_total"] = total
+        diagnostics["scan_truncated_reason"] = "scan exceeded the maximum time budget or was cancelled"
+        self.last_scan_diagnostics = diagnostics
 
     def test_connection(self) -> dict:
         if not self.config.server:
@@ -151,6 +175,8 @@ class DSPMDiscoveryEngine:
         return scanner.test_connection()
 
     def run(self) -> ScanReport:
+        # M14: arm the wall-clock deadline for this scan (collection + analysis).
+        self._deadline = (time.monotonic() + SCAN_MAX_SECONDS) if SCAN_MAX_SECONDS > 0 else None
         records = self._collect_records()
         self._emit_progress("collected", len(records), len(records))
         normalized_records = normalize_records(records)
@@ -178,18 +204,29 @@ class DSPMDiscoveryEngine:
         if worker_count <= 1 or len(records) <= 1:
             analyzed = []
             for index, record in enumerate(records, start=1):
+                if self._cancelled():  # M14: stop and return what we have
+                    self._mark_truncated(index - 1, total_records)
+                    break
                 analyzed.append(self._analyze_record_safe(record))
                 self._emit_progress("analyzing", index, total_records)
             return analyzed
 
         analyzed: list[dict | None] = [None] * len(records)
         completed = 0
+        stopped = False
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="dspm-scan") as executor:
             futures = {executor.submit(self._analyze_record_safe, record): index for index, record in enumerate(records)}
             for future in as_completed(futures):
                 analyzed[futures[future]] = future.result()
                 completed += 1
                 self._emit_progress("analyzing", completed, total_records)
+                if self._cancelled():  # M14: cancel pending work so the pool drains and the worker frees
+                    stopped = True
+                    for pending in futures:
+                        pending.cancel()
+                    break
+        if stopped:
+            self._mark_truncated(completed, total_records)
         return [item for item in analyzed if item is not None]
 
     def _emit_progress(self, stage: str, completed: int, total: int) -> None:
@@ -383,7 +420,7 @@ class DSPMDiscoveryEngine:
                     system_filter_enabled=self.config.system_filter_enabled,
                     include_admin_shares=self.config.include_admin_shares,
                     inspect_archives=self.config.inspect_archives,
-                    cancel_check=self.config.cancel_check,
+                    cancel_check=self._cancelled,  # M14: job-cancel OR engine deadline stops a hung collection
                     reuse_probe=self._reuse_probe,
                     progress_callback=self._collection_progress,
                 )
