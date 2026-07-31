@@ -81,6 +81,108 @@ def rotate_registration_code(tenant_id: str) -> str | None:
     return registration_code
 
 
+def create_registration_invite(
+    tenant_id: str,
+    token_hash: str,
+    role: str,
+    max_uses: int,
+    expires_at: str,
+    requires_approval: bool,
+    created_by: str,
+) -> str:
+    invite_id = f"inv_{secrets.token_urlsafe(9)}"
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO registration_invites
+                    (id, tenant_id, token_hash, role, max_uses, used_count, expires_at,
+                     requires_approval, revoked, created_by, created_at, last_redeemed_at)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, 0, ?, ?, NULL)
+                """,
+                (invite_id, tenant_id, token_hash, role, int(max_uses), expires_at,
+                 1 if requires_approval else 0, created_by, now),
+            )
+    return invite_id
+
+
+def redeem_registration_invite(tenant_id: str, token_hash: str) -> dict | None:
+    """Atomically consume one use of a matching, non-revoked, non-expired invite
+    with uses remaining. Returns the invite (role, requires_approval, remaining) or
+    None. The conditional UPDATE + SQLite write lock make the use-cap race-free."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute(
+                """
+                UPDATE registration_invites
+                SET used_count = used_count + 1, last_redeemed_at = ?
+                WHERE tenant_id = ? AND token_hash = ? AND revoked = 0
+                  AND expires_at > ? AND used_count < max_uses
+                """,
+                (now, tenant_id, token_hash, now),
+            )
+            if result.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT id, role, requires_approval, max_uses, used_count "
+                "FROM registration_invites WHERE tenant_id = ? AND token_hash = ?",
+                (tenant_id, token_hash),
+            ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "role": row["role"],
+        "requires_approval": bool(row["requires_approval"]),
+        "max_uses": row["max_uses"],
+        "used_count": row["used_count"],
+        "remaining_uses": max(0, row["max_uses"] - row["used_count"]),
+    }
+
+
+def list_registration_invites(tenant_id: str) -> list[dict]:
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, tenant_id, role, max_uses, used_count, expires_at,
+                       requires_approval, revoked, created_by, created_at, last_redeemed_at
+                FROM registration_invites WHERE tenant_id = ? ORDER BY created_at DESC
+                """,
+                (tenant_id,),
+            ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "tenant_id": r["tenant_id"],
+            "role": r["role"],
+            "max_uses": r["max_uses"],
+            "used_count": r["used_count"],
+            "remaining_uses": max(0, r["max_uses"] - r["used_count"]),
+            "expires_at": r["expires_at"],
+            "requires_approval": bool(r["requires_approval"]),
+            "revoked": bool(r["revoked"]),
+            "created_by": r["created_by"],
+            "created_at": r["created_at"],
+            "last_redeemed_at": r["last_redeemed_at"],
+        }
+        for r in rows
+    ]
+
+
+def revoke_registration_invite(tenant_id: str, invite_id: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute(
+                "UPDATE registration_invites SET revoked = 1 "
+                "WHERE tenant_id = ? AND id = ? AND revoked = 0",
+                (tenant_id, invite_id),
+            )
+    return result.rowcount == 1
+
+
 def init_db() -> None:
     with _lock:
         with _connect() as conn:
@@ -152,6 +254,26 @@ def init_db() -> None:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                -- M5: time-boxed, limited-use registration invites. The plaintext
+                -- token is never stored - only its sha256. Redemption is an atomic
+                -- conditional UPDATE (not expired, not revoked, used_count<max_uses).
+                CREATE TABLE IF NOT EXISTS registration_invites (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    token_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'viewer',
+                    max_uses INTEGER NOT NULL DEFAULT 1,
+                    used_count INTEGER NOT NULL DEFAULT 0,
+                    expires_at TEXT NOT NULL,
+                    requires_approval INTEGER NOT NULL DEFAULT 0,
+                    revoked INTEGER NOT NULL DEFAULT 0,
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_redeemed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_registration_invites_lookup
+                    ON registration_invites (tenant_id, token_hash);
 
                 CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created
                     ON scan_reports (tenant_id, created_at);

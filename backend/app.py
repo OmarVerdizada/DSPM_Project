@@ -1,15 +1,17 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import ipaddress
 import os
 import platform
 import re
+import secrets
 import socket
 import time
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -59,6 +61,10 @@ from backend.store import (
     recover_interrupted_jobs,
     record_login_failure,
     rotate_registration_code,
+    create_registration_invite,
+    redeem_registration_invite,
+    list_registration_invites,
+    revoke_registration_invite,
     save_scan_history,
     tenant_exists,
     get_finding,
@@ -969,13 +975,24 @@ def register(payload: RegisterRequest) -> dict:
     tenant_id = _safe_tenant(payload.tenant_id)
     if not tenant_exists(tenant_id):
         raise HTTPException(status_code=403, detail="Registration failed")
-    if not _valid_registration_code(tenant_id, payload.registration_code):
+    code = payload.registration_code.strip()
+    # M5: prefer a time-boxed, use-capped invite token (atomically redeemed); fall
+    # back to the legacy static per-tenant code for backward compatibility.
+    invite = redeem_registration_invite(tenant_id, _hash_invite_token(code)) if code else None
+    if invite is None and not _valid_registration_code(tenant_id, code):
         raise HTTPException(status_code=403, detail="Registration failed")
     if get_user(username):
         raise HTTPException(status_code=409, detail="Registration failed")
-    user = create_user(username, hash_password(payload.password), "viewer", tenant_id, payload.full_name.strip())
-    audit(tenant_id, username, "user.registered", {"role": "viewer"})
-    return {"user": _public_user(user)}
+    role = invite["role"] if invite else "viewer"
+    pending = bool(invite and invite["requires_approval"])
+    create_user(username, hash_password(payload.password), role, tenant_id, payload.full_name.strip())
+    if pending:
+        update_user_active(username, False)  # M5: admin-approval - inactive until an admin activates
+    detail = {"role": role, "source": "invite" if invite else "registration_code"}
+    if invite:
+        detail.update({"invite_id": invite["id"], "remaining_uses": invite["remaining_uses"], "pending_approval": pending})
+    audit(tenant_id, username, "user.registered", detail)  # M5: per-redemption audit
+    return {"user": _public_user(get_user(username)), "pending_approval": pending}
 
 
 @app.post("/api/auth/change-password")
@@ -1150,6 +1167,59 @@ def admin_rotate_tenant_registration_code(tenant_id: str, principal: Principal =
     audit(principal.tenant_id, principal.subject, "tenant.registration_code_rotated", {"tenant_id": target})
     tenant = get_tenant(target)
     return {"tenant": _public_tenant(tenant), "registration_code": code}
+
+
+class InviteCreateRequest(BaseModel):
+    role: str = Field(default="viewer", max_length=20)
+    max_uses: int = Field(default=1, ge=1, le=1000)
+    ttl_hours: int = Field(default=168, ge=1, le=8760)  # 7-day default, 1-year max
+    requires_approval: bool = False
+
+
+@app.post("/api/tenants/{tenant_id}/invites")
+def admin_create_invite(tenant_id: str, payload: InviteCreateRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = _safe_tenant(tenant_id)
+    if not _can_manage_tenant(principal, target):
+        raise HTTPException(status_code=403, detail="Tenant access denied")
+    if not tenant_exists(target):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    role = payload.role.strip().lower()
+    if role not in {"viewer", "analyst"}:
+        # Self-registration invites never mint admins - create admins via /api/users.
+        raise HTTPException(status_code=400, detail="Invite role must be 'viewer' or 'analyst'")
+    token = f"inv_{secrets.token_urlsafe(24)}"
+    expires_at = (datetime.now(timezone.utc) + timedelta(hours=payload.ttl_hours)).isoformat()
+    invite_id = create_registration_invite(
+        target, _hash_invite_token(token), role, payload.max_uses, expires_at, payload.requires_approval, principal.subject,
+    )
+    audit(principal.tenant_id, principal.subject, "tenant.invite_created", {
+        "tenant_id": target, "invite_id": invite_id, "role": role,
+        "max_uses": payload.max_uses, "expires_at": expires_at, "requires_approval": payload.requires_approval,
+    })
+    # The plaintext token is returned ONCE here; only its hash is stored.
+    return {
+        "invite_id": invite_id, "token": token, "role": role,
+        "max_uses": payload.max_uses, "expires_at": expires_at, "requires_approval": payload.requires_approval,
+    }
+
+
+@app.get("/api/tenants/{tenant_id}/invites")
+def admin_list_invites(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = _safe_tenant(tenant_id)
+    if not _can_manage_tenant(principal, target):
+        raise HTTPException(status_code=403, detail="Tenant access denied")
+    return {"invites": list_registration_invites(target)}
+
+
+@app.post("/api/tenants/{tenant_id}/invites/{invite_id}/revoke")
+def admin_revoke_invite(tenant_id: str, invite_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+    target = _safe_tenant(tenant_id)
+    if not _can_manage_tenant(principal, target):
+        raise HTTPException(status_code=403, detail="Tenant access denied")
+    if not revoke_registration_invite(target, invite_id):
+        raise HTTPException(status_code=404, detail="Invite not found or already revoked")
+    audit(principal.tenant_id, principal.subject, "tenant.invite_revoked", {"tenant_id": target, "invite_id": invite_id})
+    return {"revoked": True, "invite_id": invite_id}
 
 
 @app.delete("/api/tenants/{tenant_id}")
@@ -1825,6 +1895,12 @@ def _valid_registration_code(tenant_id: str, registration_code: str) -> bool:
     if not expected:
         return False
     return hmac.compare_digest(registration_code.strip(), expected)
+
+
+def _hash_invite_token(token: str) -> str:
+    # M5: invite tokens are high-entropy random secrets; store/lookup by sha256 so
+    # the plaintext token never lives in the database.
+    return hashlib.sha256((token or "").strip().encode("utf-8")).hexdigest()
 
 
 def _public_user(user: dict) -> dict:
