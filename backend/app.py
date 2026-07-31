@@ -225,6 +225,76 @@ async def secure_response_headers(request: Request, call_next):
     return response
 
 
+# M13: perimeter body-size limit. Reject a request whose body exceeds the cap
+# BEFORE any handler reads/parses it, so a giant POST can never be buffered into
+# memory or handed to the JSON parser. All API bodies are small JSON (no uploads),
+# so the default cap is generous; override with DSPM_MAX_BODY_BYTES, 0 disables.
+MAX_BODY_BYTES = int(os.getenv("DSPM_MAX_BODY_BYTES", str(25 * 1024 * 1024)))
+
+
+class BodySizeLimitMiddleware:
+    """Pure-ASGI limiter (added OUTERMOST so it sees the raw receive channel and is
+    not affected by BaseHTTPMiddleware body buffering). It refuses an oversized
+    Content-Length up front (no body read at all), and otherwise reads the body
+    only up to the cap+1 - aborting a chunked / lying-Content-Length flood in
+    bounded memory - before replaying the (small) body to the app."""
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or self.max_bytes <= 0:
+            await self.app(scope, receive, send)
+            return
+        for name, value in scope.get("headers") or ():
+            if name == b"content-length":
+                try:
+                    if int(value) > self.max_bytes:
+                        await self._reject(send)
+                        return
+                except (TypeError, ValueError):
+                    pass
+                break
+        body = b""
+        while True:
+            message = await receive()
+            if message.get("type") != "http.request":
+                break  # e.g. http.disconnect - stop reading
+            body += message.get("body", b"") or b""
+            if len(body) > self.max_bytes:  # chunked / lying Content-Length flood
+                await self._reject(send)
+                return
+            if not message.get("more_body", False):
+                break
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _reject(send) -> None:
+        payload = b'{"detail":"Request body exceeds the configured limit"}'
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(payload)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": payload})
+
+
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES)
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_: Request, __: RequestValidationError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": "Invalid request. Check required fields and formats."})
