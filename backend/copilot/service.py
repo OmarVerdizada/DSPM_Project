@@ -2948,8 +2948,8 @@ def _no_artifact_answer() -> str:
     return "No Copilot PDF artifact has been generated in this conversation yet."
 
 
-def _raw_evidence_fallback(tool_results: list[ToolResult], task_type: str | None = None) -> str:
-    lines = ["Model temporarily unavailable. I can still show the available evidence:", ""]
+def _raw_evidence_fallback(tool_results: list[ToolResult], task_type: str | None = None, preamble: str | None = None) -> str:
+    lines = [preamble or "Model temporarily unavailable. I can still show the available evidence:", ""]
     for result in tool_results[:3]:
         payload = _payload(result)
         item = payload.get("item") if isinstance(payload.get("item"), dict) else None
@@ -4418,6 +4418,45 @@ def deterministic_selected_item_template(tool_result: ToolResult, language: str,
     return render_known_finding_explanation(payload, target_language)
 
 
+# M7: grounding guard for the legacy answer path. The verbalizer path validates
+# its output against the grounded source; the legacy generate_answer path did not,
+# so a prompt-injected filename (in a file name/content that lands in the LLM
+# context) could make the model assert a finding the scan never produced. These
+# reject an answer that names a finding/file or asserts a severity absent from the
+# tool payloads; on violation the caller falls back to the deterministic, grounded
+# evidence rendering (the path is kept - this only guards its output).
+_GROUNDING_NAME_RE = re.compile(
+    r"\b[\w.-]+\.(?:env|yaml|yml|json|txt|pem|key|pdf|docx|xlsx|xlsm|csv|log|ini|cfg|conf|sql|bak|pptx|odt|kdbx|p12|pfx|gpg|pgp)\b",
+    re.IGNORECASE,
+)
+_GROUNDING_SEVERITIES = ("critical", "high", "medium", "low")
+
+
+def _grounded_source_text(tool_results: list[ToolResult]) -> str:
+    return " ".join(str(getattr(result, "content", "") or "") for result in tool_results).lower()
+
+
+def _answer_grounding_error(answer: str, tool_results: list[ToolResult]) -> str | None:
+    """Return a reason if `answer` asserts a finding/file or severity that is not
+    present in the tool payloads, else None. Asserting the ABSENCE of a severity
+    ("no critical findings") is grounded and allowed."""
+    text = str(answer or "")
+    if not text.strip():
+        return None
+    source = _grounded_source_text(tool_results)
+    for match in _GROUNDING_NAME_RE.finditer(text):
+        name = match.group(0).lower()
+        if name not in source:
+            return f"ungrounded_finding:{name}"
+    lowered = text.lower()
+    for severity in _GROUNDING_SEVERITIES:
+        if re.search(rf"\b{severity}\b", lowered) and severity not in source:
+            if re.search(rf"\b(?:no|zero|not any|without|none|0)\b[^.?!]*\b{severity}\b", lowered):
+                continue  # asserting absence, not a finding
+            return f"ungrounded_severity:{severity}"
+    return None
+
+
 async def generate_answer(message: str, tool_results: list[ToolResult], conversation_history: list[dict], metadata: LanguageIntent) -> str:
     if not tool_results:
         return fallback_answer("en")
@@ -4441,7 +4480,14 @@ async def generate_answer(message: str, tool_results: list[ToolResult], conversa
         # samples at the scan source, but this guards anything not covered and
         # the case where OLLAMA_HOST is repointed off localhost.
         messages = build_answer_messages(message, mask_sensitive_text(context), mask_sensitive_text(history), canonical_metadata)
-        return await _call_ollama_with_language_retry(messages, canonical_metadata, task_type="short_answer")
+        answer = await _call_ollama_with_language_retry(messages, canonical_metadata, task_type="short_answer")
+        # M7: reject an ungrounded claim (e.g. a prompt-injected filename asserting a
+        # finding the scan never produced) and fall back to the grounded evidence.
+        if _answer_grounding_error(answer, tool_results):
+            return _raw_evidence_fallback(
+                tool_results, preamble="I can only report findings present in the scan results:"
+            )
+        return answer
     except LLMError:
         return _raw_evidence_fallback(tool_results)
 
