@@ -17,6 +17,7 @@ import re
 from typing import Callable
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
+from collectors.net_guard import TargetNotAllowed, resolve_and_pin
 from collectors.ocr import extract_text_from_image, is_ocr_scannable
 from collectors.file_scanner import (
     ARCHIVE_EXTENSIONS,
@@ -159,8 +160,19 @@ class SMBScanner:
             raise RuntimeError("Missing dependency 'pysmb'. Install requirements.txt before SMB scans.") from exc
 
         reached_server = False
+        self._target_refused = ""
         for server in self._server_candidates():
             remote_name = self._remote_name_for(server)
+            # M12: resolve + validate the target ONCE and connect to the PINNED IP,
+            # so a DNS-rebind flip (public -> loopback/private) between validation
+            # and connect cannot turn the scanner into an SSRF primitive. The
+            # NetBIOS remote_name (for auth) stays the hostname.
+            try:
+                pinned_ip = resolve_and_pin(server)
+            except TargetNotAllowed as exc:
+                logger.warning("Refusing SMB target %s: %s", server, exc)
+                self._target_refused = str(exc)
+                continue
             for username, domain, label in self._credential_candidates():
                 conn = SMBConnection(
                     username,
@@ -177,7 +189,7 @@ class SMBScanner:
                     is_direct_tcp=True,
                 )
                 try:
-                    if conn.connect(server, self.config.port, timeout=self.config.timeout):
+                    if conn.connect(pinned_ip, self.config.port, timeout=self.config.timeout):
                         self.connection = conn
                         self.credential_used = label
                         self.server_used = server
@@ -258,6 +270,8 @@ class SMBScanner:
         self.last_scan_diagnostics = {}
         self._progress_counters = {"visited": 0, "matched": 0, "reused": 0}
         if not self.connect():
+            if getattr(self, "_target_refused", ""):
+                raise ConnectionError(f"SMB target refused (network guard): {self._target_refused}")
             if getattr(self, "_auth_rejected", False):
                 raise ConnectionError(
                     f"SMB authentication was rejected by {self.config.server} for user "

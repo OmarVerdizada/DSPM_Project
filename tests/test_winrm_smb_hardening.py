@@ -218,7 +218,13 @@ class SmbSigningTests(unittest.TestCase):
             def connect(self, *args, **kwargs):
                 return True
 
-        with mock.patch("smb.SMBConnection.SMBConnection", FakeConn):
+        import socket as _socket
+
+        # M12: connect() now resolves + pins the target, so give "fs" a resolvable,
+        # allowed address instead of hitting real DNS.
+        gai = [(_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
+        with mock.patch("smb.SMBConnection.SMBConnection", FakeConn), \
+             mock.patch("collectors.net_guard.socket.getaddrinfo", return_value=gai):
             scanner = SMBScanner(SMBConfig(server="fs", username="u1", password="Pw123456", domain="CORP"))
             scanner.connect()
 

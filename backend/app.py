@@ -91,6 +91,7 @@ from classification.compliance.nist_catalog import (
     validate_nist_catalog,
 )
 from collectors.file_scanner import normalize_extension_filter, scan_directory
+from collectors.net_guard import ip_disallowed_reason
 from collectors.winrm_endpoint_scanner import (
     ENDPOINT_PATH_ALIASES,
     WinRMEndpointConfig,
@@ -1714,13 +1715,12 @@ def _validate_scan_target(target: str) -> None:
     if not addresses:
         return
     allow_private = os.getenv("DSPM_ALLOW_PRIVATE_TARGETS", "0" if IS_PRODUCTION else "1") == "1"
+    # M12: single source of truth for "is this a permissible scan-target address",
+    # shared with the collectors' resolve-and-pin connect guard (collectors/net_guard).
     for address in addresses:
-        if address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved or address.is_unspecified:
-            raise HTTPException(status_code=400, detail="Target address is not allowed")
-        if str(address) == "169.254.169.254":
-            raise HTTPException(status_code=400, detail="Target address is not allowed")
-        if address.is_private and not allow_private:
-            raise HTTPException(status_code=400, detail="Private network targets are disabled by configuration")
+        reason = ip_disallowed_reason(address, allow_private)
+        if reason:
+            raise HTTPException(status_code=400, detail=f"Target address is not allowed: {reason}")
 
 def _safe_tenant(tenant_id: str) -> str:
     safe = "".join(ch for ch in tenant_id.strip() if ch.isalnum() or ch in {"-", "_"}) or "default"

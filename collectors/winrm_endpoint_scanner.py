@@ -14,6 +14,7 @@ from pathlib import Path, PureWindowsPath
 from uuid import uuid4
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
+from collectors.net_guard import resolve_and_pin
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     DEFAULT_TEXT_SCAN_MAX_BYTES,
@@ -784,7 +785,17 @@ class WinRMEndpointScanner:
 
     def _endpoint_url(self, connection_host: str) -> str:
         port = self.config.port or (5986 if self.config.use_ssl else 5985)
-        return f"http{'s' if self.config.use_ssl else ''}://{connection_host}:{port}/wsman"
+        # M12: resolve + validate the target ONCE (raises TargetNotAllowed on a
+        # loopback/private/metadata rebind, which the connect loop treats as a
+        # failed candidate). Over HTTP we dial the PINNED IP so the validated
+        # address is the dialed address; over HTTPS we keep the hostname in the URL
+        # so certificate validation still applies (a rebind to loopback then fails
+        # the cert), while still refusing a disallowed resolved address.
+        pinned = resolve_and_pin(connection_host)
+        host_for_url = connection_host if self.config.use_ssl else pinned
+        if ":" in host_for_url and not host_for_url.startswith("["):
+            host_for_url = f"[{host_for_url}]"  # bracket IPv6 literals for the URL
+        return f"http{'s' if self.config.use_ssl else ''}://{host_for_url}:{port}/wsman"
 
     def _winrm_transports(self) -> list[str]:
         # M11 (0.3): prefer Kerberos (mutual auth, not NTLM-relayable) for domain
