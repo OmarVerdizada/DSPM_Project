@@ -504,6 +504,33 @@ let inventoryFrameworkFacets = new Set();
 let fileSearchIndex = new WeakMap();
 
 const ROW_PAGE_SIZE = 200;
+
+// Debounce: coalesce rapid-fire events (every keystroke in a search box) into a
+// single trailing call, so the expensive re-filter + full table re-render runs
+// ONCE when the user pauses instead of on every keystroke. The <input> value
+// updates instantly (the browser owns that); only the heavy work is deferred, so
+// typing stays smooth on large result sets. .flush()/.cancel() let callers force
+// or drop a pending run.
+function debounce(fn, wait = 160) {
+  let timer = null;
+  function debounced(...args) {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn.apply(this, args);
+    }, wait);
+  }
+  debounced.cancel = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  debounced.flush = function flush(...args) {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    fn.apply(this, args);
+  };
+  return debounced;
+}
 const ARCHIVE_EXTENSIONS = new Set([".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"]);
 
 async function api(path, payload, method = "POST") {
@@ -6496,11 +6523,11 @@ endpointCustomExtensionInput?.addEventListener("keydown", (event) => {
   event.preventDefault();
   addCustomExtensionFromInput(endpointCustomExtensionInput, endpointAllowedExtensionsList, endpointExtensionSearch);
 });
-extensionSearch?.addEventListener("input", () => filterExtensionList(allowedExtensionsList, extensionSearch));
-endpointExtensionSearch?.addEventListener("input", () => {
+extensionSearch?.addEventListener("input", debounce(() => filterExtensionList(allowedExtensionsList, extensionSearch)));
+endpointExtensionSearch?.addEventListener("input", debounce(() => {
   filterExtensionList(endpointAllowedExtensionsList, endpointExtensionSearch);
   tuneEndpointScanDefaults();
-});
+}));
 allowedExtensionsList?.addEventListener("change", (event) => {
   if (!event.target.matches("input[type='checkbox']")) return;
   reorderExtensionOptions(allowedExtensionsList);
@@ -6767,10 +6794,10 @@ document.querySelector("#endpoint-target-username")?.addEventListener("input", (
   updateEndpointCustomPathState();
 });
 
-filterInput.addEventListener("input", () => {
+filterInput.addEventListener("input", debounce(() => {
   renderedRowsLimit = ROW_PAGE_SIZE;
   renderRows(latestFiles);
-});
+}));
 
 inventoryRiskFilters.forEach((button) => {
   button.addEventListener("click", () => {
@@ -6960,16 +6987,16 @@ historyRange?.addEventListener("change", () => {
 });
 historyFrom?.addEventListener("change", () => renderHistory(latestHistoryItems));
 historyTo?.addEventListener("change", () => renderHistory(latestHistoryItems));
-historyFrom?.addEventListener("input", () => renderHistory(latestHistoryItems));
-historyTo?.addEventListener("input", () => renderHistory(latestHistoryItems));
+historyFrom?.addEventListener("input", debounce(() => renderHistory(latestHistoryItems)));
+historyTo?.addEventListener("input", debounce(() => renderHistory(latestHistoryItems)));
 auditRange?.addEventListener("change", () => {
   updateAuditFilterControls();
   renderAudit(latestAuditEvents);
 });
 auditFrom?.addEventListener("change", () => renderAudit(latestAuditEvents));
 auditTo?.addEventListener("change", () => renderAudit(latestAuditEvents));
-auditFrom?.addEventListener("input", () => renderAudit(latestAuditEvents));
-auditTo?.addEventListener("input", () => renderAudit(latestAuditEvents));
+auditFrom?.addEventListener("input", debounce(() => renderAudit(latestAuditEvents)));
+auditTo?.addEventListener("input", debounce(() => renderAudit(latestAuditEvents)));
 function setSidebarCollapsed(collapsed) {
   document.body.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggle?.setAttribute("aria-expanded", String(!collapsed));
