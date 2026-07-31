@@ -132,6 +132,11 @@ TRUSTED_HOSTS = [
 ]
 LOGIN_WINDOW_SECONDS = int(os.getenv("DSPM_LOGIN_WINDOW_SECONDS", "600"))
 LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
+# M4: an aggregate per-IP failure cap alongside the per-(IP,username) cap, so one
+# IP spraying a password across many usernames is throttled even though no single
+# (IP,username) counter trips. Higher than the per-user cap to tolerate a shared
+# NAT/office IP with a few users and the odd typo.
+LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_IP_MAX_ATTEMPTS", "30"))
 ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
 IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
 # ARCH-002: Copilot is an optional subsystem. DSPM_COPILOT_ENABLED=0 deploys the
@@ -924,12 +929,18 @@ def nist_catalog_export(principal: Principal = Depends(require_role("viewer"))) 
 @app.post("/api/auth/login")
 def login(payload: LoginRequest, request: Request) -> dict:
     login_key = _login_rate_key(payload.username, request)
-    if _too_many_login_failures(login_key):
+    ip_key = _login_ip_rate_key(request)
+    # M4: trip on EITHER the per-(IP,username) cap OR the aggregate per-IP cap, so a
+    # username-spray from one IP is throttled even though no single username does.
+    if _too_many_login_failures(login_key) or _too_many_ip_login_failures(ip_key):
         raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
     principal = authenticate_user(payload.username, payload.password)
     if principal is None:
         _record_login_failure(login_key)
+        _record_login_failure(ip_key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    # Clear this user's counter; the per-IP aggregate is NOT cleared by one success
+    # (a sprayer who guesses one valid credential must not reset the IP's history).
     _clear_login_failures(login_key)
     audit(principal.tenant_id, principal.subject, "auth.login")
     return {
@@ -1676,8 +1687,19 @@ def _login_rate_key(username: str, request: Request) -> str:
     return f"{client}:{safe_user}"
 
 
+def _login_ip_rate_key(request: Request) -> str:
+    # M4: distinct namespace ("ip:") so the per-IP aggregate cannot collide with a
+    # per-(IP,username) key.
+    client = request.client.host if request.client else "unknown"
+    return f"ip:{client}"
+
+
 def _too_many_login_failures(key: str) -> bool:
     return count_login_failures(key, LOGIN_WINDOW_SECONDS) >= LOGIN_MAX_ATTEMPTS
+
+
+def _too_many_ip_login_failures(key: str) -> bool:
+    return count_login_failures(key, LOGIN_WINDOW_SECONDS) >= LOGIN_IP_MAX_ATTEMPTS
 
 
 def _record_login_failure(key: str) -> None:
