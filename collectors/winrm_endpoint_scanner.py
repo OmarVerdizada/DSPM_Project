@@ -1407,21 +1407,31 @@ def _scan_script(
     function Read-ZipXmlText($path, $prefix) {{
       try {{
         Add-Type -AssemblyName System.IO.Compression.FileSystem
+        # M8: bound Office/ODT extraction so a hostile document cannot OOM the
+        # target. Skip a part that is implausibly large or inflates implausibly
+        # (zip-bomb guard), and cap the total decompressed across the document.
+        $maxEntryBytes = 52428800
+        $maxTotalBytes = 209715200
+        $maxRatio = 200
         $archive = [System.IO.Compression.ZipFile]::OpenRead($path)
         try {{
           $parts = New-Object System.Collections.Generic.List[string]
+          $total = 0
           foreach ($entry in $archive.Entries) {{
-            if ($entry.FullName.StartsWith($prefix) -and $entry.FullName.EndsWith(".xml")) {{
-              $reader = New-Object System.IO.StreamReader($entry.Open())
-              try {{
-                $xml = $reader.ReadToEnd()
-                $clean = $xml -replace "<[^>]+>", " "
-                $clean = $clean -replace "\\s+", " "
-                $parts.Add($clean) | Out-Null
-              }} finally {{
-                $reader.Close()
-              }}
+            if (-not ($entry.FullName.StartsWith($prefix) -and $entry.FullName.EndsWith(".xml"))) {{ continue }}
+            if ($entry.Length -gt $maxEntryBytes) {{ continue }}
+            if ($entry.CompressedLength -gt 0 -and ($entry.Length / $entry.CompressedLength) -gt $maxRatio) {{ continue }}
+            $reader = New-Object System.IO.StreamReader($entry.Open())
+            try {{
+              $xml = $reader.ReadToEnd()
+              $clean = $xml -replace "<[^>]+>", " "
+              $clean = $clean -replace "\\s+", " "
+              $parts.Add($clean) | Out-Null
+            }} finally {{
+              $reader.Close()
             }}
+            $total += $entry.Length
+            if ($total -ge $maxTotalBytes) {{ break }}
           }}
           $joined = $parts -join "`n"
           return $joined.Substring(0, [Math]::Min(120000, $joined.Length))

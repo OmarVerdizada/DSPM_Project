@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 import zipfile
 from pathlib import Path
-from xml.etree import ElementTree
+from xml.etree import ElementTree  # Element type + navigation only
+
+# M8: parse untrusted document XML with defusedxml, which blocks entity-expansion
+# (billion-laughs), XXE, and external-DTD attacks that the stdlib parser accepts.
+import defusedxml.ElementTree as _DefusedET
 
 
 BINARY_TEXT_EXTENSIONS = {
@@ -21,6 +25,15 @@ BINARY_TEXT_EXTENSIONS = {
     ".xlsm",
     ".xlsx",
 }
+
+# M8: bound Office/ODT extraction so a hostile document cannot exhaust memory.
+# The per-part DECOMPRESSED read cap is the real OOM guard - a zip-bomb part is
+# never inflated in full. The ratio check rejects an obvious bomb before reading;
+# the total-bytes and parts caps bound a document assembled from many parts.
+MAX_DOC_ENTRY_BYTES = 50 * 1024 * 1024      # 50 MB per XML part (decompressed)
+MAX_DOC_TOTAL_BYTES = 200 * 1024 * 1024     # 200 MB total decompressed per document
+MAX_DOC_COMPRESSION_RATIO = 200             # skip a part that inflates beyond this
+MAX_DOC_PARTS = 4096                         # cap the number of parts processed
 
 
 def extract_binary_text(path: Path, max_chars: int = 120_000) -> str:
@@ -41,15 +54,66 @@ def extract_binary_text(path: Path, max_chars: int = 120_000) -> str:
     return ""
 
 
-def _xml_text(xml: bytes) -> str:
-    root = ElementTree.fromstring(xml)
+def _parse_xml(data: bytes):
+    """Parse XML defensively (defusedxml blocks billion-laughs / XXE / external-DTD).
+    Returns the root Element, or None on any parse error or blocked attack."""
+    if not data:
+        return None
+    try:
+        return _DefusedET.fromstring(data)
+    except Exception:
+        return None
+
+
+def _read_zip_member(archive: zipfile.ZipFile, name: str, max_bytes: int = MAX_DOC_ENTRY_BYTES) -> bytes:
+    """Read a zip member under a hard DECOMPRESSED byte cap plus a compression-ratio
+    guard, so a zip-bomb / multi-GB-inflating part cannot exhaust memory. Returns the
+    (possibly truncated) bytes, or b"" if the member is missing or looks like a bomb."""
+    try:
+        info = archive.getinfo(name)
+    except KeyError:
+        return b""
+    # Reject a part that declares implausible inflation, before reading anything.
+    if info.compress_size > 0 and (info.file_size / info.compress_size) > MAX_DOC_COMPRESSION_RATIO:
+        return b""
+    # Read at most max_bytes DECOMPRESSED, so a lying header cannot OOM us either.
+    try:
+        with archive.open(name) as handle:
+            data = handle.read(max_bytes + 1)
+    except Exception:
+        return b""
+    return data[:max_bytes]
+
+
+def _xml_text(data: bytes) -> str:
+    root = _parse_xml(data)
+    if root is None:
+        return ""
     return " ".join(node.text or "" for node in root.iter() if node.text)
+
+
+def _join_xml_parts(archive: zipfile.ZipFile, parts: list[str], max_chars: int) -> str:
+    """Text-extract each XML part under total-bytes / parts / char budgets, stopping
+    early so a document made of many (or bomb) parts stays bounded."""
+    out: list[str] = []
+    total_bytes = 0
+    chars = 0
+    for name in parts[:MAX_DOC_PARTS]:
+        data = _read_zip_member(archive, name)
+        total_bytes += len(data)
+        text = _xml_text(data)
+        if text:
+            out.append(text)
+            chars += len(text) + 1
+        if chars >= max_chars or total_bytes >= MAX_DOC_TOTAL_BYTES:
+            break
+    return "\n".join(out)[:max_chars]
 
 
 def _extract_docx(path: Path, max_chars: int) -> str:
     with zipfile.ZipFile(path) as archive:
         parts = [name for name in archive.namelist() if name.startswith("word/") and name.endswith(".xml")]
-        return "\n".join(_xml_text(archive.read(name)) for name in parts)[:max_chars]
+        return _join_xml_parts(archive, parts, max_chars)
 
 
 def _extract_xlsx(path: Path, max_chars: int) -> str:
@@ -62,10 +126,13 @@ def _extract_xlsx(path: Path, max_chars: int) -> str:
             if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
         ]
         lines: list[str] = []
-        for index, name in enumerate(sorted(sheet_parts), start=1):
+        total_bytes = 0
+        for index, name in enumerate(sorted(sheet_parts)[:MAX_DOC_PARTS], start=1):
             sheet_name = sheet_names.get(name, f"Sheet{index}")
-            lines.extend(_xlsx_sheet_text(archive.read(name), sheet_name, shared_strings))
-            if len("\n".join(lines)) >= max_chars:
+            data = _read_zip_member(archive, name)
+            total_bytes += len(data)
+            lines.extend(_xlsx_sheet_text(data, sheet_name, shared_strings))
+            if len("\n".join(lines)) >= max_chars or total_bytes >= MAX_DOC_TOTAL_BYTES:
                 break
         return "\n".join(lines)[:max_chars]
 
@@ -73,13 +140,13 @@ def _extract_xlsx(path: Path, max_chars: int) -> str:
 def _extract_pptx(path: Path, max_chars: int) -> str:
     with zipfile.ZipFile(path) as archive:
         parts = [name for name in archive.namelist() if name.startswith("ppt/slides/") and name.endswith(".xml")]
-        return "\n".join(_xml_text(archive.read(name)) for name in parts)[:max_chars]
+        return _join_xml_parts(archive, parts, max_chars)
 
 
 def _extract_odt(path: Path, max_chars: int) -> str:
     with zipfile.ZipFile(path) as archive:
         parts = [name for name in archive.namelist() if name.endswith(".xml")]
-        return "\n".join(_xml_text(archive.read(name)) for name in parts)[:max_chars]
+        return _join_xml_parts(archive, parts, max_chars)
 
 
 def _extract_pdf_light(path: Path, max_chars: int) -> str:
@@ -116,11 +183,8 @@ def _extract_pdf_with_pypdf(path: Path, max_chars: int) -> str:
 
 
 def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
-    if "xl/sharedStrings.xml" not in archive.namelist():
-        return []
-    try:
-        root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
-    except ElementTree.ParseError:
+    root = _parse_xml(_read_zip_member(archive, "xl/sharedStrings.xml"))
+    if root is None:
         return []
     values: list[str] = []
     for item in _children_with_local_name(root, "si"):
@@ -129,10 +193,9 @@ def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
 
 
 def _xlsx_sheet_names(archive: zipfile.ZipFile) -> dict[str, str]:
-    try:
-        workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
-        rels = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
-    except (KeyError, ElementTree.ParseError):
+    workbook = _parse_xml(_read_zip_member(archive, "xl/workbook.xml"))
+    rels = _parse_xml(_read_zip_member(archive, "xl/_rels/workbook.xml.rels"))
+    if workbook is None or rels is None:
         return {}
     rel_targets: dict[str, str] = {}
     for rel in rels.iter():
@@ -154,9 +217,8 @@ def _xlsx_sheet_names(archive: zipfile.ZipFile) -> dict[str, str]:
 
 
 def _xlsx_sheet_text(xml: bytes, sheet_name: str, shared_strings: list[str]) -> list[str]:
-    try:
-        root = ElementTree.fromstring(xml)
-    except ElementTree.ParseError:
+    root = _parse_xml(xml)
+    if root is None:
         return []
     rows: list[str] = []
     for row in root.iter():
