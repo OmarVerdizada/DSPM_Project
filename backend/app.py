@@ -154,6 +154,11 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 @asynccontextmanager
 async def app_lifespan(_: FastAPI):
+    # M3: fail CLOSED at startup on a missing (prod) or malformed vault key, before
+    # any credential operation. NOT wrapped in try/except - a bad key must abort.
+    from backend.vault import validate_vault_key
+
+    validate_vault_key()
     # ARCH-003: at server startup, mark jobs orphaned by a prior process as
     # failed and prune old terminal records. Done here (not at import) so tools
     # and tests that import the app do not mutate persisted job state.
