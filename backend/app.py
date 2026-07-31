@@ -153,10 +153,16 @@ async def app_lifespan(_: FastAPI):
     # Make the OCR posture observable: opt-in OCR was silently off before, so a
     # user who enabled it had no way to confirm. Log it once at startup.
     try:
-        from collectors.ocr import ocr_status_line
+        from collectors.ocr import ocr_enabled, ocr_status_line, warmup
         from scripts.logger import get_logger
 
         get_logger("backend.app").info(ocr_status_line())
+        if ocr_enabled():
+            # Warm the OCR engine in the background so the first scan's first image
+            # does not pay the one-time model-load + graph-optimisation cost.
+            import threading
+
+            threading.Thread(target=warmup, name="ocr-warmup", daemon=True).start()
     except Exception:
         pass
     sweeper = asyncio.create_task(session_context_sweeper()) if COPILOT_ENABLED else None

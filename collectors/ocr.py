@@ -28,9 +28,11 @@ DSPM_OCR_MIN_CONFIDENCE, DSPM_OCR_MAX_CHARS, DSPM_OCR_INTRA_OP_THREADS.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from scripts.logger import get_logger
@@ -119,6 +121,80 @@ def _get_engine():
 def ocr_available() -> bool:
     """True only when OCR is enabled AND the engine can be created."""
     return ocr_enabled() and _get_engine() is not None
+
+
+# ---------------------------------------------------------------------------
+# Result cache — the accuracy-neutral speedup.
+#
+# OCR inference (~2 s/image, all cores) dominates scan time and is the ONLY heavy
+# step; decode/hash are milliseconds and concurrency measurably HURTS (a single
+# inference already saturates the cores). Identical image bytes always produce the
+# identical OCR result, so re-running OCR on an unchanged image is pure waste. A
+# process-wide LRU keyed by the file's content hash removes:
+#   * re-OCR of unchanged images across repeat scans (the server is long-running),
+#   * double-OCR of one physical file surfaced via two overlapping SMB shares
+#     (both are read before the record-level dedup runs).
+# It changes NOTHING about accuracy — a cache hit returns the exact same text OCR
+# would produce. Bounded by DSPM_OCR_CACHE_MAX entries (0 disables the cache).
+# ---------------------------------------------------------------------------
+_ocr_cache: "OrderedDict[str, str]" = OrderedDict()
+_ocr_cache_lock = threading.Lock()
+
+
+def _ocr_cache_max() -> int:
+    return _int_env("DSPM_OCR_CACHE_MAX", 1024)
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 16), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _cache_get(key: str | None) -> str | None:
+    if key is None:
+        return None
+    with _ocr_cache_lock:
+        text = _ocr_cache.get(key)
+        if text is not None:
+            _ocr_cache.move_to_end(key)  # mark most-recently-used
+        return text
+
+
+def _cache_put(key: str | None, text: str) -> None:
+    if key is None:
+        return
+    cap = _ocr_cache_max()
+    if cap <= 0:
+        return
+    with _ocr_cache_lock:
+        _ocr_cache[key] = text
+        _ocr_cache.move_to_end(key)
+        while len(_ocr_cache) > cap:
+            _ocr_cache.popitem(last=False)  # evict least-recently-used
+
+
+def warmup() -> bool:
+    """Load and warm the engine so the FIRST real image does not pay the one-time
+    ONNX graph-optimisation cost (~4-6 s cold vs ~2 s warm). Safe to call from a
+    background thread at server startup; returns True if the engine is ready."""
+    if not ocr_enabled():
+        return False
+    engine = _get_engine()
+    if engine is None:
+        return False
+    try:
+        import numpy as np
+
+        _run_ocr_with_budget(engine, np.zeros((32, 96, 3), dtype="uint8"))
+        return True
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 def is_ocr_scannable(extension: str) -> bool:
@@ -248,13 +324,25 @@ def extract_text_from_image(path: Path | str, max_chars: int | None = None) -> s
     if engine is None:
         return ""
     path = Path(path)
+    limit = _max_chars() if max_chars is None else max_chars
+
+    # Cache lookup by content hash: an unchanged image returns its prior result
+    # WITHOUT re-running OCR (same bytes -> same text, so accuracy is identical).
+    digest = _file_sha256(path) if _ocr_cache_max() > 0 else None
+    cached = _cache_get(digest)
+    if cached is not None:
+        return cached[:limit] if limit else cached
+
     image = _load_bounded_image(path)
     if image is None:
         return ""
     result = _run_ocr_with_budget(engine, image)
+    if result is None:
+        # Timeout / error: may be transient, so do NOT cache "" (a later scan retries).
+        return ""
     lines: list[str] = []
     threshold = _min_confidence()
-    for item in result or []:
+    for item in result:
         try:
             _box, text, confidence = item
         except (TypeError, ValueError):
@@ -266,5 +354,7 @@ def extract_text_from_image(path: Path | str, max_chars: int | None = None) -> s
         if confident and str(text).strip():
             lines.append(str(text))
     text = "\n".join(lines)
-    limit = _max_chars() if max_chars is None else max_chars
+    # OCR completed (result is a list): cache even an empty result - a genuinely
+    # text-less image should not be re-OCR'd next scan.
+    _cache_put(digest, text)
     return text[:limit] if limit else text

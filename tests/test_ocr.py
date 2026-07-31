@@ -46,10 +46,19 @@ def _enabled():
     return mock.patch.dict(os.environ, {"DSPM_OCR_ENABLED": "1"})
 
 
-class OcrDisabledTests(unittest.TestCase):
+class _OcrBase(unittest.TestCase):
+    """Isolate the process-wide OCR result cache between tests (else one test's
+    cached text would be returned for another test's same-content image)."""
+
+    def setUp(self) -> None:
+        ocr._ocr_cache.clear()
+
+
+class OcrDisabledTests(_OcrBase):
     """Default (OFF) posture: images behave exactly as before OCR existed."""
 
     def setUp(self) -> None:
+        super().setUp()
         os.environ.pop("DSPM_OCR_ENABLED", None)
 
     def test_disabled_by_default(self) -> None:
@@ -70,7 +79,7 @@ class OcrDisabledTests(unittest.TestCase):
             self.assertEqual(fs.read_text_preview(png), "")
 
 
-class OcrEnabledGatingTests(unittest.TestCase):
+class OcrEnabledGatingTests(_OcrBase):
     def test_enabled_marks_images_scannable(self) -> None:
         with _enabled():
             self.assertTrue(ocr.ocr_enabled())
@@ -86,7 +95,7 @@ class OcrEnabledGatingTests(unittest.TestCase):
                 self.assertFalse(ocr.ocr_available())
 
 
-class OcrExtractionTests(unittest.TestCase):
+class OcrExtractionTests(_OcrBase):
     def test_extracts_and_feeds_preview(self) -> None:
         result = [[[[0, 0]], "Card: 4111 1111 1111 1111", 0.9], [[[0, 0]], "Name: Jane", 0.88]]
         with _enabled(), mock.patch.object(ocr, "_get_engine", return_value=_FakeEngine(result)):
@@ -128,7 +137,7 @@ class OcrExtractionTests(unittest.TestCase):
         self.assertLess(elapsed, 1.5)         # returned control at the budget
 
 
-class OcrHardeningTests(unittest.TestCase):
+class OcrHardeningTests(_OcrBase):
     """Hostile-image caps run against the REAL Pillow loader (engine never reached)."""
 
     def test_pixel_bomb_rejected_from_header(self) -> None:
@@ -165,7 +174,7 @@ class OcrHardeningTests(unittest.TestCase):
             self.assertEqual(ocr.extract_text_from_image(Path("does_not_exist.png")), "")
 
 
-class SmbImageOcrTests(unittest.TestCase):
+class SmbImageOcrTests(_OcrBase):
     """The SMB content path downloads image bytes to a temp file and OCRs them."""
 
     def _scanner_with_bytes(self, data: bytes):
@@ -203,13 +212,49 @@ class SmbImageOcrTests(unittest.TestCase):
             self.assertEqual(scanner._read_file_preview("Finance", "/photo.png", ".png"), "")
 
 
-class OcrStatusTests(unittest.TestCase):
+class OcrStatusTests(_OcrBase):
     def test_status_reflects_flag(self) -> None:
         os.environ.pop("DSPM_OCR_ENABLED", None)
         self.assertFalse(ocr.ocr_status()["enabled"])
         with _enabled():
             self.assertTrue(ocr.ocr_status()["enabled"])
             self.assertIn("ENABLED", ocr.ocr_status_line())
+
+
+class OcrCacheTests(_OcrBase):
+    """Content-hash result cache: the accuracy-neutral speedup."""
+
+    def test_cache_hit_skips_reocr_with_identical_text(self) -> None:
+        engine = _FakeEngine([[[[0, 0]], "CACHED LINE", 0.9]])
+        with _enabled(), mock.patch.object(ocr, "_get_engine", return_value=engine):
+            with TemporaryDirectory() as d:
+                png = _write_png(Path(d) / "x.png")
+                first = ocr.extract_text_from_image(png)
+                second = ocr.extract_text_from_image(png)
+        self.assertEqual(first, second)     # identical text -> accuracy unchanged
+        self.assertEqual(engine.calls, 1)   # second call served from cache
+
+    def test_cache_disabled_reocrs(self) -> None:
+        engine = _FakeEngine([[[[0, 0]], "X", 0.9]])
+        with _enabled(), \
+             mock.patch.dict(os.environ, {"DSPM_OCR_CACHE_MAX": "0"}), \
+             mock.patch.object(ocr, "_get_engine", return_value=engine):
+            with TemporaryDirectory() as d:
+                png = _write_png(Path(d) / "x.png")
+                ocr.extract_text_from_image(png)
+                ocr.extract_text_from_image(png)
+        self.assertEqual(engine.calls, 2)   # cache off -> OCR ran twice
+
+    def test_transient_failure_is_not_cached(self) -> None:
+        # A timed-out OCR (result None) must NOT be cached, so a later scan retries.
+        slow = _FakeEngine([[[[0, 0]], "LATE", 0.9]], delay=2.0)
+        with _enabled(), \
+             mock.patch.dict(os.environ, {"DSPM_OCR_TIMEOUT_SECONDS": "0.2"}), \
+             mock.patch.object(ocr, "_get_engine", return_value=slow):
+            with TemporaryDirectory() as d:
+                png = _write_png(Path(d) / "x.png")
+                self.assertEqual(ocr.extract_text_from_image(png), "")
+        self.assertEqual(len(ocr._ocr_cache), 0)
 
 
 if __name__ == "__main__":
