@@ -19,11 +19,13 @@ from pathlib import Path
 
 from backend.store import (
     create_user,
+    get_active_api_key,
     get_user,
     is_token_revoked,
     mark_user_login,
     revoke_token_jti,
     tenant_exists,
+    touch_api_key,
     update_user_password,
     update_user_role,
 )
@@ -306,6 +308,15 @@ def require_principal(
 
     if x_api_key:
         key_hash = hash_api_key(x_api_key)
+        # M18: DB-backed keys first - revocable and expiring WITHOUT a redeploy. The
+        # lookup already excludes revoked/expired rows; usage updates last_used_at.
+        db_key = get_active_api_key(key_hash)
+        if db_key:
+            if x_tenant_id and x_tenant_id != db_key["tenant_id"]:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key is not valid for this tenant")
+            touch_api_key(db_key["id"])
+            return Principal("api-key", db_key["role"], db_key["tenant_id"], "api_key")
+        # Legacy env-configured keys (static; kept for backward compatibility).
         for tenant_id, stored_hash in API_KEYS.items():
             if hmac.compare_digest(key_hash, stored_hash):
                 # API keys are tenant-scoped. Do not allow a caller to pivot into another tenant with X-Tenant-ID.

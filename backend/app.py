@@ -65,6 +65,9 @@ from backend.store import (
     redeem_registration_invite,
     list_registration_invites,
     revoke_registration_invite,
+    create_api_key_record,
+    list_api_keys,
+    revoke_api_key,
     save_scan_history,
     tenant_exists,
     get_finding,
@@ -617,6 +620,8 @@ class CredentialRequest(BaseModel):
 
 class ApiKeyRequest(BaseModel):
     label: str = Field(default="default", max_length=80)
+    role: str = Field(default="analyst", max_length=20)
+    ttl_days: int = Field(default=365, ge=1, le=3650)  # default 1 year, max 10 years
 
 
 class DemoDataRequest(BaseModel):
@@ -1243,14 +1248,35 @@ def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_r
 
 @app.post("/api/api-keys")
 def create_api_key(payload: ApiKeyRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+    role = payload.role.strip().lower()
+    if role not in {"viewer", "analyst"}:
+        # Machine keys never carry admin - create admins via /api/users.
+        raise HTTPException(status_code=400, detail="API key role must be 'viewer' or 'analyst'")
     raw, key_hash = generate_api_key()
-    audit(principal.tenant_id, principal.subject, "api_key.created", {"label": payload.label, "hash": key_hash[:12]})
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=payload.ttl_days)).isoformat()
+    key_id = create_api_key_record(principal.tenant_id, key_hash, payload.label, role, principal.subject, expires_at)
+    audit(principal.tenant_id, principal.subject, "api_key.created", {"key_id": key_id, "label": payload.label, "role": role, "expires_at": expires_at})
     return {
+        "key_id": key_id,
         "label": payload.label,
-        "api_key": raw,
-        "hash": key_hash,
-        "message": "Persist this hash in DSPM_API_KEYS as tenant_id:hash. The raw key is shown once.",
+        "role": role,
+        "expires_at": expires_at,
+        "api_key": raw,  # shown once; only the sha256 is stored
+        "message": "Store this key now - it is shown once. It is revocable via /api/api-keys/{key_id}/revoke.",
     }
+
+
+@app.get("/api/api-keys")
+def list_api_keys_route(principal: Principal = Depends(require_role("admin"))) -> dict:
+    return {"api_keys": list_api_keys(principal.tenant_id)}
+
+
+@app.post("/api/api-keys/{key_id}/revoke")
+def revoke_api_key_route(key_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+    if not revoke_api_key(principal.tenant_id, key_id):
+        raise HTTPException(status_code=404, detail="API key not found or already revoked")
+    audit(principal.tenant_id, principal.subject, "api_key.revoked", {"key_id": key_id})
+    return {"revoked": True, "key_id": key_id}
 
 
 @app.post("/api/credentials")

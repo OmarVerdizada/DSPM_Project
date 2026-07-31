@@ -183,6 +183,90 @@ def revoke_registration_invite(tenant_id: str, invite_id: str) -> bool:
     return result.rowcount == 1
 
 
+def create_api_key_record(
+    tenant_id: str,
+    key_hash: str,
+    label: str,
+    role: str,
+    created_by: str,
+    expires_at: str | None,
+) -> str:
+    key_id = f"key_{secrets.token_urlsafe(9)}"
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO api_keys
+                    (id, tenant_id, key_hash, label, role, created_by, created_at, last_used_at, expires_at, revoked)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 0)
+                """,
+                (key_id, tenant_id, key_hash, label, role, created_by, now, expires_at),
+            )
+    return key_id
+
+
+def get_active_api_key(key_hash: str) -> dict | None:
+    """Return {id, tenant_id, role} for a key that exists AND is not revoked AND is
+    not expired, else None. Does NOT touch last_used (see touch_api_key)."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT id, tenant_id, role FROM api_keys "
+                "WHERE key_hash = ? AND revoked = 0 AND (expires_at IS NULL OR expires_at > ?)",
+                (key_hash, now),
+            ).fetchone()
+    if row is None:
+        return None
+    return {"id": row["id"], "tenant_id": row["tenant_id"], "role": row["role"]}
+
+
+def touch_api_key(key_id: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?", (now, key_id))
+
+
+def list_api_keys(tenant_id: str) -> list[dict]:
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, tenant_id, label, role, created_by, created_at, last_used_at,
+                       expires_at, revoked, substr(key_hash, 1, 8) AS hash_prefix
+                FROM api_keys WHERE tenant_id = ? ORDER BY created_at DESC
+                """,
+                (tenant_id,),
+            ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "tenant_id": r["tenant_id"],
+            "label": r["label"],
+            "role": r["role"],
+            "created_by": r["created_by"],
+            "created_at": r["created_at"],
+            "last_used_at": r["last_used_at"],
+            "expires_at": r["expires_at"],
+            "revoked": bool(r["revoked"]),
+            "hash_prefix": r["hash_prefix"],
+        }
+        for r in rows
+    ]
+
+
+def revoke_api_key(tenant_id: str, key_id: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute(
+                "UPDATE api_keys SET revoked = 1 WHERE tenant_id = ? AND id = ? AND revoked = 0",
+                (tenant_id, key_id),
+            )
+    return result.rowcount == 1
+
+
 def init_db() -> None:
     with _lock:
         with _connect() as conn:
@@ -274,6 +358,23 @@ def init_db() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_registration_invites_lookup
                     ON registration_invites (tenant_id, token_hash);
+
+                -- M18: DB-backed API keys with a full lifecycle (created / last-used
+                -- / revoked / expiry), so a key is revocable and expirable WITHOUT
+                -- a redeploy. Only the key's sha256 is stored.
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    key_hash TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT 'analyst',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    expires_at TEXT,
+                    revoked INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
 
                 CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created
                     ON scan_reports (tenant_id, created_at);
