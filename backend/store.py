@@ -24,10 +24,36 @@ def db_path() -> Path:
     return DB_PATH
 
 
+_perms_hardened = False
+
+
+def _harden_db_permissions() -> None:
+    """M2 interim (roadmap 2.1): restrict the SQLite data dir + DB file so a non-admin
+    OS user cannot read credential hashes (users.password_hash, api_keys.key_hash) or
+    the encrypted credential-vault blobs (secrets). Best-effort POSIX chmod - 0700 on
+    the data dir (which also covers the WAL/SHM sidecar files), 0600 on the DB. On
+    Windows this is a no-op and host NTFS ACLs govern; the full least-privilege /
+    off-host / encrypted-at-rest controls come with the PostgreSQL migration."""
+    global _perms_hardened
+    if _perms_hardened:
+        return
+    try:
+        os.chmod(DB_PATH.parent, 0o700)
+    except OSError:
+        pass
+    try:
+        if DB_PATH.exists():
+            os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
+    _perms_hardened = True
+
+
 @contextmanager
 def _connect():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    _harden_db_permissions()
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
