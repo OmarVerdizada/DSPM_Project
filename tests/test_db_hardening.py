@@ -11,9 +11,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from backend import store
+from backend import db, store
 
 
+@unittest.skipIf(db.is_postgres(), "SQLite-specific at-rest file hardening; Postgres at-rest is a server concern")
 class DbHardeningTests(unittest.TestCase):
     def tearDown(self) -> None:
         store._perms_hardened = False  # don't leak the flag into other tests

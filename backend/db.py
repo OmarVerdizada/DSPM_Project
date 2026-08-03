@@ -277,6 +277,13 @@ class _PgConn:
         # and un-doubles any ``%%`` we introduced.
         return self._raw.execute(translate_sql(sql), tuple(params))
 
+    def executemany(self, sql: str, seq_of_params: Iterable[Iterable[Any]]):
+        # sqlite3.Connection.executemany exists; mirror it. psycopg exposes
+        # executemany on the cursor, not the connection shortcut.
+        cur = self._raw.cursor()
+        cur.executemany(translate_sql(sql), [tuple(p) for p in seq_of_params])
+        return cur
+
     def executescript(self, script: str) -> None:
         for stmt in split_statements(translate_schema(script)):
             self._raw.execute(stmt)

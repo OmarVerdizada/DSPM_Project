@@ -268,13 +268,31 @@ Useful environment variables:
 
 - `DSPM_ADMIN_PASSWORD`: required in production and overrides the local development admin password. Set `DSPM_SECRET_KEY` and `DSPM_VAULT_KEY` in production as well.
 - `DSPM_DB_PATH`: optional custom SQLite database path. Defaults to `data/dspm.sqlite`.
+- `DSPM_DB_URL`: optional PostgreSQL DSN. When set (e.g. `postgresql://sentro_app:…@host:5432/sentro_dev?sslmode=require`) the store runs on PostgreSQL instead of SQLite — see [PostgreSQL backend](#postgresql-backend-optional) below. Empty by default (SQLite).
 - `DSPM_ENV`: `local` (default) or `production`. Production enables fail-closed startup checks, disables the OpenAPI docs routes, blocks `--reload`, and denies private/RFC1918 scan targets unless `DSPM_ALLOW_PRIVATE_TARGETS=1`.
 - `DSPM_API_KEYS`: API-key hash mapping in `tenant_id:hash` format.
 - `DSPM_ALERT_WEBHOOK_URL`: optional alert webhook destination, POSTed on CRITICAL findings.
 
-See [`.env.example`](.env.example) for the complete, code-verified list of all 63 supported environment variables with defaults and production guidance. Note that the application does not auto-load `.env` files; export the values into the process environment.
+See [`.env.example`](.env.example) for the complete, code-verified list of all supported environment variables with defaults and production guidance. Note that the application does not auto-load `.env` files; export the values into the process environment.
 
 Local runtime data is stored in SQLite at `data/dspm.sqlite` and is ignored by git. The database and schema are created automatically on first run after `git clone` or `git pull`, so no machine-specific path changes are required.
+
+### PostgreSQL backend (optional)
+
+The store (users and password hashes, API-key hashes, the encrypted credential vault, scan history, audit log, login-throttle and token-revocation state) defaults to SQLite. For a hardened, off-host, least-privilege deployment you can run it on **PostgreSQL** without any code change — set `DSPM_DB_URL` to a libpq DSN. The dialect seam lives in [`backend/db.py`](backend/db.py); SQLite remains byte-for-byte the default when `DSPM_DB_URL` is empty.
+
+```bash
+pip install -r requirements-postgres.txt          # psycopg (only needed for Postgres)
+
+# Provision an app database + least-privilege role on your Postgres (idempotent):
+python -m scripts.provision_postgres --admin-url postgresql://postgres@127.0.0.1:5432/postgres
+# -> prints the DSPM_DB_URL to export
+
+export DSPM_DB_URL='postgresql://sentro_app:<pw>@127.0.0.1:5432/sentro_dev?sslmode=require'
+python -m pytest tests/ -q                          # the whole suite now runs on Postgres
+```
+
+For a disposable **local dev** cluster on Windows (trust auth, spare port, no service install), `scripts/pg_dev_cluster.ps1 up` will `initdb` + start one and print the next steps; `down`/`destroy` tear it down. The provisioned role is not a superuser and has only `CONNECT` + `USAGE, CREATE ON SCHEMA public` — it owns its own tables and nothing else. Bind Postgres to localhost/socket, require TLS for non-local clients, and encrypt the data volume and backups for production (see the roadmap's Phase 2 runbook).
 
 ## Dependencies
 
@@ -287,6 +305,7 @@ Requirements are split by purpose:
 | `requirements.txt` | Runtime dependencies only. Use this alone for production installs. |
 | `requirements-dev.txt` | Adds the test runner. Use `pip install -r requirements.txt -r requirements-dev.txt` for development. |
 | `requirements-ml.txt` | Optional spaCy-based ML/NER classification. See the caveat below. |
+| `requirements-postgres.txt` | Optional PostgreSQL backend (psycopg). Only needed when `DSPM_DB_URL` is set. |
 
 SQLite does not need a separate package because the app uses Python's built-in `sqlite3` module. WinRM endpoint scanning uses the existing `pywinrm` dependency; no extra package is needed for the GPO-based target preparation flow.
 
