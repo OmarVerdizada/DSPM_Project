@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 
 from classification.compliance.country_identifiers import validate_country_identifier
@@ -52,6 +53,42 @@ RULE_PREFILTER_TERMS = {
     for rule in GDPR_RULES
 }
 
+# Perf: the builtin GDPR keyword catalog (~40k terms across 67 rules) is STATIC, so
+# building the group list and its sha256 signature on every file - just to look up
+# the already-cached Aho-Corasick index - wasted ~60 ms/file. Cache the index by a
+# cheap key over only the (usually empty) custom groups; the builtin catalog is
+# pinned by catalog_version.
+_GDPR_INDEX_CACHE: dict = {}
+_GDPR_INDEX_LOCK = threading.Lock()
+
+
+def _custom_groups_key(custom_keyword_groups: list[dict]) -> tuple:
+    return tuple(sorted(
+        (
+            str(group.get("type") or ""),
+            str(group.get("language") or ""),
+            tuple(sorted({str(term).strip().lower() for term in (group.get("terms") or []) if str(term).strip()})),
+        )
+        for group in custom_keyword_groups
+    ))
+
+
+def _gdpr_keyword_index(custom_keyword_groups: list[dict], catalog_version: str, language: str):
+    key = (catalog_version, language, _custom_groups_key(custom_keyword_groups))
+    with _GDPR_INDEX_LOCK:
+        cached = _GDPR_INDEX_CACHE.get(key)
+    if cached is not None:
+        return cached
+    index = compiled_keyword_index(
+        framework="gdpr",
+        catalog_version=catalog_version,
+        language=language,
+        groups=_gdpr_keyword_groups(custom_keyword_groups),
+    )
+    with _GDPR_INDEX_LOCK:
+        _GDPR_INDEX_CACHE[key] = index
+    return index
+
 
 def classify_gdpr_content(content: str, metadata: dict | None = None, custom_keyword_groups: list[dict] | None = None) -> list[dict]:
     if not content and not metadata:
@@ -69,12 +106,10 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
         ]
     ).lower()
     tenant_id = str(metadata.get("tenant_id") or metadata.get("tenant") or "default")
-    keyword_groups = _gdpr_keyword_groups(custom_keyword_groups or [])
-    keyword_index = compiled_keyword_index(
-        framework="gdpr",
-        catalog_version=str(metadata.get("rule_catalog_version") or GDPR_RULE_CATALOG_VERSION),
-        language=str(metadata.get("language") or "all"),
-        groups=keyword_groups,
+    keyword_index = _gdpr_keyword_index(
+        custom_keyword_groups or [],
+        str(metadata.get("rule_catalog_version") or GDPR_RULE_CATALOG_VERSION),
+        str(metadata.get("language") or "all"),
     )
     indexed_keyword_matches = keyword_index.search(evidence_blob)
     started = time.perf_counter()

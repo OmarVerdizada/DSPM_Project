@@ -88,6 +88,13 @@ def keyword_hits_indexed(blob: str, keywords: Iterable[str], *, cache_namespace:
     terms = [str(keyword or "").strip() for keyword in keywords if str(keyword or "").strip()]
     if not terms:
         return []
+    # Perf: skip building/searching the automaton entirely when none of the terms is
+    # even a substring of the blob (the common case for a small ad-hoc keyword set
+    # called many times per file). A match requires the substring, so this is a
+    # correct necessary-condition prefilter.
+    blob_lower = blob.lower()
+    if not any(term.lower() in blob_lower for term in terms):
+        return []
     groups = [{"framework": cache_namespace, "language": "all", "type": "hit", "terms": terms}]
     index = compiled_keyword_index(
         framework=cache_namespace,

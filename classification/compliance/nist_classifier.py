@@ -327,9 +327,17 @@ def _apply_overlays(rules: list[dict[str, Any]], overlays: list[dict[str, Any]])
 
 def _keyword_hits(text: str, terms: list[Any]) -> list[str]:
     hits = []
+    # Lower the text ONCE and use it as a cheap substring prefilter. A word-boundary
+    # match requires the term to be present at all, so this correctly skips the
+    # expensive per-term regex (re.escape + compile + search) for the ~99% of a large
+    # catalog (thousands of terms) that never appear in a given file - the dominant
+    # NIST scan cost before this guard.
+    text_lower = text.lower()
     for term in terms:
         normalized = _normalize_text(str(term or ""))
         if not normalized:
+            continue
+        if normalized.lower() not in text_lower:
             continue
         if _term_matches(text, normalized):
             hits.append(str(term))
