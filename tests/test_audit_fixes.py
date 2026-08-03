@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sqlite3
 import unittest
 from uuid import uuid4
 
@@ -172,7 +173,9 @@ class RecordJobRetryTests(unittest.TestCase):
         def flaky():
             calls["n"] += 1
             if calls["n"] == 1:
-                raise store.sqlite3.OperationalError("database is locked")
+                # A transient "database is locked" - caught by db.OperationalError
+                # (which includes sqlite3.OperationalError) in store.record_job.
+                raise sqlite3.OperationalError("database is locked")
             with real_connect() as conn:
                 yield conn
 

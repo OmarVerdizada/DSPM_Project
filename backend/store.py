@@ -3,13 +3,13 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from backend import db
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,16 +51,14 @@ def _harden_db_permissions() -> None:
 
 @contextmanager
 def _connect():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    _harden_db_permissions()
-    try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+    # Delegate connection/commit/close to the backend seam (backend/db.py):
+    # SQLite (default) yields the same raw sqlite3 connection as before; Postgres
+    # (DSPM_DB_URL) yields an equivalent wrapper. The at-rest file hardening is
+    # SQLite-only - Postgres at-rest protection is an operator/server concern.
+    with db.connect(DB_PATH) as conn:
+        if db.is_sqlite():
+            _harden_db_permissions()
         yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def generate_registration_code() -> str:
@@ -523,14 +521,14 @@ def init_db() -> None:
                 """
             )
             now = datetime.now(timezone.utc).isoformat()
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tenants)").fetchall()}
+            columns = db.table_columns(conn, "tenants")
             if "registration_code" not in columns:
                 conn.execute("ALTER TABLE tenants ADD COLUMN registration_code TEXT NOT NULL DEFAULT ''")
             # F2: bring pre-version-stamp finding_index rows up to the current
             # schema. They land with index_version='' (i.e. "unknown logic"), so
             # the read-switch treats them as stale and serves the blob until a
             # backfill re-stamps them - the safe default for a migration mirror.
-            fi_columns = {row["name"] for row in conn.execute("PRAGMA table_info(finding_index)").fetchall()}
+            fi_columns = db.table_columns(conn, "finding_index")
             if "index_version" not in fi_columns:
                 conn.execute("ALTER TABLE finding_index ADD COLUMN index_version TEXT NOT NULL DEFAULT ''")
             # Created here (not in the schema script above) because the column it
@@ -813,7 +811,10 @@ def record_job(job: dict) -> None:
                         params,
                     )
             return
-        except sqlite3.OperationalError as exc:
+        except db.OperationalError as exc:
+            # SQLite's "database is locked" is the transient this retry targets;
+            # on Postgres, contention surfaces as different errors that fall
+            # through to `raise` (server-side locking/queueing handles it there).
             if "locked" not in str(exc).lower() or attempt == 2:
                 raise
             time.sleep(0.05 * (attempt + 1))
@@ -1553,7 +1554,7 @@ def data_retention_summary(tenant_id: str) -> dict:
         ).fetchone()[0]
     return {
         "tenant_id": tenant_id,
-        "database": "sqlite",
+        "database": db.backend_name(),
         "report_count": report_count,
         "audit_events": audit_count,
         "alert_events": alert_count,
