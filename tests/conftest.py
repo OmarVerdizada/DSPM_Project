@@ -26,11 +26,30 @@ To run the whole suite on Postgres:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 import pytest
 
 from backend import db
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Fail fast rather than reset a possibly-production database.
+
+    The per-test fixture TRUNCATEs the target Postgres database. A persistent
+    install points DSPM_DB_URL at the real store, so running the suite with that
+    env inherited would wipe it. Require an explicit DSPM_PG_TEST_RESET=1 opt-in
+    to run the destructive suite against Postgres; otherwise abort before any
+    test (or fixture) runs. SQLite is always fine (its isolation is a temp file)."""
+    if db.is_postgres() and os.getenv("DSPM_PG_TEST_RESET") != "1":
+        pytest.exit(
+            "DSPM_DB_URL selects PostgreSQL, but this suite RESETS (truncates) the "
+            "target database for per-test isolation. Refusing to run against a "
+            "possibly-production DB. Set DSPM_PG_TEST_RESET=1 to allow (use a "
+            "dedicated test database!), or unset DSPM_DB_URL to run on SQLite.",
+            returncode=2,
+        )
 
 # Every application table (single TRUNCATE; there are no FK constraints between
 # them). RESTART IDENTITY resets the audit_events / alert_events IDENTITY
@@ -52,7 +71,9 @@ def _now() -> str:
 @pytest.fixture(autouse=True)
 def _isolate_db_state():
     """Give each test a clean, baseline-seeded database on Postgres (no-op on SQLite)."""
-    if not db.is_postgres():
+    # pytest_configure has already aborted the session if this is Postgres without
+    # the explicit reset opt-in; the flag check here is belt-and-suspenders.
+    if not db.is_postgres() or os.getenv("DSPM_PG_TEST_RESET") != "1":
         yield
         return
 

@@ -281,18 +281,39 @@ Local runtime data is stored in SQLite at `data/dspm.sqlite` and is ignored by g
 
 The store (users and password hashes, API-key hashes, the encrypted credential vault, scan history, audit log, login-throttle and token-revocation state) defaults to SQLite. For a hardened, off-host, least-privilege deployment you can run it on **PostgreSQL** without any code change — set `DSPM_DB_URL` to a libpq DSN. The dialect seam lives in [`backend/db.py`](backend/db.py); SQLite remains byte-for-byte the default when `DSPM_DB_URL` is empty.
 
-```bash
-pip install -r requirements-postgres.txt          # psycopg (only needed for Postgres)
+**One-command install (Windows).** `scripts/setup_postgres.ps1 install` stands up a persistent, auto-starting `SentroPostgres` Windows service (initialized with scram auth, bound to 127.0.0.1), provisions a least-privilege app role + database, initializes the schema, and writes the `DSPM_DB_URL` to an admin-only credentials file (`C:\SentroPostgres\credentials.env`). It is idempotent, and `uninstall` (with `-RemoveData`) reverses it.
 
-# Provision an app database + least-privilege role on your Postgres (idempotent):
-python -m scripts.provision_postgres --admin-url postgresql://postgres@127.0.0.1:5432/postgres
-# -> prints the DSPM_DB_URL to export
+```powershell
+pip install -r requirements-postgres.txt            # psycopg (only needed for Postgres)
+./scripts/setup_postgres.ps1 install                # persistent service + provisioned role/db + schema
 
-export DSPM_DB_URL='postgresql://sentro_app:<pw>@127.0.0.1:5432/sentro_dev?sslmode=require'
-python -m pytest tests/ -q                          # the whole suite now runs on Postgres
+# Migrate existing SQLite data (users, tenants, vault, scans, audit, ...) into Postgres:
+$env:DSPM_DB_URL = (./scripts/setup_postgres.ps1 url)
+python -m scripts.migrate_sqlite_to_postgres
+
+./scripts/run_app.ps1 --host 127.0.0.1 --port 8000  # runs the app on Postgres
 ```
 
-For a disposable **local dev** cluster on Windows (trust auth, spare port, no service install), `scripts/pg_dev_cluster.ps1 up` will `initdb` + start one and print the next steps; `down`/`destroy` tear it down. The provisioned role is not a superuser and has only `CONNECT` + `USAGE, CREATE ON SCHEMA public` — it owns its own tables and nothing else. Bind Postgres to localhost/socket, require TLS for non-local clients, and encrypt the data volume and backups for production (see the roadmap's Phase 2 runbook).
+`run_app.ps1` loads `DSPM_DB_URL` from the credentials file for the app process only, so the DB password never enters the global machine environment. (If you prefer, `setx DSPM_DB_URL "<url>" /M` makes any launch use Postgres, at the cost of exposing the password in the machine environment.)
+
+The provisioned role is not a superuser and has only `CONNECT` + `USAGE, CREATE ON SCHEMA public` — it owns its own tables and nothing else. Bind Postgres to localhost/socket, require TLS for non-local clients, and encrypt the data volume and backups for production (see the roadmap's Phase 2 runbook).
+
+**Provisioning against an existing Postgres** (idempotent; no service install):
+
+```bash
+python -m scripts.provision_postgres --admin-url postgresql://postgres@dbhost:5432/postgres
+# -> prints the DSPM_DB_URL to export
+```
+
+**Running the test suite on Postgres.** The suite TRUNCATES its target database per test for isolation, so it refuses to run against Postgres unless you opt in with `DSPM_PG_TEST_RESET=1` — **always point it at a dedicated test database, never production**:
+
+```bash
+export DSPM_DB_URL='postgresql://sentro_app:<pw>@127.0.0.1:5432/sentro_test'
+export DSPM_PG_TEST_RESET=1
+python -m pytest tests/ -q
+```
+
+For a disposable **local dev** cluster on Windows (trust auth, spare port, no service install), `scripts/pg_dev_cluster.ps1 up` will `initdb` + start one; `down`/`destroy` tear it down.
 
 ## Dependencies
 
