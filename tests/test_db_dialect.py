@@ -292,6 +292,13 @@ class WrapperPlumbingTests(unittest.TestCase):
         self.assertNotIn("AUTOINCREMENT", raw.executed[0][0].upper())
         self.assertTrue(raw.executed[1][0].startswith("CREATE INDEX idx"))
 
+    def test_get_pool_none_without_psycopg_pool(self) -> None:
+        # When psycopg_pool is absent, the pool getter returns None so connect()
+        # falls back to connect-per-op (the live pooled path is covered by the
+        # Postgres suite, which runs with pooling enabled).
+        with mock.patch.object(db, "ConnectionPool", None):
+            self.assertIsNone(db._get_pool())
+
     def test_executemany_translates_and_forwards(self) -> None:
         raw = _FakeRaw()
         conn = db._PgConn(raw)

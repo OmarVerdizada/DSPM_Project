@@ -27,3 +27,6 @@
 #   link the system library.
 
 psycopg[binary]==3.3.4
+# Connection pooling (Track S-A): reuse connections instead of a TCP+scram
+# handshake per query. Optional - db.py falls back to connect-per-op without it.
+psycopg_pool==3.3.1

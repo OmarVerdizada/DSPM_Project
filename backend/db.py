@@ -41,9 +41,11 @@ runbook in the Phase 2 roadmap).
 
 from __future__ import annotations
 
+import atexit
 import os
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
@@ -52,6 +54,11 @@ try:  # psycopg is an OPTIONAL dependency - only needed when DSPM_DB_URL is a Po
     import psycopg  # type: ignore
 except Exception:  # pragma: no cover - import guard; absence is the SQLite-only norm
     psycopg = None  # type: ignore
+
+try:  # psycopg_pool is optional; without it the Postgres path uses connect-per-op.
+    from psycopg_pool import ConnectionPool  # type: ignore
+except Exception:  # pragma: no cover - import guard
+    ConnectionPool = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +322,66 @@ def _pg_connect() -> _PgConn:
 
 
 # ---------------------------------------------------------------------------
+# Connection pool (Track S-A). Reusing connections avoids paying a TCP +
+# scram handshake per query (~90ms on this host), which is the scale bottleneck
+# for concurrent queries over large tables. The pool is process-wide and bound
+# to the DSN in effect when first used; SQLite never pools (its "connect" is a
+# local file open). Falls back to connect-per-op if psycopg_pool is absent.
+# ---------------------------------------------------------------------------
+
+_pool: Any = None
+_pool_lock = threading.Lock()
+_pool_dsn: str | None = None
+
+
+def _get_pool():
+    """Lazily create the process-wide pool for the current DSN, or return None
+    when psycopg_pool isn't installed (callers then use connect-per-op)."""
+    global _pool, _pool_dsn
+    if ConnectionPool is None:
+        return None
+    dsn = db_url()
+    if _pool is not None and _pool_dsn == dsn:
+        return _pool
+    with _pool_lock:
+        if _pool is not None and _pool_dsn == dsn:
+            return _pool
+        if _pool is not None:  # DSN changed (tests) - retire the old pool
+            _close_locked()
+        pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=int(os.getenv("DSPM_DB_POOL_MIN", "1")),
+            max_size=int(os.getenv("DSPM_DB_POOL_MAX", "10")),
+            timeout=float(os.getenv("DSPM_DB_CONNECT_TIMEOUT", "10")),
+            max_idle=float(os.getenv("DSPM_DB_POOL_MAX_IDLE", "300")),
+            kwargs={"row_factory": _pg_row_factory},
+            open=True,
+            name="sentro-dspm",
+        )
+        _pool = pool
+        _pool_dsn = dsn
+        atexit.register(close_pool)
+        return _pool
+
+
+def _close_locked() -> None:
+    global _pool, _pool_dsn
+    if _pool is not None:
+        try:
+            _pool.close()
+        except Exception:  # pragma: no cover - best effort
+            pass
+        _pool = None
+        _pool_dsn = None
+
+
+def close_pool() -> None:
+    """Close the pool (e.g. at app shutdown). Safe to call when none exists."""
+    with _pool_lock:
+        _close_locked()
+
+
+# ---------------------------------------------------------------------------
 # Public connect() - the seam store._connect() delegates to
 # ---------------------------------------------------------------------------
 
@@ -324,14 +391,24 @@ def connect(sqlite_path: Path):
 
     SQLite: the raw ``sqlite3.Connection`` (row_factory + FK pragma), i.e. the
     exact object and setup store.py has always used. Postgres: a :class:`_PgConn`
-    wrapper providing the same execute/executescript/commit surface."""
+    wrapper over a pooled connection (or a fresh one if pooling is unavailable),
+    providing the same execute/executescript/commit surface."""
     if is_postgres():
-        conn = _pg_connect()
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        pool = _get_pool()
+        if pool is not None:
+            # pool.connection() returns the connection to the pool on exit and
+            # resets it; we commit explicitly on clean exit (matching the
+            # connect-per-op semantics) and rely on its rollback-on-exception.
+            with pool.connection() as raw:
+                yield _PgConn(raw)
+                raw.commit()
+        else:  # no psycopg_pool -> connect-per-op
+            conn = _pg_connect()
+            try:
+                yield conn
+                conn.commit()
+            finally:
+                conn.close()
     else:
         Path(sqlite_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(sqlite_path)
