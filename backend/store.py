@@ -436,6 +436,21 @@ def init_db() -> None:
                     stable_object_id TEXT,
                     path TEXT,
                     name TEXT,
+                    -- S-B queryable-inventory columns (denormalized from the scan
+                    -- so the inventory list filters/sorts/searches in the DB).
+                    extension TEXT,
+                    share TEXT,
+                    risk_level TEXT,
+                    risk_score INTEGER NOT NULL DEFAULT 0,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    owner TEXT,
+                    modified_at TEXT,
+                    finding_count INTEGER NOT NULL DEFAULT 0,
+                    top_frameworks TEXT,
+                    is_hidden INTEGER NOT NULL DEFAULT 0,
+                    is_system INTEGER NOT NULL DEFAULT 0,
+                    is_protected INTEGER NOT NULL DEFAULT 0,
+                    search_text TEXT,
                     PRIMARY KEY (tenant_id, id)
                 );
 
@@ -534,6 +549,41 @@ def init_db() -> None:
             # Created here (not in the schema script above) because the column it
             # covers may have just been added by the ALTER on a pre-existing DB.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_finding_index_version ON finding_index (tenant_id, index_version)")
+
+            # S-B: bring pre-existing `assets` tables up to the queryable-inventory
+            # schema. New columns default to 0/NULL; a re-scan (dual-write) or
+            # backfill_normalized_scans() populates them for historical assets.
+            asset_columns = db.table_columns(conn, "assets")
+            for col, coltype in (
+                ("extension", "TEXT"),
+                ("share", "TEXT"),
+                ("risk_level", "TEXT"),
+                ("risk_score", "INTEGER NOT NULL DEFAULT 0"),
+                ("size", "INTEGER NOT NULL DEFAULT 0"),
+                ("owner", "TEXT"),
+                ("modified_at", "TEXT"),
+                ("finding_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("top_frameworks", "TEXT"),
+                ("is_hidden", "INTEGER NOT NULL DEFAULT 0"),
+                ("is_system", "INTEGER NOT NULL DEFAULT 0"),
+                ("is_protected", "INTEGER NOT NULL DEFAULT 0"),
+                ("search_text", "TEXT"),
+            ):
+                if col not in asset_columns:
+                    conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {coltype}")
+            # Index every filter/sort column (created after the ALTERs so the
+            # columns exist on a migrated DB). FTS over search_text is Track S-D.
+            for _idx in (
+                "idx_assets_tenant_risk_score ON assets (tenant_id, risk_score)",
+                "idx_assets_tenant_risk_level ON assets (tenant_id, risk_level)",
+                "idx_assets_tenant_extension ON assets (tenant_id, extension)",
+                "idx_assets_tenant_size ON assets (tenant_id, size)",
+                "idx_assets_tenant_modified ON assets (tenant_id, modified_at)",
+                "idx_assets_tenant_finding_count ON assets (tenant_id, finding_count)",
+                "idx_assets_tenant_source ON assets (tenant_id, source)",
+            ):
+                conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
+
             conn.execute(
                 """
                 INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -671,8 +721,15 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
     )
     for asset in scan.assets:
         conn.execute(
-            "INSERT OR REPLACE INTO assets (tenant_id, id, source, stable_object_id, path, name) VALUES (?, ?, ?, ?, ?, ?)",
-            (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name),
+            "INSERT OR REPLACE INTO assets "
+            "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
+            "risk_level, risk_score, size, owner, modified_at, finding_count, "
+            "top_frameworks, is_hidden, is_system, is_protected, search_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
+             asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
+             asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
+             asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text),
         )
     for version in scan.asset_versions:
         conn.execute(

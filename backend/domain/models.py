@@ -10,12 +10,45 @@ wired into any runtime path yet (see docs/phase1_kickoff_rfc.md).
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 
 
 def _sha(*parts: str, length: int = 24) -> str:
     raw = "|".join(str(p or "") for p in parts)
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:length]
+
+
+def _asset_risk(record: dict) -> tuple[str, int]:
+    """(risk_level, risk_score) from a file record. The file-level ``risk`` is a
+    ``{level, score}`` dict; tolerate a bare string or missing value."""
+    risk = record.get("risk")
+    if isinstance(risk, dict):
+        level = str(risk.get("level") or "").upper()
+        try:
+            score = int(risk.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        return level, score
+    if isinstance(risk, str):
+        return risk.strip().upper(), 0
+    return "", 0
+
+
+def _asset_top_frameworks(record: dict, limit: int = 3) -> str:
+    """Comma-joined most-common compliance frameworks across a file's findings
+    (from each finding's ``framework`` + ``frameworks`` list), for the inventory
+    row's at-a-glance column."""
+    counter: Counter = Counter()
+    for finding in record.get("findings") or []:
+        primary = str(finding.get("framework") or "").strip()
+        if primary:
+            counter[primary] += 1
+        for extra in finding.get("frameworks") or []:
+            label = str(extra or "").strip()
+            if label:
+                counter[label] += 1
+    return ",".join(name for name, _ in counter.most_common(limit))
 
 
 def asset_identity(tenant_id: str, source: str, stable_object_id: str, path: str) -> str:
@@ -68,6 +101,21 @@ class Asset:
     stable_object_id: str
     path: str
     name: str
+    # S-B queryable-inventory columns: denormalized from the file record so the
+    # inventory list can filter / sort / search in the DB without loading blobs.
+    extension: str = ""
+    share: str = ""
+    risk_level: str = ""
+    risk_score: int = 0
+    size: int = 0
+    owner: str = ""
+    modified_at: str = ""
+    finding_count: int = 0
+    top_frameworks: str = ""
+    is_hidden: int = 0
+    is_system: int = 0
+    is_protected: int = 0
+    search_text: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -227,6 +275,10 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
 
         if asset_id not in seen_assets:
             seen_assets.add(asset_id)
+            extension = str(record.get("extension") or "").lower()
+            owner = str(record.get("owner") or "")
+            risk_level, risk_score = _asset_risk(record)
+            search_text = " ".join(p for p in (path, name, owner, extension) if p).lower()
             assets.append(
                 Asset(
                     id=asset_id,
@@ -235,6 +287,19 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
                     stable_object_id=stable_object_id or path,
                     path=path,
                     name=name,
+                    extension=extension,
+                    share=str(record.get("share") or ""),
+                    risk_level=risk_level,
+                    risk_score=risk_score,
+                    size=int(record.get("size") or record.get("total_bytes") or 0),
+                    owner=owner,
+                    modified_at=str(record.get("modified_at") or record.get("mtime") or record.get("last_write_time") or ""),
+                    finding_count=len(record.get("findings") or []),
+                    top_frameworks=_asset_top_frameworks(record),
+                    is_hidden=1 if record.get("is_hidden") else 0,
+                    is_system=1 if record.get("is_system") else 0,
+                    is_protected=1 if record.get("protected") else 0,
+                    search_text=search_text,
                 )
             )
             asset_versions.append(
