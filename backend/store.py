@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
@@ -1214,6 +1215,212 @@ def _normalized_ready(tenant_id: str) -> bool:
 
 def _read_from_normalized(tenant_id: str) -> bool:
     return os.getenv("DSPM_READ_FROM_NORMALIZED", "0") == "1" and _normalized_ready(tenant_id)
+
+
+# ---------------------------------------------------------------------------
+# S-C: cursor-paginated inventory over the S-B `assets` columns.
+#
+# Mirrors the findings read-switch: served from the normalized `assets` table
+# when DSPM_INVENTORY_FROM_NORMALIZED=1 AND the mirror is complete, else from the
+# authoritative report blobs (bounded to the 1000 newest scans, like the findings
+# fallback). tests/test_inventory_api.py pins the two paths equal (parity).
+#
+# Keyset (not OFFSET) pagination: WHERE (sort, id) </> cursor ORDER BY sort, id -
+# constant cost at any depth. Text ordering uses db.collate_c so Postgres, SQLite
+# and the blob path's Python comparison agree byte-for-byte.
+# ---------------------------------------------------------------------------
+
+# name -> (column, is_text, direction). All parity-safe: numeric compare, or text
+# under COLLATE "C". risk_score is the default (highest risk first).
+INVENTORY_SORTS: dict[str, tuple[str, bool, str]] = {
+    "risk_score": ("risk_score", False, "DESC"),
+    "size": ("size", False, "DESC"),
+    "finding_count": ("finding_count", False, "DESC"),
+    "modified_at": ("modified_at", True, "DESC"),
+    "name": ("name", True, "ASC"),
+}
+_DEFAULT_INVENTORY_SORT = "risk_score"
+_INVENTORY_COLS = (
+    "id", "source", "path", "name", "extension", "share", "risk_level",
+    "risk_score", "size", "owner", "modified_at", "finding_count",
+    "top_frameworks", "is_hidden", "is_system", "is_protected",
+)
+_INVENTORY_COUNT_CAP = 10000
+
+
+def _inventory_ready(tenant_id: str) -> bool:
+    """True when every persisted scan has been mirrored - a scan_report with no
+    matching scan_run means the assets mirror is missing that scan (assets are
+    written in the same savepoint as scan_runs)."""
+    with _connect() as conn:
+        incomplete = conn.execute(
+            "SELECT 1 FROM scan_reports sr WHERE sr.tenant_id = ? AND NOT EXISTS ("
+            "  SELECT 1 FROM scan_runs r WHERE r.tenant_id = sr.tenant_id AND r.id = sr.scan_id) LIMIT 1",
+            (tenant_id,),
+        ).fetchone()
+    return incomplete is None
+
+
+def _read_inventory_from_normalized(tenant_id: str) -> bool:
+    return os.getenv("DSPM_INVENTORY_FROM_NORMALIZED", "0") == "1" and _inventory_ready(tenant_id)
+
+
+def _like_escape(value: str) -> str:
+    """Escape LIKE wildcards so a search/framework term matches literally (and so
+    the SQL LIKE and the blob path's Python substring test agree)."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _encode_cursor(sort_value, asset_id: str) -> str:
+    raw = json.dumps([sort_value, asset_id], ensure_ascii=False)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _decode_cursor(cursor: str):
+    if not cursor:
+        return None
+    try:
+        value, asset_id = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+        return value, str(asset_id)
+    except Exception:
+        return None  # malformed cursor -> serve the first page rather than error
+
+
+def _inventory_filters(risk: str, source: str, framework: str, q: str, extension: str) -> dict:
+    return {
+        "risk": str(risk or "").strip().upper(),
+        "source": str(source or "").strip().lower(),
+        "extension": str(extension or "").strip().lower(),
+        "framework": str(framework or "").strip().lower(),
+        "q": str(q or "").strip().lower(),
+    }
+
+
+def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
+                   q: str = "", extension: str = "", sort: str = "risk_score",
+                   cursor: str = "", limit: int = 100) -> dict:
+    """One keyset-paginated page of the file inventory. Filters: risk (level),
+    source, framework (in top_frameworks), q (search_text), extension. Returns
+    {items, next_cursor, has_more, total, total_is_estimate, source}."""
+    sort = sort if sort in INVENTORY_SORTS else _DEFAULT_INVENTORY_SORT
+    limit = max(1, min(int(limit or 100), 500))
+    filt = _inventory_filters(risk, source, framework, q, extension)
+    if _read_inventory_from_normalized(tenant_id):
+        try:
+            result = _list_inventory_normalized(tenant_id, filt, sort, cursor, limit)
+            result["source"] = "normalized"
+            return result
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            logger.warning("Normalized inventory failed, falling back to blob: %s", exc)
+    result = _list_inventory_blob(tenant_id, filt, sort, cursor, limit)
+    result["source"] = "blob"
+    return result
+
+
+def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
+    col, is_text, direction = INVENTORY_SORTS[sort]
+    order_expr = db.collate_c(f"COALESCE({col}, '')") if is_text else col
+    id_expr = db.collate_c("id")
+    op = "<" if direction == "DESC" else ">"
+
+    where = ["tenant_id = ?"]
+    params: list = [tenant_id]
+    if filt["risk"]:
+        where.append("risk_level = ?"); params.append(filt["risk"])
+    if filt["source"]:
+        where.append("source = ?"); params.append(filt["source"])
+    if filt["extension"]:
+        where.append("extension = ?"); params.append(filt["extension"])
+    if filt["framework"]:
+        where.append("lower(COALESCE(top_frameworks, '')) LIKE ? ESCAPE '\\'")
+        params.append(f"%{_like_escape(filt['framework'])}%")
+    if filt["q"]:
+        where.append("COALESCE(search_text, '') LIKE ? ESCAPE '\\'")
+        params.append(f"%{_like_escape(filt['q'])}%")
+
+    count_where, count_params = list(where), list(params)
+
+    decoded = _decode_cursor(cursor)
+    if decoded is not None:
+        cv, cid = decoded
+        where.append(f"({order_expr} {op} ? OR ({order_expr} = ? AND {id_expr} {op} ?))")
+        params.extend([cv, cv, cid])
+
+    sql = (
+        f"SELECT {', '.join(_INVENTORY_COLS)} FROM assets WHERE {' AND '.join(where)} "
+        f"ORDER BY {order_expr} {direction}, {id_expr} {direction} LIMIT ?"
+    )
+    params.append(limit + 1)
+    with _connect() as conn:
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        cap_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM assets WHERE {' AND '.join(count_where)} LIMIT ?) t"
+        total = int(conn.execute(cap_sql, tuple(count_params) + (_INVENTORY_COUNT_CAP + 1,)).fetchone()[0])
+
+    return _inventory_page([{c: r[c] for c in _INVENTORY_COLS} for r in rows], col, is_text, limit, total)
+
+
+def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
+    from backend.domain import normalize_scan_report
+
+    latest: dict[str, dict] = {}
+    for item in read_scan_history(tenant_id, limit=1000):  # oldest-first -> newest scan overwrites
+        report = read_scan_report(tenant_id, item.get("scan_id"))
+        if not report:
+            continue
+        for asset in normalize_scan_report(tenant_id, report).assets:
+            latest[asset.id] = {c: getattr(asset, c) for c in _INVENTORY_COLS} | {"search_text": asset.search_text}
+
+    col, is_text, direction = INVENTORY_SORTS[sort]
+    reverse = direction == "DESC"
+
+    def _matches(row: dict) -> bool:
+        if filt["risk"] and str(row.get("risk_level") or "") != filt["risk"]:
+            return False
+        if filt["source"] and str(row.get("source") or "") != filt["source"]:
+            return False
+        if filt["extension"] and str(row.get("extension") or "") != filt["extension"]:
+            return False
+        if filt["framework"] and filt["framework"] not in str(row.get("top_frameworks") or "").lower():
+            return False
+        if filt["q"] and filt["q"] not in str(row.get("search_text") or ""):
+            return False
+        return True
+
+    def _key(row: dict):
+        v = row.get(col)
+        return ((v or "") if is_text else (v or 0), str(row.get("id") or ""))
+
+    rows = sorted((r for r in latest.values() if _matches(r)), key=_key, reverse=reverse)
+    total = len(rows)
+
+    decoded = _decode_cursor(cursor)
+    if decoded is not None:
+        cv, cid = decoded
+        pivot = ((cv or "") if is_text else (cv or 0), str(cid))
+        rows = [r for r in rows if (_key(r) < pivot if reverse else _key(r) > pivot)]
+
+    # strip the internal search_text from the returned items
+    for r in rows:
+        r.pop("search_text", None)
+    return _inventory_page(rows, col, is_text, limit, total)
+
+
+def _inventory_page(rows: list[dict], col: str, is_text: bool, limit: int, total: int) -> dict:
+    """Shared page assembly for both inventory paths (identical output shape)."""
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        value = last.get(col)
+        next_cursor = _encode_cursor((value or "") if is_text else value, str(last.get("id") or ""))
+    return {
+        "items": page,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "total": min(total, _INVENTORY_COUNT_CAP),
+        "total_is_estimate": total > _INVENTORY_COUNT_CAP,
+    }
 
 
 def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict | None:

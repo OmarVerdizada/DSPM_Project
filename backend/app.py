@@ -74,6 +74,7 @@ from backend.store import (
     get_finding_history,
     get_finding_occurrences,
     list_findings,
+    list_inventory,
     update_finding_lifecycle,
     update_finding_workflow,
     update_user_password,
@@ -1510,6 +1511,26 @@ def findings_index(
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict:
     return {"findings": list_findings(principal.tenant_id, status=status, limit=limit)}
+
+
+@app.get("/api/inventory")
+def inventory_index(
+    principal: Principal = Depends(require_role("viewer")),
+    risk: str = Query(default="", max_length=20),
+    source: str = Query(default="", max_length=40),
+    framework: str = Query(default="", max_length=40),
+    q: str = Query(default="", max_length=200),
+    extension: str = Query(default="", max_length=20),
+    sort: str = Query(default="risk_score", max_length=20),
+    after: str = Query(default="", max_length=512),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    """S-C: keyset-paginated file inventory. The DB filters/sorts/searches so the
+    browser fetches one page instead of the whole file list."""
+    return list_inventory(
+        principal.tenant_id, risk=risk, source=source, framework=framework,
+        q=q, extension=extension, sort=sort, cursor=after, limit=limit,
+    )
 
 
 @app.get("/api/findings/{finding_id}")

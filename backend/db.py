@@ -421,6 +421,18 @@ def connect(sqlite_path: Path):
             conn.close()
 
 
+def collate_c(sql_expr: str) -> str:
+    """Wrap a *text* SQL expression so it orders/compares by byte value on both
+    backends: Postgres ``COLLATE "C"`` == SQLite BINARY (the default) == Python
+    codepoint order. Without this, a locale-collated Postgres database (e.g.
+    ``English_United States.1252``) orders text differently from SQLite and from
+    the blob path's Python comparison, breaking keyset-pagination parity. Apply
+    only to text expressions - Postgres rejects COLLATE on non-collatable types."""
+    if is_postgres():
+        return f'({sql_expr}) COLLATE "C"'
+    return sql_expr
+
+
 def table_columns(conn: Any, table: str) -> set[str]:
     """Column names of ``table`` - the backend-appropriate replacement for
     ``PRAGMA table_info(table)`` (used by store.init_db for ALTER migrations)."""
