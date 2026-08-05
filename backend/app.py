@@ -354,18 +354,10 @@ class ConnectionRequest(BaseModel):
     @field_validator("allowed_extensions")
     @classmethod
     def _validate_extensions(cls, values: list[str]) -> list[str]:
-        normalized: list[str] = []
-        for item in values or []:
-            extension = str(item or "").strip().lower()
-            if not extension:
-                continue
-            if not extension.startswith("."):
-                extension = f".{extension}"
-            if not re.fullmatch(r"\.[a-z0-9][a-z0-9._+-]{0,40}", extension):
-                raise ValueError("Invalid file extension filter")
-            if extension not in normalized:
-                normalized.append(extension)
-        return normalized
+        # Tolerant + canonical (shared with every scan type): split multi-token
+        # items, strip globs/quotes, drop invalid tokens - never raise. A typo or
+        # a "*.pdf" no longer fails the whole scan, and every scan type agrees.
+        return sorted(normalize_extension_filter(values))
 
 
 class AssetOverride(BaseModel):
@@ -408,7 +400,7 @@ class EndpointScanRequest(BaseModel):
     read_acl: bool = False
     inspect_archives: bool = False
     async_scan: bool = False
-    allowed_extensions: list[str] = Field(default_factory=list)
+    allowed_extensions: list[str] = Field(default_factory=list, max_length=160)
     extension_filter_enabled: bool = False
     include_hidden: bool = True
     include_system: bool = False
@@ -423,6 +415,14 @@ class EndpointScanRequest(BaseModel):
     @classmethod
     def _clean_endpoint_text(cls, value: str) -> str:
         return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
+
+    @field_validator("allowed_extensions")
+    @classmethod
+    def _validate_endpoint_extensions(cls, values: list[str]) -> list[str]:
+        # Same canonical, tolerant normalization as the file-server scan, so the
+        # endpoint scan no longer silently accepts a garbage filter (e.g. "*.pdf"
+        # -> ".*.pdf") that matches nothing.
+        return sorted(normalize_extension_filter(values))
 
     @field_validator("compliance_frameworks")
     @classmethod

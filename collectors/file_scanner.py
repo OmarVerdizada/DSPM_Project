@@ -7,6 +7,7 @@ from typing import Callable, Iterable
 import hashlib
 import os
 import platform
+import re
 import subprocess
 import time
 import zipfile
@@ -241,15 +242,44 @@ def _archive_safety_metadata(extension: str) -> dict:
     }
 
 
+# A valid file extension: a dot, an alphanumeric, then up to 40 of a small safe
+# set. Shared by the frontend (identical regex) and the API validators.
+EXTENSION_PATTERN = re.compile(r"\.[a-z0-9][a-z0-9._+-]{0,40}")
+# Callers pass extensions as list items, but a single item may itself hold several
+# tokens separated by commas / whitespace / semicolons / pipes (users type
+# "pdf, docx" or "pdf docx", or paste a blob). Split on all of them.
+_EXTENSION_SPLIT = re.compile(r"[,\s;|]+")
+# Bound the result so a giant pasted blob can't create an unbounded filter set.
+MAX_EXTENSION_FILTER = 256
+
+
+def normalize_one_extension(token: str) -> str:
+    """Normalize a single token to a canonical extension, or "" if it isn't one.
+
+    Tolerant of the ways people type extensions: surrounding quotes, a leading
+    glob (``*.pdf`` -> ``.pdf``), a missing dot (``pdf`` -> ``.pdf``), and case.
+    Returns "" for anything that isn't a valid extension (dropped, never raised)."""
+    token = str(token or "").strip().strip("'\"").strip().lower().lstrip("*")
+    if not token:
+        return ""
+    if not token.startswith("."):
+        token = f".{token}"
+    return token if EXTENSION_PATTERN.fullmatch(token) else ""
+
+
 def normalize_extension_filter(extensions: Iterable[str] | None) -> set[str]:
+    """Canonical, tolerant extension-filter normalizer used by every scan type
+    (local / SMB / WinRM) and the API validators, so they all agree. Splits
+    multi-token items, drops invalid tokens instead of raising, and never lets a
+    malformed policy fail a scan or leak a garbage filter that matches nothing."""
     normalized: set[str] = set()
     for item in extensions or []:
-        extension = item.strip().lower()
-        if not extension:
-            continue
-        if not extension.startswith("."):
-            extension = f".{extension}"
-        normalized.add(extension)
+        for token in _EXTENSION_SPLIT.split(str(item or "")):
+            extension = normalize_one_extension(token)
+            if extension:
+                normalized.add(extension)
+                if len(normalized) >= MAX_EXTENSION_FILTER:
+                    return normalized
     return normalized
 
 
