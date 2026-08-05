@@ -11,7 +11,11 @@ def analyze_acl(acl: dict, file_record: dict | None = None) -> dict:
 
     wide_access = any(marker in principal for marker in WIDE_ACCESS_MARKERS for principal in principals)
     privileged_access = any(marker in principal for marker in PRIVILEGED_MARKERS for principal in principals)
-    writable = any(permission in {"write", "modify", "full_control", "full control"} for permission in permissions)
+    writable = any(
+        marker in permission.replace("_", " ")
+        for permission in permissions
+        for marker in ("write", "modify", "full control", "fullcontrol", "createdirectories", "createfiles")
+    )
 
     issues: list[str] = []
     if wide_access:

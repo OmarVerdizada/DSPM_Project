@@ -1,0 +1,32 @@
+# Optional PostgreSQL backend (roadmap Phase 2, M2).
+#
+#   pip install -r requirements.txt -r requirements-postgres.txt
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# backend/db.py imports psycopg lazily. The default backend is SQLite (a local
+# file), so the base install stays lean and psycopg is NOT pulled in unless an
+# operator opts into Postgres by setting DSPM_DB_URL to a libpq DSN. This mirrors
+# requirements-ocr.txt / requirements-ml.txt (feature-gated extras).
+#
+# WHY POSTGRES (the security milestone)
+# -------------------------------------
+# The primary store holds credential material - users.password_hash,
+# api_keys.key_hash, and the encrypted vault `secrets` blobs. On SQLite that is a
+# flat file whose at-rest protection is only host filesystem ACLs (the interim
+# chmod 0600 in store._harden_db_permissions). Postgres moves it off-host onto a
+# least-privilege, TLS-fronted, encrypted-at-rest server with real access control
+# and auditable backups - which is the Phase 2 acceptance criterion.
+#
+# WHY psycopg 3 (over psycopg2)
+# -----------------------------
+# * Actively maintained, native support for modern libpq, better type adaptation.
+# * The [binary] extra bundles libpq, so no separate PostgreSQL client-lib install
+#   is needed on the host (matches the air-gapped, per-customer deployment model).
+#   On a host that already has libpq you may instead install plain `psycopg` to
+#   link the system library.
+
+psycopg[binary]==3.3.4
+# Connection pooling (Track S-A): reuse connections instead of a TCP+scram
+# handshake per query. Optional - db.py falls back to connect-per-op without it.
+psycopg_pool==3.3.1

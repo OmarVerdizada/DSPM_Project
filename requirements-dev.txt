@@ -1,0 +1,13 @@
+# Development and test dependencies.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Production installs must use requirements.txt alone so that no test framework
+# is shipped in the runtime image.
+
+-r requirements.txt
+
+# Test runner. The suite itself is written against the stdlib `unittest`
+# module, so it also runs via `python -m unittest discover tests`. pytest is
+# used as the runner because it gives clearer output and is what CI invokes.
+pytest==8.4.2

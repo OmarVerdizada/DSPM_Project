@@ -3,8 +3,8 @@
 ## Implemented in this build
 
 - JWT authentication with roles: `admin`, `analyst`, `viewer`.
-- SQLite-backed tenant and user management with tenant-scoped registration, admin user creation, role updates, password reset, and login activity.
-- Separate login and registration pages with tenant selection and password confirmation.
+- SQLite-backed tenant and user management with invitation-code registration, admin user creation, role updates, password reset, and login activity.
+- Separate login and registration pages with tenant ID, registration code, and password confirmation.
 - API key generation helper and API-key authentication through `X-API-Key`.
 - Tenant-aware SQLite storage at `data/dspm.sqlite`, created automatically on first run.
 - Hidden local and SMB files are included in discovery results and counted in scan summaries.

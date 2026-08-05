@@ -1,0 +1,31 @@
+# Optional OCR extra - image / scanned-document text extraction.
+#
+#   pip install -r requirements.txt -r requirements-ocr.txt
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# collectors/ocr.py imports rapidocr_onnxruntime lazily. When it is absent (or
+# DSPM_OCR_ENABLED != 1) OCR is silently skipped and scans run normally - the
+# base install stays lean. This mirrors requirements-ml.txt (spaCy).
+#
+# WHY RapidOCR (over EasyOCR / Tesseract)
+# ---------------------------------------
+# On-prem, per-customer, frequently CPU-only and air-gapped deployments:
+#   * ONNX Runtime backend - NO PyTorch (EasyOCR pulls ~1.5 GB of PyTorch).
+#   * The PP-OCRv4 models ship INSIDE the wheel - no model download on first run,
+#     so it works air-gapped and there is no unverified-blob supply-chain step.
+#   * Apache-2.0 - clean for commercial redistribution.
+#   * Good accuracy-to-weight on printed/scanned business documents (the DSPM case).
+#
+# FOOTPRINT / COST
+# ----------------
+# ~150 MB installed (onnxruntime + opencv-python + numpy + shapely + pyclipper).
+# ~2 s/image on CPU after a one-time model warmup; hence OCR is opt-in per
+# deployment (DSPM_OCR_ENABLED) and image size/pixels/time are hard-bounded in
+# collectors/ocr.py so a hostile image cannot hang or exhaust the scanner.
+#
+# NOTE (servers without a display): rapidocr-onnxruntime depends on opencv-python,
+# which links GUI libraries. On a headless host you may instead install with
+# `--no-deps` and provide `opencv-python-headless` yourself to avoid the GUI deps.
+
+rapidocr-onnxruntime==1.2.3

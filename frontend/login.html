@@ -1,57 +1,635 @@
 <!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Login | DSPM</title>
-    <link rel="stylesheet" href="/static/styles.css?v=9" />
-  </head>
-  <body class="login-page">
-    <section class="login-screen standalone">
-      <div class="login-visual">
-        <div class="logo-lockup large">
-          <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 48 48" role="img">
-              <path d="M8 13c0-3 2-5 5-5h15c8 0 14 6 14 16s-6 16-14 16H13c-3 0-5-2-5-5V13Z" />
-              <path d="M19 16h8c4 0 7 3 7 8s-3 8-7 8h-8V16Z" />
-              <path d="M19 16v16" />
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Sign In | SENTRO</title>
+
+  <!-- Apply saved theme BEFORE CSS so there's no flash -->
+  <script>var _t=localStorage.getItem('s-theme');if(_t)document.documentElement.setAttribute('data-theme',_t);</script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
+
+    /* ─── LIGHT (default) ─── */
+    :root {
+      --lbg:    #ffffff;
+      --ltxt:   #111827;
+      --lsub:   #6b7280;
+      --lmut:   #9ca3af;
+      --ibg:    #f9fafb;
+      --ibdr:   #e5e7eb;
+      --ifoc:   #2563eb;
+      --itxt:   #111827;
+      --iph:    #9ca3af;
+      --divdr:  #f3f4f6;
+      --lnk:    #2563eb;
+      --rbg:    #1d4ed8;
+      --rglow:  rgba(255,255,255,0.13);
+      --rring:  rgba(255,255,255,0.2);
+      --rnode:  rgba(255,255,255,0.13);
+      --rbdr:   rgba(255,255,255,0.3);
+      --rline:  rgba(255,255,255,0.3);
+      --rtxt:   #ffffff;
+      --rsub:   rgba(255,255,255,0.65);
+      --dotoff: rgba(255,255,255,0.3);
+      --doton:  #ffffff;
+      --cbg:    rgba(255,255,255,0.15);
+      --cbdr:   rgba(255,255,255,0.25);
+      --ctxt:   #ffffff;
+      --cmut:   rgba(255,255,255,0.6);
+      --tbg:    #f3f4f6;
+      --tbdr:   #e5e7eb;
+      --tico:   #374151;
+    }
+
+    /* ─── DARK ─── */
+    html[data-theme="dark"] {
+      --lbg:    #0f172a;
+      --ltxt:   #f1f5f9;
+      --lsub:   #94a3b8;
+      --lmut:   #475569;
+      --ibg:    #1e293b;
+      --ibdr:   #334155;
+      --ifoc:   #3b82f6;
+      --itxt:   #f1f5f9;
+      --iph:    #475569;
+      --divdr:  #1e293b;
+      --lnk:    #60a5fa;
+      --rbg:    #060914;
+      --rglow:  rgba(37,99,235,0.15);
+      --rring:  rgba(37,99,235,0.2);
+      --rnode:  rgba(10,14,26,0.95);
+      --rbdr:   rgba(56,189,248,0.3);
+      --rline:  rgba(56,189,248,0.28);
+      --rtxt:   #e9f1ff;
+      --rsub:   rgba(148,163,184,0.7);
+      --dotoff: rgba(56,189,248,0.2);
+      --doton:  #38bdf8;
+      --cbg:    rgba(10,14,26,0.92);
+      --cbdr:   rgba(37,99,235,0.3);
+      --ctxt:   #e9f1ff;
+      --cmut:   rgba(148,163,184,0.6);
+      --tbg:    #1e293b;
+      --tbdr:   #334155;
+      --tico:   #94a3b8;
+    }
+
+    /* ─── LAYOUT ─── */
+    .page { display: flex; height: 100vh; overflow: hidden; }
+
+    /* Theme toggle */
+    .theme-btn {
+      position: fixed; top: 1rem; right: 1rem; z-index: 999;
+      width: 40px; height: 40px; border-radius: 50%;
+      border: 1.5px solid var(--tbdr);
+      background: var(--tbg); color: var(--tico);
+      font-size: 1.05rem; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,.12);
+      transition: transform .2s, background .3s, border-color .3s;
+    }
+    .theme-btn:hover { transform: rotate(20deg) scale(1.1); }
+
+    /* ─── LEFT ─── */
+    .left {
+      flex: 0 0 500px;
+      background: var(--lbg);
+      display: flex; align-items: center; justify-content: center;
+      padding: 3rem;
+      overflow-y: auto;
+      transition: background .3s;
+    }
+
+    .form-box { width: 100%; max-width: 360px; }
+
+    /* Logo */
+    .logo-row { display: flex; align-items: center; gap: .8rem; margin-bottom: 2.5rem; }
+    .logo-name {
+      font-family: 'Audiowide', sans-serif;
+      font-size: 1.15rem; letter-spacing: .1em;
+      color: var(--ltxt); transition: color .3s;
+    }
+
+    /* Heading */
+    .form-title {
+      font-size: 1.75rem; font-weight: 700; letter-spacing: -.025em;
+      color: var(--ltxt); margin-bottom: .4rem; transition: color .3s;
+    }
+    .form-desc { font-size: .84rem; color: var(--lsub); margin-bottom: 1.75rem; transition: color .3s; }
+
+    /* Fields */
+    .field { margin-bottom: .9rem; }
+    .fw { position: relative; }
+    .fi {
+      position: absolute; left: .85rem; top: 50%; transform: translateY(-50%);
+      color: var(--iph); pointer-events: none; transition: color .3s;
+    }
+    .finput {
+      width: 100%; height: 48px;
+      padding: 0 .9rem 0 2.55rem;
+      background: var(--ibg); border: 1.5px solid var(--ibdr);
+      border-radius: 8px;
+      color: var(--itxt); font-family: 'Inter', sans-serif; font-size: .88rem;
+      outline: none; transition: border-color .2s, box-shadow .2s, background .3s, color .3s;
+    }
+    .finput:focus { border-color: var(--ifoc); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
+    .finput::placeholder { color: var(--iph); }
+    .finput.pw { padding-right: 2.75rem; }
+
+    .eye-btn {
+      position: absolute; right: .85rem; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer;
+      color: var(--iph); padding: 4px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 4px; transition: color .2s;
+    }
+    .eye-btn:hover { color: var(--ifoc); }
+
+    /* Sign in button */
+    .btn-sign {
+      display: block; width: 100%; height: 48px;
+      background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
+      color: #fff; border: none; border-radius: 8px;
+      font-family: 'Inter', sans-serif; font-size: .92rem; font-weight: 600;
+      cursor: pointer; margin-top: 1.25rem;
+      transition: box-shadow .2s, transform .15s;
+    }
+    .btn-sign:hover { box-shadow: 0 6px 20px rgba(37,99,235,.38); transform: translateY(-1px); }
+    .btn-sign:active { transform: none; }
+
+    .status-msg {
+      font-size: .73rem; color: var(--lmut); text-align: center;
+      margin-top: .7rem; min-height: 1.1em; transition: color .3s;
+    }
+
+    .reg-row {
+      text-align: center; margin-top: 1.4rem;
+      padding-top: 1.25rem; border-top: 1.5px solid var(--divdr);
+      font-size: .82rem; color: var(--lsub);
+      transition: color .3s, border-color .3s;
+    }
+    .reg-row a { color: var(--lnk); text-decoration: none; font-weight: 500; }
+    .reg-row a:hover { text-decoration: underline; }
+
+    /* ─── RIGHT ─── */
+    .right {
+      flex: 1; background: var(--rbg); position: relative;
+      overflow: hidden; display: flex; align-items: center; justify-content: center;
+      transition: background .3s;
+    }
+
+    #cvs { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+    .vis {
+      position: relative; z-index: 1;
+      display: flex; flex-direction: column; align-items: center; gap: 2rem; padding: 2rem;
+    }
+
+    /* Big circle */
+    .big-circle {
+      width: 380px; height: 380px; border-radius: 50%;
+      background: var(--rglow); border: 1px solid var(--rring);
+      display: flex; align-items: center; justify-content: center;
+      position: relative; transition: background .3s, border-color .3s;
+    }
+    .big-circle::before {
+      content: ''; position: absolute; inset: 28px; border-radius: 50%;
+      border: 1px solid var(--rring); opacity: .4; transition: border-color .3s;
+    }
+
+    /* Diagram */
+    .diag { width: 320px; height: 320px; position: relative; display: flex; align-items: center; justify-content: center; }
+
+    /* Center orb */
+    .orb {
+      width: 82px; height: 82px; border-radius: 50%;
+      background: var(--rnode); border: 1.5px solid var(--rbdr);
+      display: flex; align-items: center; justify-content: center;
+      position: absolute; z-index: 2;
+      animation: orbpulse 3s ease-in-out infinite;
+      transition: background .3s, border-color .3s;
+    }
+    @keyframes orbpulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+      50%      { box-shadow: 0 0 0 14px rgba(255,255,255,.05); }
+    }
+
+    /* Satellite nodes */
+    .sat {
+      position: absolute; width: 60px; height: 60px; border-radius: 50%;
+      background: var(--rnode); border: 1.5px solid var(--rbdr);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      animation: satglow 4s ease-in-out infinite; z-index: 2;
+      transition: background .3s, border-color .3s;
+    }
+    .sat.n { top: 10px; left: 50%; transform: translateX(-50%); }
+    .sat.e { top: 50%; right: 0; transform: translateY(-50%); animation-delay: .8s; }
+    .sat.s { bottom: 10px; left: 50%; transform: translateX(-50%); animation-delay: 1.6s; }
+    .sat.w { top: 50%; left: 0; transform: translateY(-50%); animation-delay: 2.4s; }
+    @keyframes satglow {
+      0%,100% { border-color: var(--rbdr); }
+      50%      { border-color: rgba(255,255,255,.55); box-shadow: 0 0 12px rgba(255,255,255,.1); }
+    }
+    .sat-lbl { font-size: .44rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--rsub); margin-top: 1px; transition: color .3s; }
+
+    /* Flow lines SVG */
+    .dsvg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .fl { stroke-dasharray: 4 7; animation: flowdash 2s linear infinite; }
+    .fl:nth-child(2) { animation-delay: -.5s; }
+    .fl:nth-child(3) { animation-delay: -1s; }
+    .fl:nth-child(4) { animation-delay: -1.5s; }
+    @keyframes flowdash { to { stroke-dashoffset: -22; } }
+
+    /* Dashboard card */
+    .dc {
+      position: absolute; right: -10px; top: 50%; transform: translateY(-50%);
+      width: 168px; background: var(--cbg); border: 1px solid var(--cbdr);
+      border-radius: 12px; padding: 10px; backdrop-filter: blur(14px);
+      z-index: 3; transition: background .3s, border-color .3s;
+    }
+    .dc-hdr {
+      font-size: .52rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+      color: var(--cmut); margin-bottom: 6px; padding-bottom: 5px;
+      border-bottom: 1px solid var(--cbdr); transition: color .3s, border-color .3s;
+    }
+    .dc-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
+    .dc-row:last-child { border: none; }
+    .dc-left { display: flex; align-items: center; gap: 5px; }
+    .dc-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .dc-name { font-size: .6rem; font-weight: 500; color: var(--ctxt); transition: color .3s; }
+    .dc-type { font-size: .5rem; color: var(--cmut); transition: color .3s; }
+    .dc-badge { font-size: .48rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 5px; border-radius: 4px; }
+
+    /* Taglines */
+    .taglines { position: relative; height: 54px; overflow: hidden; text-align: center; }
+    .slide { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; opacity: 0; animation: sl 12s ease-in-out infinite; }
+    .slide:nth-child(2) { animation-delay: 4s; }
+    .slide:nth-child(3) { animation-delay: 8s; }
+    @keyframes sl {
+      0%,7%    { opacity: 0; transform: translateY(8px); }
+      13%,31%  { opacity: 1; transform: translateY(0); }
+      37%,100% { opacity: 0; transform: translateY(-8px); }
+    }
+    .sl-main { font-size: 1.05rem; font-weight: 700; color: var(--rtxt); letter-spacing: -.01em; transition: color .3s; }
+    .sl-sub  { font-size: .73rem; color: var(--rsub); transition: color .3s; }
+
+    /* Dots */
+    .dots { display: flex; gap: 7px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dotoff); transition: background .3s, transform .3s; }
+    .dot.on { background: var(--doton); transform: scale(1.3); }
+
+    /* Mobile */
+    @media (max-width: 820px) {
+      html, body { overflow: auto; }
+      .page { flex-direction: column; height: auto; }
+      .left { flex: none; }
+      .right { flex: 0 0 360px; }
+      .big-circle { width: 260px; height: 260px; }
+      .diag { width: 220px; height: 220px; }
+      .dc { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<button class="theme-btn" id="themeBtn" aria-label="Toggle theme" onclick="sentroThemeToggle()">🌙</button>
+
+<div class="page">
+
+  <!-- ══════ LEFT ══════ -->
+  <div class="left">
+    <div class="form-box">
+
+      <!-- Logo: full-colour turbine at 44px + Audiowide wordmark -->
+      <div class="logo-row">
+        <svg width="44" height="44" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"
+             style="filter:drop-shadow(0 0 10px rgba(74,124,255,.45));flex-shrink:0" aria-label="SENTRO">
+          <defs>
+            <linearGradient id="s1" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"   stop-color="#bcd4ff"/>
+              <stop offset="42%"  stop-color="#5b8cff"/>
+              <stop offset="78%"  stop-color="#2f5ad6"/>
+              <stop offset="100%" stop-color="#1d3a96"/>
+            </linearGradient>
+            <linearGradient id="s2" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"   stop-color="#eaf3ff"/>
+              <stop offset="100%" stop-color="#9fc2ff"/>
+            </linearGradient>
+            <filter id="s3" x="-60%" y="-60%" width="220%" height="220%">
+              <feGaussianBlur stdDeviation="1" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+          </defs>
+          <circle cx="50" cy="50" r="45" fill="none" stroke="#1a2c5a" stroke-width="6"/>
+          <circle cx="50" cy="50" r="45" fill="none" stroke="url(#s1)" stroke-width="3"/>
+          <g fill="url(#s2)" filter="url(#s3)">
+            <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z"/>
+            <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(120 50 50)"/>
+            <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(240 50 50)"/>
+          </g>
+          <circle cx="50" cy="50" r="10" fill="url(#s1)"/>
+          <circle cx="47" cy="47" r="3"  fill="#e7f0ff"/>
+        </svg>
+        <span class="logo-name">SENTRO</span>
+      </div>
+
+      <h1 class="form-title">Sign in to your account</h1>
+      <p class="form-desc">Welcome back. Enter your credentials to continue.</p>
+
+      <form id="login-form" autocomplete="on">
+        <!-- Username -->
+        <div class="field">
+          <div class="fw">
+            <svg class="fi" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M2.5 13.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
-          </span>
-          <div>
-            <h1>DSPM</h1>
-            <p>Data security posture command center</p>
+            <input class="finput" id="login-username" name="username"
+                   autocomplete="username" placeholder="Username" required/>
           </div>
         </div>
-        <div class="login-graphic" aria-hidden="true">
-          <div class="graphic-node n1"></div>
-          <div class="graphic-node n2"></div>
-          <div class="graphic-node n3"></div>
-          <div class="graphic-node n4"></div>
-          <div class="graphic-line l1"></div>
-          <div class="graphic-line l2"></div>
-          <div class="graphic-line l3"></div>
-          <div class="graphic-core">DSPM</div>
+
+        <!-- Password -->
+        <div class="field">
+          <div class="fw">
+            <svg class="fi" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <rect x="3" y="7" width="10" height="7" rx="2" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5 7V5a3 3 0 0 1 6 0v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <input class="finput pw" id="login-password" name="password"
+                   type="password" autocomplete="current-password" placeholder="Password" required/>
+            <button type="button" class="eye-btn" id="eyeBtn" aria-label="Toggle password visibility" onclick="sentroEyeToggle()">
+              <!-- Eye open (default: password hidden, show eye icon) -->
+              <svg id="eyeA" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z" stroke="currentColor" stroke-width="1.5"/>
+                <circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/>
+              </svg>
+              <!-- Eye slashed (shown when password is visible) -->
+              <svg id="eyeB" width="16" height="16" viewBox="0 0 16 16" fill="none" style="display:none">
+                <path d="M2 2l12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M6.5 6.5a2 2 0 0 0 2.8 2.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M4 4.2C2.4 5.2 1 8 1 8s2.5 5 7 5c1.4 0 2.7-.4 3.8-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                <path d="M12.5 12.5C13.8 11.3 15 8 15 8s-2.5-5-7-5c-.6 0-1.2.1-1.8.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <button class="btn-sign" type="submit">Sign in</button>
+        <p id="login-status" class="status-msg">Local default: admin / admin123</p>
+
+        <div class="reg-row">
+          Don't have an account? <a href="/register">Create one</a>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ══════ RIGHT ══════ -->
+  <div class="right">
+    <canvas id="cvs" aria-hidden="true"></canvas>
+
+    <div class="vis">
+      <div class="big-circle">
+        <div class="diag">
+
+          <!-- N: SQL -->
+          <div class="sat n">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+              <ellipse cx="12" cy="7" rx="7" ry="3" stroke="rgba(255,255,255,.6)" stroke-width="1.3"/>
+              <path d="M5 7v10c0 1.66 3.13 3 7 3s7-1.34 7-3V7" stroke="rgba(255,255,255,.6)" stroke-width="1.3"/>
+              <path d="M5 12c0 1.66 3.13 3 7 3s7-1.34 7-3" stroke="rgba(255,255,255,.4)" stroke-width="1.3" stroke-dasharray="2 2"/>
+            </svg>
+            <span class="sat-lbl">SQL</span>
+          </div>
+
+          <!-- W: S3 -->
+          <div class="sat w">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+              <path d="M12 3L21 8v8l-9 5-9-5V8z" stroke="rgba(255,255,255,.6)" stroke-width="1.3" stroke-linejoin="round"/>
+              <path d="M12 3v18" stroke="rgba(255,255,255,.3)" stroke-width="1.3" stroke-dasharray="2 2"/>
+              <path d="M3 8l9 5 9-5" stroke="rgba(255,255,255,.3)" stroke-width="1.3" stroke-dasharray="2 2"/>
+            </svg>
+            <span class="sat-lbl">S3</span>
+          </div>
+
+          <!-- S: Files -->
+          <div class="sat s">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" stroke="rgba(255,255,255,.6)" stroke-width="1.3"/>
+              <path d="M13 2v7h7M8 13h8M8 17h5" stroke="rgba(255,255,255,.6)" stroke-width="1.3" stroke-linecap="round"/>
+            </svg>
+            <span class="sat-lbl">Files</span>
+          </div>
+
+          <!-- SVG flow lines: N→center, W→center, S→center, center→E (to card) -->
+          <svg class="dsvg" viewBox="0 0 320 320" fill="none">
+            <line x1="160" y1="70"  x2="160" y2="119" class="fl" stroke="rgba(255,255,255,.28)" stroke-width="1.2"/>
+            <line x1="60"  y1="160" x2="109" y2="160" class="fl" stroke="rgba(255,255,255,.28)" stroke-width="1.2"/>
+            <line x1="160" y1="250" x2="160" y2="201" class="fl" stroke="rgba(255,255,255,.28)" stroke-width="1.2"/>
+            <line x1="201" y1="160" x2="255" y2="160" class="fl" stroke="rgba(255,255,255,.18)" stroke-width="1" stroke-dasharray="2 5"/>
+          </svg>
+
+          <!-- Center SENTRO orb -->
+          <div class="orb">
+            <svg width="46" height="46" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"
+                 style="filter:drop-shadow(0 0 12px rgba(255,255,255,.25))">
+              <defs>
+                <linearGradient id="r1" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%"   stop-color="#bcd4ff"/>
+                  <stop offset="50%"  stop-color="#5b8cff"/>
+                  <stop offset="100%" stop-color="#1d3a96"/>
+                </linearGradient>
+                <linearGradient id="r2" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%"   stop-color="#ffffff"/>
+                  <stop offset="100%" stop-color="#bcd4ff"/>
+                </linearGradient>
+                <filter id="r3" x="-60%" y="-60%" width="220%" height="220%">
+                  <feGaussianBlur stdDeviation="1.4" result="b"/>
+                  <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+                </filter>
+              </defs>
+              <circle cx="50" cy="50" r="44" fill="none" stroke="rgba(255,255,255,.15)" stroke-width="5"/>
+              <circle cx="50" cy="50" r="44" fill="none" stroke="url(#r1)" stroke-width="3"/>
+              <g fill="url(#r2)" filter="url(#r3)">
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z"/>
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(120 50 50)"/>
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(240 50 50)"/>
+              </g>
+              <circle cx="50" cy="50" r="9" fill="url(#r1)"/>
+              <circle cx="47" cy="47" r="3" fill="#e7f0ff"/>
+            </svg>
+          </div>
+
+          <!-- Live scan card (right side, like dotwork's list) -->
+          <div class="dc">
+            <div class="dc-hdr">⬤ &nbsp;Live Scan</div>
+            <div class="dc-row">
+              <div class="dc-left">
+                <div class="dc-dot" style="background:#f87171"></div>
+                <div><div class="dc-name">prod-db-eu</div><div class="dc-type">PostgreSQL</div></div>
+              </div>
+              <span class="dc-badge" style="color:#f87171;background:rgba(248,113,113,.15)">CRIT</span>
+            </div>
+            <div class="dc-row">
+              <div class="dc-left">
+                <div class="dc-dot" style="background:#fb923c"></div>
+                <div><div class="dc-name">s3-finance</div><div class="dc-type">AWS S3</div></div>
+              </div>
+              <span class="dc-badge" style="color:#fb923c;background:rgba(251,146,60,.15)">HIGH</span>
+            </div>
+            <div class="dc-row">
+              <div class="dc-left">
+                <div class="dc-dot" style="background:#facc15"></div>
+                <div><div class="dc-name">sharepoint</div><div class="dc-type">SharePoint</div></div>
+              </div>
+              <span class="dc-badge" style="color:#facc15;background:rgba(250,204,21,.15)">MED</span>
+            </div>
+          </div>
+
         </div>
       </div>
 
-      <form id="login-form" class="login-card">
-        <p class="eyebrow">Secure access</p>
-        <h2>Sign in to continue</h2>
-        <p>Scans, reports, history, tenant controls, and security operations require authentication.</p>
-        <label>
-          Username
-          <input id="login-username" name="username" autocomplete="username" placeholder="admin" required />
-        </label>
-        <label>
-          Password
-          <input id="login-password" name="password" type="password" autocomplete="current-password" placeholder="admin123" required />
-        </label>
-        <button type="submit">Sign in</button>
-        <span id="login-status" class="save-status">Local default: admin / admin123.</span>
-        <div class="login-divider"></div>
-        <a class="auth-link" href="/register">Don't have an account? Create account</a>
-      </form>
-    </section>
-    <script src="/static/login.js?v=3"></script>
-  </body>
+      <!-- Rotating taglines -->
+      <div class="taglines">
+        <div class="slide">
+          <span class="sl-main">Find it before they do.</span>
+          <span class="sl-sub">Real-time discovery across every data store.</span>
+        </div>
+        <div class="slide">
+          <span class="sl-main">Every byte, classified.</span>
+          <span class="sl-sub">40+ sensitive data types with AI accuracy.</span>
+        </div>
+        <div class="slide">
+          <span class="sl-main">Zero blind spots.</span>
+          <span class="sl-sub">Compliance-ready posture reports in one click.</span>
+        </div>
+      </div>
+
+      <div class="dots" id="dotsEl">
+        <div class="dot on"></div>
+        <div class="dot"></div>
+        <div class="dot"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ══ SCRIPTS ══ -->
+<script>
+/* ── Eye toggle: global, onclick, no event-listener dependency ── */
+function sentroEyeToggle() {
+  var input = document.getElementById('login-password');
+  var eyeA  = document.getElementById('eyeA');
+  var eyeB  = document.getElementById('eyeB');
+  var nowVisible = input.type === 'text';
+  input.type         = nowVisible ? 'password' : 'text';
+  eyeA.style.display = nowVisible ? ''         : 'none';
+  eyeB.style.display = nowVisible ? 'none'     : '';
+}
+
+/* ── Theme toggle: global, onclick, no event-listener dependency ── */
+function sentroThemeToggle() {
+  var root  = document.documentElement;
+  var tBtn  = document.getElementById('themeBtn');
+  var dark  = root.getAttribute('data-theme') === 'dark';
+  var next  = dark ? 'light' : 'dark';
+  root.setAttribute('data-theme', next);
+  tBtn.textContent = next === 'dark' ? '☀️' : '🌙';
+  try { localStorage.setItem('s-theme', next); } catch(e) {}
+}
+
+/* Sync button icon to whatever theme was restored by <head> script */
+(function () {
+  var t = document.documentElement.getAttribute('data-theme');
+  var btn = document.getElementById('themeBtn');
+  if (btn) btn.textContent = t === 'dark' ? '☀️' : '🌙';
+})();
+
+/* ── Carousel dots ── */
+(function () {
+  var dots = document.querySelectorAll('#dotsEl .dot');
+  if (!dots.length) return;
+  var di = 0;
+  setInterval(function () {
+    dots[di].classList.remove('on');
+    di = (di + 1) % dots.length;
+    dots[di].classList.add('on');
+  }, 4000);
+})();
+
+/* ── Canvas ── */
+(function () {
+  var cv  = document.getElementById('cvs');
+  if (!cv) return;
+  var ctx2 = cv.getContext('2d');
+  var W = 0, H = 0, tick = 0;
+
+  var pts = Array.from({ length: 30 }, function () {
+    return {
+      x: Math.random(), y: Math.random(),
+      vx: (Math.random() - .5) * .00016, vy: (Math.random() - .5) * .00016,
+      r: 1.2 + Math.random() * 2, d: Math.random(), ph: Math.random() * Math.PI * 2,
+    };
+  });
+
+  function resize() {
+    var p = cv.parentElement;
+    W = p.offsetWidth; H = p.offsetHeight;
+    cv.width = W; cv.height = H;
+  }
+
+  function draw() {
+    var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (dark) { ctx2.fillStyle = '#060914'; ctx2.fillRect(0, 0, W, H); }
+    else ctx2.clearRect(0, 0, W, H);
+
+    tick++;
+    pts.forEach(function (p) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < 0 || p.x > 1) p.vx *= -1;
+      if (p.y < 0 || p.y > 1) p.vy *= -1;
+    });
+
+    var la = dark ? .1 : .07;
+    for (var i = 0; i < pts.length; i++) {
+      for (var j = i + 1; j < pts.length; j++) {
+        var a = pts[i], b = pts[j];
+        var dx = (a.x - b.x) * W, dy = (a.y - b.y) * H;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 185) {
+          ctx2.strokeStyle = 'rgba(255,255,255,' + ((1 - dist / 185) * la) + ')';
+          ctx2.lineWidth = .5;
+          ctx2.beginPath(); ctx2.moveTo(a.x * W, a.y * H); ctx2.lineTo(b.x * W, b.y * H); ctx2.stroke();
+        }
+      }
+    }
+
+    pts.forEach(function (p) {
+      var cx = p.x * W, cy = p.y * H;
+      var pulse = .6 + .4 * Math.sin(tick * .016 + p.ph);
+      var al = (.18 + .28 * p.d) * pulse;
+      ctx2.fillStyle = 'rgba(255,255,255,' + (al * .18) + ')';
+      ctx2.beginPath(); ctx2.arc(cx, cy, p.r * 5, 0, Math.PI * 2); ctx2.fill();
+      ctx2.fillStyle = 'rgba(255,255,255,' + al + ')';
+      ctx2.beginPath(); ctx2.arc(cx, cy, p.r, 0, Math.PI * 2); ctx2.fill();
+    });
+
+    requestAnimationFrame(draw);
+  }
+
+  new ResizeObserver(resize).observe(cv.parentElement);
+  resize();
+  draw();
+})();
+</script>
+<script src="/static/login.js?v=99"></script>
+</body>
 </html>

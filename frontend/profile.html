@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Profile | SENTRO</title>
+    <script>
+      try {
+        document.documentElement.dataset.theme = window.localStorage.getItem("dspm-theme") || "light";
+      } catch {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css?v=143" />
+  </head>
+  <body class="profile-page">
+    <main class="profile-shell">
+      <section class="profile-header">
+        <div>
+          <p class="eyebrow">DSPM account</p>
+          <h1>Profile settings</h1>
+        </div>
+        <div class="profile-header-actions">
+          <button type="button" id="profile-theme-btn" class="secondary-btn">Dark mode</button>
+          <a class="secondary-btn profile-link" href="/dashboard">Dashboard</a>
+          <button type="button" id="profile-logout-btn" class="secondary-btn">Sign out</button>
+        </div>
+      </section>
+
+      <section class="profile-card">
+        <div class="profile-hero">
+          <div id="profile-avatar-large" class="profile-avatar large">U</div>
+          <div>
+            <p class="eyebrow">Account profile</p>
+            <h1 id="profile-title">Profile</h1>
+            <p id="profile-subtitle">Loading account details...</p>
+          </div>
+          <span id="profile-protection-badge" class="profile-state-badge">Loading</span>
+        </div>
+
+        <div class="profile-main-grid">
+          <aside class="profile-side-panel">
+            <div class="profile-summary-grid">
+              <div>
+                <span>Username</span>
+                <strong id="profile-username">-</strong>
+              </div>
+              <div>
+                <span>Role</span>
+                <strong id="profile-role-label">-</strong>
+              </div>
+              <div>
+                <span>Tenant</span>
+                <strong id="profile-tenant-label">-</strong>
+              </div>
+            </div>
+
+            <div class="profile-info-list">
+              <div>
+                <span>Session</span>
+                <strong id="profile-session-state">Authenticated</strong>
+              </div>
+              <div>
+                <span>Editable fields</span>
+                <strong id="profile-edit-state">Checking...</strong>
+              </div>
+              <div>
+                <span>Password policy</span>
+                <strong>8+ characters</strong>
+              </div>
+            </div>
+          </aside>
+
+          <section class="profile-settings-stack">
+            <section class="profile-form profile-section-card avatar-settings-card" aria-label="Profile photo">
+              <div>
+                <h2>Profile photo</h2>
+                <p>Upload a square-friendly image, crop the visible area, and apply it to your account avatar.</p>
+              </div>
+              <div class="avatar-settings-grid">
+                <div class="avatar-preview-wrap">
+                  <div id="profile-avatar-preview" class="profile-avatar avatar-preview-large">U</div>
+                  <div>
+                    <strong>Avatar preview</strong>
+                    <span>PNG, JPG, or WebP. Max 2 MB.</span>
+                  </div>
+                </div>
+                <div class="avatar-actions">
+                  <input id="avatar-file-input" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+                  <button type="button" id="choose-avatar-btn" class="secondary-btn">Choose image</button>
+                  <button type="button" id="remove-avatar-btn" class="secondary-btn danger">Remove photo</button>
+                </div>
+              </div>
+              <p id="avatar-help" class="avatar-help">Minimum 160x160 px. Maximum 4096x4096 px.</p>
+            </section>
+
+            <form id="profile-form" class="profile-form profile-section-card">
+              <div>
+                <h2>Personal details</h2>
+                <p>Update the display name shown in account and user management views.</p>
+              </div>
+              <label>
+                Full name
+                <input id="profile-full-name" name="full_name" autocomplete="name" />
+              </label>
+              <button type="submit" id="save-profile-btn">Save profile</button>
+            </form>
+
+            <form id="password-form" class="profile-form profile-section-card">
+              <div>
+                <h2>Password</h2>
+                <p>Change your local account password after confirming the current one.</p>
+              </div>
+              <div class="profile-password-grid">
+                <label>
+                  Current password
+                  <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+                </label>
+                <label>
+                  New password
+                  <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+                </label>
+                <label>
+                  Confirm new password
+                  <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+                </label>
+              </div>
+              <button type="submit" id="save-password-btn" class="secondary-btn">Change password</button>
+            </form>
+          </section>
+        </div>
+
+        <p id="profile-status" class="save-status">Loading profile...</p>
+      </section>
+    </main>
+
+    <div id="avatar-crop-modal" class="avatar-crop-modal hidden" role="dialog" aria-modal="true" aria-labelledby="avatar-crop-title">
+      <div class="avatar-crop-panel">
+        <div class="avatar-crop-header">
+          <div>
+            <p class="eyebrow">Profile photo</p>
+            <h2 id="avatar-crop-title">Crop avatar</h2>
+          </div>
+          <button type="button" id="avatar-crop-close" class="secondary-btn">Close</button>
+        </div>
+        <div class="avatar-crop-stage-wrap">
+          <canvas id="avatar-crop-canvas" width="320" height="320" aria-label="Avatar crop preview"></canvas>
+        </div>
+        <label class="avatar-zoom-control">
+          Zoom
+          <input id="avatar-zoom" type="range" min="1" max="3" step="0.01" value="1" />
+        </label>
+        <div class="avatar-crop-actions">
+          <button type="button" id="avatar-apply-btn">Apply photo</button>
+          <button type="button" id="avatar-crop-cancel" class="secondary-btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/profile.js?v=94"></script>
+  </body>
+</html>
