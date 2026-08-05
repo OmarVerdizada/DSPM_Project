@@ -332,12 +332,13 @@ def _pg_connect() -> _PgConn:
 _pool: Any = None
 _pool_lock = threading.Lock()
 _pool_dsn: str | None = None
+_atexit_registered = False
 
 
 def _get_pool():
     """Lazily create the process-wide pool for the current DSN, or return None
     when psycopg_pool isn't installed (callers then use connect-per-op)."""
-    global _pool, _pool_dsn
+    global _pool, _pool_dsn, _atexit_registered
     if ConnectionPool is None:
         return None
     dsn = db_url()
@@ -348,19 +349,28 @@ def _get_pool():
             return _pool
         if _pool is not None:  # DSN changed (tests) - retire the old pool
             _close_locked()
+        # check_connection validates a pooled connection on checkout and discards
+        # a dead one (e.g. after a Postgres restart / failover) instead of handing
+        # it to a caller whose first query would then fail. ~1 round-trip/checkout;
+        # disable with DSPM_DB_POOL_CHECK=0 for max throughput where restarts are
+        # handled another way.
+        check = ConnectionPool.check_connection if os.getenv("DSPM_DB_POOL_CHECK", "1") == "1" else None
         pool = ConnectionPool(
             conninfo=dsn,
             min_size=int(os.getenv("DSPM_DB_POOL_MIN", "1")),
             max_size=int(os.getenv("DSPM_DB_POOL_MAX", "10")),
             timeout=float(os.getenv("DSPM_DB_CONNECT_TIMEOUT", "10")),
             max_idle=float(os.getenv("DSPM_DB_POOL_MAX_IDLE", "300")),
+            check=check,
             kwargs={"row_factory": _pg_row_factory},
             open=True,
             name="sentro-dspm",
         )
         _pool = pool
         _pool_dsn = dsn
-        atexit.register(close_pool)
+        if not _atexit_registered:  # register the shutdown hook once, not per pool
+            atexit.register(close_pool)
+            _atexit_registered = True
         return _pool
 
 

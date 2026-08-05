@@ -194,6 +194,11 @@ async def app_lifespan(_: FastAPI):
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+        # Close the DB connection pool cleanly on shutdown (no-op on SQLite).
+        with suppress(Exception):
+            from backend import db
+
+            db.close_pool()
 
 
 app = FastAPI(
