@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
 from collectors.net_guard import resolve_and_pin
-from discovery.parallelism import host_admission_budget
+from discovery.parallelism import host_admission_budget, resolve_parallelism
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     DEFAULT_TEXT_SCAN_MAX_BYTES,
@@ -659,6 +659,19 @@ class WinRMEndpointScanner:
         except Exception as exc:
             return {"connected": False, "host": self.config.host, "message": "WinRM connection test failed"}
 
+    def _winrm_worker_count(self) -> int:
+        """Runspace-pool worker count for the remote per-file work (content +
+        SHA256 + ACL). ON by default; ``DSPM_WINRM_PARALLEL=0`` forces the serial
+        single-runspace path. Bounded modestly (cap 8) because the pool runs on
+        the ENDPOINT, whose core count is unknown - over-subscribing a small box
+        would hurt; ``DSPM_WINRM_WORKERS`` overrides explicitly."""
+        if os.getenv("DSPM_WINRM_PARALLEL", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return 1
+        override = os.getenv("DSPM_WINRM_WORKERS", "").strip()
+        if override.isdigit() and int(override) > 0:
+            return min(int(override), 16)
+        return max(1, min(int(resolve_parallelism().io_workers), 8))
+
     def scan(self) -> list[dict]:
         target_paths = self._target_paths()
         ps_script = _scan_script(
@@ -676,13 +689,15 @@ class WinRMEndpointScanner:
             inspect_archives=self.config.inspect_archives,
             hash_files=self.config.hash_files,
             read_owner=self.config.read_owner,
+            parallel_workers=self._winrm_worker_count(),
         )
-        # P-B.2: the WinRM collector runs its whole walk+content fetch as ONE
-        # remote PowerShell session (there is no client-side per-file split to
-        # parallelize - see the roadmap). It still holds a connection-equivalent
-        # for the scan's duration, so it takes a process-wide admission slot: a
-        # burst of concurrent endpoint scans cannot oversubscribe the shared
-        # collector-I/O budget alongside the SMB share workers.
+        # P-B.2: the WinRM collector runs its whole walk as ONE remote PowerShell
+        # session, but that session now parallelizes the expensive per-file work
+        # (content + SHA256 + ACL) across a bounded runspace pool - one round-trip,
+        # byte-identical output. It still holds a connection-equivalent for the
+        # scan's duration, so it takes a process-wide admission slot: a burst of
+        # concurrent endpoint scans cannot oversubscribe the shared collector-I/O
+        # budget alongside the SMB share workers.
         budget = host_admission_budget()
         with budget.slot():
             result = self._run_ps_file(ps_script)
@@ -974,6 +989,7 @@ def _scan_script(
     inspect_archives: bool,
     hash_files: bool = True,
     read_owner: bool = True,
+    parallel_workers: int = 1,
 ) -> str:
     encoded_paths = base64.b64encode(json.dumps(paths).encode("utf-8")).decode("ascii")
     encoded_extensions = base64.b64encode(json.dumps(allowed_extensions).encode("utf-8")).decode("ascii")
@@ -989,7 +1005,17 @@ def _scan_script(
     read_owner_value = "$true" if read_owner else "$false"
     text_extensions = ",".join(f'"{item}"' for item in sorted(TEXT_EXTENSIONS))
     binary_extensions = ",".join(f'"{item}"' for item in sorted(BINARY_TEXT_EXTENSIONS))
+    parallel_workers_value = max(1, int(parallel_workers or 1))
+    # P-B.2 WinRM parallelism: the config init + every helper function live in a
+    # single reusable scriptblock ($dspmEngine). The main runspace dot-sources it
+    # for the (serial) enumeration walk; each pooled worker runspace dot-sources
+    # the SAME source once (guarded by Test-Path Function:) to run the expensive
+    # per-file work (content + SHA256 + ACL) in parallel. Because every helper is
+    # a pure function and every diagnostic tally is updated only during the serial
+    # walk, the parallel result is byte-identical to the serial one.
     return f"""
+    $ErrorActionPreference = "SilentlyContinue"
+    $dspmEngine = {{
     $ErrorActionPreference = "SilentlyContinue"
     $pathsJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_paths}"))
     $targetPaths = ConvertFrom-Json $pathsJson
@@ -1015,6 +1041,7 @@ def _scan_script(
     $maxArchiveTotalBytes = 209715200
     $maxArchiveCompressionRatio = 100
     $records = New-Object System.Collections.Generic.List[object]
+    $workItems = New-Object System.Collections.Generic.List[object]
     $extensionHistogram = @{{}}
     $diagnostics = [ordered]@{{
       requested_roots = @($targetPaths)
@@ -1028,6 +1055,7 @@ def _scan_script(
       archive_errors = @()
       record_limit_reached = $false
       skipped_dirs = 0
+      worker_errors = @()
       unreadable_dirs = @()
       allowed_extensions = @($allowedExtensions)
       extension_histogram = @{{}}
@@ -1669,6 +1697,28 @@ def _scan_script(
       if ($scanArchiveEntries -and $extension -eq ".zip") {{ Add-ZipFileEntries $file.FullName $isHidden $isSystem }}
       if (-not $includeRecord) {{ return }}
       $diagnostics.matched_files += 1
+      # Phase 1 (serial): reserve this file's ordered output slot (respecting the
+      # global record cap deterministically, in enumeration order) and queue the
+      # expensive per-file work. The slot is filled in phase 2 by index, so output
+      # order is identical to the serial scan regardless of worker completion.
+      if ($records.Count -ge $maxRecords) {{
+        $diagnostics.record_limit_reached = $true
+        return
+      }}
+      $records.Add($null) | Out-Null
+      $workItems.Add([PSCustomObject]@{{
+        Index = ($records.Count - 1)
+        File = $file
+        Extension = $extension
+        IsHidden = $isHidden
+        IsSystem = $isSystem
+      }}) | Out-Null
+    }}
+
+    # Phase 2 (parallelizable): the expensive per-file work - ZIP protection probe,
+    # owner/ACL read, content read, SHA256 - as a PURE function (no shared state),
+    # so a runspace-pool worker can run it and return an identical record object.
+    function Build-DspmFileRecord($file, $extension, $isHidden, $isSystem) {{
       $zipProtection = if ($extension -eq ".zip") {{ Test-DspmZipProtection $file.FullName }} else {{ [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }} }}
       $ownerAcl = if ({read_owner_value} -or {read_acl_value}) {{ Get-Acl -LiteralPath $file.FullName -ErrorAction SilentlyContinue }} else {{ $null }}
       $acl = if ({read_acl_value}) {{ $ownerAcl }} else {{ $null }}
@@ -1686,7 +1736,7 @@ def _scan_script(
           $sha256 = ""
         }}
       }}
-      Add-DspmRecord ([PSCustomObject]@{{
+      return [PSCustomObject]@{{
         path = $file.FullName
         name = $file.Name
         size = $file.Length
@@ -1711,7 +1761,7 @@ def _scan_script(
         bytes_scanned = if ($content) {{ [Math]::Min([int64]$file.Length, [int64]{int(max_read_bytes)}) }} else {{ 0 }}
         total_bytes = $file.Length
         truncated = ($content -and ($file.Length -gt {int(max_read_bytes)}))
-      }}) | Out-Null
+      }}
     }}
 
     function Walk-DspmDirectory($root, $current, $depth) {{
@@ -1750,6 +1800,12 @@ def _scan_script(
       }}
     }}
 
+    }}
+    . $dspmEngine
+
+    # ---- Phase 1: serial enumeration walk (metadata only) - deterministic order,
+    # filters, and the record cap. Populates $records with archive-entry records +
+    # ordered $null placeholders, and $workItems with the per-file work to run. ----
     foreach ($requestedRoot in $targetPaths) {{
       $resolvedRoots = @(Resolve-DspmRoot $requestedRoot)
       if (-not $resolvedRoots -or $resolvedRoots.Count -eq 0) {{
@@ -1766,9 +1822,57 @@ def _scan_script(
         }}
       }}
     }}
+
+    # ---- Phase 2: fill each reserved slot with the expensive per-file work.
+    # Parallel across a runspace pool on real fan-out (the engine is dot-sourced
+    # once per pooled runspace, then reused); results are written back by their
+    # reserved index, so output order is identical to the serial path. ----
+    $dspmMaxWorkers = {parallel_workers_value}
+    if ($dspmMaxWorkers -gt 1 -and $workItems.Count -gt 1) {{
+      $engineSrc = $dspmEngine.ToString()
+      # Worker params are dspm-namespaced: dot-sourcing the engine runs its
+      # top-level config init, which assigns common names like $item - those must
+      # NOT clobber the worker's own arguments. Passed to AddScript as a STRING so
+      # it compiles in the target runspace (no cross-runspace scriptblock affinity).
+      $dspmWorkerText = @'
+param($dspmSrc, $dspmItem)
+if (-not (Test-Path Function:\\Build-DspmFileRecord)) {{ . ([scriptblock]::Create($dspmSrc)) }}
+[PSCustomObject]@{{ Index = $dspmItem.Index; Record = (Build-DspmFileRecord $dspmItem.File $dspmItem.Extension $dspmItem.IsHidden $dspmItem.IsSystem) }}
+'@
+      $pool = [runspacefactory]::CreateRunspacePool(1, $dspmMaxWorkers)
+      $pool.Open()
+      $jobs = New-Object System.Collections.Generic.List[object]
+      foreach ($workItem in $workItems) {{
+        $psInstance = [powershell]::Create()
+        $psInstance.RunspacePool = $pool
+        [void]$psInstance.AddScript($dspmWorkerText).AddArgument($engineSrc).AddArgument($workItem)
+        $jobs.Add([PSCustomObject]@{{ ps = $psInstance; handle = $psInstance.BeginInvoke() }}) | Out-Null
+      }}
+      foreach ($job in $jobs) {{
+        try {{
+          $completed = $job.ps.EndInvoke($job.handle)
+          foreach ($entry in @($completed)) {{
+            if ($entry -and $null -ne $entry.Record) {{ $records[$entry.Index] = $entry.Record }}
+          }}
+        }} catch {{
+          if ($diagnostics.worker_errors.Count -lt 20) {{ $diagnostics.worker_errors += [string]$_.Exception.Message }}
+        }} finally {{
+          $job.ps.Dispose()
+        }}
+      }}
+      $pool.Close()
+      $pool.Dispose()
+      $diagnostics.io_parallel_active = $true
+    }} else {{
+      foreach ($item in $workItems) {{
+        $records[$item.Index] = Build-DspmFileRecord $item.File $item.Extension $item.IsHidden $item.IsSystem
+      }}
+      $diagnostics.io_parallel_active = $false
+    }}
+    $diagnostics.parallel_workers = $dspmMaxWorkers
     $diagnostics.extension_histogram = $extensionHistogram
     [PSCustomObject]@{{
-      records = @($records.ToArray())
+      records = @($records.ToArray() | Where-Object {{ $null -ne $_ }})
       diagnostics = $diagnostics
     }} | ConvertTo-Json -Depth 6 -Compress
     """
