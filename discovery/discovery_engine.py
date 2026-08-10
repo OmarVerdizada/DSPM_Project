@@ -24,6 +24,7 @@ from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FR
 from classification.regex_classifier import RULES, classify_content
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
+from discovery import triage
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
 from permissions.acl_analyzer import analyze_acl
 from risk.risk_engine import RiskAssessment, calculate_risk
@@ -148,6 +149,9 @@ class DSPMDiscoveryEngine:
             "sidecar_hits": 0,
             "durable_hits": 0,
         }
+        # P-C triage aggregate (analysis runs across worker threads, so guard it).
+        self._triage_lock = threading.Lock()
+        self._triage_counts = {"full": 0, "skipped_non_text": 0}
 
     def _cancelled(self) -> bool:
         """True if the caller cancelled (e.g. the job heartbeat set cancel) OR the
@@ -570,6 +574,7 @@ class DSPMDiscoveryEngine:
         }
         diagnostics["cache_reused_files"] = reused
         diagnostics["files_discovered"] = total
+        diagnostics["triage"] = self._triage_diagnostics()
         self.last_scan_diagnostics = diagnostics
 
     def _write_meta_sidecar(self, record: dict, cache_key: tuple | None = None) -> None:
@@ -951,11 +956,47 @@ class DSPMDiscoveryEngine:
         self._store_cached_findings(cache_key, copy.deepcopy(public_record.get("findings") or []), cache_record)
         return public_record
 
+    def _record_triage(self, decision: dict) -> None:
+        key = "skipped_non_text" if decision["route"] == triage.ROUTE_SKIP_NON_TEXT else "full"
+        with self._triage_lock:
+            self._triage_counts[key] += 1
+
+    def _triage_diagnostics(self) -> dict:
+        with self._triage_lock:
+            full = self._triage_counts["full"]
+            skipped = self._triage_counts["skipped_non_text"]
+        return {
+            "enabled": triage.triage_signature() != "triage-off",
+            "policy": triage.triage_signature(),
+            "records_full": full,
+            "records_skipped_non_text": skipped,
+        }
+
     def _run_detectors(self, content: str, record: dict, framework_ids: set[str]) -> tuple[list[dict], dict]:
         started = time.perf_counter()
         timeout_seconds = float(self.config.detector_timeout_seconds or 0)
         detector_rows: list[dict] = []
         findings: list[dict] = []
+
+        # P-C triage: skip the whole catalog for content that did not decode as
+        # text (compressed/encrypted/binary mislabeled with a text extension) -
+        # it cannot hold the plaintext the detectors match, so this is recall-safe
+        # and consistent with the scanner's existing binary-content policy. Any
+        # real text falls through to the full catalog below.
+        decision = triage.triage_content(record, content)
+        self._record_triage(decision)
+        if decision["route"] == triage.ROUTE_SKIP_NON_TEXT:
+            return [], {
+                "cache_hit": False,
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                "detector_timeout_seconds": timeout_seconds,
+                "triage_route": decision["route"],
+                "triage_reason": decision["reason"],
+                "triage_text_ratio": decision["text_ratio"],
+                "triage_score": decision["score"],
+                "slow_detector_degraded_mode": False,
+                "detectors": [],
+            }
 
         generic_findings, row = self._timed_detector("generic", lambda: classify_content(content), timeout_seconds)
         detector_rows.append(row)
@@ -1024,6 +1065,8 @@ class DSPMDiscoveryEngine:
             "detector_timeout_seconds": timeout_seconds,
             "slow_detector_degraded_mode": bool(slow),
             "slow_detectors": [row["name"] for row in slow],
+            "triage_route": decision["route"],
+            "triage_score": decision["score"],
             "detectors": detector_rows,
         }
         return findings, metrics
@@ -1308,6 +1351,11 @@ def _detector_version(framework_ids: set[str]) -> str:
         parts.append(PCI_DETECTOR_VERSION)
     if NIST_FRAMEWORK_ID in framework_ids:
         parts.append(NIST_DETECTOR_VERSION)
+    # P-C: a triage skip changes WHICH detectors run without changing content, so
+    # the active triage policy must invalidate the findings cache / durable
+    # baseline - otherwise a "skipped -> []" result could be reused after triage
+    # is turned off (or vice-versa).
+    parts.append(triage.triage_signature())
     return "+".join(parts)
 
 
