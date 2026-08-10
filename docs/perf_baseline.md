@@ -74,14 +74,16 @@ absent — **recall-exact** (a skipped rule would have matched nothing). Per-`cl
 
 | Content | Prefilter OFF | Prefilter ON | Speedup | Parity |
 |---|---:|---:|---:|---:|
-| Content-heavy prose (few anchors present) | 362 ms | 115 ms | **3.1×** | byte-identical |
-| Secret-dense (most anchors present) | — | — | →1× | byte-identical |
+| Content-heavy prose (few anchors present) | 469 ms | 155 ms | **3.0×** | byte-identical |
+| Secret-dense (a handful of anchors present) | 229 ms | 93 ms | **2.5×** | byte-identical |
 
-Workload-dependent: the win is largest on ordinary text (most of the 63 rules are skipped) and
-shrinks toward 1× when the content actually contains many of the anchored secrets/keywords. Zero
-recall cost — proven by `tests/test_regex_prefilter.py` (prefilter ≡ full scan across a per-rule
-positive corpus + the whole `enterprise_test_data` set). The four numeric rules (card/IBAN/FIN/phone)
-have no fixed literal and always run.
+Workload-dependent but robust: the win is largest on ordinary text (most of the 63 rules are
+skipped), and even secret-dense content stays ~2.5× because a single file realistically contains
+only a handful of the 63 distinct anchor types — the rest are still skipped. It approaches 1× only
+in the (unrealistic) limit of content carrying every anchor. Zero recall cost — proven by
+`tests/test_regex_prefilter.py` (prefilter ≡ full scan across a per-rule positive corpus + the whole
+`enterprise_test_data` set). The four numeric rules (card/IBAN/FIN/phone) have no fixed literal and
+always run.
 
 **Harness:** `scripts/perf_baseline.py` (reusable). **Method:** cold scan (persistent cache off) of a generated synthetic dataset through `DSPMDiscoveryEngine`, wall-clock timed, peak Python memory via `tracemalloc`.
 **Environment:** this dev host (Windows Server 2019, Python 3.14). Numbers are indicative, not a certified result.
