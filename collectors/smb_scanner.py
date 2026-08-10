@@ -9,16 +9,21 @@ import os
 import socket
 import subprocess
 import tempfile
+import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 import re
 from typing import Callable
 
+from discovery.parallelism import host_admission_budget, resolve_parallelism
+
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
 from collectors.net_guard import TargetNotAllowed, resolve_and_pin
 from collectors.ocr import extract_text_from_image, is_ocr_scannable
+from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
 from collectors.file_scanner import (
     ARCHIVE_EXTENSIONS,
     CONTENT_EXTENSIONS,
@@ -117,12 +122,23 @@ class SMBConfig:
     reuse_probe: Callable[[str, int, str], dict | None] | None = None
     # Collection progress: callback(visited, matched, reused_from_cache).
     progress_callback: Callable[[int, int, int], None] | None = None
+    # P-B.1: emit a successfully collected share batch before walking the next
+    # share so analysis overlaps later network I/O. Failed/retried share attempts
+    # never emit partial records.
+    record_callback: Callable[[dict], None] | None = None
+    # P-B.2: bound for parallel per-share acquisition (0 = resolve from the
+    # process parallelism policy / io_workers). Each parallel worker owns an
+    # isolated connection and a process-wide admission slot.
+    io_workers: int = 0
 
 
 class SMBScanner:
     def __init__(self, config: SMBConfig):
         self.config = config
-        self.connection = None
+        # P-B.2: the pysmb session is stateful and NOT thread-safe, so the live
+        # connection is thread-local - each parallel share worker owns its own,
+        # and the serial path (single thread) sees exactly one, unchanged.
+        self._local = threading.local()
         self.extension_filter = normalize_extension_filter(config.allowed_extensions)
         self.credential_used = ""
         self.server_used = ""
@@ -130,6 +146,25 @@ class SMBScanner:
         self._acl_cache: dict[str, dict] = {}
         self.last_scan_diagnostics: dict = {}
         self._progress_counters = {"visited": 0, "matched": 0, "reused": 0}
+        # P-B.2 share-parallelism coordination (shared across workers).
+        self._reset_lock = threading.Lock()
+        self._consecutive_resets = 0
+        self._abort_event = threading.Event()
+        self._io_parallel_active = False
+        # Serializes updates to the counters/diagnostics that parallel share
+        # workers share: a bare ``+=`` on a dict value is a lost-update race, so
+        # the progress counts and diagnostic tallies would drift under threads.
+        # Uncontended (and therefore ~free) on the serial single-thread path.
+        self._walk_lock = threading.Lock()
+
+    @property
+    def connection(self):
+        """The live pysmb connection for the CURRENT thread (thread-local)."""
+        return getattr(self._local, "connection", None)
+
+    @connection.setter
+    def connection(self, value) -> None:
+        self._local.connection = value
 
     def _cancelled(self) -> bool:
         return bool(self.config.cancel_check and self.config.cancel_check())
@@ -137,17 +172,24 @@ class SMBScanner:
     def _emit_collection_progress(self, force: bool = False) -> None:
         if self.config.progress_callback is None:
             return
+        with self._walk_lock:  # a torn read across the three counters would misreport progress
+            visited = self._progress_counters["visited"]
+            matched = self._progress_counters["matched"]
+            reused = self._progress_counters["reused"]
         # Throttle so the callback stays cheap during large share walks.
-        if not force and self._progress_counters["visited"] % 25 != 0:
+        if not force and visited % 25 != 0:
             return
         try:
-            self.config.progress_callback(
-                self._progress_counters["visited"],
-                self._progress_counters["matched"],
-                self._progress_counters["reused"],
-            )
+            self.config.progress_callback(visited, matched, reused)
         except Exception:
             return
+
+    def _bump_diag(self, key: str, amount: int = 1) -> None:
+        """Atomically increment a running diagnostic tally. Parallel share
+        workers touch the same ``last_scan_diagnostics`` counters, so the
+        read-modify-write must hold ``_walk_lock`` or increments are lost."""
+        with self._walk_lock:
+            self.last_scan_diagnostics[key] = int(self.last_scan_diagnostics.get(key) or 0) + amount
 
     def _reuse_key(self, share_name: str, remote_path: str) -> str:
         server = self.server_used or self.config.server
@@ -269,6 +311,9 @@ class SMBScanner:
     def scan(self) -> list[dict]:
         self.last_scan_diagnostics = {}
         self._progress_counters = {"visited": 0, "matched": 0, "reused": 0}
+        self._consecutive_resets = 0
+        self._abort_event.clear()
+        self._io_parallel_active = False
         if not self.connect():
             if getattr(self, "_target_refused", ""):
                 raise ConnectionError(f"SMB target refused (network guard): {self._target_refused}")
@@ -285,13 +330,9 @@ class SMBScanner:
             )
 
         try:
-            records: list[dict] = []
             discovered_shares: list[str] = []
             scanned_shares: list[str] = []
             skipped_shares: list[str] = []
-            reset_shares: list[str] = []
-            aborted_reason = ""
-            consecutive_resets = 0
             for share in list(self.connection.listShares()):  # materialised once
                 if self._cancelled():
                     raise RuntimeError("Scan cancelled")
@@ -301,40 +342,17 @@ class SMBScanner:
                     skipped_shares.append(share_name)
                     continue
                 scanned_shares.append(share_name)
-                # Attempt the share; on a connection reset, reconnect and retry it
-                # ONCE. The reset is often transient - a single share trips it and the
-                # reconnected session reads it fine - so retrying avoids silently
-                # skipping a whole share. A failed attempt adds no records (the walk
-                # raises before its list is extended in), so the retry cannot duplicate.
-                # If it still resets, record it and carry on to the next share with a
-                # live connection.
-                share_done = False
-                for attempt in range(2):
-                    try:
-                        records.extend(self._walk_share(share_name, "/", depth=0))
-                        consecutive_resets = 0
-                        share_done = True
-                        break
-                    except _SmbConnectionLost as lost:
-                        consecutive_resets += 1
-                        logger.warning(
-                            "Connection reset scanning share %s (%s); reconnecting%s",
-                            share_name, lost.detail,
-                            " and retrying the share" if attempt == 0 else " for the remaining shares",
-                        )
-                        if consecutive_resets >= 5 or not self._reconnect():
-                            aborted_reason = "smb_connection_reset"
-                            logger.error(
-                                "The SMB server keeps resetting the connection; aborting the "
-                                "remaining shares. This is a connection-level failure (network, "
-                                "SMB signing/encryption mismatch, or server-side policy) - not a "
-                                "per-share permission issue."
-                            )
-                            break
-                if not share_done:
-                    reset_shares.append(share_name)  # only shares that never completed
-                if aborted_reason:
-                    break
+
+            # P-B.2: walk shares in parallel (each on its OWN isolated connection +
+            # a process-wide admission slot) when there is more than one, else the
+            # serial single-connection path. Both share _scan_one_share's retry-once
+            # + reset circuit-breaker and emit only successfully-walked shares.
+            budget = host_admission_budget()
+            if self._should_parallelize(len(scanned_shares)):
+                self._io_parallel_active = True
+                records, reset_shares, aborted_reason = self._scan_shares_parallel(scanned_shares, budget)
+            else:
+                records, reset_shares, aborted_reason = self._scan_shares_serial(scanned_shares, budget)
 
             # Collapse the same physical file surfaced via overlapping shares
             # (e.g. a nested `HR` share also reachable under a parent `Shares`
@@ -375,11 +393,156 @@ class SMBScanner:
                 "shares_skipped": skipped_shares,
                 "shares_access_denied": denied_shares,
                 "shares_connection_reset": reset_unique,
+                "io_parallel_active": self._io_parallel_active,
+                "io_workers": self._io_worker_count(),
+                "host_admission": budget.stats(),
                 **({"scan_aborted_reason": aborted_reason} if aborted_reason else {}),
             }
             return records
         finally:
             self.close()
+
+    # ------------------------------------------------------------------
+    # P-B.2: per-share acquisition strategy (serial vs parallel).
+    # ------------------------------------------------------------------
+
+    def _io_worker_count(self) -> int:
+        """Bounded parallel-share worker count. Falls back to the process
+        parallelism policy's ``io_workers`` when the scan config doesn't pin
+        one explicitly."""
+        configured = self.config.io_workers if self.config.io_workers and self.config.io_workers > 0 else 0
+        workers = configured or resolve_parallelism().io_workers
+        return max(1, int(workers))
+
+    def _should_parallelize(self, share_count: int) -> bool:
+        """Parallel per-share acquisition is ON by default (Track P-B.2). It
+        only engages with real fan-out - more than one scannable share AND more
+        than one worker - so a single-share target keeps the simpler serial
+        path. ``DSPM_SMB_PARALLEL=0`` forces serial as an operational escape
+        hatch for a server that mishandles concurrent sessions."""
+        if os.getenv("DSPM_SMB_PARALLEL", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return False
+        return share_count > 1 and self._io_worker_count() > 1
+
+    def _scan_one_share(self, share_name: str) -> tuple[list[dict], bool]:
+        """Walk ONE share on the CURRENT thread's connection, retrying once on a
+        connection reset. Returns ``(records, completed)``; a share that never
+        completes returns ``([], False)``. Records stream to the pipeline
+        ``record_callback`` only after the share's walk fully succeeds, so a
+        failed/retried attempt never emits partial or duplicate records (a
+        mid-walk reset raises ``_SmbConnectionLost`` and discards that attempt's
+        records). The reset circuit-breaker is process-shared: repeated resets
+        set ``_abort_event`` to stop the remaining shares rather than hammer a
+        failing server."""
+        for attempt in range(2):
+            if self._abort_event.is_set():
+                return [], False
+            try:
+                share_records = self._walk_share(share_name, "/", depth=0)
+            except _SmbConnectionLost as lost:
+                with self._reset_lock:
+                    self._consecutive_resets += 1
+                    tripped = self._consecutive_resets >= 5
+                logger.warning(
+                    "Connection reset scanning share %s (%s); reconnecting%s",
+                    share_name, lost.detail,
+                    " and retrying the share" if attempt == 0 else " for the remaining shares",
+                )
+                if tripped or not self._reconnect():
+                    self._abort_event.set()
+                    logger.error(
+                        "The SMB server keeps resetting the connection; aborting the "
+                        "remaining shares. This is a connection-level failure (network, "
+                        "SMB signing/encryption mismatch, or server-side policy) - not a "
+                        "per-share permission issue."
+                    )
+                    return [], False
+                continue
+            with self._reset_lock:
+                self._consecutive_resets = 0
+            callback = self.config.record_callback
+            if callback is not None:
+                for record in share_records:
+                    callback(record)
+            return share_records, True
+        return [], False
+
+    def _scan_shares_serial(self, shares: list[str], budget) -> tuple[list[dict], list[str], str]:
+        """Walk the shares one at a time on the single already-open connection,
+        holding one process-wide admission slot for the scan's duration."""
+        records: list[dict] = []
+        reset_shares: list[str] = []
+        with budget.slot():
+            for share_name in shares:
+                if self._cancelled():
+                    raise RuntimeError("Scan cancelled")
+                if self._abort_event.is_set():
+                    break
+                share_records, completed = self._scan_one_share(share_name)
+                if completed:
+                    records.extend(share_records)
+                else:
+                    reset_shares.append(share_name)
+        aborted_reason = "smb_connection_reset" if self._abort_event.is_set() else ""
+        return records, reset_shares, aborted_reason
+
+    def _scan_shares_parallel(self, shares: list[str], budget) -> tuple[list[dict], list[str], str]:
+        """Walk the shares concurrently, each worker on its OWN isolated
+        (thread-local) connection and its own process-wide admission slot. The
+        record list is re-assembled in the ORIGINAL share order so output is
+        deterministic regardless of finish order (semantic parity with the
+        serial path).
+
+        Each share resolves to one of three states:
+
+        * ``done``    - walked successfully; its records are kept.
+        * ``reset``   - actually attempted and lost the connection (retry
+          exhausted, or the reset circuit-breaker tripped during ITS walk).
+        * ``skipped`` - the circuit-breaker had already tripped, so this share
+          was never attempted. Like the serial path's post-abort shares, a
+          skipped share is neither scanned nor counted as reset - it just was
+          not reached. This bounds how many shares a broken server is hammered
+          with to roughly the worker pool, instead of every share."""
+        worker_count = max(1, min(self._io_worker_count(), len(shares)))
+
+        def run(share_name: str) -> tuple[str, list[dict], str]:
+            if self._abort_event.is_set() or self._cancelled():
+                return share_name, [], "skipped"
+            with budget.slot():
+                if self._abort_event.is_set() or self._cancelled():
+                    return share_name, [], "skipped"
+                if not self.connect():  # this worker's OWN thread-local connection
+                    return share_name, [], "reset"
+                try:
+                    share_records, completed = self._scan_one_share(share_name)
+                finally:
+                    self.close()  # close THIS thread's connection (thread-local: isolated)
+            return share_name, share_records, ("done" if completed else "reset")
+
+        results: dict[str, tuple[list[dict], str]] = {}
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="dspm-smb-io") as executor:
+            futures = [executor.submit(run, share_name) for share_name in shares]
+            for future in as_completed(futures):
+                try:
+                    share_name, share_records, status = future.result()
+                except BaseException:
+                    # A cancel (RuntimeError) or unexpected failure in one worker
+                    # aborts the whole scan (matching the serial path); signal the
+                    # rest to stop promptly, then propagate.
+                    self._abort_event.set()
+                    raise
+                results[share_name] = (share_records, status)
+
+        records: list[dict] = []
+        reset_shares: list[str] = []
+        for share_name in shares:  # deterministic: original discovery order
+            share_records, status = results.get(share_name, ([], "skipped"))
+            if status == "done":
+                records.extend(share_records)
+            elif status == "reset":
+                reset_shares.append(share_name)
+        aborted_reason = "smb_connection_reset" if self._abort_event.is_set() else ""
+        return records, reset_shares, aborted_reason
 
     @staticmethod
     def _norm_share_path(value: str) -> str:
@@ -528,9 +691,10 @@ class SMBScanner:
             if _is_connection_error(exc):
                 raise _SmbConnectionLost(share_name, brief) from exc
             logger.warning("Could not list %s:%s: %s", share_name, folder, brief)
-            errors = self.last_scan_diagnostics.setdefault("list_errors", [])
-            if isinstance(errors, list) and len(errors) < 20:
-                errors.append({"share": share_name, "path": folder, "error": brief})
+            with self._walk_lock:
+                errors = self.last_scan_diagnostics.setdefault("list_errors", [])
+                if isinstance(errors, list) and len(errors) < 20:
+                    errors.append({"share": share_name, "path": folder, "error": brief})
             return records
 
         for entry in entries:
@@ -553,11 +717,10 @@ class SMBScanner:
                 continue
 
             extension = detect_extension(remote_path)
-            self._progress_counters["visited"] += 1
+            with self._walk_lock:
+                self._progress_counters["visited"] += 1
             self._emit_collection_progress()
-            if self.config.inspect_archives and self._should_scan_archive_entries(extension):
-                records.extend(self._read_zip_entries(share_name, remote_path, is_hidden, is_system))
-            if not matches_scan_filters(
+            include_top = matches_scan_filters(
                 extension,
                 is_hidden,
                 is_system,
@@ -567,7 +730,11 @@ class SMBScanner:
                 self.config.include_system,
                 self.config.hidden_filter_enabled,
                 self.config.system_filter_enabled,
-            ):
+            )
+            if not include_top and self.config.inspect_archives and self._should_scan_archive_entries(extension):
+                records.extend(self._read_zip_entries(share_name, remote_path, is_hidden, is_system))
+                continue
+            if not include_top:
                 continue
 
             file_size = int(getattr(entry, "file_size", 0) or 0)
@@ -576,23 +743,19 @@ class SMBScanner:
             attributes = ", ".join([item for item in ["H" if is_hidden else "", "S" if is_system else ""] if item]) or "Normal"
             reuse_key = self._reuse_key(share_name, remote_path)
 
-            # Metadata-first cache reuse: listPath already gave us size + mtime,
-            # so an unchanged non-archive/non-protected file can reuse the stored
-            # snapshot and skip the remote content read, full-file hash, and
-            # per-file ACL lookup entirely.
+            # Metadata-first reuse: listPath already gave us size + mtime, so an
+            # unchanged object can restore its analyzed snapshot (and archive
+            # entry bundle) without remote content/hash/ACL work.
             if (
                 self.config.reuse_probe is not None
                 and modified_at
-                and extension not in ARCHIVE_EXTENSIONS
-                and extension not in PROTECTED_CONTENT_EXTENSIONS
-                # A cache snapshot taken before OCR was enabled has no OCR text and
-                # would mask the image; always read images freshly when OCR is on.
-                and not is_ocr_scannable(extension)
             ):
                 snapshot = None
                 try:
                     snapshot = self.config.reuse_probe(reuse_key, file_size, modified_at)
                 except Exception:
+                    snapshot = None
+                if self.config.inspect_archives and extension == ".zip" and not bool((snapshot or {}).get("archive_bundle_complete")):
                     snapshot = None
                 if isinstance(snapshot, dict):
                     records.append(
@@ -626,15 +789,26 @@ class SMBScanner:
                             "total_bytes": int(snapshot.get("total_bytes") or file_size),
                             "truncated": bool(snapshot.get("truncated", False)),
                             "cache_reused": True,
+                            "incremental_reused": bool(snapshot.get("baseline_result")),
                             "reused_preview": snapshot.get("preview") if isinstance(snapshot.get("preview"), dict) else None,
+                            "baseline_result": snapshot.get("baseline_result") if isinstance(snapshot.get("baseline_result"), dict) else None,
                             "reuse_key": reuse_key,
                         }
                     )
-                    self._progress_counters["matched"] += 1
-                    self._progress_counters["reused"] += 1
+                    archive_records = snapshot.get("archive_records") if isinstance(snapshot.get("archive_records"), list) else []
+                    for prior in archive_records:
+                        if not isinstance(prior, dict):
+                            continue
+                        child_key = str(prior.get("reuse_key") or prior.get("path") or "")
+                        records.append(apply_reuse_snapshot(prior, reuse_snapshot_from_result(prior), child_key))
+                    with self._walk_lock:
+                        self._progress_counters["matched"] += 1 + len(archive_records)
+                        self._progress_counters["reused"] += 1 + len(archive_records)
                     self._emit_collection_progress()
                     continue
 
+            if self.config.inspect_archives and self._should_scan_archive_entries(extension):
+                records.extend(self._read_zip_entries(share_name, remote_path, is_hidden, is_system))
             content = self._read_file_preview(share_name, remote_path, extension)
             archive_metadata = archive_protection_metadata(extension)
             zip_metadata = self._inspect_zip_protection(share_name, remote_path) if extension == ".zip" else {}
@@ -674,7 +848,8 @@ class SMBScanner:
                     "reuse_key": reuse_key,
                 }
             )
-            self._progress_counters["matched"] += 1
+            with self._walk_lock:
+                self._progress_counters["matched"] += 1
             self._emit_collection_progress()
 
         return records
@@ -768,6 +943,7 @@ class SMBScanner:
                             "bytes_scanned": min(int(entry.file_size or 0), MAX_ARCHIVE_ENTRY_BYTES) if content else 0,
                             "total_bytes": int(entry.file_size or 0),
                             "truncated": int(entry.file_size or 0) > MAX_ARCHIVE_ENTRY_BYTES,
+                            "reuse_key": f"{self._reuse_key(share_name, path)}::{entry.filename}",
                         }
                     )
             return records
@@ -860,7 +1036,7 @@ class SMBScanner:
         unc_path = self._unc_path(share_name, path)
         if unc_path in self._acl_cache:
             return self._acl_cache[unc_path]
-        self.last_scan_diagnostics["owner_read_attempts"] = int(self.last_scan_diagnostics.get("owner_read_attempts") or 0) + 1
+        self._bump_diag("owner_read_attempts")
         username, domain = self._windows_credential()
         # SC-6: the password is NOT embedded in the (base64) script/argv, which
         # is visible to any local process listing command lines. It is passed to
@@ -931,11 +1107,11 @@ class SMBScanner:
                 env={**os.environ, "DSPM_SMB_ACL_PW": self.config.password or ""},
             )
         except (OSError, subprocess.SubprocessError):
-            self.last_scan_diagnostics["owner_read_failed"] = int(self.last_scan_diagnostics.get("owner_read_failed") or 0) + 1
+            self._bump_diag("owner_read_failed")
             return {"owner": "", "principals": [], "permissions": []}
 
         if completed.returncode != 0:
-            self.last_scan_diagnostics["owner_read_failed"] = int(self.last_scan_diagnostics.get("owner_read_failed") or 0) + 1
+            self._bump_diag("owner_read_failed")
             logger.debug("Could not read SMB owner for %s: %s", unc_path, completed.stderr.strip() or completed.stdout.strip())
             return {"owner": "", "principals": [], "permissions": []}
         try:
@@ -954,9 +1130,9 @@ class SMBScanner:
             "permissions": [str(item) for item in permissions if str(item or "").strip()],
         }
         if not normalized_acl["owner"]:
-            self.last_scan_diagnostics["owner_read_failed"] = int(self.last_scan_diagnostics.get("owner_read_failed") or 0) + 1
+            self._bump_diag("owner_read_failed")
         if normalized_acl["principals"]:
-            self.last_scan_diagnostics["acl_read_success"] = int(self.last_scan_diagnostics.get("acl_read_success") or 0) + 1
+            self._bump_diag("acl_read_success")
         self._owner_cache[unc_path] = normalized_acl["owner"]
         self._acl_cache[unc_path] = normalized_acl
         return normalized_acl

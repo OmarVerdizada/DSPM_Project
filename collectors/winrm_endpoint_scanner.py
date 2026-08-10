@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
 from collectors.net_guard import resolve_and_pin
+from discovery.parallelism import host_admission_budget
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     DEFAULT_TEXT_SCAN_MAX_BYTES,
@@ -531,6 +532,8 @@ class WinRMEndpointConfig:
     system_filter_enabled: bool = False
     read_acl: bool = False
     inspect_archives: bool = False
+    hash_files: bool = True
+    read_owner: bool = True
 
 
 class WinRMEndpointScanner:
@@ -671,14 +674,27 @@ class WinRMEndpointScanner:
             system_filter_enabled=self.config.system_filter_enabled,
             read_acl=self.config.read_acl,
             inspect_archives=self.config.inspect_archives,
+            hash_files=self.config.hash_files,
+            read_owner=self.config.read_owner,
         )
-        result = self._run_ps_file(ps_script)
+        # P-B.2: the WinRM collector runs its whole walk+content fetch as ONE
+        # remote PowerShell session (there is no client-side per-file split to
+        # parallelize - see the roadmap). It still holds a connection-equivalent
+        # for the scan's duration, so it takes a process-wide admission slot: a
+        # burst of concurrent endpoint scans cannot oversubscribe the shared
+        # collector-I/O budget alongside the SMB share workers.
+        budget = host_admission_budget()
+        with budget.slot():
+            result = self._run_ps_file(ps_script)
+        admission_stats = budget.stats()
         if result.status_code != 0:
             raise ConnectionError(_clean_error(result.std_err) or f"WinRM scan failed on {self.config.host}")
 
         raw_records = _read_json(result.std_out)
         if raw_records is None:
-            self.last_scan_diagnostics = {}
+            # No client-side parallelism (single remote session), but record the
+            # admission posture for parity with the SMB collector's diagnostics.
+            self.last_scan_diagnostics = {"io_parallel_active": False, "host_admission": admission_stats}
             return []
         if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
             self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
@@ -743,6 +759,8 @@ class WinRMEndpointScanner:
             )
         if filtered_wrong_profile:
             self.last_scan_diagnostics["filtered_wrong_profile"] = filtered_wrong_profile
+        self.last_scan_diagnostics.setdefault("io_parallel_active", False)
+        self.last_scan_diagnostics["host_admission"] = admission_stats
         return normalize_records(records)
 
     def _is_profile_scoped_request(self) -> bool:
@@ -954,6 +972,8 @@ def _scan_script(
     system_filter_enabled: bool,
     read_acl: bool,
     inspect_archives: bool,
+    hash_files: bool = True,
+    read_owner: bool = True,
 ) -> str:
     encoded_paths = base64.b64encode(json.dumps(paths).encode("utf-8")).decode("ascii")
     encoded_extensions = base64.b64encode(json.dumps(allowed_extensions).encode("utf-8")).decode("ascii")
@@ -965,6 +985,8 @@ def _scan_script(
     system_filter_value = "$true" if system_filter_enabled else "$false"
     read_acl_value = "$true" if read_acl else "$false"
     inspect_archives_value = "$true" if inspect_archives else "$false"
+    hash_files_value = "$true" if hash_files else "$false"
+    read_owner_value = "$true" if read_owner else "$false"
     text_extensions = ",".join(f'"{item}"' for item in sorted(TEXT_EXTENSIONS))
     binary_extensions = ",".join(f'"{item}"' for item in sorted(BINARY_TEXT_EXTENSIONS))
     return f"""
@@ -1648,7 +1670,7 @@ def _scan_script(
       if (-not $includeRecord) {{ return }}
       $diagnostics.matched_files += 1
       $zipProtection = if ($extension -eq ".zip") {{ Test-DspmZipProtection $file.FullName }} else {{ [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }} }}
-      $ownerAcl = Get-Acl -LiteralPath $file.FullName -ErrorAction SilentlyContinue
+      $ownerAcl = if ({read_owner_value} -or {read_acl_value}) {{ Get-Acl -LiteralPath $file.FullName -ErrorAction SilentlyContinue }} else {{ $null }}
       $acl = if ({read_acl_value}) {{ $ownerAcl }} else {{ $null }}
       $content = ""
       if ({read_content_value} -and ($textExtensions -contains $extension)) {{
@@ -1657,10 +1679,12 @@ def _scan_script(
         $content = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
       }}
       $sha256 = ""
-      try {{
-        $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
-      }} catch {{
-        $sha256 = ""
+      if ({hash_files_value}) {{
+        try {{
+          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
+        }} catch {{
+          $sha256 = ""
+        }}
       }}
       Add-DspmRecord ([PSCustomObject]@{{
         path = $file.FullName

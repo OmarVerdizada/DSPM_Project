@@ -14,6 +14,7 @@ import zipfile
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
 from collectors.ocr import extract_text_from_image, is_ocr_scannable
+from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
 
 
 TEXT_EXTENSIONS = {
@@ -352,6 +353,9 @@ class FileRecord:
     archive_safety: dict | None = None
     cache_reused: bool = False
     reused_preview: dict | None = None
+    incremental_reused: bool = False
+    baseline_result: dict | None = None
+    reuse_key: str = ""
 
     def to_dict(self) -> dict:
         scan_mode = scan_mode_for_extension(self.extension)
@@ -360,7 +364,10 @@ class FileRecord:
         protected = self.protected or status in {"protected", "password_protected", "encrypted", "locked", "protected_or_uninspectable_archive"}
         return {
             "cache_reused": self.cache_reused,
+            "incremental_reused": self.incremental_reused,
             "reused_preview": self.reused_preview,
+            "baseline_result": self.baseline_result,
+            "reuse_key": self.reuse_key,
             "source": self.source,
             "share": self.share,
             "path": self.path,
@@ -552,15 +559,36 @@ def scan_directory(
     inspect_archives: bool = False,
     diagnostics: dict | None = None,
     reuse_probe: Callable[[str, int, str], dict | None] | None = None,
+    reuse_key_builder: Callable[[str], str] | None = None,
     progress_callback: Callable[[int, int, int], None] | None = None,
+    record_callback: Callable[[dict], None] | None = None,
+    excluded_paths: Iterable[str | Path] | None = None,
 ) -> list[dict]:
     root_path = Path(path).expanduser().resolve()
     if not root_path.exists():
         raise FileNotFoundError(f"Scan path does not exist: {root_path}")
 
     extension_filter = normalize_extension_filter(allowed_extensions)
-    records: list[FileRecord] = []
+    excluded_roots: list[Path] = []
+    for excluded in excluded_paths or []:
+        try:
+            excluded_roots.append(Path(excluded).expanduser().resolve())
+        except OSError:
+            continue
+    records: list[FileRecord | dict] = []
     progress_counters = {"visited": 0, "matched": 0, "reused": 0}
+
+    def _append_record(record: FileRecord | dict) -> None:
+        records.append(record)
+        if record_callback is not None:
+            record_callback(record.to_dict() if isinstance(record, FileRecord) else dict(record))
+
+    def _excluded(item: Path) -> bool:
+        try:
+            resolved = item.resolve()
+        except OSError:
+            return False
+        return any(resolved == excluded or excluded in resolved.parents for excluded in excluded_roots)
 
     def _emit_progress(force: bool = False) -> None:
         if progress_callback is None:
@@ -592,6 +620,8 @@ def scan_directory(
         diagnostics.setdefault("archive_errors", [])
 
     def add_file(item: Path) -> None:
+        if _excluded(item):
+            return
         try:
             if item.is_symlink() or not item.resolve().is_relative_to(root_path):
                 return
@@ -609,11 +639,7 @@ def scan_directory(
             histogram = diagnostics.setdefault("extension_histogram", {})
             histogram[extension_key] = int(histogram.get(extension_key) or 0) + 1
         zip_protection: dict[str, str | bool] = {}
-        if scan_archive_entries and extension == ".zip":
-            add_zip_entries(item, is_hidden, is_system)
-        if extension == ".zip":
-            zip_protection = inspect_zip_protection(item)
-        if not matches_scan_filters(
+        include_top = matches_scan_filters(
             extension,
             is_hidden,
             is_system,
@@ -623,7 +649,11 @@ def scan_directory(
             include_system,
             hidden_filter_enabled,
             system_filter_enabled,
-        ):
+        )
+        if not include_top and scan_archive_entries and extension == ".zip":
+            add_zip_entries(item, is_hidden, is_system)
+            return
+        if not include_top:
             return
 
         try:
@@ -633,25 +663,24 @@ def scan_directory(
         created_at = datetime.fromtimestamp(stat.st_ctime, timezone.utc).isoformat()
         modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
         protected_extension = extension in PROTECTED_CONTENT_EXTENSIONS
+        object_key = reuse_key_builder(str(item)) if reuse_key_builder is not None else str(item)
 
-        # Metadata-first cache reuse: for an ordinary (non-archive, non-protected)
-        # file whose path + size + mtime match a prior cache entry, reuse the
-        # stored snapshot and skip the expensive per-file owner lookup, full
-        # content read, and full-file SHA-256. Correctness is guaranteed because
-        # the probe only matches entries whose detector/rule/parser/framework
-        # version signature is unchanged, and analysis re-reads on a cache miss.
+        # Metadata-first reuse: when identity + size + mtime + policy version
+        # match, restore the analyzed snapshot and skip owner, content, hash and
+        # detector work. Archive-entry inspection is restored as an outer-file
+        # bundle; a missing/incomplete bundle fails closed to a normal read.
         if (
             reuse_probe is not None
-            and not protected_extension
-            and extension not in ARCHIVE_EXTENSIONS
         ):
             snapshot = None
             try:
-                snapshot = reuse_probe(str(item), int(stat.st_size), modified_at)
+                snapshot = reuse_probe(object_key, int(stat.st_size), modified_at)
             except Exception:
                 snapshot = None
+            if scan_archive_entries and extension == ".zip" and not bool((snapshot or {}).get("archive_bundle_complete")):
+                snapshot = None
             if isinstance(snapshot, dict):
-                records.append(
+                _append_record(
                     FileRecord(
                         source="local",
                         path=str(item),
@@ -680,16 +709,33 @@ def scan_directory(
                         archive_scan_status="not_archive",
                         archive_safety={},
                         cache_reused=True,
+                        incremental_reused=bool(snapshot.get("baseline_result")),
                         reused_preview=snapshot.get("preview") if isinstance(snapshot.get("preview"), dict) else None,
+                        baseline_result=snapshot.get("baseline_result") if isinstance(snapshot.get("baseline_result"), dict) else None,
+                        reuse_key=object_key,
                     )
                 )
+                archive_records = snapshot.get("archive_records") if isinstance(snapshot.get("archive_records"), list) else []
+                for prior in archive_records:
+                    if not isinstance(prior, dict):
+                        continue
+                    child_key = str(prior.get("reuse_key") or prior.get("path") or "")
+                    _append_record(
+                        apply_reuse_snapshot(prior, reuse_snapshot_from_result(prior), child_key)
+                    )
                 if diagnostics is not None:
-                    diagnostics["matched_files"] = int(diagnostics.get("matched_files") or 0) + 1
-                    diagnostics["reused_files"] = int(diagnostics.get("reused_files") or 0) + 1
-                progress_counters["matched"] += 1
-                progress_counters["reused"] += 1
+                    diagnostics["matched_files"] = int(diagnostics.get("matched_files") or 0) + 1 + len(archive_records)
+                    diagnostics["reused_files"] = int(diagnostics.get("reused_files") or 0) + 1 + len(archive_records)
+                    diagnostics["archive_entries"] = int(diagnostics.get("archive_entries") or 0) + len(archive_records)
+                progress_counters["matched"] += 1 + len(archive_records)
+                progress_counters["reused"] += 1 + len(archive_records)
                 _emit_progress()
                 return
+
+        if scan_archive_entries and extension == ".zip":
+            add_zip_entries(item, is_hidden, is_system)
+        if extension == ".zip":
+            zip_protection = inspect_zip_protection(item)
 
         owner = file_owner(item)
         archive_metadata = archive_protection_metadata(extension)
@@ -720,7 +766,7 @@ def scan_directory(
         else:
             content, sha256 = read_text_preview_and_sha256(item)
         scan_meta = scan_completeness_for_path(item, content, protected)
-        records.append(
+        _append_record(
             FileRecord(
                 source="local",
                 path=str(item),
@@ -741,6 +787,7 @@ def scan_directory(
                 attributes=attributes,
                 sha256=sha256,
                 content_hash=content_hash_value(content),
+                reuse_key=object_key,
                 scan_completeness=str(scan_meta.get("scan_completeness") or "UNKNOWN"),
                 bytes_scanned=int(scan_meta.get("bytes_scanned") or 0),
                 total_bytes=int(scan_meta.get("total_bytes") or stat.st_size),
@@ -815,7 +862,7 @@ def scan_directory(
                             hidden_filter_enabled,
                             system_filter_enabled,
                         ):
-                            records.append(
+                            _append_record(
                                 FileRecord(
                                     source="local",
                                     path=entry_path,
@@ -846,7 +893,7 @@ def scan_directory(
                         system_filter_enabled,
                     ):
                         content, sha256 = read_zip_entry_preview_and_sha256(archive, entry, extension)
-                        records.append(
+                        _append_record(
                             FileRecord(
                                 source="local",
                                 path=entry_path,
@@ -897,7 +944,7 @@ def scan_directory(
                                             hidden_filter_enabled,
                                             system_filter_enabled,
                                         ):
-                                            records.append(
+                                            _append_record(
                                                 FileRecord(
                                                     source="local",
                                                     path=nested_path,
@@ -928,7 +975,7 @@ def scan_directory(
                                         system_filter_enabled,
                                     ):
                                         nested_content, nested_sha256 = read_zip_entry_preview_and_sha256(nested_archive, nested_entry, nested_extension)
-                                        records.append(
+                                        _append_record(
                                             FileRecord(
                                                 source="local",
                                                 path=nested_path,
@@ -955,6 +1002,10 @@ def scan_directory(
 
     def walk(folder: Path, depth: int) -> None:
         if depth > max_depth:
+            return
+        if _excluded(folder):
+            if diagnostics is not None:
+                diagnostics["skipped_dirs"] = int(diagnostics.get("skipped_dirs") or 0) + 1
             return
         if is_skipped_scan_path(folder):
             if diagnostics is not None:
@@ -1002,7 +1053,7 @@ def scan_directory(
         walk(root_path, 0)
 
     _emit_progress(force=True)
-    return [record.to_dict() for record in records]
+    return [record.to_dict() if isinstance(record, FileRecord) else record for record in records]
 
 
 def read_zip_entry_preview(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, extension: str, max_bytes: int = MAX_ARCHIVE_ENTRY_BYTES) -> str:
@@ -1156,7 +1207,9 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "total_bytes": int(record.get("total_bytes") or record.get("size") or 0),
                 "truncated": bool(record.get("truncated", False)),
                 "cache_reused": bool(record.get("cache_reused", False)),
+                "incremental_reused": bool(record.get("incremental_reused", False)),
                 "reused_preview": record.get("reused_preview"),
+                "baseline_result": record.get("baseline_result") if isinstance(record.get("baseline_result"), dict) else None,
                 "reuse_key": str(record.get("reuse_key") or ""),
             }
         )

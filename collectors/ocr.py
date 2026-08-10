@@ -86,6 +86,12 @@ def ocr_enabled() -> bool:
 
 _engine = None
 _engine_lock = threading.Lock()
+# One RapidOCR inference already uses the configured ONNX intra-op CPU threads.
+# Concurrent calls benchmarked worse and the shared engine is not documented as
+# re-entrant, so P-B serializes inference while allowing collection/analysis
+# around it to remain parallel. A timed-out daemon retains this gate until its
+# bounded inference actually exits.
+_ocr_inference_gate = threading.Semaphore(1)
 _unavailable_logged = False
 
 
@@ -229,6 +235,8 @@ def ocr_status() -> dict:
         "dependency_installed": installed,
         "state": state,
         "image_extensions": sorted(OCR_IMAGE_EXTENSIONS),
+        "inference_workers": 1,
+        "parallelism": "serialized_inference",
     }
 
 
@@ -295,8 +303,9 @@ def _run_ocr_with_budget(engine, image):
 
     def work() -> None:
         try:
-            output = engine(image)
-            box["result"] = output[0] if isinstance(output, tuple) else output
+            with _ocr_inference_gate:
+                output = engine(image)
+                box["result"] = output[0] if isinstance(output, tuple) else output
         except Exception as exc:  # pragma: no cover - defensive
             box["error"] = exc
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from collections import defaultdict, deque
 import copy
 import hashlib
 import json
@@ -23,6 +24,7 @@ from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FR
 from classification.regex_classifier import RULES, classify_content
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
+from discovery.parallelism import ParallelismPlan, resolve_parallelism
 from permissions.acl_analyzer import analyze_acl
 from risk.risk_engine import RiskAssessment, calculate_risk
 from scripts.logger import get_logger
@@ -59,10 +61,17 @@ class ScanConfig:
     compliance_frameworks: list[str] = field(default_factory=list)
     cancel_check: Callable[[], bool] | None = None
     progress_callback: Callable[[str, int, int], None] | None = None
-    max_workers: int = 1
+    # Zero means adaptive; a positive value remains an explicit operator/test cap.
+    max_workers: int = 0
+    io_workers: int = 0
+    pipeline_buffer: int = 0
+    pipeline_enabled: bool = True
     detector_timeout_seconds: float = 8.0
     persistent_cache_enabled: bool = True
     cache_dir: str = "data/scan_cache"
+    incremental_enabled: bool = True
+    incremental_scope: str = ""
+    baseline_probe: Callable[[str, int, str, str], dict | None] | None = None
 
 
 @dataclass(slots=True)
@@ -101,6 +110,7 @@ class ScanReport:
         data = {
             "timestamp": self.timestamp,
             "source": self.source,
+            "mode": str((self.scan_diagnostics.get("incremental") or {}).get("mode") or "full"),
             "summary": self.summary.to_dict(),
             "files": self.files,
         }
@@ -126,7 +136,18 @@ class DSPMDiscoveryEngine:
         self._cache_lock = threading.RLock()
         self._keyword_lock = threading.RLock()
         self._version_signature: tuple | None = None
+        self._parallelism_plan: ParallelismPlan | None = None
         self._deadline: float | None = None
+        self._incremental_lock = threading.Lock()
+        self._incremental_counts = {
+            "probes": 0,
+            "unchanged": 0,
+            "new": 0,
+            "changed": 0,
+            "errors": 0,
+            "sidecar_hits": 0,
+            "durable_hits": 0,
+        }
 
     def _cancelled(self) -> bool:
         """True if the caller cancelled (e.g. the job heartbeat set cancel) OR the
@@ -177,11 +198,15 @@ class DSPMDiscoveryEngine:
     def run(self) -> ScanReport:
         # M14: arm the wall-clock deadline for this scan (collection + analysis).
         self._deadline = (time.monotonic() + SCAN_MAX_SECONDS) if SCAN_MAX_SECONDS > 0 else None
-        records = self._collect_records()
-        self._emit_progress("collected", len(records), len(records))
-        normalized_records = normalize_records(records)
-        analyzed_files = self._analyze_records(normalized_records)
+        plan = self._parallelism()
+        if plan.pipeline_enabled:
+            records, analyzed_files = self._collect_and_analyze_pipelined(plan)
+        else:
+            records = self._collect_records()
+            self._emit_progress("collected", len(records), len(records))
+            analyzed_files = self._analyze_records(normalize_records(records))
         summary = self._build_summary(analyzed_files)
+        self._finalize_incremental_diagnostics(analyzed_files)
 
         return ScanReport(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -191,16 +216,165 @@ class DSPMDiscoveryEngine:
             scan_diagnostics=self.last_scan_diagnostics,
         )
 
-    def _analyze_records(self, records: list[dict]) -> list[dict]:
-        worker_count = max(1, min(int(self.config.max_workers or 1), 32, len(records) or 1))
-        total_records = len(records)
+    def _parallelism(self) -> ParallelismPlan:
+        if self._parallelism_plan is None:
+            self._parallelism_plan = resolve_parallelism(
+                analysis_workers=int(self.config.max_workers or 0),
+                io_workers=int(self.config.io_workers or 0),
+                pipeline_buffer=int(self.config.pipeline_buffer or 0),
+                pipeline_enabled=bool(self.config.pipeline_enabled),
+            )
+        return self._parallelism_plan
+
+    @staticmethod
+    def _record_identity(record: dict) -> tuple[str, str, str]:
+        return (
+            str(record.get("source") or "unknown"),
+            str(record.get("share") or ""),
+            str(record.get("reuse_key") or record.get("path") or ""),
+        )
+
+    def _set_parallelism_diagnostics(
+        self,
+        plan: ParallelismPlan,
+        *,
+        records: int,
+        workers: int,
+        pipeline: dict | None = None,
+    ) -> None:
         diagnostics = dict(self.last_scan_diagnostics or {})
-        diagnostics["worker_pool"] = {
-            "enabled": worker_count > 1,
-            "max_workers": worker_count,
-            "records": len(records),
+        diagnostics["parallelism"] = {
+            **plan.to_dict(),
+            "analysis_workers_active": workers,
+            # P-B.2: collectors now own independent, retry-safe per-share
+            # connections, so parallel acquisition reflects whether the SMB
+            # collector actually engaged its parallel path this scan.
+            "io_parallel_enabled": bool(diagnostics.get("io_parallel_active", False)),
+            "ocr_policy": "serialized_inference",
         }
+        diagnostics["worker_pool"] = {
+            "enabled": workers > 1,
+            "max_workers": workers,
+            "records": records,
+            "adaptive": plan.analysis_source == "auto_cpu",
+        }
+        if pipeline is not None:
+            diagnostics["pipeline"] = pipeline
         self.last_scan_diagnostics = diagnostics
+
+    def _collect_and_analyze_pipelined(self, plan: ParallelismPlan) -> tuple[list[dict], list[dict]]:
+        """Stream collector output into a bounded analysis pool.
+
+        The collector owns the final record list, including SMB dedup and local
+        cache exclusion. Results are joined by source-qualified identity, which
+        preserves collector order even when workers finish out of order.
+        """
+
+        futures_by_identity: dict[tuple[str, str, str], deque] = defaultdict(deque)
+        all_futures = []
+        gate = threading.BoundedSemaphore(plan.pipeline_buffer)
+        state_lock = threading.Lock()
+        state = {
+            "submitted": 0,
+            "completed": 0,
+            "in_flight": 0,
+            "peak_in_flight": 0,
+            "overlap_observed": False,
+            "collection_finished": False,
+        }
+
+        with ThreadPoolExecutor(
+            max_workers=plan.analysis_workers,
+            thread_name_prefix="dspm-analysis",
+        ) as executor:
+
+            def submit(record: dict):
+                if self._cancelled():
+                    return None
+                gate.acquire()
+                if self._cancelled():
+                    gate.release()
+                    return None
+                normalized = normalize_records([record])[0]
+                future = executor.submit(self._analyze_record_safe, normalized)
+                futures_by_identity[self._record_identity(normalized)].append(future)
+                all_futures.append(future)
+                with state_lock:
+                    state["submitted"] += 1
+                    state["in_flight"] += 1
+                    state["peak_in_flight"] = max(state["peak_in_flight"], state["in_flight"])
+
+                def completed(_future) -> None:
+                    with state_lock:
+                        state["completed"] += 1
+                        state["in_flight"] = max(0, state["in_flight"] - 1)
+                        if not state["collection_finished"]:
+                            state["overlap_observed"] = True
+                        completed_count = state["completed"]
+                        submitted_count = state["submitted"]
+                    gate.release()
+                    self._emit_progress("pipelining", completed_count, submitted_count)
+
+                future.add_done_callback(completed)
+                return future
+
+            records = self._collect_records(record_callback=submit)
+            with state_lock:
+                state["collection_finished"] = True
+            self._emit_progress("collected", len(records), len(records))
+            normalized_records = normalize_records(records)
+
+            selected_futures = []
+            for record in normalized_records:
+                queue = futures_by_identity.get(self._record_identity(record))
+                future = queue.popleft() if queue else None
+                if future is None:
+                    future = submit(record)
+                if future is not None:
+                    selected_futures.append(future)
+
+            analyzed: list[dict] = []
+            stopped = False
+            for future in selected_futures:
+                if self._cancelled() and not future.done():
+                    stopped = True
+                    break
+                analyzed.append(future.result())
+                self._emit_progress("analyzing", len(analyzed), len(selected_futures))
+            if stopped:
+                for future in all_futures:
+                    future.cancel()
+                self._mark_truncated(len(analyzed), len(normalized_records))
+
+        with state_lock:
+            pipeline_diagnostics = {
+                "enabled": True,
+                "buffer_limit": plan.pipeline_buffer,
+                "records_submitted": state["submitted"],
+                "records_selected": len(selected_futures),
+                "peak_in_flight": state["peak_in_flight"],
+                "collection_analysis_overlap": state["overlap_observed"],
+                "output_order": "collector",
+            }
+        active_workers = max(1, min(plan.analysis_workers, len(selected_futures) or 1))
+        self._set_parallelism_diagnostics(
+            plan,
+            records=len(normalized_records),
+            workers=active_workers,
+            pipeline=pipeline_diagnostics,
+        )
+        return records, analyzed
+
+    def _analyze_records(self, records: list[dict]) -> list[dict]:
+        plan = self._parallelism()
+        worker_count = max(1, min(plan.analysis_workers, len(records) or 1))
+        total_records = len(records)
+        self._set_parallelism_diagnostics(
+            plan,
+            records=len(records),
+            workers=worker_count,
+            pipeline={"enabled": False},
+        )
         if worker_count <= 1 or len(records) <= 1:
             analyzed = []
             for index, record in enumerate(records, start=1):
@@ -262,8 +436,26 @@ class DSPMDiscoveryEngine:
             detector_version,
             rule_catalog_version,
             tuple(sorted(framework_ids)),
+            (
+                os.getenv("DSPM_OCR_ENABLED", "0"),
+                os.getenv("DSPM_OCR_MAX_FILE_BYTES", ""),
+                os.getenv("DSPM_OCR_MAX_PIXELS", ""),
+                os.getenv("DSPM_OCR_MAX_DIMENSION", ""),
+                os.getenv("DSPM_OCR_MIN_CONFIDENCE", ""),
+            ),
+            _cache_key_digest(
+                (
+                    json.dumps(self.config.asset_overrides, sort_keys=True, ensure_ascii=False, default=str),
+                    float(self.config.detector_timeout_seconds or 0),
+                )
+            ),
         )
         return self._version_signature
+
+    def version_signature(self) -> str:
+        """Opaque durable-baseline invalidation token for the active policy."""
+
+        return _cache_key_digest(self._version_sig())
 
     def _meta_digest(self, path: str, size: int, mtime: str) -> str:
         raw = json.dumps(
@@ -288,34 +480,108 @@ class DSPMDiscoveryEngine:
         Remote sources have no post-collection re-read fallback, so this check is
         what keeps SMB reuse safe.
         """
-        if not self.config.persistent_cache_enabled or not self.config.cache_dir:
+        if not self.config.incremental_enabled:
+            return None
+        with self._incremental_lock:
+            self._incremental_counts["probes"] += 1
+
+        # The filesystem sidecar is a fast L1. The normalized asset + durable
+        # database baseline below remains authoritative when this local cache is
+        # absent (new worker, cache eviction, failover).
+        archive_bundle_required = self.config.inspect_archives and str(path).lower().split("::", 1)[0].endswith(".zip")
+        if self.config.persistent_cache_enabled and self.config.cache_dir and not archive_bundle_required:
+            try:
+                meta_path = self._meta_path(self._meta_digest(path, size, mtime))
+                data = json.loads(meta_path.read_text(encoding="utf-8"))
+                finding_digest = str(data.get("finding_cache_digest") or "")
+                if finding_digest:
+                    findings_path = Path(self.config.cache_dir).expanduser().resolve() / f"{finding_digest}.json"
+                    if not findings_path.exists():
+                        data = {}
+                snapshot = data.get("snapshot")
+                if isinstance(snapshot, dict):
+                    with self._incremental_lock:
+                        self._incremental_counts["unchanged"] += 1
+                        self._incremental_counts["sidecar_hits"] += 1
+                    return snapshot
+            except (OSError, json.JSONDecodeError, ValueError):
+                pass
+
+        if self.config.baseline_probe is None or not self.config.incremental_scope:
+            with self._incremental_lock:
+                self._incremental_counts["new"] += 1
             return None
         try:
-            meta_path = self._meta_path(self._meta_digest(path, size, mtime))
-            data = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
+            result = self.config.baseline_probe(path, int(size), str(mtime), self.version_signature()) or {}
+        except Exception:
+            with self._incremental_lock:
+                self._incremental_counts["errors"] += 1
             return None
-        finding_digest = str(data.get("finding_cache_digest") or "")
-        if finding_digest:
-            try:
-                findings_path = Path(self.config.cache_dir).expanduser().resolve() / f"{finding_digest}.json"
-                if not findings_path.exists():
-                    return None
-            except OSError:
-                return None
-        snapshot = data.get("snapshot")
-        return snapshot if isinstance(snapshot, dict) else None
+        state = str(result.get("state") or "new").lower()
+        snapshot = result.get("snapshot")
+        with self._incremental_lock:
+            if state in {"new", "changed"}:
+                self._incremental_counts[state] += 1
+            if state == "unchanged" and isinstance(snapshot, dict):
+                self._incremental_counts["unchanged"] += 1
+                self._incremental_counts["durable_hits"] += 1
+        return snapshot if state == "unchanged" and isinstance(snapshot, dict) else None
+
+    def _finalize_incremental_diagnostics(self, analyzed_files: list[dict]) -> None:
+        diagnostics = dict(self.last_scan_diagnostics or {})
+        counts = dict(self._incremental_counts)
+        total = len(analyzed_files)
+        reused = sum(1 for item in analyzed_files if item.get("cache_reused") or item.get("incremental_reused"))
+        content_reads = max(0, total - reused)
+        incomplete_markers = (
+            diagnostics.get("scan_truncated"),
+            diagnostics.get("list_errors"),
+            diagnostics.get("unreadable_dirs"),
+            diagnostics.get("scan_errors"),
+            diagnostics.get("missing_roots"),
+            diagnostics.get("missing_paths"),
+            diagnostics.get("incremental_fetch_errors"),
+            diagnostics.get("archive_errors"),
+            diagnostics.get("archive_timed_out"),
+        )
+        complete = not any(incomplete_markers)
+        diagnostics["incremental"] = {
+            "enabled": bool(self.config.incremental_enabled),
+            "baseline_update": bool(self.config.incremental_scope),
+            "mode": "incremental" if self.config.incremental_enabled else "full",
+            "scope_key": self.config.incremental_scope,
+            "version_signature": self.version_signature(),
+            "complete": complete,
+            "total_objects": total,
+            "unchanged_objects": reused,
+            "new_objects": int(counts.get("new") or 0),
+            "changed_objects": int(counts.get("changed") or 0),
+            "unclassified_fresh_objects": max(
+                0,
+                content_reads - int(counts.get("new") or 0) - int(counts.get("changed") or 0),
+            ),
+            "content_reads": content_reads,
+            "delta_ratio": round(content_reads / total, 6) if total else 0.0,
+            "sidecar_hits": int(counts.get("sidecar_hits") or 0),
+            "durable_baseline_hits": int(counts.get("durable_hits") or 0),
+            "probe_errors": int(counts.get("errors") or 0),
+            "baseline_committed": False,
+            "deleted_objects": 0,
+        }
+        diagnostics["cache_reused_files"] = reused
+        diagnostics["files_discovered"] = total
+        self.last_scan_diagnostics = diagnostics
 
     def _write_meta_sidecar(self, record: dict, cache_key: tuple | None = None) -> None:
         """Persist the cheap-to-restore snapshot so an unchanged file can be
         reused (metadata-first) on the next scan without any file I/O.
 
-        Local records are keyed by their filesystem path; SMB records carry a
-        source-qualified ``reuse_key`` (``smb://server/share/path``) so remote
-        identities can never collide with local ones or across servers."""
+        Local records are keyed by their filesystem path. SMB and endpoint
+        records carry source-qualified ``reuse_key`` values so remote identities
+        can never collide with local ones or across hosts."""
         if not self.config.persistent_cache_enabled or not self.config.cache_dir:
             return
-        if str(record.get("source")) not in {"local", "smb"}:
+        if str(record.get("source")) not in {"local", "smb", "endpoint-local", "endpoint-winrm"}:
             return
         path = str(record.get("path") or "")
         if not path or "::" in path or record.get("protected"):
@@ -344,8 +610,20 @@ class DSPMDiscoveryEngine:
             "bytes_scanned": int(record.get("bytes_scanned") or 0),
             "total_bytes": int(record.get("total_bytes") or record.get("size") or 0),
             "truncated": bool(record.get("truncated", False)),
-            "preview": _safe_preview(content),
+            "preview": (
+                record.get("reused_preview")
+                if isinstance(record.get("reused_preview"), dict)
+                else record.get("preview")
+                if isinstance(record.get("preview"), dict)
+                else _safe_preview(content)
+            ),
         }
+        if isinstance(record.get("findings"), list) and isinstance(record.get("risk"), dict):
+            baseline_result = copy.deepcopy(record)
+            baseline_result.pop("content", None)
+            baseline_result.pop("baseline_result", None)
+            baseline_result.pop("asset_overrides", None)
+            snapshot["baseline_result"] = baseline_result
         payload = {
             "meta_version": 2,
             "path": path,
@@ -403,7 +681,7 @@ class DSPMDiscoveryEngine:
             public_record["risk"] = calculate_risk(record, [], acl_assessment).to_dict()
             return public_record
 
-    def _collect_records(self) -> list[dict]:
+    def _collect_records(self, record_callback: Callable[[dict], None] | None = None) -> list[dict]:
         if self.config.server:
             scanner = SMBScanner(
                 SMBConfig(
@@ -423,6 +701,10 @@ class DSPMDiscoveryEngine:
                     cancel_check=self._cancelled,  # M14: job-cancel OR engine deadline stops a hung collection
                     reuse_probe=self._reuse_probe,
                     progress_callback=self._collection_progress,
+                    record_callback=record_callback,
+                    # P-B.2: bound parallel per-share acquisition to the same
+                    # resolved I/O worker budget the pipeline uses.
+                    io_workers=self._parallelism().io_workers,
                 )
             )
             records = scanner.scan()
@@ -444,6 +726,8 @@ class DSPMDiscoveryEngine:
                 diagnostics=walk_diagnostics,
                 reuse_probe=self._reuse_probe,
                 progress_callback=self._collection_progress,
+                record_callback=record_callback,
+                excluded_paths=[self.config.cache_dir] if self.config.persistent_cache_enabled and self.config.cache_dir else [],
             )
             diagnostics = {
                 "mode": "local",
@@ -455,6 +739,10 @@ class DSPMDiscoveryEngine:
                 "inspect_archives": self.config.inspect_archives,
                 "cache_reused_files": int(walk_diagnostics.get("reused_files") or 0),
                 "files_discovered": int(walk_diagnostics.get("matched_files") or 0),
+                "skipped_dirs": int(walk_diagnostics.get("skipped_dirs") or 0),
+                "unreadable_dirs": list(walk_diagnostics.get("unreadable_dirs") or [])[:20],
+                "archive_errors": list(walk_diagnostics.get("archive_errors") or [])[:20],
+                "archive_timed_out": bool(walk_diagnostics.get("archive_timed_out", False)),
             }
             self.last_scan_diagnostics = diagnostics
             records = self._exclude_cache_records(records)
@@ -490,6 +778,9 @@ class DSPMDiscoveryEngine:
         return filtered
 
     def _analyze_record(self, record: dict) -> dict:
+        baseline_result = record.get("baseline_result")
+        if record.get("incremental_reused") and isinstance(baseline_result, dict):
+            return self._reuse_analyzed_record(record, baseline_result)
         record["asset_overrides"] = self.config.asset_overrides
         framework_ids = {str(item).lower() for item in self.config.compliance_frameworks} if self.config.compliance_enabled else set()
         content = record.get("content", "") or ""
@@ -599,6 +890,65 @@ class DSPMDiscoveryEngine:
             public_record["detector_metrics"] = record["detector_metrics"]
         public_record["permissions"] = acl_assessment
         public_record["risk"] = risk.to_dict()
+        # Replace the collection-time low-level sidecar with the complete,
+        # sanitized analyzed result. Both L1 and durable reuse now preserve the
+        # exact same findings/risk/workflow snapshot (including stable SLA due
+        # dates) instead of reconstructing one tier differently.
+        self._write_meta_sidecar(public_record, cache_key)
+        return public_record
+
+    def _reuse_analyzed_record(self, record: dict, baseline_result: dict) -> dict:
+        """Reuse prior findings/risk while refreshing current enumeration metadata."""
+
+        public_record = copy.deepcopy(baseline_result)
+        for key in (
+            "source", "share", "path", "name", "size", "extension", "is_dir",
+            "is_hidden", "is_system", "acl", "owner", "created_at", "modified_at",
+            "accessed_at", "attributes", "sha256", "file_hash", "content_hash",
+            "content_status", "content_scannable", "scan_error", "protected",
+            "protection_type", "scan_completeness", "bytes_scanned", "total_bytes",
+            "truncated", "reuse_key",
+        ):
+            if key in record:
+                public_record[key] = copy.deepcopy(record[key])
+        public_record.pop("content", None)
+        public_record.pop("baseline_result", None)
+        public_record.pop("asset_overrides", None)
+        public_record["cache_reused"] = True
+        public_record["incremental_reused"] = True
+        public_record["incremental_scan_reason"] = "durable_baseline_unchanged_file"
+        public_record["last_scanned_at"] = datetime.now(timezone.utc).isoformat()
+        public_record["detector_elapsed_ms"] = 0
+        public_record["detector_metrics"] = {
+            "cache_hit": True,
+            "cache_scope": "durable_baseline",
+            "detector_timeout_seconds": float(self.config.detector_timeout_seconds or 0),
+            "slow_detector_degraded_mode": False,
+            "detectors": [],
+        }
+
+        # Rehydrate the L1 cache after a failover/cache eviction, so subsequent
+        # unchanged scans avoid even the database lookup.
+        framework_ids = {
+            str(item).lower() for item in self.config.compliance_frameworks
+        } if self.config.compliance_enabled else set()
+        content_hash = str(public_record.get("content_hash") or "")
+        file_hash = str(public_record.get("sha256") or public_record.get("file_hash") or content_hash)
+        catalog_versions, _ = self._keyword_catalog_versions(framework_ids)
+        cache_key = _record_cache_key(
+            tenant_id=self.config.tenant_id,
+            record=public_record,
+            file_hash=file_hash,
+            content_hash=content_hash,
+            parser_version=PARSER_VERSION,
+            detector_version=_detector_version(framework_ids),
+            rule_catalog_version="|".join(catalog_versions) if catalog_versions else GDPR_RULE_CATALOG_VERSION,
+            framework_ids=framework_ids,
+        )
+        cache_record = dict(public_record)
+        cache_record["content"] = ""
+        cache_record["reused_preview"] = public_record.get("preview")
+        self._store_cached_findings(cache_key, copy.deepcopy(public_record.get("findings") or []), cache_record)
         return public_record
 
     def _run_detectors(self, content: str, record: dict, framework_ids: set[str]) -> tuple[list[dict], dict]:
