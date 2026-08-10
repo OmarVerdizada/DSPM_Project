@@ -101,6 +101,69 @@ class TriageDetectorIntegrationTests(unittest.TestCase):
         self.assertEqual(diag["records_full"], 1)
         self.assertTrue(diag["enabled"])
 
+    def test_run_detectors_surfaces_triage_score_on_the_record(self) -> None:
+        engine = self._engine()
+        record = {"name": "passwords.txt"}
+        engine._run_detectors("email a@b.com", record, set())
+        self.assertIn("triage_score", record)
+        self.assertGreater(record["triage_score"], 0)
+
+
+class TriageSamplingTests(unittest.TestCase):
+    """Opt-in head/tail sampling of very large text (DSPM_TRIAGE_SAMPLE_BYTES).
+    Off by default -> byte-for-byte unchanged; on -> scans head+tail and marks the
+    record PARTIAL/truncated so findings inherit the truncation contract."""
+
+    def _engine(self) -> DSPMDiscoveryEngine:
+        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-sample", use_sample_when_empty=False))
+
+    def test_disabled_by_default_scans_full_content(self) -> None:
+        big = "a@b.com " + ("x " * 6000) + " c@d.com"
+        self.assertEqual(triage.triage_content({"name": "big.txt"}, big)["route"], triage.ROUTE_FULL)
+
+    def test_sampling_scans_head_and_tail_and_marks_partial(self) -> None:
+        engine = self._engine()
+        # Findings planted in the head and tail; a lot of filler in the middle.
+        big = "head a@b.com " + ("filler " * 8000) + " tail c@d.com"
+        record = {"name": "big.txt", "scan_completeness": "FULL", "total_bytes": len(big)}
+        with mock.patch.dict(os.environ, {"DSPM_TRIAGE_SAMPLE_BYTES": "400"}):
+            findings, metrics = engine._run_detectors(big, record, set())
+        self.assertEqual(metrics["triage_route"], triage.ROUTE_SAMPLE)
+        # head and tail emails are still found
+        emails = {f.get("type") for f in findings}
+        self.assertIn("email", emails)
+        # the record is marked partial so findings inherit truncation
+        self.assertEqual(record["scan_completeness"], "PARTIAL")
+        self.assertTrue(record["truncated"])
+        self.assertLessEqual(record["bytes_scanned"], 400)
+        self.assertEqual(engine._triage_diagnostics()["records_sampled"], 1)
+
+
+class TriageOrderingTests(unittest.TestCase):
+    """Score-ordered analysis: dispatch likeliest-sensitive first so a
+    deadline-truncated scan keeps recall. Never changes a completed scan's output
+    order (results are stored by original index)."""
+
+    def _engine(self) -> DSPMDiscoveryEngine:
+        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-order", use_sample_when_empty=False))
+
+    def test_order_puts_high_score_first(self) -> None:
+        engine = self._engine()
+        records = [
+            {"name": "readme.txt", "content": "hello world"},          # low score
+            {"name": "secrets.env", "content": "API_KEY=x password=y"},  # high score (name + text)
+            {"name": "notes.md", "content": "meeting notes"},           # low score
+        ]
+        order = engine._analysis_order(records)
+        self.assertEqual(order[0], 1)  # the secrets file is analyzed first
+        self.assertEqual(sorted(order), [0, 1, 2])  # every record still dispatched
+
+    def test_ordering_can_be_disabled(self) -> None:
+        engine = self._engine()
+        records = [{"name": "a.txt", "content": "x"}, {"name": "secret.env", "content": "password=y"}]
+        with mock.patch.dict(os.environ, {"DSPM_TRIAGE_ORDER": "0"}):
+            self.assertEqual(engine._analysis_order(records), [0, 1])  # natural order
+
 
 if __name__ == "__main__":
     unittest.main()

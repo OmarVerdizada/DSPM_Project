@@ -41,6 +41,7 @@ TRIAGE_VERSION = "triage-v1"
 # Routes.
 ROUTE_FULL = "full"  # run the whole detector catalog (default for any real text)
 ROUTE_SKIP_NON_TEXT = "skip_non_text"  # content did not decode as text -> no plaintext findings
+ROUTE_SAMPLE = "sample_head_tail"  # very large text: scan head+tail only (opt-in, marks PARTIAL)
 
 # How much of the content head to sample for the text-decode ratio. Bounds the
 # triage cost to O(sample) regardless of file size; a binary body reliably shows
@@ -62,6 +63,27 @@ def _enabled() -> bool:
 
 def _binary_skip_enabled() -> bool:
     return os.getenv("DSPM_TRIAGE_BINARY_SKIP", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def order_enabled() -> bool:
+    """Whether to analyze higher-score records first. Recall-safe: it never
+    changes a completed scan's findings, only which findings survive if the scan
+    hits its wall-clock deadline. ``DSPM_TRIAGE_ORDER=0`` restores collector order."""
+    if not _enabled():
+        return False
+    return os.getenv("DSPM_TRIAGE_ORDER", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _sample_chars() -> int:
+    """Head+tail sampling budget for very large text, in characters. 0 (default)
+    disables sampling entirely, so ordinary scans are byte-for-byte unchanged.
+    When set, text longer than this is scanned as head+tail slices totalling this
+    many chars, and the result is marked PARTIAL/truncated (a bounded-recall,
+    opt-in tradeoff for very large files)."""
+    try:
+        return max(0, int(os.getenv("DSPM_TRIAGE_SAMPLE_BYTES", "0")))
+    except (TypeError, ValueError):
+        return 0
 
 
 def is_binary(sample: str) -> bool:
@@ -90,12 +112,25 @@ def text_ratio(sample: str) -> float:
 
 def triage_signature() -> str:
     """Opaque token for the active triage policy, folded into the detector
-    version so cached findings are invalidated across a policy change."""
+    version so cached findings are invalidated across a policy change. Includes
+    the skip AND sample policy (both change which content the detectors see);
+    score-ordering is NOT included because it never changes a file's findings."""
     if not _enabled():
         return "triage-off"
-    if not _binary_skip_enabled():
-        return f"{TRIAGE_VERSION}:score-only"
-    return f"{TRIAGE_VERSION}:nul-skip"
+    parts = [TRIAGE_VERSION]
+    parts.append("nul-skip" if _binary_skip_enabled() else "no-skip")
+    sample = _sample_chars()
+    if sample:
+        parts.append(f"sample{sample}")
+    return ":".join(parts)
+
+
+def priority_score(record: dict, content: str) -> int:
+    """Cheap sensitivity rank (0-100) for ordering analysis so the likeliest-
+    sensitive files are scanned first - under a scan deadline that preserves
+    recall on what matters. Never changes findings, only order."""
+    sample = content[:_HEAD_SAMPLE_CHARS] if content else ""
+    return _score(record, content, text_ratio(sample))
 
 
 def _score(record: dict, content: str, ratio: float) -> int:
@@ -131,11 +166,21 @@ def triage_content(record: dict, content: str) -> dict:
         "text_ratio": round(ratio, 4),
         "score": _score(record, content, ratio),
     }
-    if not _enabled() or not _binary_skip_enabled():
+    if not _enabled():
         return result
     # Skip ONLY unambiguous binary (a NUL byte). Empty content is left to the
-    # detectors' own empty-check so the diagnostics don't double-count it.
-    if content and is_binary(sample):
+    # detectors' own empty-check so the diagnostics don't double-count it. The
+    # binary skip takes precedence over sampling.
+    if _binary_skip_enabled() and content and is_binary(sample):
         result["route"] = ROUTE_SKIP_NON_TEXT
         result["reason"] = "binary_content_nul_byte"
+        return result
+    # Opt-in: very large text is scanned as head+tail slices only (marks PARTIAL).
+    limit = _sample_chars()
+    if limit and content and len(content) > limit:
+        half = max(1, limit // 2)
+        result["route"] = ROUTE_SAMPLE
+        result["reason"] = "large_text_head_tail_sample"
+        result["sample"] = content[:half] + content[-half:]
+        result["sampled_chars"] = len(result["sample"])
     return result

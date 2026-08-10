@@ -151,7 +151,7 @@ class DSPMDiscoveryEngine:
         }
         # P-C triage aggregate (analysis runs across worker threads, so guard it).
         self._triage_lock = threading.Lock()
-        self._triage_counts = {"full": 0, "skipped_non_text": 0}
+        self._triage_counts = {"full": 0, "skipped_non_text": 0, "sampled": 0}
 
     def _cancelled(self) -> bool:
         """True if the caller cancelled (e.g. the job heartbeat set cancel) OR the
@@ -379,21 +379,29 @@ class DSPMDiscoveryEngine:
             workers=worker_count,
             pipeline={"enabled": False},
         )
+        # P-C: dispatch highest triage-score first so a deadline-truncated scan
+        # keeps the likeliest-sensitive findings. Results are always stored by the
+        # record's ORIGINAL index, so a fully-completed scan's output is identical
+        # to collector order (parity) - only which records survive a truncation
+        # differs (for the better).
+        order = self._analysis_order(records)
         if worker_count <= 1 or len(records) <= 1:
-            analyzed = []
-            for index, record in enumerate(records, start=1):
+            analyzed_by_index: list[dict | None] = [None] * len(records)
+            done = 0
+            for index in order:
                 if self._cancelled():  # M14: stop and return what we have
-                    self._mark_truncated(index - 1, total_records)
+                    self._mark_truncated(done, total_records)
                     break
-                analyzed.append(self._analyze_record_safe(record))
-                self._emit_progress("analyzing", index, total_records)
-            return analyzed
+                analyzed_by_index[index] = self._analyze_record_safe(records[index])
+                done += 1
+                self._emit_progress("analyzing", done, total_records)
+            return [item for item in analyzed_by_index if item is not None]
 
         analyzed: list[dict | None] = [None] * len(records)
         completed = 0
         stopped = False
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="dspm-scan") as executor:
-            futures = {executor.submit(self._analyze_record_safe, record): index for index, record in enumerate(records)}
+            futures = {executor.submit(self._analyze_record_safe, records[index]): index for index in order}
             for future in as_completed(futures):
                 analyzed[futures[future]] = future.result()
                 completed += 1
@@ -406,6 +414,19 @@ class DSPMDiscoveryEngine:
         if stopped:
             self._mark_truncated(completed, total_records)
         return [item for item in analyzed if item is not None]
+
+    def _analysis_order(self, records: list[dict]) -> list[int]:
+        """Record indices ordered highest triage-score first (stable within a
+        score). Natural order when ordering is disabled or there is nothing to
+        reorder."""
+        if not triage.order_enabled() or len(records) <= 1:
+            return list(range(len(records)))
+        scored = [
+            (triage.priority_score(record, record.get("content", "") or ""), index)
+            for index, record in enumerate(records)
+        ]
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [index for _, index in scored]
 
     def _emit_progress(self, stage: str, completed: int, total: int) -> None:
         if not self.config.progress_callback:
@@ -957,19 +978,25 @@ class DSPMDiscoveryEngine:
         return public_record
 
     def _record_triage(self, decision: dict) -> None:
-        key = "skipped_non_text" if decision["route"] == triage.ROUTE_SKIP_NON_TEXT else "full"
+        route = decision["route"]
+        if route == triage.ROUTE_SKIP_NON_TEXT:
+            key = "skipped_non_text"
+        elif route == triage.ROUTE_SAMPLE:
+            key = "sampled"
+        else:
+            key = "full"
         with self._triage_lock:
             self._triage_counts[key] += 1
 
     def _triage_diagnostics(self) -> dict:
         with self._triage_lock:
-            full = self._triage_counts["full"]
-            skipped = self._triage_counts["skipped_non_text"]
+            counts = dict(self._triage_counts)
         return {
             "enabled": triage.triage_signature() != "triage-off",
             "policy": triage.triage_signature(),
-            "records_full": full,
-            "records_skipped_non_text": skipped,
+            "records_full": counts["full"],
+            "records_skipped_non_text": counts["skipped_non_text"],
+            "records_sampled": counts["sampled"],
         }
 
     def _run_detectors(self, content: str, record: dict, framework_ids: set[str]) -> tuple[list[dict], dict]:
@@ -985,6 +1012,7 @@ class DSPMDiscoveryEngine:
         # real text falls through to the full catalog below.
         decision = triage.triage_content(record, content)
         self._record_triage(decision)
+        record["triage_score"] = decision["score"]  # surfaced for downstream ranking
         if decision["route"] == triage.ROUTE_SKIP_NON_TEXT:
             return [], {
                 "cache_hit": False,
@@ -997,6 +1025,13 @@ class DSPMDiscoveryEngine:
                 "slow_detector_degraded_mode": False,
                 "detectors": [],
             }
+        if decision["route"] == triage.ROUTE_SAMPLE:
+            # Opt-in head/tail sampling of very large text: scan the sample and
+            # mark the record PARTIAL so findings inherit the truncation contract.
+            content = decision["sample"]
+            record["scan_completeness"] = "PARTIAL"
+            record["truncated"] = True
+            record["bytes_scanned"] = decision.get("sampled_chars", len(content))
 
         generic_findings, row = self._timed_detector("generic", lambda: classify_content(content), timeout_seconds)
         detector_rows.append(row)
