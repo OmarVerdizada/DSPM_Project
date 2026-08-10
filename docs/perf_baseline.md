@@ -66,6 +66,23 @@ divided by the worker pool (toward core count, minus fixed pool/dot-source overh
 the real runspace-pool code path with exact parity at every worker count. Parallel SMB shares are
 the analogous lever for multi-share file servers (mock-tested; same real-target caveat).
 
+## Track P-D detector throughput — `scripts/detector_benchmark.py` (2026-08-10)
+
+The generic catalog ran one regex `finditer` pass per rule (63 passes/file). The necessary-substring
+prefilter skips any rule whose mandatory literal (`AKIA`, `BEGIN PRIVATE KEY`, `password`, …) is
+absent — **recall-exact** (a skipped rule would have matched nothing). Per-`classify_content` cost:
+
+| Content | Prefilter OFF | Prefilter ON | Speedup | Parity |
+|---|---:|---:|---:|---:|
+| Content-heavy prose (few anchors present) | 362 ms | 115 ms | **3.1×** | byte-identical |
+| Secret-dense (most anchors present) | — | — | →1× | byte-identical |
+
+Workload-dependent: the win is largest on ordinary text (most of the 63 rules are skipped) and
+shrinks toward 1× when the content actually contains many of the anchored secrets/keywords. Zero
+recall cost — proven by `tests/test_regex_prefilter.py` (prefilter ≡ full scan across a per-rule
+positive corpus + the whole `enterprise_test_data` set). The four numeric rules (card/IBAN/FIN/phone)
+have no fixed literal and always run.
+
 **Harness:** `scripts/perf_baseline.py` (reusable). **Method:** cold scan (persistent cache off) of a generated synthetic dataset through `DSPMDiscoveryEngine`, wall-clock timed, peak Python memory via `tracemalloc`.
 **Environment:** this dev host (Windows Server 2019, Python 3.14). Numbers are indicative, not a certified result.
 

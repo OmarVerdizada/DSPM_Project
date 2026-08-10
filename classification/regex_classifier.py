@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -503,12 +504,87 @@ COUNT_CAP = 10_000
 MATCH_SCAN_CAP = 200_000
 
 
-def classify_content(content: str) -> list[dict]:
+# Track P-D: necessary-substring prefilter. For each rule listed here, ANY match
+# requires at least one of these lowercased literals to be present in the content
+# (they are mandatory literals in the rule's pattern). When none is present the
+# rule is skipped WITHOUT running its `finditer` - which is exactly equivalent to
+# running it and getting zero matches (the rule would `continue` at total==0), so
+# the output is byte-identical. Rules absent from this map (the numeric rules with
+# no fixed literal - credit_card, iban, azerbaijan_fin, phone_number - and a few
+# whose only necessary literal is too common to help) are always run. Substring
+# presence is a valid necessary condition even for \b-anchored keyword rules: if
+# the word matches with a boundary, the word is a substring. Case-insensitive by
+# construction (we lowercase both sides), which stays a correct necessary
+# condition for the case-sensitive token rules too (an uppercase AKIA present
+# implies "akia" present in the lowercased content).
+_RULE_PREFILTER: dict[str, tuple[str, ...]] = {
+    "private_key": ("private key",),
+    "saml_private_key": ("private key",),
+    "aws_access_key": ("akia", "asia"),
+    "aws_secret_key": ("aws_secret_access_key",),
+    "jwt": ("eyj",),
+    "connection_string": ("server", "host", "data source"),
+    "azure_storage_key": ("defaultendpointsprotocol", "accountname", "accountkey", "blobendpoint"),
+    "azure_sas_token": ("sv=",),
+    "google_api_key": ("aiza",),
+    "gcp_service_account": ("service_account",),
+    "slack_token": ("xox",),
+    "github_token": ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+    "gitlab_token": ("glpat-",),
+    "npm_token": ("npm_",),
+    "stripe_key": ("sk_live", "sk_test", "rk_live", "rk_test"),
+    "sendgrid_key": ("sg.",),
+    "datadog_key": ("dd_api_key", "dd_app_key", "datadog"),
+    "sentry_dsn": ("sentry.io",),
+    "okta_token": ("okta", "ssws"),
+    "auth0_secret": ("auth0",),
+    "newrelic_key": ("new_relic_license_key", "newrelic"),
+    "database_uri": ("postgres", "mysql", "mariadb", "mongodb", "redis", "mssql", "sqlserver"),
+    "jdbc_connection": ("jdbc:",),
+    "basic_auth_url": ("@",),
+    "docker_auth_config": ("auths",),
+    "kubeconfig_secret": ("apiversion", "config"),
+    "terraform_state_secret": ("sensitive", "secret", "password", "private_key"),
+    "source_code_secret_context": ("client_secret", "private_token", "auth_token", "db_password", "encryption_key"),
+    "mfa_recovery_context": ("mfa", "2fa", "totp", "webauthn", "recovery code", "backup code"),
+    "swift_bic": ("swift", "bic"),
+    "email": ("@",),
+    "password": ("password", "passwd", "pwd"),
+    "bearer_token": ("authorization",),
+    "confidential_keyword": ("confidential", "restricted", "internal use only", "secret", "nda", "non-disclosure", "board only", "privileged", "need to know"),
+    "legal_contract_context": ("contract", "statement of work", "master service agreement", "msa", "nda", "legal hold"),
+    "phi_context": ("patient", "diagnosis", "medical record", "health insurance", "treatment plan", "clinical", "prescription"),
+    "payroll_context": ("payroll", "salary", "bonus", "compensation", "payslip", "employee benefit", "performance review", "disciplinary"),
+    "customer_context": ("customer list", "client list", "crm export", "account list", "support export", "vendor payment", "invoice register"),
+    "board_context": ("board pack", "board minutes", "executive committee", "exco", "strategy deck", "pricing strategy", "forecast", "merger", "acquisition", "due diligence"),
+    "security_ops_context": ("incident response", "vulnerability", "cve-", "edr export", "siem export", "access review", "soc2", "penetration test", "pentest"),
+    "repo_archive_context": ("git bundle", "repository export", "source archive", ".git/config", ".git-credentials", "repo backup"),
+    "build_log_context": ("build log", "pipeline trace", "ci job log", "deploy log", "artifact upload", "runner token", "release bundle"),
+    "special_category_context": ("biometric", "fingerprint", "face id", "facial recognition", "gps", "precise location", "religion", "political opinion", "union membership", "background check"),
+    "retention_policy_context": ("retention schedule", "records retention", "legal hold", "litigation hold", "audit evidence", "control testing", "workpaper", "access review"),
+}
+
+
+def _prefilter_active() -> bool:
+    return os.getenv("DSPM_DETECTOR_PREFILTER", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def classify_content(content: str, *, _prefilter: bool | None = None) -> list[dict]:
     if not content:
         return []
 
+    # P-D: skip rules whose necessary literal is absent (recall-exact). `_prefilter`
+    # is an internal override used by the parity harness/tests to force the full
+    # (un-prefiltered) scan for comparison; production callers pass nothing.
+    use_prefilter = _prefilter_active() if _prefilter is None else _prefilter
+    content_lower = content.lower() if use_prefilter else ""
+
     findings: list[dict] = []
     for rule in RULES:
+        if use_prefilter:
+            anchors = _RULE_PREFILTER.get(rule.name)
+            if anchors and not any(anchor in content_lower for anchor in anchors):
+                continue  # necessary literal absent -> this rule cannot match
         samples: list[str] = []
         total = 0
         examined = 0
