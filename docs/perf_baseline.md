@@ -1,5 +1,71 @@
 # Performance Baseline — Local Scan Path (Phase 0 item 12)
 
+## Track P-A incremental result (2026-08-06)
+
+The original cold result below remains the control for per-file full-scan cost. Track P-A
+now publishes a fail-on-accuracy-drift comparison with `scripts/incremental_benchmark.py`.
+It uses a disposable database and cache, performs an explicit full scan, an unchanged L1
+scan, then deletes that disposable L1 cache and proves recovery from the durable baseline.
+
+| Mode | Files | Time | Throughput | Speedup | Content-read ratio | Semantic parity |
+|---|---:|---:|---:|---:|---:|---:|
+| Explicit full | 360 | 201.952 s | 1.783 files/s | 1× | 100% | control |
+| Unchanged, warm L1 | 360 | 13.658 s | 26.357 files/s | 14.79× | **0%** | exact |
+| Unchanged, cache deleted / durable DB | 360 | 4.930 s | 73.023 files/s | 40.96× | **0%** | exact |
+
+The semantic gate compares findings, risk, permissions, and sanitized preview while excluding
+only volatile per-run timestamps/metrics. Both unchanged paths beat the last release's
+published 2.5 files/s result. The durable pass recorded 360 database-baseline hits.
+
+Reproduce:
+
+```powershell
+python scripts/incremental_benchmark.py --path enterprise_test_data --json
+```
+
+These are developer-host results, not NAS/WAN endpoint-impact certification. The existing
+infrastructure caveats below still apply to target CPU, latency, handle, and soak gates.
+
+## Track P-B parallelism (2026-08-10)
+
+All three benchmarks are **semantic-parity gated** (findings/risk/permissions/preview identical
+between serial and parallel — a faster scan that changed the answer fails the run). 6-core dev host.
+
+### Serial vs adaptive analysis — `scripts/parallelism_benchmark.py`
+
+| Mode | Files | Time | files/s | Speedup | Parity |
+|---|---:|---:|---:|---:|---:|
+| Serial (`max_workers=1`, pipeline off) | 360 | 130.1 s | 2.77 | 1× | control |
+| Adaptive (`max_workers=0`, pipeline on) | 360 | 121.9 s | 2.95 | **1.07×** | **exact** |
+
+Honest read: only **1.07×**, with pipeline `peak_in_flight=1`. This local corpus is
+**collection-bound**, not analysis-bound — the per-file `Get-Acl` subprocess (SCAN-006, see
+below) dominates, so the analysis pool is starved and there is little analysis time to overlap.
+The adaptive pipeline is *correct* (exact parity) and helps proportionally to how analysis-bound
+the workload is (heavy compliance detectors / large text files); it is not a lever for
+ACL-collection-bound scans. That is the collector-parallelism story:
+
+### WinRM collector parallelism (in-session runspace pool) — `scripts/winrm_parallel_benchmark.py`
+
+Real per-file work (content + SHA256 + ACL), 300 files, no modeled latency: **~1.8×** (plateaus
+near 4 workers; local `Get-Acl`/disk are cheap).
+
+**NAS/WAN modeled** (`--latency-ms` injects a per-file network-round-trip delay — the work the
+pool parallelizes — so the win *grows* with latency; 80 files × 100 ms):
+
+| Workers | Time | Speedup | Parity |
+|---:|---:|---:|---:|
+| 1 | 13.76 s | 1× | control |
+| 2 | 7.33 s | 1.88× | OK |
+| 4 | 4.82 s | 2.85× | OK |
+| 6 | 4.08 s | **3.37×** | OK |
+
+This is the NAS/WAN case the hardware lab would measure: a network-latency-bound endpoint scan is
+divided by the worker pool (toward core count, minus fixed pool/dot-source overhead). It is a
+**model** (injected `Start-Sleep`), not a measurement on real NAS/WAN hardware, but it exercises
+the real runspace-pool code path with exact parity at every worker count. Parallel SMB shares are
+the analogous lever for multi-share file servers (mock-tested; same real-target caveat).
+
 **Harness:** `scripts/perf_baseline.py` (reusable). **Method:** cold scan (persistent cache off) of a generated synthetic dataset through `DSPMDiscoveryEngine`, wall-clock timed, peak Python memory via `tracemalloc`.
 **Environment:** this dev host (Windows Server 2019, Python 3.14). Numbers are indicative, not a certified result.
 
