@@ -20903,62 +20903,64 @@ textarea:focus-visible {
 }
 
 /* ============================================================================
-   Track U-A â€” operator DENSITY mode (opt-in, second tunable axis).
+   Track U — operator COMPACT density (the default layout, applied site-wide).
 
-   Mirrors the data-theme mechanism: <html data-density="compact">, persisted as
-   localStorage "dspm-density". The DEFAULT render (no attribute / "comfortable")
-   is byte-for-byte untouched â€” every rule below is scoped to
-   :root[data-density="compact"], so shipping this carries ZERO regression to the
-   comfortable layout. Compact simply trims vertical padding, gaps, and oversized
-   display type to fit more rows above the fold; it keeps every radius, colour,
-   border, shadow, motion and brand cue intact â€” a density dial, not a redesign.
+   Sentro ships compact by DEFAULT: tighter vertical padding, gaps, card
+   min-heights and display type so operators see more rows above the fold. There
+   is no comfortable/compact toggle — compact IS the layout. Every rule below is
+   scoped to :root so it applies unconditionally wherever the app loads, and it
+   keeps every radius, colour, border, shadow, motion and brand cue intact — a
+   density pass, not a redesign.
 
    This stylesheet is version-layered (v80 -> v104 -> later): the density-critical
    rules are the LATE #id-scoped / !important winners (inventory table ~19110, the
    v104 metric layer ~4083, the panel-polish layer ~4133, main padding ~5615).
    Each override below therefore re-targets the WINNING rule at strictly higher
-   specificity (the :root[data-density] prefix) and repeats !important only where
-   that winner already used it â€” otherwise the layered cascade silently ignores it.
+   specificity (the :root prefix) and repeats !important only where that winner
+   already used it — otherwise the layered cascade silently ignores it.
    ============================================================================ */
 
-/* NOTE: `main` itself is NOT tokenized â€” the real comfortable rule is
+/* NOTE: `main` itself is NOT tokenized — the real comfortable rule is
    `.app-shell > main { padding: 0 !important }` (content gutters live on inner
    containers), so a compact `main` padding would ADD space, not remove it. The
    density win comes from the inner blocks below. */
 
 /* --- #1 lever: inventory / findings table rows. Halving the vertical cell
    padding is the single biggest "more rows above the fold" win. --- */
-:root[data-density="compact"] #inventory-workspace .inventory-table th {
+:root #inventory-workspace .inventory-table th {
   padding: 6px 14px;
 }
-:root[data-density="compact"] #inventory-workspace .inventory-table td {
+:root #inventory-workspace .inventory-table td {
   padding: 6px 14px;
 }
 
 /* --- KPI metric cards (v104 winners; .metric strong is !important) --- */
-:root[data-density="compact"] .metrics {
+/* The .metric family's comfortable winners sit in the high-specificity v104
+   layer, so these three need the doubled :root:root prefix (specificity 0,3,x)
+   to win where plain :root (0,2,x) loses. The rest win at :root. */
+:root:root .metrics {
   gap: 12px !important; /* comfortable resolves to 24px via a late !important rule */
 }
-:root[data-density="compact"] .metric {
+:root:root .metric {
   min-height: 96px;
   padding: 12px 14px;
 }
-:root[data-density="compact"] .metric strong {
+:root:root .metric strong {
   font-size: 26px !important; /* comfortable is a flat 30px; stay below it */
   margin-top: 10px;
 }
-:root[data-density="compact"] .metric span {
+:root .metric span {
   min-height: 26px;
 }
 
 /* --- Command hero: trim padding/gap and the oversized display title, keep the
    30px brand radius and gradient untouched. --- */
-:root[data-density="compact"] .command-hero {
+:root .command-hero {
   padding: 18px 22px;
   margin-bottom: 12px;
   gap: 16px;
 }
-:root[data-density="compact"] .command-hero-copy h1 {
+:root .command-hero-copy h1 {
   /* comfortable resolves to clamp(26px,3vw,40px)!important; stay below its 40px cap */
   font-size: clamp(22px, 2.4vw, 34px) !important;
   margin: 6px 0 8px;
@@ -20967,46 +20969,46 @@ textarea:focus-visible {
 /* --- Section / toolbar headings. The real comfortable padding/margin here is
    0 / managed by inner elements (a compact padding would ADD space), so compact
    only trims the oversized h3, which comfortable flattens to 24px. --- */
-:root[data-density="compact"] .section-header h3,
-:root[data-density="compact"] .table-toolbar h3,
-:root[data-density="compact"] .asset-header h3,
-:root[data-density="compact"] .report-header h3 {
+:root .section-header h3,
+:root .table-toolbar h3,
+:root .asset-header h3,
+:root .report-header h3 {
   font-size: clamp(18px, 1.6vw, 22px) !important;
 }
 
 /* --- Panels / context strip (padding winners are !important) --- */
-:root[data-density="compact"] .visual-panel {
+:root .visual-panel {
   padding: 14px !important;
 }
-:root[data-density="compact"] .panel-title {
+:root .panel-title {
   margin-bottom: 10px;
 }
-:root[data-density="compact"] .context-strip {
+:root .context-strip {
   padding: 12px 14px !important;
 }
 
 /* --- Scan-setup wizard stepper. Comfortable gap/padding are already tight
    (8px), so compact only lowers the step tiles' min-height. --- */
-:root[data-density="compact"] .wizard-strip div {
+:root .wizard-strip div {
   min-height: 88px;
 }
 
 /* --- Form controls: tighter fields for a dense desktop console (radius/border
    left intact). 36px stays comfortably clickable with a mouse. --- */
-:root[data-density="compact"] input,
-:root[data-density="compact"] select,
-:root[data-density="compact"] textarea,
-:root[data-density="compact"] .table-input {
+:root input,
+:root select,
+:root textarea,
+:root .table-input {
   min-height: 36px;
 }
-:root[data-density="compact"] textarea {
+:root textarea {
   min-height: 72px;
 }
 
 /* --- Findings rows / file cards --- */
-:root[data-density="compact"] .finding-signal-row,
-:root[data-density="compact"] .finding-file-card,
-:root[data-density="compact"] .exposure-row,
-:root[data-density="compact"] .coverage-row {
+:root .finding-signal-row,
+:root .finding-file-card,
+:root .exposure-row,
+:root .coverage-row {
   min-height: 48px;
 }
