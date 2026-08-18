@@ -36,6 +36,7 @@ const scanMeta = document.querySelector("#scan-meta");
 const tabs = document.querySelectorAll(".tab");
 const tabPanels = document.querySelectorAll(".tab-panel");
 const themeToggle = document.querySelector("#theme-toggle");
+const densityToggle = document.querySelector("#density-toggle");
 const tenantSwitcher = document.querySelector("#tenant-switcher");
 const addAssetBtn = document.querySelector("#add-asset-btn");
 const saveAssetsBtn = document.querySelector("#save-assets-btn");
@@ -2373,6 +2374,22 @@ function applyTheme(theme) {
   themeToggle.setAttribute("aria-label", nextLabel);
   themeToggle.title = nextLabel;
   safeStorageSet("dspm-theme", theme);
+}
+
+// Density is a second tunable axis mirroring theme: data-density on <html>,
+// persisted as "dspm-density". "comfortable" (the default) writes the attribute
+// but matches no rule, so the shipped layout is unchanged; "compact" activates
+// the :root[data-density="compact"] override block in styles.css.
+function applyDensity(density) {
+  const compact = density === "compact";
+  document.documentElement.dataset.density = density;
+  const nextLabel = compact ? "Switch to comfortable density" : "Switch to compact density";
+  if (densityToggle) {
+    densityToggle.setAttribute("aria-pressed", compact ? "true" : "false");
+    densityToggle.setAttribute("aria-label", nextLabel);
+    densityToggle.title = compact ? "Comfortable rows" : "Compact rows";
+  }
+  safeStorageSet("dspm-density", density);
 }
 
 function renderPreview(preview) {
@@ -6884,6 +6901,11 @@ themeToggle.addEventListener("click", () => {
   applyTheme(current);
 });
 
+densityToggle?.addEventListener("click", () => {
+  const current = document.documentElement.dataset.density === "compact" ? "comfortable" : "compact";
+  applyDensity(current);
+});
+
 addAssetBtn.addEventListener("click", upsertAssetRule);
 saveAssetsBtn.addEventListener("click", saveAssetEditor);
 
@@ -7173,6 +7195,7 @@ msspPortfolio.addEventListener("click", async (event) => {
 
 hydrateNavigation();
 applyTheme(safeStorageGet("dspm-theme") || "light");
+applyDensity(safeStorageGet("dspm-density") || "comfortable");
 setAuthState(Boolean(accessToken));
 renderExtensionFilter(allowedExtensionsList, extensionSearch);
 renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
@@ -7244,6 +7267,9 @@ window.addEventListener("storage", (event) => {
       toggle.setAttribute("aria-label", nextLabel);
       toggle.title = nextLabel;
     }
+  }
+  if (event.key === "dspm-density" && event.newValue) {
+    applyDensity(event.newValue);
   }
   if (event.key === profileAvatarStorageKey()) {
     renderProfile();
