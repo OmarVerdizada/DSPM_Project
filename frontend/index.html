@@ -186,13 +186,6 @@
             </div>
           </div>
 
-          <section class="wizard-strip fileserver-wizard" aria-label="File server scan workflow">
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></i><span>01</span><strong>Connect</strong><small>SMB or local dataset</small></div>
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-search"/></svg></i><span>02</span><strong>Scope</strong><small>Depth, shares, extensions</small></div>
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scan-search"/></svg></i><span>03</span><strong>Analyze</strong><small>Secrets, PII, risk context</small></div>
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-file-bar-chart-2"/></svg></i><span>04</span><strong>Report</strong><small>Inventory and DLP output</small></div>
-          </section>
-
           <section class="context-strip" id="file-server-context">
             <div>
               <span>Latest workspace data</span>
@@ -453,7 +446,6 @@
               <i class="fx-node fx-node-3"></i>
             </div>
             <div class="command-hero-copy">
-              <h1>Command center</h1>
               <div class="command-actions">
                 <button type="button" data-tab-jump="file-servers"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-folder-search"/></svg>Start file scan</button>
                 <button type="button" class="secondary-btn" data-tab-jump="endpoint"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-monitor-cog"/></svg>Start endpoint scan</button>
@@ -624,7 +616,6 @@
           <section class="visual-panel mssp-panel">
             <div class="panel-title">
               <h4>MSSP customer portfolio</h4>
-              <span>Tenant isolation and customer posture</span>
             </div>
             <div id="mssp-portfolio" class="mssp-portfolio"></div>
           </section>
@@ -640,14 +631,12 @@
               <section class="visual-panel">
                 <div class="panel-title">
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-siren"/></svg></span>Critical and high files</h4>
-                  <span>Priority review queue</span>
                 </div>
                 <div id="priority-risk-files"></div>
               </section>
               <section class="visual-panel exposure-insights">
                 <div class="panel-title">
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-open-dot"/></svg></span>Exposure insights</h4>
-                  <span>Secondary breakdowns</span>
                 </div>
                 <div class="insight-tabs">
                   <input type="radio" name="exposure-tab" id="xt-folders" class="insight-tab-radio" checked />
@@ -676,21 +665,18 @@
               <section class="visual-panel">
                 <div class="panel-title">
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-activity"/></svg></span>Posture trend</h4>
-                  <span>Last scans</span>
                 </div>
                 <div id="posture-trend" class="posture-trend"></div>
               </section>
               <section class="visual-panel">
                 <div class="panel-title">
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Remediation workflow</h4>
-                  <span>Owner and SLA</span>
                 </div>
                 <div id="remediation-workflow" class="remediation-workflow"></div>
               </section>
               <section class="visual-panel">
                 <div class="panel-title">
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-git-compare"/></svg></span>Scan comparison</h4>
-                  <span>Latest versus previous scan</span>
                 </div>
                 <div id="scan-comparison"></div>
               </section>
@@ -843,13 +829,6 @@
               <h3>Endpoint local-admin scan</h3>
             </div>
           </div>
-
-          <section class="wizard-strip endpoint-wizard" aria-label="Endpoint scan workflow">
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-monitor-cog"/></svg></i><span>01</span><strong>Prepare</strong><small>Optional local WinRM readiness</small></div>
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-shield-check"/></svg></i><span>02</span><strong>Verify</strong><small>Target host and admin credential</small></div>
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-radar"/></svg></i><span>03</span><strong>Scan</strong><small>User profile or fixed drives</small></div>
-            <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></i><span>04</span><strong>Triage</strong><small>Findings and remediation queue</small></div>
-          </section>
 
           <section class="context-strip" id="endpoint-context">
             <div>

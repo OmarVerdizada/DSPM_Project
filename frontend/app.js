@@ -2726,17 +2726,6 @@ function renderRiskRules(rules) {
   ];
 
   riskRulesBody.innerHTML = `
-    <div class="logic-hero">
-      <div>
-        <span class="eyebrow">Risk scoring model</span>
-        <h4>Every file receives a 0-100 risk score from content, path, extension, permissions, share exposure, and customer asset context.</h4>
-      </div>
-      <div class="logic-score-meter">
-        <strong>100</strong>
-        <span>maximum file risk</span>
-      </div>
-    </div>
-
     <section class="logic-section">
       <div class="logic-section-title">
         <span>Severity ranges</span>

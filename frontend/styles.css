@@ -7117,9 +7117,8 @@ body.sidebar-collapsed .sidebar-toggle {
 
 #tab-reports .report-preview,
 #report-preview {
-  max-height: 640px !important;
-  overflow: auto !important;
-  scrollbar-gutter: stable both-edges;
+  /* Report preview flows in the page — no nested scrollbar, fits the width. */
+  overflow: visible !important;
   border-radius: var(--radius-lg, 22px) !important;
   border: 1px solid var(--line) !important;
   background: color-mix(in srgb, var(--card) 94%, transparent) !important;
