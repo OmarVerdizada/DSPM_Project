@@ -182,9 +182,7 @@
         <section id="tab-file-servers" class="tab-panel">
           <div class="section-header">
             <div>
-              <p class="eyebrow">Data source discovery</p>
               <h3>File server scan</h3>
-              <p>Configure SMB or local sample discovery, extension policy, archive inspection, and queue behavior in one focused workflow.</p>
             </div>
           </div>
 
@@ -455,10 +453,7 @@
               <i class="fx-node fx-node-3"></i>
             </div>
             <div class="command-hero-copy">
-              <span class="command-pill"><svg class="f-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>DSPM command center</span>
-              <p class="eyebrow">Live workspace</p>
-              <h1>Find sensitive data, prioritize exposure, and generate evidence from one console.</h1>
-              <p>Built for file-server, endpoint, and MSSP workflows with tenant-aware history, DLP export, and remediation-focused triage.</p>
+              <h1>Command center</h1>
               <div class="command-actions">
                 <button type="button" data-tab-jump="file-servers"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-folder-search"/></svg>Start file scan</button>
                 <button type="button" class="secondary-btn" data-tab-jump="endpoint"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-monitor-cog"/></svg>Start endpoint scan</button>
@@ -586,35 +581,9 @@
           </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">Classification</p>
               <h3>Sensitive findings</h3>
-              <p>Review secret, PII, regulated-data, and confidentiality signals generated from scanned content and file context.</p>
             </div>
           </div>
-          <section class="tab-spotlight spotlight-findings" aria-label="Findings workspace overview">
-            <div class="spotlight-fx" aria-hidden="true">
-              <i class="fx-sweep"></i>
-              <i class="fx-node fx-node-1"></i>
-              <i class="fx-node fx-node-2"></i>
-              <i class="fx-node fx-node-3"></i>
-            </div>
-            <div class="tab-spotlight-copy">
-              <span class="spotlight-pill"><svg class="f-ico" aria-hidden="true"><use href="#li-radar"/></svg>Sensitive findings</span>
-              <p class="eyebrow">Detection cockpit</p>
-              <h3>Turn noisy matches into prioritized investigation queues.</h3>
-              <p>Group secrets, regulated identifiers, and confidentiality signals into a workflow analysts can scan quickly.</p>
-            </div>
-            <div class="tab-spotlight-board" aria-hidden="true">
-              <span>Signal workflow</span>
-              <div class="spotlight-flow findings-flow"><b>Detect</b><i></i><b>Group</b><i></i><b>Triage</b></div>
-              <div class="spotlight-tile-grid findings-tile-grid">
-                <div><span class="fnd-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span><strong>Secrets</strong><small>Keys and tokens</small></div>
-                <div><span class="fnd-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-fingerprint"/></svg></span><strong>PII</strong><small>Identity signals</small></div>
-                <div><span class="fnd-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-shield-check"/></svg></span><strong>DLP</strong><small>Controls</small></div>
-                <div><span class="fnd-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-clock-3"/></svg></span><strong>SLA</strong><small>Priority queue</small></div>
-              </div>
-            </div>
-          </section>
           <div class="executive-grid">
             <section class="visual-panel">
               <div class="panel-title">
@@ -646,9 +615,7 @@
           </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">Remediation operations</p>
               <h3>Risk and remediation</h3>
-              <p>Current exposure, trend movement, alert pressure, and the top files that need attention.</p>
             </div>
             <button type="button" id="refresh-executive-btn" class="secondary-btn">Refresh</button>
           </div>
@@ -741,7 +708,6 @@
           </svg>
           <div class="asset-header">
             <div>
-              <p class="eyebrow">Platform configuration</p>
               <h3>Customer asset risk</h3>
               <p>Define tenant-specific crown-jewel paths, folders, extensions, or filenames. Saved rules are applied to every new scan.</p>
             </div>
@@ -790,9 +756,7 @@
           </svg>
           <div class="report-header">
             <div>
-              <p class="eyebrow">Executive evidence</p>
               <h3>Reporting center</h3>
-              <p>Generate customer-ready reports from the latest scan and current manual risk decisions.</p>
             </div>
             <div class="report-actions">
               <button type="button" id="export-csv-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-spreadsheet"/></svg>Export Excel Workbook</button>
@@ -800,30 +764,6 @@
               <button type="button" id="export-pdf-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-text"/></svg>Open PDF Composer</button>
             </div>
           </div>
-          <section class="tab-spotlight spotlight-reports compact-spotlight" aria-label="Reporting workflow overview">
-            <div class="spotlight-fx" aria-hidden="true">
-              <i class="fx-sweep"></i>
-              <i class="fx-node fx-node-1"></i>
-              <i class="fx-node fx-node-2"></i>
-              <i class="fx-node fx-node-3"></i>
-            </div>
-            <div class="tab-spotlight-copy">
-              <span class="spotlight-pill"><svg class="f-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg>Report path</span>
-              <p class="eyebrow">Evidence package</p>
-              <h3>Convert scan output into board-ready proof and DLP actions.</h3>
-              <p>Risk distribution, priority files, and signal evidence stay together for customer reporting.</p>
-            </div>
-            <div class="tab-spotlight-board" aria-hidden="true">
-              <span>Report path</span>
-              <div class="spotlight-flow"><b>Summarize</b><i></i><b>Export</b><i></i><b>Prove</b></div>
-              <div class="spotlight-tile-grid report-format-grid">
-                <div class="fmt-xls"><span class="fmt-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-file-spreadsheet"/></svg></span><strong>XLS</strong><small>Workbook</small></div>
-                <div class="fmt-doc"><span class="fmt-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-file-text"/></svg></span><strong>DOC</strong><small>Board pack</small></div>
-                <div class="fmt-pdf"><span class="fmt-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-file-type-2"/></svg></span><strong>PDF</strong><small>Composer</small></div>
-                <div class="fmt-appendix"><span class="fmt-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-files"/></svg></span><strong>Appendix</strong><small>Full data</small></div>
-              </div>
-            </div>
-          </section>
 
           <div id="report-preview" class="report-preview"></div>
         </section>
@@ -833,7 +773,6 @@
             <div class="toolbar-fx" aria-hidden="true"><i class="fx-sweep"></i></div>
             <div>
               <h3>Scan history and audit</h3>
-              <p>Tenant scan trend, posture score, and immutable activity trail.</p>
             </div>
             <div class="history-controls">
                 <span class="field-shell history-filter-shell"><svg class="f-ico field-ico dropdown-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg><select id="history-range" class="tenant-switcher" title="Filter scan history">
@@ -901,35 +840,9 @@
           </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">Workstation discovery</p>
               <h3>Endpoint local-admin scan</h3>
-              <p>Use the credential you enter for the selected endpoint only, then scan a user profile, OneDrive, all fixed drives, or custom paths.</p>
             </div>
           </div>
-          <section class="tab-spotlight spotlight-endpoint" aria-label="Endpoint scan workflow overview">
-            <div class="spotlight-fx" aria-hidden="true">
-              <i class="fx-sweep"></i>
-              <i class="fx-node fx-node-1"></i>
-              <i class="fx-node fx-node-2"></i>
-              <i class="fx-node fx-node-3"></i>
-            </div>
-            <div class="tab-spotlight-copy">
-              <span class="spotlight-pill"><svg class="f-ico" aria-hidden="true"><use href="#li-radar"/></svg>Endpoint workflow</span>
-              <p class="eyebrow">Endpoint command path</p>
-              <h3>Prepare WinRM, verify local admin access, and scan workstation data.</h3>
-              <p>Endpoint discovery follows the same evidence model as file-server scans without mixing credentials across tenants.</p>
-            </div>
-            <div class="tab-spotlight-board" aria-hidden="true">
-              <span>Endpoint workflow</span>
-              <div class="spotlight-flow endpoint-flow"><b>Prepare</b><i></i><b>Verify</b><i></i><b>Scan</b></div>
-              <div class="spotlight-tile-grid endpoint-tile-grid">
-                <div><span class="ep-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server-cog"/></svg></span><strong>WinRM</strong><small>Readiness</small></div>
-                <div><span class="ep-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span><strong>Admin</strong><small>Credential</small></div>
-                <div><span class="ep-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-search"/></svg></span><strong>Paths</strong><small>Scope</small></div>
-                <div><span class="ep-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-shield-alert"/></svg></span><strong>Triage</strong><small>Findings</small></div>
-              </div>
-            </div>
-          </section>
 
           <section class="wizard-strip endpoint-wizard" aria-label="Endpoint scan workflow">
             <div><i class="wiz-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-monitor-cog"/></svg></i><span>01</span><strong>Prepare</strong><small>Optional local WinRM readiness</small></div>
@@ -1168,31 +1081,9 @@
           </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">Governance</p>
               <h3>Security operations</h3>
-              <p>API keys, audit evidence, DLP export, and tenant controls exposed by the backend.</p>
             </div>
           </div>
-          <section class="tab-spotlight spotlight-security compact-spotlight" aria-label="Security operations overview">
-            <div class="spotlight-fx" aria-hidden="true">
-              <i class="fx-sweep"></i>
-            </div>
-            <div class="tab-spotlight-copy">
-              <p class="eyebrow">Operator controls</p>
-              <h3>Manage users, API keys, audit evidence, and DLP exports in one lane.</h3>
-              <p>Administrative actions stay close to audit history so tenant operations remain accountable.</p>
-            </div>
-            <div class="tab-spotlight-board" aria-hidden="true">
-              <span>Governance path</span>
-              <div class="spotlight-flow security-flow"><b>Access</b><i></i><b>Keys</b><i></i><b>Audit</b></div>
-              <div class="spotlight-tile-grid security-tile-grid">
-                <div><span class="sec-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-users-round"/></svg></span><strong>RBAC</strong><small>Users</small></div>
-                <div><span class="sec-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span><strong>API</strong><small>Automation</small></div>
-                <div><span class="sec-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-shield-check"/></svg></span><strong>DLP</strong><small>Policy</small></div>
-                <div><span class="sec-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scroll-text"/></svg></span><strong>Log</strong><small>Trail</small></div>
-              </div>
-            </div>
-          </section>
 
           <div class="security-grid">
             <section class="visual-panel">
@@ -1334,35 +1225,9 @@
           </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">Tenant management</p>
               <h3>Customers and workspaces</h3>
-              <p>Create tenant workspaces, copy registration codes, and remove tenant data when a customer is offboarded.</p>
             </div>
           </div>
-          <section class="tab-spotlight spotlight-admin compact-spotlight" aria-label="MSSP tenant workflow overview">
-            <div class="spotlight-fx" aria-hidden="true">
-              <i class="fx-sweep"></i>
-              <i class="fx-node fx-node-1"></i>
-              <i class="fx-node fx-node-2"></i>
-              <i class="fx-node fx-node-3"></i>
-            </div>
-            <div class="tab-spotlight-copy">
-              <span class="spotlight-pill"><svg class="f-ico" aria-hidden="true"><use href="#li-building-2"/></svg>Tenant management</span>
-              <p class="eyebrow">MSSP control plane</p>
-              <h3>Create customer workspaces without losing tenant isolation.</h3>
-              <p>Registration codes, report counts, and audit signals stay tied to the selected customer workspace.</p>
-            </div>
-            <div class="tab-spotlight-board" aria-hidden="true">
-              <span>Tenant workflow</span>
-              <div class="spotlight-flow admin-flow"><b>Create</b><i></i><b>Register</b><i></i><b>Operate</b></div>
-              <div class="spotlight-tile-grid admin-tile-grid">
-                <div><span class="adm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-building-2"/></svg></span><strong>ID</strong><small>Workspace</small></div>
-                <div><span class="adm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span><strong>Code</strong><small>Register</small></div>
-                <div><span class="adm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scroll-text"/></svg></span><strong>Audit</strong><small>Activity</small></div>
-                <div><span class="adm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-shield-alert"/></svg></span><strong>Risk</strong><small>Reports</small></div>
-              </div>
-            </div>
-          </section>
 
           <section class="visual-panel tenant-admin-panel">
             <div class="panel-title">
