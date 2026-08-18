@@ -4650,6 +4650,8 @@ function buildScanComparison() {
   const duplicateHashPaths = latestHashComparison?.duplicate_hash_paths || [];
   const hashSummary = latestHashComparison
     ? `
+      <details class="scan-advanced hash-comparison-details">
+        <summary>Integrity comparison &mdash; SHA-256 changes &amp; duplicates</summary>
       <div class="hash-comparison-card">
         <div>
           <span>Integrity comparison</span>
@@ -4679,6 +4681,7 @@ function buildScanComparison() {
           </div>
         ` : '<p class="subtext">No identical SHA-256 values found across different paths in the latest scan.</p>'}
       </div>
+      </details>
     `
     : "";
 
