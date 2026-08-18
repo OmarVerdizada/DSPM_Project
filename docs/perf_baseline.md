@@ -85,6 +85,25 @@ in the (unrealistic) limit of content carrying every anchor. Zero recall cost �
 `enterprise_test_data` set). The four numeric rules (card/IBAN/FIN/phone) have no fixed literal and
 always run.
 
+## Track P-E partitioned scanning — `scripts/partition_benchmark.py` (2026-08-10)
+
+A single engine scans a whole target in one process; local scans are collection-bound (a per-file
+`Get-Acl` subprocess) and GIL-bound in analysis. `run_partitioned` splits the namespace into
+per-subtree units and runs them across worker PROCESSES, then merges into one report.
+
+| Mode | Files | Time | Speedup | Parity |
+|---|---:|---:|---:|---:|
+| Single engine | 360 | 183.9 s | 1× | control |
+| Partitioned (11 units, 5 processes) | 360 | 51.3 s | **3.59×** | byte-identical |
+
+This is the win P-B's threads structurally can't deliver: separate processes give true past-the-GIL
+analysis parallelism AND run the per-file `Get-Acl` collection concurrently (the actual bottleneck).
+The merged report is semantically identical to the single scan — same findings/risk/permissions and
+the same recomputed summary — proven by `tests/test_partition_parity.py` (in-process merge AND a real
+`ProcessPoolExecutor` run, with a non-vacuous file-count guard). The remote-agent (cross-host)
+executor is the same partition/merge core with `ProcessPoolExecutor` swapped for Track O agents —
+gated on that agent being built.
+
 **Harness:** `scripts/perf_baseline.py` (reusable). **Method:** cold scan (persistent cache off) of a generated synthetic dataset through `DSPMDiscoveryEngine`, wall-clock timed, peak Python memory via `tracemalloc`.
 **Environment:** this dev host (Windows Server 2019, Python 3.14). Numbers are indicative, not a certified result.
 
