@@ -34,35 +34,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-_VOLATILE_KEYS = {
-    "first_seen", "last_seen", "seen_at", "timestamp", "updated_at",
-    "last_scanned_at", "detector_elapsed_ms", "detector_metrics",
-    "incremental_scan_reason", "cache_reused", "incremental_reused",
-    # sla_due is derived from first_seen (first_seen + SLA window), so two
-    # independent full scans at different wall-clock times produce different
-    # sla_due for byte-identical findings. It is per-run, not a semantic result.
-    "sla_due",
-}
-
-
-def _semantic(value):
-    if isinstance(value, dict):
-        return {k: _semantic(v) for k, v in value.items() if k not in _VOLATILE_KEYS}
-    if isinstance(value, list):
-        return [_semantic(v) for v in value]
-    return value
-
-
-def _accuracy(report: dict) -> dict:
-    return {
-        str(item.get("path") or ""): {
-            "findings": _semantic(item.get("findings") or []),
-            "risk": _semantic(item.get("risk") or {}),
-            "permissions": _semantic(item.get("permissions") or {}),
-            "preview": _semantic(item.get("preview") or {}),
-        }
-        for item in report.get("files") or []
-    }
+from discovery.parity import accuracy_projection as _accuracy  # noqa: E402
 
 
 def _install_latency(latency_ms: float) -> None:

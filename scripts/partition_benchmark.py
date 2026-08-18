@@ -25,30 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-_VOLATILE = {
-    "first_seen", "last_seen", "seen_at", "timestamp", "updated_at", "last_scanned_at",
-    "detector_elapsed_ms", "detector_metrics", "incremental_scan_reason", "cache_reused",
-    "incremental_reused", "sla_due", "triage_score",
-}
-
-
-def _semantic(value):
-    if isinstance(value, dict):
-        return {k: _semantic(v) for k, v in value.items() if k not in _VOLATILE}
-    if isinstance(value, list):
-        return [_semantic(v) for v in value]
-    return value
-
-
-def _accuracy(report: dict) -> dict:
-    return {
-        str(item.get("path") or ""): {
-            "findings": _semantic(item.get("findings") or []),
-            "risk": _semantic(item.get("risk") or {}),
-            "permissions": _semantic(item.get("permissions") or {}),
-        }
-        for item in report.get("files") or []
-    }
+from discovery.parity import accuracy_projection as _accuracy  # noqa: E402
 
 
 def main() -> int:
