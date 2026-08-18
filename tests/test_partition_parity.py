@@ -53,6 +53,12 @@ class PartitionParityTests(unittest.TestCase):
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def setUp(self) -> None:
+        # Capture the ambient globals so tearDown can restore them. Without this,
+        # a later module that relies on the default store.DB_PATH (most DB tests
+        # do) would inherit this test's now-deleted temp path and hit
+        # "no such table" - a cross-module isolation leak.
+        self._orig_db_path = store.DB_PATH
+        self._orig_db_env = os.environ.get("DSPM_DB_PATH")
         self._tmpdb = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
         self._tmpdb.close()
         os.environ["DSPM_DB_PATH"] = self._tmpdb.name
@@ -61,6 +67,14 @@ class PartitionParityTests(unittest.TestCase):
         store.create_tenant("partition-test", "partition-test")
 
     def tearDown(self) -> None:
+        # Restore store.DB_PATH (in-process) and DSPM_DB_PATH (read by the
+        # ProcessPoolExecutor workers) before deleting the temp DB, so nothing
+        # is left pointing at a path that no longer exists.
+        store.DB_PATH = self._orig_db_path
+        if self._orig_db_env is None:
+            os.environ.pop("DSPM_DB_PATH", None)
+        else:
+            os.environ["DSPM_DB_PATH"] = self._orig_db_env
         try:
             os.unlink(self._tmpdb.name)
         except OSError:

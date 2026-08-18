@@ -70,11 +70,29 @@ def _now() -> str:
 
 @pytest.fixture(autouse=True)
 def _isolate_db_state():
-    """Give each test a clean, baseline-seeded database on Postgres (no-op on SQLite)."""
+    """Clean, baseline-seeded DB per test on Postgres; on SQLite, a snapshot/restore
+    safety-net around the ambient DB globals so one leaky module can't cascade."""
     # pytest_configure has already aborted the session if this is Postgres without
     # the explicit reset opt-in; the flag check here is belt-and-suspenders.
     if not db.is_postgres() or os.getenv("DSPM_PG_TEST_RESET") != "1":
-        yield
+        # SQLite path: per-test isolation is DIY per module (each repoints
+        # store.DB_PATH at its own temp DB, and some also set DSPM_DB_PATH for
+        # subprocess workers). If a module forgets to restore those in tearDown,
+        # every later test that relies on the ambient default DB opens a stale or
+        # deleted path and hits "no such table". Snapshot + restore both globals
+        # around each test so such a leak is contained to the one offending test
+        # instead of cascading through the rest of the suite.
+        from backend import store
+        _saved_db_path = store.DB_PATH
+        _saved_db_env = os.environ.get("DSPM_DB_PATH")
+        try:
+            yield
+        finally:
+            store.DB_PATH = _saved_db_path
+            if _saved_db_env is None:
+                os.environ.pop("DSPM_DB_PATH", None)
+            else:
+                os.environ["DSPM_DB_PATH"] = _saved_db_env
         return
 
     global _admin_hash
