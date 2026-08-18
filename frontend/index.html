@@ -320,6 +320,9 @@
                 </div>
               </section>
 
+              <details class="scan-advanced">
+                <summary>Advanced options — compliance mapping &amp; demo data</summary>
+
               <section class="scan-card" aria-label="Compliance mapping">
                 <div class="scan-card-head">
                   <span class="scan-card-ico" aria-hidden="true">
@@ -354,6 +357,7 @@
                 </div>
                 <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
               </section>
+              </details>
 
               <section class="scan-card scan-actions-card" aria-label="Scan actions">
                 <div class="scan-card-head">
@@ -839,9 +843,12 @@
             <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
           </section>
 
+          <details class="scan-advanced">
+            <summary>Optional — prepare local backend WinRM (rarely needed)</summary>
+
           <section class="visual-panel endpoint-panel winrm-activation-panel">
             <div class="panel-title">
-              <h4>1. Optional local readiness</h4>
+              <h4>Optional local readiness</h4>
               <span>Backend host only</span>
             </div>
             <div class="asset-form-grid endpoint-form">
@@ -863,10 +870,11 @@
             </div>
             <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows host running this backend. Do not enter domain/DC credentials here unless this backend host actually needs them; target machine local-admin credentials are entered below.</p>
           </section>
+          </details>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel endpoint-io-panel">
             <div class="panel-title">
-              <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span>2. Target machine WinRM</h4>
+              <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span>1. Target machine WinRM</h4>
               <span>Remote preparation</span>
             </div>
             <div class="asset-form-grid endpoint-form">
@@ -899,7 +907,7 @@
 
           <section class="visual-panel endpoint-panel endpoint-io-panel">
             <div class="panel-title">
-              <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scan-search"/></svg></span>3. Endpoint scan</h4>
+              <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scan-search"/></svg></span>2. Endpoint scan</h4>
               <span>WinRM discovery</span>
             </div>
             <div class="asset-form-grid endpoint-form">
