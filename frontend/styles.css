@@ -21060,3 +21060,48 @@ details.scan-advanced > summary:focus-visible {
   outline: var(--focus-ring, 2px solid var(--accent));
   outline-offset: 2px;
 }
+
+/* U-C: findings queue — 8 primary columns + a per-row detail expander. */
+.finding-queue-table .finding-expand-col {
+  width: 34px;
+  text-align: center;
+}
+.finding-row-expand {
+  min-height: 0;
+  padding: 2px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 900;
+  line-height: 1;
+}
+.finding-row-expand:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.finding-detail-row.hidden {
+  display: none;
+}
+.finding-detail-row > td {
+  background: color-mix(in srgb, var(--card-2) 60%, transparent);
+}
+.finding-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px 18px;
+  padding: 8px 6px;
+}
+.finding-detail-grid span {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+}
+.finding-detail-grid label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  font-weight: 800;
+}

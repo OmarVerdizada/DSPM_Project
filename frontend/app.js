@@ -1723,31 +1723,42 @@ function severityScore(level = "LOW") {
   return { CRITICAL: 95, HIGH: 80, MEDIUM: 55, LOW: 20 }[normalized] || 0;
 }
 
+// U-C: the queue shows 8 primary columns an operator scans at a glance; the
+// remaining 7 fields (confidence, protection state, exposure, occurrences,
+// unique records, owner, last seen) are demoted into a per-row expander so the
+// table stays legible without losing any data.
 function renderFindingQueueTable(rows) {
   return `
     <div class="report-register-wrap finding-queue-wrap">
       <table class="report-register-table finding-queue-table">
         <thead>
-          <tr><th>Severity</th><th>Confidence</th><th>Finding</th><th>Framework</th><th>Data Element</th><th>Asset</th><th>Exact Location</th><th>Protection State</th><th>Exposure</th><th>Occurrences</th><th>Unique Records</th><th>Status</th><th>Owner</th><th>SLA</th><th>Last Seen</th></tr>
+          <tr><th>Severity</th><th>Finding</th><th>Framework</th><th>Data Element</th><th>Asset</th><th>Exact Location</th><th>Status</th><th>SLA</th><th class="finding-expand-col" aria-label="More detail"></th></tr>
         </thead>
         <tbody>
           ${rows.map(({ file, finding, severity, confidence, framework, dataElement, asset, location, exposure, occurrences, uniqueRecords, status, owner, sla, lastSeen }) => `
             <tr>
               <td><span class="badge ${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
-              <td>${escapeHtml(confidence)}</td>
               <td><strong>${escapeHtml(findingDisplayName(finding))}</strong></td>
               <td><div class="framework-pill-row">${findingFrameworkBadges(finding)}</div></td>
               <td>${escapeHtml(dataElement)}</td>
               <td>${escapeHtml(asset)}</td>
               <td>${escapeHtml(location)}</td>
-              <td>${escapeHtml(finding.protection_state || finding.encryption_state || "unknown")}</td>
-              <td>${escapeHtml(exposure)}</td>
-              <td>${escapeHtml(occurrences)}</td>
-              <td>${escapeHtml(uniqueRecords)}</td>
               <td>${escapeHtml(status)}</td>
-              <td>${escapeHtml(owner)}</td>
               <td>${escapeHtml(sla)}</td>
-              <td>${escapeHtml(lastSeen || "unknown")}</td>
+              <td class="finding-expand-col"><button type="button" class="finding-row-expand" aria-expanded="false" aria-label="Show more finding detail" title="More detail">&#8943;</button></td>
+            </tr>
+            <tr class="finding-detail-row hidden">
+              <td colspan="9">
+                <div class="finding-detail-grid">
+                  <span><label>Confidence</label>${escapeHtml(confidence)}</span>
+                  <span><label>Protection state</label>${escapeHtml(finding.protection_state || finding.encryption_state || "unknown")}</span>
+                  <span><label>Exposure</label>${escapeHtml(exposure)}</span>
+                  <span><label>Occurrences</label>${escapeHtml(occurrences)}</span>
+                  <span><label>Unique records</label>${escapeHtml(uniqueRecords)}</span>
+                  <span><label>Owner</label>${escapeHtml(owner)}</span>
+                  <span><label>Last seen</label>${escapeHtml(lastSeen || "unknown")}</span>
+                </div>
+              </td>
             </tr>
           `).join("")}
         </tbody>
@@ -1755,6 +1766,18 @@ function renderFindingQueueTable(rows) {
     </div>
   `;
 }
+
+// Delegated toggle for the finding-queue per-row detail expander (the detail
+// <tr> is the immediate next sibling of the row that holds the button).
+document.addEventListener("click", (event) => {
+  const btn = event.target.closest(".finding-row-expand");
+  if (!btn) return;
+  const detail = btn.closest("tr")?.nextElementSibling;
+  if (!detail || !detail.classList.contains("finding-detail-row")) return;
+  const open = !detail.classList.toggle("hidden");
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  btn.innerHTML = open ? "&#10005;" : "&#8943;";
+});
 
 function primaryFindingsForFile(file) {
   return (file?.findings || []).filter((finding) => String(finding.display_state || "").toLowerCase() !== "child_evidence");
