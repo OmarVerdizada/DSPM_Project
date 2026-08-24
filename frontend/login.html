@@ -6,7 +6,7 @@
   <title>Sign In | SENTRO</title>
 
   <!-- Apply saved theme BEFORE CSS so there's no flash -->
-  <script>var _t=localStorage.getItem('dspm-theme');if(_t)document.documentElement.setAttribute('data-theme',_t);</script>
+  <script src="/static/auth-boot.js?v=1"></script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -298,7 +298,7 @@
 </head>
 <body>
 
-<button class="theme-btn" id="themeBtn" aria-label="Toggle theme" onclick="sentroThemeToggle()">🌙</button>
+<button class="theme-btn" id="themeBtn" aria-label="Toggle theme">🌙</button>
 
 <div class="page">
 
@@ -364,7 +364,7 @@
             </svg>
             <input class="finput pw" id="login-password" name="password"
                    type="password" autocomplete="current-password" placeholder="Password" required/>
-            <button type="button" class="eye-btn" id="eyeBtn" aria-label="Toggle password visibility" onclick="sentroEyeToggle()">
+            <button type="button" class="eye-btn" id="eyeBtn" aria-label="Toggle password visibility">
               <!-- Eye open (default: password hidden, show eye icon) -->
               <svg id="eyeA" width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z" stroke="currentColor" stroke-width="1.5"/>
@@ -523,113 +523,7 @@
 </div>
 
 <!-- ══ SCRIPTS ══ -->
-<script>
-/* ── Eye toggle: global, onclick, no event-listener dependency ── */
-function sentroEyeToggle() {
-  var input = document.getElementById('login-password');
-  var eyeA  = document.getElementById('eyeA');
-  var eyeB  = document.getElementById('eyeB');
-  var nowVisible = input.type === 'text';
-  input.type         = nowVisible ? 'password' : 'text';
-  eyeA.style.display = nowVisible ? ''         : 'none';
-  eyeB.style.display = nowVisible ? 'none'     : '';
-}
-
-/* ── Theme toggle: global, onclick, no event-listener dependency ── */
-function sentroThemeToggle() {
-  var root  = document.documentElement;
-  var tBtn  = document.getElementById('themeBtn');
-  var dark  = root.getAttribute('data-theme') === 'dark';
-  var next  = dark ? 'light' : 'dark';
-  root.setAttribute('data-theme', next);
-  tBtn.textContent = next === 'dark' ? '☀️' : '🌙';
-  try { localStorage.setItem('dspm-theme', next); } catch(e) {}
-}
-
-/* Sync button icon to whatever theme was restored by <head> script */
-(function () {
-  var t = document.documentElement.getAttribute('data-theme');
-  var btn = document.getElementById('themeBtn');
-  if (btn) btn.textContent = t === 'dark' ? '☀️' : '🌙';
-})();
-
-/* ── Carousel dots ── */
-(function () {
-  var dots = document.querySelectorAll('#dotsEl .dot');
-  if (!dots.length) return;
-  var di = 0;
-  setInterval(function () {
-    dots[di].classList.remove('on');
-    di = (di + 1) % dots.length;
-    dots[di].classList.add('on');
-  }, 4000);
-})();
-
-/* ── Canvas ── */
-(function () {
-  var cv  = document.getElementById('cvs');
-  if (!cv) return;
-  var ctx2 = cv.getContext('2d');
-  var W = 0, H = 0, tick = 0;
-
-  var pts = Array.from({ length: 30 }, function () {
-    return {
-      x: Math.random(), y: Math.random(),
-      vx: (Math.random() - .5) * .00016, vy: (Math.random() - .5) * .00016,
-      r: 1.2 + Math.random() * 2, d: Math.random(), ph: Math.random() * Math.PI * 2,
-    };
-  });
-
-  function resize() {
-    var p = cv.parentElement;
-    W = p.offsetWidth; H = p.offsetHeight;
-    cv.width = W; cv.height = H;
-  }
-
-  function draw() {
-    var dark = document.documentElement.getAttribute('data-theme') === 'dark';
-    if (dark) { ctx2.fillStyle = '#060914'; ctx2.fillRect(0, 0, W, H); }
-    else ctx2.clearRect(0, 0, W, H);
-
-    tick++;
-    pts.forEach(function (p) {
-      p.x += p.vx; p.y += p.vy;
-      if (p.x < 0 || p.x > 1) p.vx *= -1;
-      if (p.y < 0 || p.y > 1) p.vy *= -1;
-    });
-
-    var la = dark ? .1 : .07;
-    for (var i = 0; i < pts.length; i++) {
-      for (var j = i + 1; j < pts.length; j++) {
-        var a = pts[i], b = pts[j];
-        var dx = (a.x - b.x) * W, dy = (a.y - b.y) * H;
-        var dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 185) {
-          ctx2.strokeStyle = 'rgba(255,255,255,' + ((1 - dist / 185) * la) + ')';
-          ctx2.lineWidth = .5;
-          ctx2.beginPath(); ctx2.moveTo(a.x * W, a.y * H); ctx2.lineTo(b.x * W, b.y * H); ctx2.stroke();
-        }
-      }
-    }
-
-    pts.forEach(function (p) {
-      var cx = p.x * W, cy = p.y * H;
-      var pulse = .6 + .4 * Math.sin(tick * .016 + p.ph);
-      var al = (.18 + .28 * p.d) * pulse;
-      ctx2.fillStyle = 'rgba(255,255,255,' + (al * .18) + ')';
-      ctx2.beginPath(); ctx2.arc(cx, cy, p.r * 5, 0, Math.PI * 2); ctx2.fill();
-      ctx2.fillStyle = 'rgba(255,255,255,' + al + ')';
-      ctx2.beginPath(); ctx2.arc(cx, cy, p.r, 0, Math.PI * 2); ctx2.fill();
-    });
-
-    requestAnimationFrame(draw);
-  }
-
-  new ResizeObserver(resize).observe(cv.parentElement);
-  resize();
-  draw();
-})();
-</script>
+<script src="/static/login-fx.js?v=1"></script>
 <script src="/static/login.js?v=99"></script>
 </body>
 </html>

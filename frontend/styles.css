@@ -6348,23 +6348,9 @@ body.sidebar-collapsed .app-shell > main {
   top: 5px;
 }
 
-body.sidebar-collapsed .app-shell {
-  grid-template-columns: minmax(0, 1fr) !important;
-}
-
-body.sidebar-collapsed .sidebar {
-  display: none !important;
-}
-
-body.sidebar-collapsed .app-shell > main {
-  grid-column: 1 / -1 !important;
-  width: 100% !important;
-  max-width: 100% !important;
-}
-
-body.sidebar-collapsed .menu-open-toggle {
-  display: inline-flex !important;
-}
+/* v93's "collapsed = fully hidden" rules removed (P3.1): collapse keeps the
+   icon rail (see the later rail layers); its floating .menu-open-toggle
+   reopen button no longer exists in the markup. */
 
 @media (max-width: 720px) {
   .menu-open-toggle {
@@ -14214,7 +14200,7 @@ td.empty { padding: 48px 20px !important; }
   .dash-grid .col-scans, .dash-grid .col-activity { grid-column: span 12; }
   .kpi-grid, .metrics.kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-@media (max-width: 1024px) {
+@media (max-width: 860px) {
   .app-shell, body.sidebar-collapsed .app-shell { grid-template-columns: minmax(0, 1fr); }
   .sidebar {
     position: fixed;
@@ -16309,20 +16295,23 @@ main, .app-shell > main, .app-shell main {
    mobile, where the sidebar is position:fixed and out of grid flow.
    ========================================================================== */
 
+/* P3.1: v113's "collapsed = fully hidden" is replaced — collapse keeps a 68px
+   icon rail: brand mark, destination icons, and the in-rail collapse control
+   stay; labels and sub-links hide. Off-canvas hiding exists only <=860px,
+   where the topbar hamburger is the opener. */
 body.sidebar-collapsed .app-shell {
-  grid-template-columns: minmax(0, 1fr) !important;
+  grid-template-columns: 68px minmax(0, 1fr) !important;
 }
 body.sidebar-collapsed .app-shell > .sidebar {
-  display: none !important;
-  width: 0 !important;
-  min-width: 0 !important;
-  max-width: 0 !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  border: 0 !important;
+  display: flex !important;
+  width: 68px !important;
+  min-width: 68px !important;
+  max-width: 68px !important;
+  padding: 14px 10px !important;
+  overflow: visible !important;
 }
 body.sidebar-collapsed .app-shell > main {
-  grid-column: 1 / -1 !important;
+  grid-column: auto !important;
   margin-left: 0 !important;
   transform: none !important;
   width: 100% !important;
@@ -21486,40 +21475,98 @@ details.scan-advanced > summary:focus-visible {
 }
 
 /* ============================================================================
-   Redesign P3 — subnav: in-page section switcher for merged destinations
-   (Scan = file-server/endpoint, Evidence = reports/history, Administration =
-   security/tenants/asset rules/risk logic). Buttons reuse the existing
-   data-tab-jump wiring; each panel's own strip marks itself active.
+   Redesign P3.1 — sidebar sub-navigation + in-sidebar collapse.
+
+   Merged destinations (Scan, Evidence, Administration) expand under their own
+   sidebar entry: the active destination shows its member pages as indented
+   sub-links (no in-page switcher strips). The collapse control is pinned to
+   the bottom of the sidebar; collapsed keeps a 68px icon rail — icons stay,
+   labels and sub-links hide. The topbar hamburger remains only as the
+   small-screen off-canvas opener.
    ============================================================================ */
-.subnav {
+.sidebar {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 0 0 14px;
+  flex-direction: column;
 }
-.subnav-tab {
-  min-height: 32px;
-  padding: 4px 14px;
+.side-nav {
+  flex: 0 0 auto;
+}
+.nav-sub {
+  display: grid;
+  gap: 2px;
+  margin: 2px 0 6px;
+  padding-left: 38px;
+}
+.nav-sub-link {
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sidebar-muted, var(--muted));
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.nav-sub-link:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.nav-sub-link.active {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-weight: 700;
+}
+.nav-sub-link:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.sidebar-collapse-btn {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface);
+  border-radius: 10px;
+  background: transparent;
   color: var(--muted);
   font-size: 12.5px;
   font-weight: 700;
   cursor: pointer;
 }
-.subnav-tab:hover {
+.sidebar-collapse-btn:hover {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
 }
-.subnav-tab.active {
-  background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  color: var(--accent-strong);
+.sidebar-collapse-btn .collapse-ico {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  transition: transform 160ms ease;
 }
-.subnav-tab:focus-visible {
+.sidebar-collapse-btn:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+body.sidebar-collapsed .sidebar-collapse-btn {
+  justify-content: center;
+  padding: 6px;
+}
+body.sidebar-collapsed .sidebar-collapse-btn span { display: none; }
+body.sidebar-collapsed .sidebar-collapse-btn .collapse-ico { transform: rotate(180deg); }
+body.sidebar-collapsed .nav-sub { display: none !important; }
+/* Desktop: the topbar hamburger is redundant (collapse lives in the sidebar).
+   `button` in the selector matches the older `.topbar button.sidebar-toggle`
+   inline-flex rule's specificity so this later declaration wins. */
+.topbar button.sidebar-toggle { display: none !important; }
+@media (max-width: 860px) {
+  .topbar button.sidebar-toggle { display: inline-flex !important; }
+  .sidebar-collapse-btn { display: none; }
 }
 
 /* ============================================================================

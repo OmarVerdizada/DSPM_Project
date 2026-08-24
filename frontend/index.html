@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=173" />
+    <link rel="stylesheet" href="/static/styles.css?v=175" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -64,6 +64,10 @@
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
             <span>Scan</span>
           </button>
+          <div class="nav-sub" data-nav-sub="file-servers" hidden>
+            <button type="button" class="nav-sub-link" data-tab-jump="file-servers">File server</button>
+            <button type="button" class="nav-sub-link" data-tab-jump="endpoint">Endpoint</button>
+          </div>
           <button type="button" class="tab" data-tab="findings" title="Secrets, PII, regulated data">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4M11 8v3M11 14h.01"/></svg>
             <span>Findings</span>
@@ -76,17 +80,31 @@
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/></svg>
             <span>Evidence</span>
           </button>
+          <div class="nav-sub" data-nav-sub="reports" hidden>
+            <button type="button" class="nav-sub-link" data-tab-jump="reports">Reports</button>
+            <button type="button" class="nav-sub-link" data-tab-jump="history">History &amp; audit</button>
+          </div>
           <button type="button" class="tab" data-tab="security" title="Users, tenants, asset rules, risk logic">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
             <span>Administration</span>
           </button>
+          <div class="nav-sub" data-nav-sub="security" hidden>
+            <button type="button" class="nav-sub-link" data-tab-jump="security">Security ops</button>
+            <button type="button" class="nav-sub-link" data-tab-jump="admin">Tenants</button>
+            <button type="button" class="nav-sub-link" data-tab-jump="settings">Asset rules</button>
+            <button type="button" class="nav-sub-link" data-tab-jump="logic">Risk logic</button>
+          </div>
         </nav>
+        <button type="button" id="sidebar-toggle" data-sidebar-toggle class="sidebar-collapse-btn" aria-expanded="true" title="Collapse navigation">
+          <svg class="collapse-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>
+          <span>Collapse</span>
+        </button>
       </aside>
 
       <main>
         <section class="topbar">
           <div class="topbar-left">
-            <button type="button" id="sidebar-toggle" class="sidebar-toggle tb-icon-btn" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
+            <button type="button" data-sidebar-toggle class="sidebar-toggle tb-icon-btn" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
             </button>
             <button type="button" id="fx-search" class="tb-search" aria-label="Search or type a command">
@@ -156,10 +174,6 @@
         </section>
 
         <section id="tab-file-servers" class="tab-panel">
-          <nav class="subnav" aria-label="Scan sections">
-            <button type="button" class="subnav-tab active" data-tab-jump="file-servers">File server</button>
-            <button type="button" class="subnav-tab" data-tab-jump="endpoint">Endpoint</button>
-          </nav>
           <div class="section-header">
             <div>
               <h3>File server scan</h3>
@@ -654,12 +668,6 @@
         </section>
 
         <section id="tab-settings" class="tab-panel">
-          <nav class="subnav" aria-label="Administration sections">
-            <button type="button" class="subnav-tab" data-tab-jump="security">Security ops</button>
-            <button type="button" class="subnav-tab" data-tab-jump="admin">Tenants</button>
-            <button type="button" class="subnav-tab active" data-tab-jump="settings">Asset rules</button>
-            <button type="button" class="subnav-tab" data-tab-jump="logic">Risk logic</button>
-          </nav>
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-save" viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></symbol>
@@ -705,10 +713,6 @@
         </section>
 
         <section id="tab-reports" class="tab-panel">
-          <nav class="subnav" aria-label="Evidence sections">
-            <button type="button" class="subnav-tab active" data-tab-jump="reports">Reports</button>
-            <button type="button" class="subnav-tab" data-tab-jump="history">History &amp; audit</button>
-          </nav>
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-file-check-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m3 15 2 2 4-4"/></symbol>
@@ -733,10 +737,6 @@
         </section>
 
         <section id="tab-history" class="tab-panel workspace">
-          <nav class="subnav" aria-label="Evidence sections">
-            <button type="button" class="subnav-tab" data-tab-jump="reports">Reports</button>
-            <button type="button" class="subnav-tab active" data-tab-jump="history">History &amp; audit</button>
-          </nav>
           <div class="table-toolbar history-toolbar">
             <div class="toolbar-fx" aria-hidden="true"><i class="fx-sweep"></i></div>
             <div>
@@ -777,10 +777,6 @@
         </section>
 
         <section id="tab-endpoint" class="tab-panel">
-          <nav class="subnav" aria-label="Scan sections">
-            <button type="button" class="subnav-tab" data-tab-jump="file-servers">File server</button>
-            <button type="button" class="subnav-tab active" data-tab-jump="endpoint">Endpoint</button>
-          </nav>
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-radar" viewBox="0 0 24 24"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62a10 10 0 1 0 19.02-1.27"/><path d="M16.24 7.76a6 6 0 1 0-8.01 8.91"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></symbol>
@@ -1044,12 +1040,6 @@
         </section>
 
         <section id="tab-security" class="tab-panel">
-          <nav class="subnav" aria-label="Administration sections">
-            <button type="button" class="subnav-tab active" data-tab-jump="security">Security ops</button>
-            <button type="button" class="subnav-tab" data-tab-jump="admin">Tenants</button>
-            <button type="button" class="subnav-tab" data-tab-jump="settings">Asset rules</button>
-            <button type="button" class="subnav-tab" data-tab-jump="logic">Risk logic</button>
-          </nav>
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-users-round" viewBox="0 0 24 24"><path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="8" r="5"/><path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/></symbol>
@@ -1193,12 +1183,6 @@
         </section>
 
         <section id="tab-admin" class="tab-panel">
-          <nav class="subnav" aria-label="Administration sections">
-            <button type="button" class="subnav-tab" data-tab-jump="security">Security ops</button>
-            <button type="button" class="subnav-tab active" data-tab-jump="admin">Tenants</button>
-            <button type="button" class="subnav-tab" data-tab-jump="settings">Asset rules</button>
-            <button type="button" class="subnav-tab" data-tab-jump="logic">Risk logic</button>
-          </nav>
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-building-2" viewBox="0 0 24 24"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></symbol>
@@ -1263,12 +1247,6 @@
         </section>
 
         <section id="tab-logic" class="tab-panel workspace risk-logic">
-          <nav class="subnav" aria-label="Administration sections">
-            <button type="button" class="subnav-tab" data-tab-jump="security">Security ops</button>
-            <button type="button" class="subnav-tab" data-tab-jump="admin">Tenants</button>
-            <button type="button" class="subnav-tab" data-tab-jump="settings">Asset rules</button>
-            <button type="button" class="subnav-tab active" data-tab-jump="logic">Risk logic</button>
-          </nav>
           <div class="section-header">
             <div>
               <h3>Risk logic</h3>
@@ -1338,68 +1316,10 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=142"></script>
+    <script src="/static/app.js?v=143"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
-    <script>
-      (function () {
-        var form = document.getElementById("connection-form");
-        var panel = document.getElementById("scan-summary-options");
-        if (!form || !panel) return;
-        var optionInputs = {
-          async: "async_scan",
-          zip: "inspect_archives",
-          admin: "include_admin_shares",
-          compliance: "compliance-enabled",
-        };
-        function fieldValue(id, fallback) {
-          var el = document.getElementById(id);
-          var value = el && typeof el.value === "string" ? el.value.trim() : "";
-          return value || fallback;
-        }
-        function setText(id, value) {
-          var el = document.getElementById(id);
-          if (el && el.textContent !== value) el.textContent = value;
-        }
-        function policyLabel() {
-          var advanced = document.getElementById("ext-advanced-mode");
-          if (advanced && !advanced.classList.contains("hidden")) {
-            var count = document.querySelectorAll("#allowed_extensions input:checked").length;
-            return count ? "Custom (" + count + " selected)" : "Custom selection";
-          }
-          var checked = document.querySelector("input[name='ext-preset']:checked");
-          var card = checked && checked.closest(".ext-preset-card");
-          var title = card && card.querySelector(".ext-preset-title");
-          return title ? title.textContent.trim() : "—";
-        }
-        function render() {
-          var server = fieldValue("server", "");
-          setText("scan-summary-target", server || "Local dataset");
-          setText("scan-summary-domain", fieldValue("domain", "—"));
-          setText("scan-summary-path", server ? "\\\\" + server + "\\*" : fieldValue("local_path", "—"));
-          setText("scan-summary-depth", fieldValue("max_depth", "—"));
-          setText("scan-summary-policy", policyLabel());
-          Object.keys(optionInputs).forEach(function (key) {
-            var input = document.getElementById(optionInputs[key]);
-            var chip = panel.querySelector('[data-summary-option="' + key + '"]');
-            if (chip) chip.classList.toggle("on", Boolean(input && input.checked));
-          });
-        }
-        var scheduled = false;
-        function schedule() {
-          if (scheduled) return;
-          scheduled = true;
-          window.requestAnimationFrame(function () {
-            scheduled = false;
-            render();
-          });
-        }
-        form.addEventListener("input", schedule);
-        form.addEventListener("change", schedule);
-        form.addEventListener("click", schedule);
-        render();
-      })();
-    </script>
+    <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
     <script src="/static/sentro-fx.js?v=3" defer></script>
   </body>

@@ -2860,6 +2860,19 @@ function switchTab(tabName) {
     tab.classList.toggle("active", isActive);
     tab.setAttribute("aria-current", isActive ? "page" : "false");
   });
+  // Sidebar sub-navigation: the active destination expands its members as
+  // indented sub-links under its entry; every other group stays collapsed.
+  document.querySelectorAll(".side-nav .nav-sub").forEach((group) => {
+    const open = group.dataset.navSub === destination;
+    group.hidden = !open;
+    if (open) {
+      group.querySelectorAll(".nav-sub-link").forEach((link) => {
+        const isCurrent = resolveTabName(link.dataset.tabJump) === resolvedTab;
+        link.classList.toggle("active", isCurrent);
+        link.setAttribute("aria-current", isCurrent ? "page" : "false");
+      });
+    }
+  });
   tabPanels.forEach((panel) => panel.classList.toggle("active", panel === activePanel));
 
   activePanel.animate(
@@ -7539,18 +7552,24 @@ auditFrom?.addEventListener("change", () => renderAudit(latestAuditEvents));
 auditTo?.addEventListener("change", () => renderAudit(latestAuditEvents));
 auditFrom?.addEventListener("input", debounce(() => renderAudit(latestAuditEvents)));
 auditTo?.addEventListener("input", debounce(() => renderAudit(latestAuditEvents)));
+// The collapse control lives at the bottom of the sidebar (desktop icon-rail
+// collapse); the topbar hamburger stays as the small-screen off-canvas opener.
+// Both carry [data-sidebar-toggle] and share this handler.
+const sidebarToggles = document.querySelectorAll("[data-sidebar-toggle]");
 function setSidebarCollapsed(collapsed) {
   document.body.classList.toggle("sidebar-collapsed", collapsed);
-  sidebarToggle?.setAttribute("aria-expanded", String(!collapsed));
+  sidebarToggles.forEach((btn) => {
+    btn.setAttribute("aria-expanded", String(!collapsed));
+    btn.title = collapsed ? "Expand navigation" : "Collapse navigation";
+  });
   menuOpenToggle?.setAttribute("aria-expanded", String(!collapsed));
-  if (sidebarToggle) {
-    sidebarToggle.title = collapsed ? "Expand navigation" : "Collapse navigation";
-  }
   safeSessionSet("dspm-sidebar-collapsed", collapsed ? "1" : "");
 }
 
-sidebarToggle?.addEventListener("click", () => {
-  setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
+sidebarToggles.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
+  });
 });
 menuOpenToggle?.addEventListener("click", () => setSidebarCollapsed(false));
 refreshExecutiveBtn.addEventListener("click", () => {
