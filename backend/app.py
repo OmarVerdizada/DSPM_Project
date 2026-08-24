@@ -11,6 +11,7 @@ import secrets
 import socket
 import time
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -28,6 +29,7 @@ from backend.copilot.session_context import session_context_sweeper
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
 from backend.jobs import cancel_job, cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
+from backend.inventory_export import inventory_export_response_metadata, inventory_export_stream
 from backend.security import (
     Principal,
     authenticate_user,
@@ -41,6 +43,7 @@ from backend.security import (
     sanitize_username,
 )
 from backend.store import (
+    InventoryReadUnavailable,
     audit,
     clear_login_failures,
     count_login_failures,
@@ -73,8 +76,13 @@ from backend.store import (
     get_finding,
     get_finding_history,
     get_finding_occurrences,
+    get_inventory_asset,
+    inventory_facets,
+    inventory_export_ready,
+    incremental_baseline_exists,
     list_findings,
     list_inventory,
+    probe_incremental_object,
     update_finding_lifecycle,
     update_finding_workflow,
     update_user_password,
@@ -171,6 +179,10 @@ async def app_lifespan(_: FastAPI):
         prune_job_records(30 * 24 * 3600)
     except Exception:
         pass
+    with suppress(Exception):
+        from backend.search import start_search_reconciler
+
+        start_search_reconciler()
     # Make the OCR posture observable: opt-in OCR was silently off before, so a
     # user who enabled it had no way to confirm. Log it once at startup.
     try:
@@ -190,6 +202,10 @@ async def app_lifespan(_: FastAPI):
     try:
         yield
     finally:
+        with suppress(Exception):
+            from backend.search import stop_search_reconciler
+
+            stop_search_reconciler()
         if sweeper is not None:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
@@ -297,7 +313,11 @@ class BodySizeLimitMiddleware:
             if not replayed:
                 replayed = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            return {"type": "http.disconnect"}
+            # Do not synthesize a disconnect after replaying the request. A
+            # StreamingResponse listens for this event and would otherwise cancel
+            # its body immediately. Propagate the real client channel so an actual
+            # disconnect still cancels database/export work promptly.
+            return await receive()
 
         await self.app(scope, replay_receive, send)
 
@@ -321,6 +341,15 @@ app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_: Request, __: RequestValidationError) -> JSONResponse:
     return JSONResponse(status_code=400, content={"detail": "Invalid request. Check required fields and formats."})
+
+
+@app.exception_handler(InventoryReadUnavailable)
+async def inventory_unavailable_handler(_: Request, __: InventoryReadUnavailable) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Normalized inventory is temporarily unavailable. Retry shortly."},
+        headers={"Retry-After": "5", "Cache-Control": "no-store"},
+    )
 
 
 class ConnectionRequest(BaseModel):
@@ -377,9 +406,11 @@ class AssetOverride(BaseModel):
 class ScanRequest(ConnectionRequest):
     save_report: bool = True
     async_scan: bool = False
+    compact_result: bool = False
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
     compliance_enabled: bool = False
     compliance_frameworks: list[str] = Field(default_factory=list, max_length=12)
+    incremental_enabled: bool = True
 
     @field_validator("compliance_frameworks")
     @classmethod
@@ -403,6 +434,7 @@ class EndpointScanRequest(BaseModel):
     read_acl: bool = False
     inspect_archives: bool = False
     async_scan: bool = False
+    compact_result: bool = False
     allowed_extensions: list[str] = Field(default_factory=list, max_length=160)
     extension_filter_enabled: bool = False
     include_hidden: bool = True
@@ -413,6 +445,7 @@ class EndpointScanRequest(BaseModel):
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
     compliance_enabled: bool = False
     compliance_frameworks: list[str] = Field(default_factory=list, max_length=12)
+    incremental_enabled: bool = True
 
     @field_validator("host", "domain", "username", "credential_ref")
     @classmethod
@@ -662,8 +695,9 @@ def dashboard() -> FileResponse:
 @app.get("/api/health")
 def health() -> dict:
     from collectors.ocr import ocr_status
+    from backend.search import search_health
 
-    return {"status": "ok", "service": "dspm-discovery", "ocr": ocr_status()}
+    return {"status": "ok", "service": "dspm-discovery", "ocr": ocr_status(), "search": search_health()}
 
 
 @app.get("/api/risk-rules")
@@ -1399,7 +1433,7 @@ def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(r
 
         data = _run_endpoint_scan_payload(config, payload, principal)
         audit(principal.tenant_id, principal.subject, "endpoint.scan.completed", {"scan_id": data.get("scan_id"), "host": payload.host})
-        return data
+        return _compact_scan_report(data) if payload.compact_result else data
     except HTTPException:
         raise
     except Exception as exc:
@@ -1447,7 +1481,7 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_role("anal
         _apply_compliance(data, payload)
         _persist_scan(data, payload, principal)
         audit(principal.tenant_id, principal.subject, "scan.completed", {"scan_id": data.get("scan_id")})
-        return data
+        return _compact_scan_report(data) if payload.compact_result else data
     except HTTPException:
         raise
     except Exception as exc:
@@ -1487,19 +1521,26 @@ def scan_history(
 
 
 @app.get("/api/history/latest/report")
-def latest_scan_report(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def latest_scan_report(
+    principal: Principal = Depends(require_role("viewer")),
+    include_files: bool = Query(default=True),
+) -> dict:
     report = read_scan_report(principal.tenant_id)
     if report is None:
         raise HTTPException(status_code=404, detail="No saved scan report found")
-    return {"report": report}
+    return {"report": report if include_files else _compact_scan_report(report)}
 
 
 @app.get("/api/history/{scan_id}/report")
-def saved_scan_report(scan_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def saved_scan_report(
+    scan_id: str,
+    principal: Principal = Depends(require_role("viewer")),
+    include_files: bool = Query(default=True),
+) -> dict:
     report = read_scan_report(principal.tenant_id, scan_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Saved scan report not found")
-    return {"report": report}
+    return {"report": report if include_files else _compact_scan_report(report)}
 
 
 @app.get("/api/findings")
@@ -1516,7 +1557,9 @@ def inventory_index(
     principal: Principal = Depends(require_role("viewer")),
     risk: str = Query(default="", max_length=20),
     source: str = Query(default="", max_length=40),
-    framework: str = Query(default="", max_length=40),
+    framework: str = Query(default="", max_length=200),
+    finding_type: str = Query(default="", max_length=160),
+    protected: bool | None = Query(default=None),
     q: str = Query(default="", max_length=200),
     extension: str = Query(default="", max_length=20),
     sort: str = Query(default="risk_score", max_length=20),
@@ -1527,8 +1570,68 @@ def inventory_index(
     browser fetches one page instead of the whole file list."""
     return list_inventory(
         principal.tenant_id, risk=risk, source=source, framework=framework,
-        q=q, extension=extension, sort=sort, cursor=after, limit=limit,
+        finding_type=finding_type, protected=protected, q=q, extension=extension,
+        sort=sort, cursor=after, limit=limit,
     )
+
+
+@app.get("/api/inventory/export")
+def inventory_export(
+    principal: Principal = Depends(require_role("viewer")),
+    format: str = Query(default="csv", pattern="^(csv|ndjson)$"),
+    risk: str = Query(default="", max_length=20),
+    source: str = Query(default="", max_length=40),
+    framework: str = Query(default="", max_length=200),
+    finding_type: str = Query(default="", max_length=160),
+    protected: bool | None = Query(default=None),
+    q: str = Query(default="", max_length=200),
+    extension: str = Query(default="", max_length=20),
+) -> StreamingResponse:
+    """S-G: tenant-scoped keyset export with bounded DB and response chunks."""
+    if not inventory_export_ready(principal.tenant_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Streaming export requires a complete normalized inventory. "
+                "Run the normalized scan backfill and retry; report-blob fallback is intentionally disabled."
+            ),
+        )
+    filters = {
+        "risk": risk, "source": source, "framework": framework,
+        "finding_type": finding_type, "protected": protected, "q": q,
+        "extension": extension,
+    }
+    filename, media_type = inventory_export_response_metadata(principal.tenant_id, format)
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "inventory.export.started",
+        {"format": format, "filtered": any(value not in ("", None) for value in filters.values())},
+    )
+    return StreamingResponse(
+        inventory_export_stream(principal.tenant_id, format, **filters),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
+            "X-Sentro-Export-Order": "asset-id-asc",
+        },
+    )
+
+
+@app.get("/api/inventory/facets")
+def inventory_facet_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    return inventory_facets(principal.tenant_id)
+
+
+@app.get("/api/inventory/{asset_id}")
+def inventory_asset_detail(asset_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+    asset = get_inventory_asset(principal.tenant_id, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Inventory asset not found")
+    return {"asset": asset}
 
 
 @app.get("/api/findings/{finding_id}")
@@ -1774,7 +1877,7 @@ def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) ->
 
 @app.get("/api/tenants")
 def tenant_portfolio(principal: Principal = Depends(require_role("admin"))) -> dict:
-    tenants = list_tenants() if _is_platform_admin(principal) else [item for item in list_tenants() if item["tenant_id"] == principal.tenant_id]
+    tenants = list_tenants() if _is_platform_admin(principal) else list_tenants(principal.tenant_id)
     return {"tenants": [_public_tenant(item) for item in tenants]}
 
 
@@ -2017,6 +2120,34 @@ def _posture_score(summary: dict) -> int:
     return max(0, min(100, round(100 - exposure)))
 
 
+def _compact_scan_report(report: dict) -> dict:
+    """Metadata-only scan payload used by the windowed console.
+
+    Full reports remain available to explicit API callers. The compact form
+    preserves summaries/diagnostics but replaces the unbounded file array with
+    an omission marker so browsers never deserialize it accidentally.
+    """
+    compact = dict(report or {})
+    files = report.get("files") if isinstance(report, dict) else []
+    files = files if isinstance(files, list) else []
+    file_count = len(files) or int((compact.get("summary") or {}).get("total_files") or 0)
+    sample_count = sum(
+        1 for file_obj in files
+        if re.search(
+            r"(^|[\\/])enterprise_test_data([\\/]|$)|(^|[\\/])README_enterprise_dataset\.md$|(^|[\\/])_manifest\.json$",
+            str(file_obj.get("path") or file_obj.get("full_path") or file_obj.get("name") or ""),
+            flags=re.IGNORECASE,
+        )
+    )
+    compact["files"] = []
+    compact["files_omitted"] = True
+    compact["file_count"] = file_count
+    compact["result_file_count"] = file_count
+    compact["result_truncated"] = bool(file_count)
+    compact["is_demo_sample"] = bool(compact.get("is_demo_sample") or (files and sample_count / len(files) >= 0.5))
+    return compact
+
+
 def _scan_extension_settings(extensions: list[str], enabled: bool) -> tuple[list[str], bool]:
     normalized = sorted(normalize_extension_filter(extensions))
     if not enabled or not normalized:
@@ -2085,17 +2216,43 @@ def _persist_compliance_scan(data: dict, payload: ScanRequest | EndpointScanRequ
 
 
 def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], job=None, floor: int = 70) -> list[dict]:
-    """Analyze endpoint records with real per-record job progress (floor→90)."""
-    analyzed: list[dict] = []
-    total = max(len(records), 1)
-    for index, record in enumerate(records, start=1):
-        if job and job.cancel_requested:
-            raise RuntimeError("Scan cancelled")
-        analyzed.append(report._analyze_record(record))
-        if job and (index % 10 == 0 or index == len(records)):
-            job.progress = max(job.progress, min(90, floor + int((index / total) * (90 - floor))))
-            job.message = f"Analyzing endpoint files {index}/{len(records)}"
-    return analyzed
+    """Analyze endpoint records with the same adaptive pool as file scans."""
+    # Keep the helper's small duck-typed contract for tests and integrations
+    # that supply only _analyze_record. Real discovery engines take the adaptive
+    # branch below.
+    if not hasattr(report, "config") or not hasattr(report, "_analyze_records"):
+        analyzed: list[dict] = []
+        total = max(len(records), 1)
+        for index, record in enumerate(records, start=1):
+            if job and job.cancel_requested:
+                raise RuntimeError("Scan cancelled")
+            analyzed.append(report._analyze_record(record))
+            if job and (index % 10 == 0 or index == len(records)):
+                job.progress = max(job.progress, min(90, floor + int((index / total) * (90 - floor))))
+                job.message = f"Analyzing endpoint files {index}/{len(records)}"
+        return analyzed
+
+    prior_cancel = report.config.cancel_check
+    prior_progress = report.config.progress_callback
+
+    if job:
+        report.config.cancel_check = lambda: job.cancel_requested
+
+        def update_progress(stage: str, completed: int, total: int) -> None:
+            if stage != "analyzing":
+                return
+            total_n = max(int(total or 0), 1)
+            completed_n = max(0, min(int(completed or 0), total_n))
+            job.progress = max(job.progress, min(90, floor + int((completed_n / total_n) * (90 - floor))))
+            job.message = f"Analyzing endpoint files {completed_n}/{len(records)}"
+
+        report.config.progress_callback = update_progress
+
+    try:
+        return report._analyze_records(records)
+    finally:
+        report.config.cancel_check = prior_cancel
+        report.config.progress_callback = prior_progress
 
 
 def _run_endpoint_scan_payload(
@@ -2107,41 +2264,119 @@ def _run_endpoint_scan_payload(
     if _is_local_endpoint_host(config.host):
         return _run_local_endpoint_scan_payload(config, payload, principal, job)
 
+    report = _endpoint_analysis_engine(config, payload, principal)
     if job:
         job.progress = 8
-        job.message = "Running remote endpoint inventory (WinRM returns results in one batch)"
+        job.message = "Enumerating remote endpoint metadata"
     scanner = WinRMEndpointScanner(config)
-    # The remote PowerShell script enumerates, reads, and hashes on the endpoint
-    # and returns everything in a single response, so there is no per-file
-    # collection signal. The heartbeat keeps the job visibly alive within a
-    # bounded band and the wall-clock deadline turns a hung remote scan into a
-    # clearly *failed* job instead of an eternal "running".
-    with collection_heartbeat(job, ceiling=60):
-        records = scanner.scan()
+    collection_diagnostics: dict = {}
+    if payload.incremental_enabled and config.read_content:
+        # WinRM cannot callback into the server for each file while its
+        # PowerShell walk is running. Enumerate size/mtime without content,
+        # owner/ACL or hashing, resolve the baseline locally, then fetch only
+        # new/changed paths in bounded commands.
+        metadata_scanner = WinRMEndpointScanner(
+            replace(
+                config,
+                read_content=False,
+                read_acl=False,
+                inspect_archives=False,
+                hash_files=False,
+                read_owner=False,
+            )
+        )
+        with collection_heartbeat(job, ceiling=45):
+            metadata_records = metadata_scanner.scan()
+        collection_diagnostics = dict(metadata_scanner.last_scan_diagnostics or {})
+        records_by_path: dict[str, dict] = {}
+        reused_archive_records: list[dict] = []
+        changed_paths: list[str] = []
+        host_key = config.host or metadata_scanner.last_connection_host
+        for record in metadata_records:
+            object_key = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
+            snapshot = report._reuse_probe(
+                object_key,
+                int(record.get("size") or 0),
+                str(record.get("modified_at") or ""),
+            )
+            path_key = str(record.get("path") or "").casefold()
+            if isinstance(snapshot, dict):
+                records_by_path[path_key] = apply_reuse_snapshot(record, snapshot, object_key)
+                for prior in snapshot.get("archive_records") or []:
+                    if not isinstance(prior, dict):
+                        continue
+                    child_key = str(prior.get("reuse_key") or qualified_object_key(
+                        "endpoint-winrm", host_key, str(prior.get("path") or "")
+                    ))
+                    reused_archive_records.append(
+                        apply_reuse_snapshot(prior, reuse_snapshot_from_result(prior), child_key)
+                    )
+            else:
+                changed_paths.append(str(record.get("path") or ""))
+
+        fetch_errors: list[str] = []
+        fetch_commands = 0
+        for offset in range(0, len(changed_paths), 32):
+            if job and job.cancel_requested:
+                raise RuntimeError("Scan cancelled")
+            chunk = [path for path in changed_paths[offset : offset + 32] if path]
+            if not chunk:
+                continue
+            fetch_commands += 1
+            if job:
+                job.progress = max(job.progress, min(65, 46 + int((offset / max(len(changed_paths), 1)) * 19)))
+                job.message = f"Reading changed endpoint files {min(offset + len(chunk), len(changed_paths))}/{len(changed_paths)}"
+            changed_scanner = WinRMEndpointScanner(
+                replace(config, paths=chunk, max_depth=1, hash_files=True, read_owner=True)
+            )
+            try:
+                with collection_heartbeat(job, ceiling=65):
+                    changed_records = changed_scanner.scan()
+            except Exception as exc:
+                fetch_errors.append(type(exc).__name__)
+                continue
+            for record in changed_records:
+                path_key = str(record.get("path") or "").casefold()
+                record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
+                records_by_path[path_key] = record
+
+        records = []
+        for metadata in metadata_records:
+            path_key = str(metadata.get("path") or "").casefold()
+            record = records_by_path.get(path_key)
+            if record is None:
+                record = dict(metadata)
+                record["scan_error"] = record.get("scan_error") or "Changed file could not be fetched during incremental scan"
+                record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
+            records.append(record)
+        records.extend(reused_archive_records)
+        collection_diagnostics.update(
+            {
+                "incremental_metadata_pass": True,
+                "incremental_changed_paths": len(changed_paths),
+                "incremental_content_fetch_commands": fetch_commands,
+                "incremental_fetch_errors": fetch_errors[:20],
+            }
+        )
+    else:
+        # Explicit full scan: one pass, always reads/hashes selected content.
+        with collection_heartbeat(job, ceiling=60):
+            records = scanner.scan()
+        collection_diagnostics = dict(scanner.last_scan_diagnostics or {})
+        host_key = config.host or scanner.last_connection_host
+        for record in records:
+            record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
     if job:
         if job.cancel_requested:
             raise RuntimeError("Scan cancelled")
         job.progress = max(job.progress, 70)
         job.message = f"Analyzing {len(records)} endpoint files"
-    report = DSPMDiscoveryEngine(
-        ScanConfig(
-            tenant_id=principal.tenant_id,
-            server="",
-            use_sample_when_empty=False,
-            compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
-            compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
-            asset_overrides=[
-                {
-                    "pattern": item.pattern.strip(),
-                    "level": item.level.strip().upper(),
-                    "reason": item.reason.strip(),
-                }
-                for item in payload.asset_overrides
-                if item.pattern.strip()
-            ],
-        )
-    )
+    report.last_scan_diagnostics = collection_diagnostics
     analyzed = _analyze_endpoint_records(report, records, job)
+    report._finalize_incremental_diagnostics(analyzed)
+    if not config.read_content:
+        report.last_scan_diagnostics["incremental"]["content_reads"] = 0
+        report.last_scan_diagnostics["incremental"]["delta_ratio"] = 0.0
     extension_counts: dict[str, int] = {}
     for record in records:
         extension = str(record.get("extension") or "no extension").lower()
@@ -2149,8 +2384,10 @@ def _run_endpoint_scan_payload(
     data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "endpoint-winrm",
+        "mode": "incremental" if payload.incremental_enabled else "full",
         "summary": report._build_summary(analyzed).to_dict(),
         "files": analyzed,
+        "scan_diagnostics": report.last_scan_diagnostics,
         "endpoint": {
             "host": config.host,
             "target_username": config.target_username,
@@ -2167,7 +2404,7 @@ def _run_endpoint_scan_payload(
             "inspect_archives": config.inspect_archives,
             "raw_record_count": len(records),
             "extension_counts": extension_counts,
-            "scan_diagnostics": scanner.last_scan_diagnostics,
+            "scan_diagnostics": report.last_scan_diagnostics,
         },
     }
     _apply_compliance(data, payload)
@@ -2190,6 +2427,7 @@ def _run_local_endpoint_scan_payload(
         job.progress = 10
         job.message = "Resolving local workstation paths"
 
+    report = _endpoint_analysis_engine(config, payload, principal)
     scan_paths, missing_paths = _local_endpoint_paths(config)
     records: list[dict] = []
     scan_errors: list[str] = []
@@ -2223,6 +2461,12 @@ def _run_local_endpoint_scan_payload(
                 max_depth=config.max_depth,
                 inspect_archives=config.inspect_archives,
                 diagnostics=local_scan_diagnostics,
+                reuse_probe=report._reuse_probe if payload.incremental_enabled else None,
+                reuse_key_builder=lambda item: qualified_object_key(
+                    "endpoint-local",
+                    config.host or socket.gethostname(),
+                    item,
+                ),
             )
         except (FileNotFoundError, OSError) as exc:
             scan_errors.append(f"{path}: {exc}")
@@ -2249,25 +2493,17 @@ def _run_local_endpoint_scan_payload(
         job.progress = 72
         job.message = "Analyzing local workstation files"
 
-    report = DSPMDiscoveryEngine(
-        ScanConfig(
-            tenant_id=principal.tenant_id,
-            server="",
-            use_sample_when_empty=False,
-            compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
-            compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
-            asset_overrides=[
-                {
-                    "pattern": item.pattern.strip(),
-                    "level": item.level.strip().upper(),
-                    "reason": item.reason.strip(),
-                }
-                for item in payload.asset_overrides
-                if item.pattern.strip()
-            ],
-        )
-    )
+    collection_diagnostics = {
+        **local_scan_diagnostics,
+        "missing_paths": missing_paths,
+        "scan_errors": scan_errors[:20],
+    }
+    report.last_scan_diagnostics = collection_diagnostics
     analyzed = _analyze_endpoint_records(report, records, job)
+    report._finalize_incremental_diagnostics(analyzed)
+    if not config.read_content:
+        report.last_scan_diagnostics["incremental"]["content_reads"] = 0
+        report.last_scan_diagnostics["incremental"]["delta_ratio"] = 0.0
     extension_counts: dict[str, int] = {}
     for record in records:
         extension = str(record.get("extension") or "no extension").lower()
@@ -2276,8 +2512,10 @@ def _run_local_endpoint_scan_payload(
     data = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "endpoint-local",
+        "mode": "incremental" if payload.incremental_enabled else "full",
         "summary": report._build_summary(analyzed).to_dict(),
         "files": analyzed,
+        "scan_diagnostics": report.last_scan_diagnostics,
         "endpoint": {
             "host": config.host or socket.gethostname(),
             "target_username": config.target_username,
@@ -2295,11 +2533,7 @@ def _run_local_endpoint_scan_payload(
             "inspect_archives": config.inspect_archives,
             "raw_record_count": len(records),
             "extension_counts": extension_counts,
-            "scan_diagnostics": {
-                **local_scan_diagnostics,
-                "missing_paths": missing_paths,
-                "scan_errors": scan_errors[:20],
-            },
+            "scan_diagnostics": report.last_scan_diagnostics,
         },
     }
     _apply_compliance(data, payload)
@@ -2467,6 +2701,101 @@ def _local_endpoint_paths(config: WinRMEndpointConfig) -> tuple[list[Path], list
     return unique, missing
 
 
+def _incremental_probe(tenant_id: str, scope_key: str, enabled: bool):
+    """Bind a scan to one tenant/scope without querying on a cold baseline."""
+
+    if not enabled or not scope_key:
+        return None
+    baseline_available = incremental_baseline_exists(tenant_id, scope_key)
+    if not baseline_available:
+        return lambda _key, _size, _mtime, _version: {"state": "new"}
+    return lambda key, size, mtime, version: probe_incremental_object(
+        tenant_id,
+        scope_key,
+        key,
+        size,
+        mtime,
+        version,
+    )
+
+
+def _file_scan_scope(
+    payload: ConnectionRequest,
+    server: str,
+    allowed_extensions: list[str],
+    extension_filter_enabled: bool,
+) -> str:
+    source = "smb" if server else "local"
+    target = server or str((BASE_DIR / (payload.local_path.strip() or "enterprise_test_data")).resolve())
+    return incremental_scope_key(
+        source,
+        target,
+        {
+            "max_depth": payload.max_depth,
+            "allowed_extensions": allowed_extensions,
+            "extension_filter_enabled": extension_filter_enabled,
+            "include_hidden": payload.include_hidden,
+            "include_system": payload.include_system,
+            "hidden_filter_enabled": payload.hidden_filter_enabled,
+            "system_filter_enabled": payload.system_filter_enabled,
+            "include_admin_shares": payload.include_admin_shares,
+            "inspect_archives": payload.inspect_archives,
+        },
+    )
+
+
+def _endpoint_scan_scope(config: WinRMEndpointConfig) -> str:
+    source = "endpoint-local" if _is_local_endpoint_host(config.host) else "endpoint-winrm"
+    return incremental_scope_key(
+        source,
+        config.host or socket.gethostname(),
+        {
+            "target_username": config.target_username,
+            "paths": sorted(config.paths, key=str.lower),
+            "max_depth": config.max_depth,
+            "read_content": config.read_content,
+            "read_acl": config.read_acl,
+            "allowed_extensions": sorted(config.allowed_extensions or []),
+            "extension_filter_enabled": config.extension_filter_enabled,
+            "include_hidden": config.include_hidden,
+            "include_system": config.include_system,
+            "hidden_filter_enabled": config.hidden_filter_enabled,
+            "system_filter_enabled": config.system_filter_enabled,
+            "inspect_archives": config.inspect_archives,
+        },
+    )
+
+
+def _endpoint_analysis_engine(
+    config: WinRMEndpointConfig,
+    payload: EndpointScanRequest,
+    principal: Principal,
+) -> DSPMDiscoveryEngine:
+    enabled = bool(payload.incremental_enabled)
+    scope_key = _endpoint_scan_scope(config)
+    return DSPMDiscoveryEngine(
+        ScanConfig(
+            tenant_id=principal.tenant_id,
+            server="",
+            use_sample_when_empty=False,
+            compliance_enabled=bool(payload.compliance_enabled),
+            compliance_frameworks=list(payload.compliance_frameworks or []),
+            asset_overrides=[
+                {
+                    "pattern": item.pattern.strip(),
+                    "level": item.level.strip().upper(),
+                    "reason": item.reason.strip(),
+                }
+                for item in payload.asset_overrides
+                if item.pattern.strip()
+            ],
+            incremental_enabled=enabled,
+            incremental_scope=scope_key,
+            baseline_probe=_incremental_probe(principal.tenant_id, scope_key, enabled),
+        )
+    )
+
+
 def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
     username = payload.username.strip()
     password = payload.password
@@ -2481,6 +2810,9 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         username = secret.get("username", "")
         password = secret.get("password", "")
         domain = secret.get("domain", domain)
+
+    incremental_enabled = bool(getattr(payload, "incremental_enabled", True))
+    scope_key = _file_scan_scope(payload, server, allowed_extensions, extension_filter_enabled)
 
     return ScanConfig(
         tenant_id=tenant_id,
@@ -2509,6 +2841,9 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
             for item in getattr(payload, "asset_overrides", [])
             if item.pattern.strip()
         ],
+        incremental_enabled=incremental_enabled,
+        incremental_scope=scope_key,
+        baseline_probe=_incremental_probe(tenant_id, scope_key, incremental_enabled),
     )
 
 
@@ -2561,4 +2896,6 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         system_filter_enabled=payload.system_filter_enabled,
         read_acl=payload.read_acl,
         inspect_archives=payload.inspect_archives,
+        hash_files=payload.read_content,
+        read_owner=True,
     )

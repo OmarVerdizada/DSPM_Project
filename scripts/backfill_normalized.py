@@ -1,9 +1,9 @@
 """One-off migration: backfill the normalized DATA-001 tables from existing
 report_json rows (Phase 1).
 
-Idempotent and safe to re-run. Reads still use the report_json blob, so this
-does not change any behaviour - it only fills the normalized mirror for scans
-that predate the dual-write. Run during a maintenance window for large datasets.
+Idempotent and safe to re-run. The readiness gate keeps report_json compatibility
+until the requested scope is fully mirrored; after completion, the default indexed
+inventory path can take over. Run during a maintenance window for large datasets.
 
 Usage:
     python scripts/backfill_normalized.py [tenant_id]
@@ -12,6 +12,10 @@ Usage:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from backend import store
 

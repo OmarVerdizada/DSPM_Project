@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
+import re
 import secrets
 import threading
 import time
@@ -19,6 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = Path(os.getenv("DSPM_DB_PATH", DATA_DIR / "dspm.sqlite"))
 _lock = threading.Lock()
+_sqlite_inventory_fts_enabled = False
 
 
 def db_path() -> Path:
@@ -293,6 +296,7 @@ def revoke_api_key(tenant_id: str, key_id: str) -> bool:
 
 
 def init_db() -> None:
+    global _sqlite_inventory_fts_enabled
     with _lock:
         with _connect() as conn:
             conn.executescript(
@@ -403,6 +407,8 @@ def init_db() -> None:
 
                 CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created
                     ON scan_reports (tenant_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created_scan
+                    ON scan_reports (tenant_id, created_at, scan_id);
                 CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_timestamp
                     ON audit_events (tenant_id, timestamp);
                 CREATE INDEX IF NOT EXISTS idx_alert_events_tenant_created
@@ -452,6 +458,9 @@ def init_db() -> None:
                     is_system INTEGER NOT NULL DEFAULT 0,
                     is_protected INTEGER NOT NULL DEFAULT 0,
                     search_text TEXT,
+                    finding_types TEXT NOT NULL DEFAULT '[]',
+                    framework_keys TEXT NOT NULL DEFAULT '[]',
+                    detail_json TEXT NOT NULL DEFAULT '{}',
                     PRIMARY KEY (tenant_id, id)
                 );
 
@@ -464,6 +473,25 @@ def init_db() -> None:
                     content_hash TEXT,
                     coverage TEXT,
                     PRIMARY KEY (tenant_id, asset_id, version)
+                );
+
+                -- Track P-A: authoritative per-object delta baseline. The
+                -- analyzed snapshot remains normalized in assets.detail_json;
+                -- this table owns only identity/fingerprint/generation state.
+                CREATE TABLE IF NOT EXISTS scan_object_baselines (
+                    tenant_id TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    object_key TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    size BIGINT NOT NULL DEFAULT 0,
+                    mtime TEXT NOT NULL DEFAULT '',
+                    content_hash TEXT NOT NULL DEFAULT '',
+                    version_signature TEXT NOT NULL,
+                    last_scan_id TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (tenant_id, scope_key, object_key)
                 );
 
                 CREATE TABLE IF NOT EXISTS findings (
@@ -507,6 +535,17 @@ def init_db() -> None:
                     index_version TEXT NOT NULL DEFAULT ''
                 );
 
+                -- S-F.2 durable reconciliation metrics for the optional search
+                -- projection. The DB remains authoritative; this stores only
+                -- counts/status, never document metadata or evidence.
+                CREATE TABLE IF NOT EXISTS search_reconciliation_state (
+                    provider TEXT NOT NULL,
+                    index_uid TEXT NOT NULL,
+                    checked_at TEXT NOT NULL,
+                    metrics_json TEXT NOT NULL,
+                    PRIMARY KEY (provider, index_uid)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_scan_runs_tenant
                     ON scan_runs (tenant_id, started_at);
                 CREATE INDEX IF NOT EXISTS idx_findings_tenant_asset
@@ -517,6 +556,8 @@ def init_db() -> None:
                     ON finding_occurrences (finding_id);
                 CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan
                     ON finding_index (tenant_id, scan_id);
+                CREATE INDEX IF NOT EXISTS idx_scan_object_baselines_generation
+                    ON scan_object_baselines (tenant_id, scope_key, last_scan_id);
 
                 -- Durable job state (ARCH-003). The executor is still in-memory,
                 -- but the job RECORD survives a restart so status/history are not
@@ -551,6 +592,10 @@ def init_db() -> None:
             # covers may have just been added by the ALTER on a pre-existing DB.
             conn.execute("CREATE INDEX IF NOT EXISTS idx_finding_index_version ON finding_index (tenant_id, index_version)")
 
+            baseline_columns = db.table_columns(conn, "scan_object_baselines")
+            if "snapshot_json" not in baseline_columns:
+                conn.execute("ALTER TABLE scan_object_baselines ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
+
             # S-B: bring pre-existing `assets` tables up to the queryable-inventory
             # schema. New columns default to 0/NULL; a re-scan (dual-write) or
             # backfill_normalized_scans() populates them for historical assets.
@@ -569,11 +614,14 @@ def init_db() -> None:
                 ("is_system", "INTEGER NOT NULL DEFAULT 0"),
                 ("is_protected", "INTEGER NOT NULL DEFAULT 0"),
                 ("search_text", "TEXT"),
+                ("finding_types", "TEXT NOT NULL DEFAULT '[]'"),
+                ("framework_keys", "TEXT NOT NULL DEFAULT '[]'"),
+                ("detail_json", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 if col not in asset_columns:
                     conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {coltype}")
             # Index every filter/sort column (created after the ALTERs so the
-            # columns exist on a migrated DB). FTS over search_text is Track S-D.
+            # columns exist on a migrated DB).
             for _idx in (
                 "idx_assets_tenant_risk_score ON assets (tenant_id, risk_score)",
                 "idx_assets_tenant_risk_level ON assets (tenant_id, risk_level)",
@@ -582,8 +630,136 @@ def init_db() -> None:
                 "idx_assets_tenant_modified ON assets (tenant_id, modified_at)",
                 "idx_assets_tenant_finding_count ON assets (tenant_id, finding_count)",
                 "idx_assets_tenant_source ON assets (tenant_id, source)",
+                "idx_assets_tenant_protected ON assets (tenant_id, is_protected)",
             ):
                 conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
+
+            # S-C.1: match every keyset ORDER BY with its id tiebreaker. A
+            # two-column sort index still makes the database sort equal-valued
+            # rows at scale; these composites serve first and deep pages alike.
+            for _idx in (
+                "idx_assets_tenant_risk_score_id ON assets (tenant_id, risk_score, id)",
+                "idx_assets_tenant_size_id ON assets (tenant_id, size, id)",
+                "idx_assets_tenant_finding_count_id ON assets (tenant_id, finding_count, id)",
+            ):
+                conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
+            if db.is_postgres():
+                # Track S 5M PostgreSQL acceptance composites. These match the
+                # production inventory filter predicates while preserving
+                # risk_score/id ordering for LIMIT/keyset reads.
+                for _idx in (
+                    "idx_assets_tenant_risk_level_source_extension_risk_score_id "
+                    "ON assets (tenant_id, risk_level, source, extension, risk_score, id)",
+                    "idx_assets_tenant_protected_risk_score_id "
+                    "ON assets (tenant_id, is_protected, risk_score, id)",
+                    "idx_assets_tenant_risk_level_source_risk_score_id "
+                    "ON assets (tenant_id, risk_level, source, risk_score, id)",
+                ):
+                    conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
+
+                # Text keysets explicitly use C collation for SQLite/Python
+                # parity, so the index expression must use that same collation.
+                conn.execute(
+                    'CREATE INDEX IF NOT EXISTS idx_assets_tenant_modified_c_id '
+                    'ON assets (tenant_id, (COALESCE(modified_at, \'\') COLLATE "C"), id)'
+                )
+                conn.execute(
+                    'CREATE INDEX IF NOT EXISTS idx_assets_tenant_name_c_id '
+                    'ON assets (tenant_id, (COALESCE(name, \'\') COLLATE "C"), id)'
+                )
+            else:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_modified_c_id "
+                    "ON assets (tenant_id, COALESCE(modified_at, ''), id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_name_c_id "
+                    "ON assets (tenant_id, COALESCE(name, ''), id)"
+                )
+                # SQLite cannot reliably select the OR-predicate partial index
+                # below. detail_json is NOT NULL on SQLite, so an exact empty-JSON
+                # index makes the readiness probe constant time without indexing
+                # the large JSON text itself.
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_empty_detail "
+                    "ON assets (tenant_id) WHERE detail_json = '{}'"
+                )
+                # SQLite development/on-prem compatibility path: FTS5's trigram
+                # tokenizer preserves the product's literal substring semantics
+                # (partial names, paths and identifiers) without scanning every
+                # potentially large search_text value. External-content triggers
+                # keep the index transactional with the authoritative assets row.
+                try:
+                    required_triggers = {
+                        "assets_search_fts_ai", "assets_search_fts_ad", "assets_search_fts_au",
+                    }
+                    existing_objects = {
+                        str(row["name"])
+                        for row in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE name = 'assets_search_fts' "
+                            "OR name IN ('assets_search_fts_ai', 'assets_search_fts_ad', 'assets_search_fts_au')"
+                        ).fetchall()
+                    }
+                    needs_rebuild = "assets_search_fts" not in existing_objects or not required_triggers <= existing_objects
+                    conn.execute(
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS assets_search_fts USING fts5("
+                        "tenant_id UNINDEXED, search_text, content='assets', content_rowid='rowid', tokenize='trigram')"
+                    )
+                    conn.executescript(
+                        """
+                        CREATE TRIGGER IF NOT EXISTS assets_search_fts_ai AFTER INSERT ON assets BEGIN
+                            INSERT INTO assets_search_fts(rowid, tenant_id, search_text)
+                            VALUES (new.rowid, new.tenant_id, COALESCE(new.search_text, ''));
+                        END;
+                        CREATE TRIGGER IF NOT EXISTS assets_search_fts_ad AFTER DELETE ON assets BEGIN
+                            INSERT INTO assets_search_fts(assets_search_fts, rowid, tenant_id, search_text)
+                            VALUES ('delete', old.rowid, old.tenant_id, COALESCE(old.search_text, ''));
+                        END;
+                        CREATE TRIGGER IF NOT EXISTS assets_search_fts_au
+                        AFTER UPDATE OF tenant_id, search_text ON assets BEGIN
+                            INSERT INTO assets_search_fts(assets_search_fts, rowid, tenant_id, search_text)
+                            VALUES ('delete', old.rowid, old.tenant_id, COALESCE(old.search_text, ''));
+                            INSERT INTO assets_search_fts(rowid, tenant_id, search_text)
+                            VALUES (new.rowid, new.tenant_id, COALESCE(new.search_text, ''));
+                        END;
+                        """
+                    )
+                    if needs_rebuild:
+                        conn.execute("INSERT INTO assets_search_fts(assets_search_fts) VALUES ('rebuild')")
+                    _sqlite_inventory_fts_enabled = True
+                except Exception as exc:  # pragma: no cover - depends on SQLite build options
+                    _sqlite_inventory_fts_enabled = False
+                    logger.warning(
+                        "SQLite trigram inventory index unavailable; using compatible LIKE search: %s",
+                        type(exc).__name__,
+                    )
+            # Readiness checks run on every normalized request. This partial
+            # index is empty for a healthy mirror, avoiding a 5M-row scan merely
+            # to prove that no pre-S-E detail rows remain.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_assets_tenant_missing_detail "
+                "ON assets (tenant_id) WHERE detail_json IS NULL OR detail_json = '{}'"
+            )
+
+            # Track S-D: PostgreSQL substring search over paths/names/owners is
+            # backed by pg_trgm without changing the S-C API's literal-substring
+            # semantics. The expression is intentionally identical to the WHERE
+            # predicate below. SQLite keeps its compatible LIKE fallback.
+            #
+            # CREATE EXTENSION belongs to scripts/provision_postgres.py because
+            # the runtime role is least-privilege. Existing deployments that have
+            # not rerun provisioning remain correct (sequential LIKE), but warn.
+            if db.is_postgres():
+                if db.postgres_extension_available(conn, "pg_trgm"):
+                    conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_assets_search_trgm "
+                        "ON assets USING GIN ((lower(COALESCE(search_text, ''))) gin_trgm_ops)"
+                    )
+                else:
+                    logger.warning(
+                        "Track S-D search index unavailable: pg_trgm is not installed; "
+                        "rerun scripts/provision_postgres.py as the PostgreSQL admin"
+                    )
 
             conn.execute(
                 """
@@ -649,6 +825,14 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
             ).fetchone()
             if existing and existing["created_at"]:
                 created_at = existing["created_at"]
+            normalized_written = _dual_write_normalized(conn, tenant_id, report)
+            if normalized_written:
+                _write_incremental_baseline(conn, tenant_id, report, is_new_scan=existing is None)
+            else:
+                incremental = (report.get("scan_diagnostics") or {}).get("incremental")
+                if isinstance(incremental, dict) and incremental.get("enabled"):
+                    incremental["baseline_committed"] = False
+                    incremental["baseline_commit_reason"] = "normalized_asset_write_unavailable"
             conn.execute(
                 """
                 INSERT OR REPLACE INTO scan_reports
@@ -665,7 +849,18 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                     created_at,
                 ),
             )
-            _dual_write_normalized(conn, tenant_id, report)
+    _invalidate_inventory_query_cache(tenant_id)
+    # S-F dual-write is an optional, best-effort projection and deliberately
+    # runs after the authoritative DB transaction/lock has completed. Search
+    # outages must never roll back or delay ownership of the saved scan.
+    try:
+        from backend.search import SearchUnavailable, index_scan_report
+
+        index_scan_report(tenant_id, report)
+    except SearchUnavailable as exc:
+        logger.warning("Dedicated search indexing deferred for scan %s: %s", scan_id, exc)
+    except Exception as exc:  # pragma: no cover - optional projection guard
+        logger.warning("Dedicated search indexing skipped for scan %s: %s", scan_id, type(exc).__name__)
     return scan_id
 
 
@@ -676,7 +871,7 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
 FINDING_INDEX_VERSION = "fi-v1"
 
 
-def _dual_write_normalized(conn, tenant_id: str, report: dict) -> None:
+def _dual_write_normalized(conn, tenant_id: str, report: dict) -> bool:
     """Mirror the scan into the normalized tables (Phase 1, DATA-001).
 
     Best-effort and savepoint-isolated: the report_json blob remains the source
@@ -687,6 +882,7 @@ def _dual_write_normalized(conn, tenant_id: str, report: dict) -> None:
         conn.execute("SAVEPOINT dspm_norm")
         _write_normalized_rows(conn, tenant_id, report)
         conn.execute("RELEASE SAVEPOINT dspm_norm")
+        return True
     except Exception as exc:  # pragma: no cover - defensive migration guard
         try:
             conn.execute("ROLLBACK TO SAVEPOINT dspm_norm")
@@ -694,6 +890,224 @@ def _dual_write_normalized(conn, tenant_id: str, report: dict) -> None:
         except Exception:
             pass
         logger.warning("Normalized dual-write skipped for scan %s: %s", report.get("scan_id"), exc)
+        return False
+
+
+def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_scan: bool = True) -> None:
+    """Advance a scope generation inside the authoritative scan transaction.
+
+    A partial/truncated scan may refresh objects it did see but never prunes the
+    prior generation. A complete scan deletes unseen rows only after every
+    current row and its normalized asset snapshot have been written.
+    """
+
+    diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
+    incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
+    if not isinstance(incremental, dict) or not incremental.get("baseline_update", incremental.get("enabled")):
+        return
+    if not is_new_scan:
+        # Finding workflow/lifecycle operations re-save historical report blobs.
+        # They may refresh assets.detail_json, but must never roll the active
+        # object generation back to that report's older size/mtime set.
+        refreshed = 0
+        scan_id = str(report.get("scan_id") or "")
+        scope_key = str(incremental.get("scope_key") or "")
+        for record in report.get("files") or []:
+            object_key = str(record.get("reuse_key") or record.get("path") or "")
+            if not object_key:
+                continue
+            result = conn.execute(
+                "UPDATE scan_object_baselines SET snapshot_json = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND scope_key = ? AND object_key = ? AND last_scan_id = ?",
+                (
+                    json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                    datetime.now(timezone.utc).isoformat(),
+                    tenant_id,
+                    scope_key,
+                    object_key,
+                    scan_id,
+                ),
+            )
+            refreshed += max(0, int(result.rowcount or 0))
+        incremental["baseline_snapshot_rows_refreshed"] = refreshed
+        incremental["baseline_commit_reason"] = "existing_scan_resave_preserved_generation"
+        return
+    scope_key = str(incremental.get("scope_key") or "")
+    version_signature = str(incremental.get("version_signature") or "")
+    scan_id = str(report.get("scan_id") or "")
+    if not scope_key or not version_signature or not scan_id:
+        incremental["baseline_committed"] = False
+        incremental["baseline_commit_reason"] = "missing_scope_version_or_scan_id"
+        return
+
+    from backend.domain import asset_identity
+
+    source = str(report.get("source") or "local")
+    now = datetime.now(timezone.utc).isoformat()
+    rows: list[tuple] = []
+    rows_written = 0
+    skipped = 0
+    archive_mtimes = {
+        str(record.get("path") or ""): str(record.get("modified_at") or record.get("mtime") or "")
+        for record in report.get("files") or []
+        if str(record.get("extension") or "").lower() == ".zip" and "::" not in str(record.get("path") or "")
+    }
+
+    def flush_rows() -> None:
+        nonlocal rows_written
+        if not rows:
+            return
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO scan_object_baselines
+                (tenant_id, scope_key, object_key, asset_id, size, mtime,
+                 content_hash, version_signature, last_scan_id, last_seen_at,
+                 updated_at, snapshot_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        rows_written += len(rows)
+        rows.clear()
+
+    for record in report.get("files") or []:
+        path = str(record.get("path") or record.get("name") or "")
+        object_key = str(record.get("reuse_key") or path)
+        mtime = str(record.get("modified_at") or record.get("mtime") or record.get("last_write_time") or "")
+        if not mtime and "::" in path:
+            mtime = archive_mtimes.get(path.split("::", 1)[0], "")
+        content_hash = str(record.get("content_hash") or record.get("file_hash") or record.get("sha256") or "")
+        if (
+            not object_key
+            or not mtime
+            or (
+                int(record.get("size") or record.get("total_bytes") or 0) > 0
+                and not content_hash
+                and "::" not in object_key
+            )
+        ):
+            skipped += 1
+            continue
+        stable_object_id = str(record.get("stable_object_id") or record.get("asset_id") or "")
+        asset_id = asset_identity(tenant_id, source, stable_object_id, path)
+        rows.append(
+            (
+                tenant_id,
+                scope_key,
+                object_key,
+                asset_id,
+                int(record.get("size") or record.get("total_bytes") or 0),
+                mtime,
+                content_hash,
+                version_signature,
+                scan_id,
+                now,
+                now,
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+            )
+        )
+        if len(rows) >= 500:
+            flush_rows()
+    flush_rows()
+
+    stale = conn.execute(
+        "SELECT COUNT(*) AS count FROM scan_object_baselines "
+        "WHERE tenant_id = ? AND scope_key = ? AND last_scan_id <> ?",
+        (tenant_id, scope_key, scan_id),
+    ).fetchone()
+    deleted = int(stale["count"] if stale else 0)
+    complete = bool(incremental.get("complete"))
+    if complete:
+        conn.execute(
+            "DELETE FROM scan_object_baselines "
+            "WHERE tenant_id = ? AND scope_key = ? AND last_scan_id <> ?",
+            (tenant_id, scope_key, scan_id),
+        )
+    incremental["baseline_committed"] = True
+    incremental["baseline_rows_written"] = rows_written
+    incremental["baseline_rows_skipped"] = skipped
+    incremental["deleted_objects"] = deleted if complete else 0
+    incremental["prune_skipped"] = not complete
+
+
+def incremental_baseline_exists(tenant_id: str, scope_key: str) -> bool:
+    """Cheap first-scan guard that avoids one guaranteed-miss query per file."""
+
+    if not tenant_id or not scope_key:
+        return False
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM scan_object_baselines WHERE tenant_id = ? AND scope_key = ? LIMIT 1",
+                (tenant_id, scope_key),
+            ).fetchone()
+    return row is not None
+
+
+def probe_incremental_object(
+    tenant_id: str,
+    scope_key: str,
+    object_key: str,
+    size: int,
+    mtime: str,
+    version_signature: str,
+) -> dict:
+    """Classify one object and return a durable analyzed snapshot on a match."""
+
+    if not tenant_id or not scope_key or not object_key:
+        return {"state": "new"}
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute(
+                """
+                SELECT b.size, b.mtime, b.content_hash, b.version_signature,
+                       b.snapshot_json
+                FROM scan_object_baselines b
+                WHERE b.tenant_id = ? AND b.scope_key = ? AND b.object_key = ?
+                """,
+                (tenant_id, scope_key, object_key),
+            ).fetchone()
+    if row is None:
+        return {"state": "new"}
+    exact = (
+        int(row["size"] or 0) == int(size or 0)
+        and str(row["mtime"] or "") == str(mtime or "")
+        and str(row["version_signature"] or "") == str(version_signature or "")
+        and (bool(str(row["content_hash"] or "")) or int(size or 0) == 0)
+    )
+    if not exact or not row["snapshot_json"]:
+        return {"state": "changed"}
+    try:
+        detail = json.loads(row["snapshot_json"])
+    except (TypeError, json.JSONDecodeError):
+        return {"state": "changed"}
+    if not isinstance(detail, dict):
+        return {"state": "changed"}
+    from discovery.incremental import reuse_snapshot_from_result
+
+    snapshot = reuse_snapshot_from_result(detail)
+    if str(detail.get("extension") or "").lower() == ".zip":
+        prefix = f"{object_key}::"
+        with _lock:
+            with _connect() as conn:
+                child_rows = conn.execute(
+                    "SELECT object_key, snapshot_json FROM scan_object_baselines "
+                    "WHERE tenant_id = ? AND scope_key = ? "
+                    "AND substr(object_key, 1, ?) = ? ORDER BY object_key",
+                    (tenant_id, scope_key, len(prefix), prefix),
+                ).fetchall()
+        archive_records: list[dict] = []
+        for child in child_rows:
+            try:
+                child_detail = json.loads(child["snapshot_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                child_detail = {}
+            if isinstance(child_detail, dict) and child_detail:
+                child_detail.setdefault("reuse_key", str(child["object_key"] or ""))
+                archive_records.append(child_detail)
+        snapshot["archive_records"] = archive_records
+        snapshot["archive_bundle_complete"] = True
+    return {"state": "unchanged", "snapshot": snapshot}
 
 
 def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
@@ -722,15 +1136,27 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
     )
     for asset in scan.assets:
         conn.execute(
-            "INSERT OR REPLACE INTO assets "
+            "INSERT INTO assets "
             "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
             "risk_level, risk_score, size, owner, modified_at, finding_count, "
-            "top_frameworks, is_hidden, is_system, is_protected, search_text) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "top_frameworks, is_hidden, is_system, is_protected, search_text, "
+            "finding_types, framework_keys, detail_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (tenant_id, id) DO UPDATE SET "
+            "source = excluded.source, stable_object_id = excluded.stable_object_id, "
+            "path = excluded.path, name = excluded.name, extension = excluded.extension, "
+            "share = excluded.share, risk_level = excluded.risk_level, risk_score = excluded.risk_score, "
+            "size = excluded.size, owner = excluded.owner, modified_at = excluded.modified_at, "
+            "finding_count = excluded.finding_count, top_frameworks = excluded.top_frameworks, "
+            "is_hidden = excluded.is_hidden, is_system = excluded.is_system, "
+            "is_protected = excluded.is_protected, search_text = excluded.search_text, "
+            "finding_types = excluded.finding_types, framework_keys = excluded.framework_keys, "
+            "detail_json = excluded.detail_json",
             (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
              asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
              asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
-             asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text),
+             asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
+             asset.finding_types, asset.framework_keys, asset.detail_json),
         )
     for version in scan.asset_versions:
         conn.execute(
@@ -794,11 +1220,15 @@ def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
     scanned = mirrored = failed = 0
     with _lock:
         with _connect() as conn:
+            # Assets are an upserted latest-state projection. Replay oldest to
+            # newest so a historical backfill cannot leave an older copy of the
+            # same source-qualified asset as the visible inventory row.
             query = "SELECT tenant_id, scan_id FROM scan_reports"
             params: tuple = ()
             if tenant_id:
                 query += " WHERE tenant_id = ?"
                 params = (tenant_id,)
+            query += " ORDER BY created_at ASC, scan_id ASC"
             keys = conn.execute(query, params).fetchall()
             for key in keys:
                 scanned += 1
@@ -829,6 +1259,7 @@ def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
                         pass
                     failed += 1
                     logger.warning("Backfill skipped scan %s: %s", key["scan_id"], exc)
+    _invalidate_inventory_query_cache(tenant_id)
     return {"scanned": scanned, "mirrored": mirrored, "failed": failed}
 
 
@@ -1218,7 +1649,8 @@ def _read_from_normalized(tenant_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# S-C: cursor-paginated inventory over the S-B `assets` columns.
+# S-C/S-D: cursor-paginated inventory over the S-B `assets` columns, with
+# PostgreSQL trigram-indexed substring search.
 #
 # Mirrors the findings read-switch: served from the normalized `assets` table
 # when DSPM_INVENTORY_FROM_NORMALIZED=1 AND the mirror is complete, else from the
@@ -1244,8 +1676,63 @@ _INVENTORY_COLS = (
     "id", "source", "path", "name", "extension", "share", "risk_level",
     "risk_score", "size", "owner", "modified_at", "finding_count",
     "top_frameworks", "is_hidden", "is_system", "is_protected",
+    "finding_types", "framework_keys",
 )
 _INVENTORY_COUNT_CAP = 10000
+_INVENTORY_CURSOR_VERSION = "sc-v2"
+_INVENTORY_COUNT_CACHE_MAX = 256
+_inventory_count_cache: dict[tuple, tuple[float, int]] = {}
+_inventory_query_cache_lock = threading.Lock()
+
+
+class InventoryReadUnavailable(RuntimeError):
+    """Normalized inventory was selected but could not safely serve the read."""
+
+
+def _invalidate_inventory_query_cache(tenant_id: str | None = None) -> None:
+    """Invalidate short-lived inventory aggregates after an authoritative write."""
+    with _inventory_query_cache_lock:
+        if tenant_id is None:
+            _inventory_count_cache.clear()
+            return
+        for key in [item for item in _inventory_count_cache if item[1] == tenant_id]:
+            _inventory_count_cache.pop(key, None)
+
+
+def _inventory_count_cache_seconds() -> float:
+    try:
+        value = float(os.getenv("DSPM_INVENTORY_COUNT_CACHE_SECONDS", "5"))
+    except ValueError:
+        value = 5.0
+    return max(0.0, min(value, 60.0))
+
+
+def _capped_inventory_total(conn, tenant_id: str, where: list[str], params: list) -> int:
+    """Return the capped total while avoiding the same count query on every page.
+
+    The first page computes the bounded count. Cursor pages and rapid back/forward
+    navigation reuse it briefly; saves/backfills invalidate it immediately.
+    """
+    cache_key = (str(DB_PATH), tenant_id, tuple(where), tuple(params))
+    now = time.monotonic()
+    ttl = _inventory_count_cache_seconds()
+    if ttl:
+        with _inventory_query_cache_lock:
+            cached = _inventory_count_cache.get(cache_key)
+            if cached and now - cached[0] <= ttl:
+                return cached[1]
+            if cached:
+                _inventory_count_cache.pop(cache_key, None)
+
+    cap_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM assets WHERE {' AND '.join(where)} LIMIT ?) t"
+    total = int(conn.execute(cap_sql, tuple(params) + (_INVENTORY_COUNT_CAP + 1,)).fetchone()[0])
+    if ttl:
+        with _inventory_query_cache_lock:
+            _inventory_count_cache[cache_key] = (now, total)
+            if len(_inventory_count_cache) > _INVENTORY_COUNT_CACHE_MAX:
+                oldest = min(_inventory_count_cache, key=lambda item: _inventory_count_cache[item][0])
+                _inventory_count_cache.pop(oldest, None)
+    return total
 
 
 def _inventory_ready(tenant_id: str) -> bool:
@@ -1258,11 +1745,42 @@ def _inventory_ready(tenant_id: str) -> bool:
             "  SELECT 1 FROM scan_runs r WHERE r.tenant_id = sr.tenant_id AND r.id = sr.scan_id) LIMIT 1",
             (tenant_id,),
         ).fetchone()
-    return incomplete is None
+        # SQLite's planner otherwise prefers a broad tenant/filter index and then
+        # reads every large detail_json value merely to prove no stale row exists.
+        # Pin the exact empty-on-healthy index; PostgreSQL uses the combined
+        # partial index for the OR predicate (and permits legacy NULL rows).
+        if db.is_sqlite():
+            stale_detail = conn.execute(
+                "SELECT 1 FROM assets INDEXED BY idx_assets_tenant_empty_detail "
+                "WHERE tenant_id = ? AND detail_json = '{}' LIMIT 1",
+                (tenant_id,),
+            ).fetchone()
+        else:
+            stale_detail = conn.execute(
+                "SELECT 1 FROM assets WHERE tenant_id = ? "
+                "AND (detail_json IS NULL OR detail_json = '{}') LIMIT 1",
+                (tenant_id,),
+            ).fetchone()
+    return incomplete is None and stale_detail is None
 
 
 def _read_inventory_from_normalized(tenant_id: str) -> bool:
-    return os.getenv("DSPM_INVENTORY_FROM_NORMALIZED", "0") == "1" and _inventory_ready(tenant_id)
+    # New/fresh installs dual-write complete detail rows, so the indexed path is
+    # the safe and fast default. Operators can still force the legacy compatibility
+    # path with 0; the readiness gate automatically falls back for old databases
+    # until scripts/backfill_normalized.py has completed.
+    return os.getenv("DSPM_INVENTORY_FROM_NORMALIZED", "1") != "0" and _inventory_ready(tenant_id)
+
+
+def inventory_export_ready(tenant_id: str) -> bool:
+    """Return whether S-G can export from the bounded normalized read model.
+
+    Export intentionally does not consult ``DSPM_INVENTORY_FROM_NORMALIZED``:
+    that flag controls interactive inventory reads and their compatibility blob
+    fallback. A streaming export may use the normalized mirror whenever it is
+    complete, but it must never fall back to materializing report blobs.
+    """
+    return _inventory_ready(tenant_id)
 
 
 def _like_escape(value: str) -> str:
@@ -1271,58 +1789,66 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _encode_cursor(sort_value, asset_id: str) -> str:
-    raw = json.dumps([sort_value, asset_id], ensure_ascii=False)
+def _encode_cursor(sort: str, sort_value, asset_id: str) -> str:
+    raw = json.dumps([_INVENTORY_CURSOR_VERSION, sort, sort_value, asset_id], ensure_ascii=False)
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
-def _decode_cursor(cursor: str):
+def _decode_cursor(cursor: str, sort: str, is_text: bool):
+    """Decode a cursor only when its version, sort, value type and asset id fit.
+
+    S-C's original two-item cursors remain accepted for in-flight clients. The
+    strict asset-id/type checks also prevent a Meilisearch or cross-sort cursor
+    from causing a database type error and triggering an expensive fallback.
+    """
     if not cursor:
         return None
     try:
-        value, asset_id = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
-        return value, str(asset_id)
+        decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+        if isinstance(decoded, list) and len(decoded) == 4:
+            version, cursor_sort, value, asset_id = decoded
+            if version != _INVENTORY_CURSOR_VERSION or cursor_sort != sort:
+                return None
+        elif isinstance(decoded, list) and len(decoded) == 2:
+            value, asset_id = decoded
+        else:
+            return None
+        asset_id = str(asset_id)
+        if not re.fullmatch(r"[0-9a-f]{24}", asset_id):
+            return None
+        if is_text:
+            if not isinstance(value, str):
+                return None
+        elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        return value, asset_id
     except Exception:
         return None  # malformed cursor -> serve the first page rather than error
 
 
-def _inventory_filters(risk: str, source: str, framework: str, q: str, extension: str) -> dict:
+def _inventory_filters(risk: str, source: str, framework: str, q: str, extension: str,
+                       protected: bool | None = None, finding_type: str = "") -> dict:
+    frameworks = [part.strip().lower() for part in str(framework or "").split(",") if part.strip()]
     return {
         "risk": str(risk or "").strip().upper(),
         "source": str(source or "").strip().lower(),
         "extension": str(extension or "").strip().lower(),
-        "framework": str(framework or "").strip().lower(),
+        "framework": frameworks[0] if len(frameworks) == 1 else "",
+        "frameworks": frameworks,
+        "finding_type": str(finding_type or "").strip().lower(),
+        "protected": protected,
         "q": str(q or "").strip().lower(),
     }
 
 
-def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
-                   q: str = "", extension: str = "", sort: str = "risk_score",
-                   cursor: str = "", limit: int = 100) -> dict:
-    """One keyset-paginated page of the file inventory. Filters: risk (level),
-    source, framework (in top_frameworks), q (search_text), extension. Returns
-    {items, next_cursor, has_more, total, total_is_estimate, source}."""
-    sort = sort if sort in INVENTORY_SORTS else _DEFAULT_INVENTORY_SORT
-    limit = max(1, min(int(limit or 100), 500))
-    filt = _inventory_filters(risk, source, framework, q, extension)
-    if _read_inventory_from_normalized(tenant_id):
-        try:
-            result = _list_inventory_normalized(tenant_id, filt, sort, cursor, limit)
-            result["source"] = "normalized"
-            return result
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Normalized inventory failed, falling back to blob: %s", exc)
-    result = _list_inventory_blob(tenant_id, filt, sort, cursor, limit)
-    result["source"] = "blob"
-    return result
+def _json_member_pattern(value: str) -> str:
+    """LIKE pattern for one exact scalar in a compact JSON string array."""
+    encoded = json.dumps(str(value or "").lower(), ensure_ascii=False)
+    return f"%{_like_escape(encoded)}%"
 
 
-def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
-    col, is_text, direction = INVENTORY_SORTS[sort]
-    order_expr = db.collate_c(f"COALESCE({col}, '')") if is_text else col
-    id_expr = db.collate_c("id")
-    op = "<" if direction == "DESC" else ">"
-
+def _inventory_normalized_where(tenant_id: str, filt: dict) -> tuple[list[str], list]:
+    """Build the shared tenant/filter predicate for inventory reads and exports."""
     where = ["tenant_id = ?"]
     params: list = [tenant_id]
     if filt["risk"]:
@@ -1331,20 +1857,94 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
         where.append("source = ?"); params.append(filt["source"])
     if filt["extension"]:
         where.append("extension = ?"); params.append(filt["extension"])
-    if filt["framework"]:
-        where.append("lower(COALESCE(top_frameworks, '')) LIKE ? ESCAPE '\\'")
-        params.append(f"%{_like_escape(filt['framework'])}%")
+    if filt["protected"] is not None:
+        where.append("is_protected = ?"); params.append(1 if filt["protected"] else 0)
+    if filt["finding_type"]:
+        where.append("lower(COALESCE(finding_types, '[]')) LIKE ? ESCAPE '\\'")
+        params.append(_json_member_pattern(filt["finding_type"]))
+    if filt["frameworks"]:
+        clauses = ["lower(COALESCE(framework_keys, '[]')) LIKE ? ESCAPE '\\'" for _ in filt["frameworks"]]
+        where.append(f"({' OR '.join(clauses)})")
+        params.extend(_json_member_pattern(framework) for framework in filt["frameworks"])
     if filt["q"]:
-        where.append("COALESCE(search_text, '') LIKE ? ESCAPE '\\'")
-        params.append(f"%{_like_escape(filt['q'])}%")
+        if db.is_sqlite() and _sqlite_inventory_fts_enabled and len(filt["q"]) >= 3:
+            # A quoted FTS5 trigram phrase is a literal substring query; quoting
+            # prevents MATCH operators in user text from becoming query syntax.
+            phrase = '"' + filt["q"].replace('"', '""') + '"'
+            where.append(
+                "rowid IN (SELECT rowid FROM assets_search_fts WHERE search_text MATCH ?)"
+            )
+            params.append(phrase)
+        else:
+            # PostgreSQL keeps this expression byte-for-byte aligned with
+            # idx_assets_search_trgm. SQLite builds without FTS5 retain parity.
+            where.append("lower(COALESCE(search_text, '')) LIKE ? ESCAPE '\\'")
+            params.append(f"%{_like_escape(filt['q'])}%")
+    return where, params
+
+
+def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
+                   q: str = "", extension: str = "", protected: bool | None = None,
+                   finding_type: str = "", sort: str = "risk_score",
+                   cursor: str = "", limit: int = 100) -> dict:
+    """One keyset-paginated page of the file inventory. Filters: risk (level),
+    source, framework(s, OR), protected state, exact finding type, q
+    (search_text), extension. Returns
+    {items, next_cursor, has_more, total, total_is_estimate, source}."""
+    sort = sort if sort in INVENTORY_SORTS else _DEFAULT_INVENTORY_SORT
+    limit = max(1, min(int(limit or 100), 500))
+    filt = _inventory_filters(risk, source, framework, q, extension, protected, finding_type)
+    # S-F valve: only text searches opt into the dedicated engine. Placeholder
+    # inventory browsing keeps S-C keyset pagination. A separate read-enable
+    # switch supports backfill/shadow operation before cutover.
+    if filt["q"]:
+        try:
+            from backend.search import SearchUnavailable, external_search_requested, search_inventory
+
+            if external_search_requested():
+                col, _, direction = INVENTORY_SORTS[sort]
+                return search_inventory(tenant_id, filt, col, direction, cursor, limit)
+        except SearchUnavailable as exc:
+            logger.warning("Dedicated inventory search unavailable, falling back to DB: %s", exc)
+        except Exception as exc:  # pragma: no cover - optional projection guard
+            logger.warning("Dedicated inventory search failed, falling back to DB: %s", type(exc).__name__)
+    if _read_inventory_from_normalized(tenant_id):
+        try:
+            result = _list_inventory_normalized(tenant_id, filt, sort, cursor, limit)
+            result["source"] = "normalized"
+            return result
+        except Exception as exc:  # pragma: no cover - operational failure path
+            logger.error("Normalized inventory read failed: %s", type(exc).__name__)
+            raise InventoryReadUnavailable("Normalized inventory is temporarily unavailable") from exc
+    result = _list_inventory_blob(tenant_id, filt, sort, cursor, limit)
+    result["source"] = "blob"
+    return result
+
+
+def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
+    col, is_text, direction = INVENTORY_SORTS[sort]
+    order_expr = db.collate_c(f"COALESCE({col}, '')") if is_text else col
+    # Asset ids are fixed lowercase hex, so their order is identical under C and
+    # locale collations. Keep the raw column so S-C.1 composite indexes match.
+    id_expr = "id"
+    op = "<" if direction == "DESC" else ">"
+
+    where, params = _inventory_normalized_where(tenant_id, filt)
 
     count_where, count_params = list(where), list(params)
 
-    decoded = _decode_cursor(cursor)
+    decoded = _decode_cursor(cursor, sort, is_text)
     if decoded is not None:
         cv, cid = decoded
-        where.append(f"({order_expr} {op} ? OR ({order_expr} = ? AND {id_expr} {op} ?))")
-        params.extend([cv, cv, cid])
+        if db.is_postgres() and not is_text:
+            where.append(f"({order_expr}, {id_expr}) {op} (?, ?)")
+            params.extend([cv, cid])
+        else:
+            where.append(
+                f"({order_expr} {op} ? OR "
+                f"({order_expr} = ? AND {id_expr} {op} ?))"
+            )
+            params.extend([cv, cv, cid])
 
     sql = (
         f"SELECT {', '.join(_INVENTORY_COLS)} FROM assets WHERE {' AND '.join(where)} "
@@ -1353,10 +1953,65 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
     params.append(limit + 1)
     with _connect() as conn:
         rows = conn.execute(sql, tuple(params)).fetchall()
-        cap_sql = f"SELECT COUNT(*) FROM (SELECT 1 FROM assets WHERE {' AND '.join(count_where)} LIMIT ?) t"
-        total = int(conn.execute(cap_sql, tuple(count_params) + (_INVENTORY_COUNT_CAP + 1,)).fetchone()[0])
+        total = _capped_inventory_total(conn, tenant_id, count_where, count_params)
 
-    return _inventory_page([{c: r[c] for c in _INVENTORY_COLS} for r in rows], col, is_text, limit, total)
+    return _inventory_page(
+        [{c: r[c] for c in _INVENTORY_COLS} for r in rows], sort, col, is_text, limit, total
+    )
+
+
+def iter_inventory_export_rows(
+    tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
+    q: str = "", extension: str = "", protected: bool | None = None,
+    finding_type: str = "", batch_size: int = 1_000,
+):
+    """Yield filtered inventory metadata in bounded, tenant-scoped keyset batches.
+
+    Rows are ordered by ``id ASC`` rather than an interactive display sort so the
+    composite assets primary key serves every page. The upper id is captured once,
+    which prevents concurrent inserts from extending a long-running export. Each
+    batch owns a short-lived connection; closing/cancelling the response therefore
+    cannot strand a database cursor or a multi-hour read transaction.
+
+    Callers must check :func:`inventory_export_ready` before starting an HTTP
+    response. This function deliberately has no report-blob fallback.
+    """
+    batch_size = max(10, min(int(batch_size or 1_000), 5_000))
+    filt = _inventory_filters(risk, source, framework, q, extension, protected, finding_type)
+    base_where, base_params = _inventory_normalized_where(tenant_id, filt)
+    # Raw id ordering lets the (tenant_id, id) primary key serve every batch;
+    # ids are lowercase hexadecimal and therefore collation-agnostic.
+    id_expr = "id"
+
+    with _connect() as conn:
+        upper_row = conn.execute(
+            f"SELECT id FROM assets WHERE tenant_id = ? ORDER BY {id_expr} DESC LIMIT 1",
+            (tenant_id,),
+        ).fetchone()
+    if upper_row is None:
+        return
+    upper_id = str(upper_row["id"] or "")
+    cursor_id = ""
+
+    while True:
+        where = list(base_where)
+        params = list(base_params)
+        where.append(f"{id_expr} > ?")
+        params.append(cursor_id)
+        where.append(f"{id_expr} <= ?")
+        params.append(upper_id)
+        params.append(batch_size)
+        with _connect() as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(_INVENTORY_COLS)} FROM assets "
+                f"WHERE {' AND '.join(where)} ORDER BY {id_expr} ASC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            yield {column: row[column] for column in _INVENTORY_COLS}
+        cursor_id = str(rows[-1]["id"] or "")
 
 
 def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
@@ -1380,7 +2035,13 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
             return False
         if filt["extension"] and str(row.get("extension") or "") != filt["extension"]:
             return False
-        if filt["framework"] and filt["framework"] not in str(row.get("top_frameworks") or "").lower():
+        if filt["protected"] is not None and bool(row.get("is_protected")) is not filt["protected"]:
+            return False
+        finding_types = {str(value).lower() for value in _decode_string_list(row.get("finding_types"))}
+        if filt["finding_type"] and filt["finding_type"] not in finding_types:
+            return False
+        framework_keys = {str(value).lower() for value in _decode_string_list(row.get("framework_keys"))}
+        if filt["frameworks"] and not any(value in framework_keys for value in filt["frameworks"]):
             return False
         if filt["q"] and filt["q"] not in str(row.get("search_text") or ""):
             return False
@@ -1393,7 +2054,7 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
     rows = sorted((r for r in latest.values() if _matches(r)), key=_key, reverse=reverse)
     total = len(rows)
 
-    decoded = _decode_cursor(cursor)
+    decoded = _decode_cursor(cursor, sort, is_text)
     if decoded is not None:
         cv, cid = decoded
         pivot = ((cv or "") if is_text else (cv or 0), str(cid))
@@ -1402,10 +2063,235 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
     # strip the internal search_text from the returned items
     for r in rows:
         r.pop("search_text", None)
-    return _inventory_page(rows, col, is_text, limit, total)
+    return _inventory_page(rows, sort, col, is_text, limit, total)
 
 
-def _inventory_page(rows: list[dict], col: str, is_text: bool, limit: int, total: int) -> dict:
+def _decode_string_list(raw) -> list[str]:
+    if isinstance(raw, list):
+        return [str(value) for value in raw if str(value)]
+    try:
+        value = json.loads(str(raw or "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [str(item) for item in value if str(item)] if isinstance(value, list) else []
+
+
+def _inventory_blob_rows(tenant_id: str) -> list[dict]:
+    """Latest materialized asset state reconstructed from report blobs."""
+    from backend.domain import normalize_scan_report
+
+    latest: dict[str, dict] = {}
+    for item in read_scan_history(tenant_id, limit=1000):
+        report = read_scan_report(tenant_id, item.get("scan_id"))
+        if not report:
+            continue
+        for asset in normalize_scan_report(tenant_id, report).assets:
+            latest[asset.id] = asset.to_dict()
+    return list(latest.values())
+
+
+def _facet_items(counts: dict[str, int]) -> list[dict]:
+    return [
+        {"value": value, "count": count}
+        for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+        if value
+    ]
+
+
+def _facets_from_rows(rows: list[dict], source: str) -> dict:
+    risk_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {}
+    finding_counts: dict[str, int] = {}
+    framework_counts: dict[str, int] = {}
+    protected_count = 0
+    for row in rows:
+        risk = str(row.get("risk_level") or "").upper()
+        asset_source = str(row.get("source") or "workspace")
+        if risk:
+            risk_counts[risk] = risk_counts.get(risk, 0) + 1
+        source_counts[asset_source] = source_counts.get(asset_source, 0) + 1
+        protected_count += 1 if row.get("is_protected") else 0
+        for finding_type in set(_decode_string_list(row.get("finding_types"))):
+            finding_counts[finding_type] = finding_counts.get(finding_type, 0) + 1
+        for framework in set(_decode_string_list(row.get("framework_keys"))):
+            framework_counts[framework] = framework_counts.get(framework, 0) + 1
+    if protected_count:
+        finding_counts["Protected / locked"] = protected_count
+    return {
+        "total": len(rows), "risk_counts": risk_counts, "protected": protected_count,
+        "sources": _facet_items(source_counts), "finding_types": _facet_items(finding_counts),
+        "frameworks": _facet_items(framework_counts), "source": source,
+    }
+
+
+def _normalized_json_facet_rows(conn, tenant_id: str, column: str):
+    """Aggregate one JSON-array facet to one bounded row per distinct value."""
+    if column not in {"finding_types", "framework_keys"}:
+        raise ValueError("Unsupported inventory JSON facet")
+    if db.is_postgres():
+        return conn.execute(
+            f"SELECT item.value AS value, COUNT(*) AS n FROM assets AS a "
+            f"CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(a.{column}, '[]')::jsonb) "
+            "AS item(value) WHERE a.tenant_id = ? GROUP BY item.value",
+            (tenant_id,),
+        ).fetchall()
+    return conn.execute(
+        f"SELECT item.value AS value, COUNT(*) AS n FROM assets AS a, "
+        f"json_each(COALESCE(a.{column}, '[]')) AS item "
+        "WHERE a.tenant_id = ? GROUP BY item.value",
+        (tenant_id,),
+    ).fetchall()
+
+
+def inventory_facets(tenant_id: str) -> dict:
+    """Aggregate inventory filters without transferring asset rows to the browser."""
+    if _read_inventory_from_normalized(tenant_id):
+        try:
+            with _connect() as conn:
+                risk_rows = conn.execute(
+                    "SELECT risk_level, COUNT(*) AS n FROM assets WHERE tenant_id = ? GROUP BY risk_level",
+                    (tenant_id,),
+                ).fetchall()
+                source_rows = conn.execute(
+                    "SELECT source, COUNT(*) AS n FROM assets WHERE tenant_id = ? GROUP BY source",
+                    (tenant_id,),
+                ).fetchall()
+                protected_row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM assets WHERE tenant_id = ? AND is_protected = 1", (tenant_id,)
+                ).fetchone()
+                total_row = conn.execute("SELECT COUNT(*) AS n FROM assets WHERE tenant_id = ?", (tenant_id,)).fetchone()
+                finding_rows = _normalized_json_facet_rows(conn, tenant_id, "finding_types")
+                framework_rows = _normalized_json_facet_rows(conn, tenant_id, "framework_keys")
+            finding_counts = {str(row["value"]): int(row["n"]) for row in finding_rows if row["value"]}
+            framework_counts = {str(row["value"]): int(row["n"]) for row in framework_rows if row["value"]}
+            protected_count = int(protected_row["n"] if protected_row else 0)
+            if protected_count:
+                finding_counts["Protected / locked"] = protected_count
+            return {
+                "total": int(total_row["n"] if total_row else 0),
+                "risk_counts": {str(row["risk_level"] or "").upper(): int(row["n"]) for row in risk_rows if row["risk_level"]},
+                "protected": protected_count,
+                "sources": _facet_items({str(row["source"] or "workspace"): int(row["n"]) for row in source_rows}),
+                "finding_types": _facet_items(finding_counts),
+                "frameworks": _facet_items(framework_counts),
+                "source": "normalized",
+            }
+        except Exception as exc:  # pragma: no cover - operational failure path
+            logger.error("Normalized inventory facets failed: %s", type(exc).__name__)
+            raise InventoryReadUnavailable("Normalized inventory facets are temporarily unavailable") from exc
+    return _facets_from_rows(_inventory_blob_rows(tenant_id), "blob")
+
+
+def iter_search_asset_batches(batch_size: int = 500):
+    """Stream all normalized asset metadata in stable keyset batches for S-F.
+
+    The rebuild script consumes this generator without loading the inventory or
+    per-asset detail blobs into process memory.
+    """
+    batch_size = max(10, min(int(batch_size or 500), 5_000))
+    columns = ("tenant_id", *_INVENTORY_COLS, "search_text")
+    cursor_tenant = ""
+    cursor_id = ""
+    while True:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(columns)} FROM assets "
+                "WHERE (tenant_id > ? OR (tenant_id = ? AND id > ?)) "
+                "ORDER BY tenant_id ASC, id ASC LIMIT ?",
+                (cursor_tenant, cursor_tenant, cursor_id, batch_size),
+            ).fetchall()
+        if not rows:
+            return
+        batch = [{column: row[column] for column in columns} for row in rows]
+        yield batch
+        cursor_tenant = str(rows[-1]["tenant_id"] or "")
+        cursor_id = str(rows[-1]["id"] or "")
+
+
+def get_search_assets_by_refs(documents: list[dict]) -> list[dict]:
+    """Return projection rows by tenant+id so the composite PK serves the lookup."""
+    refs = [
+        (str(document.get("tenant_id") or ""), str(document.get("id") or ""))
+        for document in documents
+        if document.get("tenant_id") and document.get("id")
+    ]
+    if not refs:
+        return []
+    if len(refs) > 400:
+        raise ValueError("search reconciliation lookup is limited to 400 tenant/id pairs")
+    columns = ("tenant_id", *_INVENTORY_COLS, "search_text")
+    predicates = " OR ".join("(tenant_id = ? AND id = ?)" for _ in refs)
+    params = [value for ref in refs for value in ref]
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(columns)} FROM assets WHERE {predicates}", params
+        ).fetchall()
+    return [{column: row[column] for column in columns} for row in rows]
+
+
+def save_search_reconciliation(index_uid: str, metrics: dict) -> None:
+    checked_at = str(metrics.get("checked_at") or datetime.now(timezone.utc).isoformat())
+    payload = json.dumps(metrics, ensure_ascii=False, separators=(",", ":"))
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO search_reconciliation_state
+                    (provider, index_uid, checked_at, metrics_json)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (provider, index_uid) DO UPDATE SET
+                    checked_at = excluded.checked_at,
+                    metrics_json = excluded.metrics_json
+                """,
+                ("meilisearch", str(index_uid), checked_at, payload),
+            )
+
+
+def get_search_reconciliation(index_uid: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT metrics_json FROM search_reconciliation_state WHERE provider = ? AND index_uid = ?",
+            ("meilisearch", str(index_uid)),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        value = json.loads(row["metrics_json"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def get_inventory_asset(tenant_id: str, asset_id: str) -> dict | None:
+    """One full asset from the materialized detail row; never a full report read."""
+    if _read_inventory_from_normalized(tenant_id):
+        try:
+            with _connect() as conn:
+                row = conn.execute(
+                    f"SELECT {', '.join(_INVENTORY_COLS)}, detail_json FROM assets WHERE tenant_id = ? AND id = ?",
+                    (tenant_id, asset_id),
+                ).fetchone()
+            if row:
+                try:
+                    detail = json.loads(row["detail_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    detail = {}
+                return detail | {column: row[column] for column in _INVENTORY_COLS}
+            return None
+        except Exception as exc:  # pragma: no cover - operational failure path
+            logger.error("Normalized inventory detail failed: %s", type(exc).__name__)
+            raise InventoryReadUnavailable("Normalized inventory detail is temporarily unavailable") from exc
+    for row in _inventory_blob_rows(tenant_id):
+        if str(row.get("id") or "") == str(asset_id or ""):
+            try:
+                detail = json.loads(row.get("detail_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                detail = {}
+            return detail | {column: row.get(column) for column in _INVENTORY_COLS}
+    return None
+
+
+def _inventory_page(rows: list[dict], sort: str, col: str, is_text: bool, limit: int, total: int) -> dict:
     """Shared page assembly for both inventory paths (identical output shape)."""
     has_more = len(rows) > limit
     page = rows[:limit]
@@ -1413,7 +2299,7 @@ def _inventory_page(rows: list[dict], col: str, is_text: bool, limit: int, total
     if has_more and page:
         last = page[-1]
         value = last.get(col)
-        next_cursor = _encode_cursor((value or "") if is_text else value, str(last.get("id") or ""))
+        next_cursor = _encode_cursor(sort, (value or "") if is_text else value, str(last.get("id") or ""))
     return {
         "items": page,
         "next_cursor": next_cursor,
@@ -1655,34 +2541,123 @@ def _comment_payload(payload: dict, actor: str, timestamp: str) -> dict:
     return {"timestamp": timestamp, "actor": actor, "comment": str(payload.get("comment") or "").strip()}
 
 
-def list_tenants() -> list[dict]:
+def list_tenants(tenant_id: str | None = None) -> list[dict]:
+    """Return the tenant portfolio with one set-based database query.
+
+    The former implementation performed seven queries per tenant (latest scan,
+    scan count and four retention counts). That made an ordinary tenant-scoped
+    admin pay for the entire platform portfolio and scaled linearly with network
+    round trips on PostgreSQL. Window/grouped CTEs keep the response contract but
+    bound the work to one query, optionally to one authorized tenant.
+    """
+    selected_where = "WHERE tenant_id = ?" if tenant_id else ""
+    params: tuple = (tenant_id,) if tenant_id else ()
     with _connect() as conn:
         rows = conn.execute(
-            """
-            SELECT tenant_id, display_name, registration_code, created_at, updated_at
-            FROM tenants
-            ORDER BY tenant_id
-            """
+            f"""
+            WITH selected_tenants AS (
+                SELECT tenant_id, display_name, registration_code, created_at, updated_at
+                FROM tenants {selected_where}
+            ),
+            latest_ranked AS (
+                SELECT sr.tenant_id, sr.scan_id, sr.timestamp, sr.source, sr.summary_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY sr.tenant_id
+                           ORDER BY sr.created_at DESC, sr.scan_id DESC
+                       ) AS row_number
+                FROM scan_reports AS sr
+                JOIN selected_tenants AS st ON st.tenant_id = sr.tenant_id
+            ),
+            scan_counts AS (
+                SELECT sr.tenant_id, COUNT(*) AS n
+                FROM scan_reports AS sr
+                JOIN selected_tenants AS st ON st.tenant_id = sr.tenant_id
+                GROUP BY sr.tenant_id
+            ),
+            audit_counts AS (
+                SELECT ae.tenant_id, COUNT(*) AS n
+                FROM audit_events AS ae
+                JOIN selected_tenants AS st ON st.tenant_id = ae.tenant_id
+                GROUP BY ae.tenant_id
+            ),
+            alert_counts AS (
+                SELECT ae.tenant_id, COUNT(*) AS n
+                FROM alert_events AS ae
+                JOIN selected_tenants AS st ON st.tenant_id = ae.tenant_id
+                GROUP BY ae.tenant_id
+            ),
+            baseline_counts AS (
+                SELECT b.tenant_id, COUNT(*) AS n
+                FROM scan_object_baselines AS b
+                JOIN selected_tenants AS st ON st.tenant_id = b.tenant_id
+                GROUP BY b.tenant_id
+            )
+            SELECT st.tenant_id, st.display_name, st.registration_code,
+                   st.created_at, st.updated_at,
+                   lr.scan_id AS latest_scan_id, lr.timestamp AS latest_timestamp,
+                   lr.source AS latest_source, lr.summary_json AS latest_summary_json,
+                   COALESCE(sc.n, 0) AS scan_count,
+                   COALESCE(ac.n, 0) AS audit_count,
+                   COALESCE(alc.n, 0) AS alert_count,
+                   COALESCE(bc.n, 0) AS baseline_count
+            FROM selected_tenants AS st
+            LEFT JOIN latest_ranked AS lr
+              ON lr.tenant_id = st.tenant_id AND lr.row_number = 1
+            LEFT JOIN scan_counts AS sc ON sc.tenant_id = st.tenant_id
+            LEFT JOIN audit_counts AS ac ON ac.tenant_id = st.tenant_id
+            LEFT JOIN alert_counts AS alc ON alc.tenant_id = st.tenant_id
+            LEFT JOIN baseline_counts AS bc ON bc.tenant_id = st.tenant_id
+            ORDER BY st.tenant_id
+            """,
+            params,
         ).fetchall()
     tenants: list[dict] = []
+    missing_codes: list[tuple[str, str, str]] = []
     for row in rows:
-        tenant_id = row["tenant_id"]
-        registration_code = ensure_registration_code(tenant_id, row["registration_code"])
-        history = read_scan_history(tenant_id, limit=1)
-        latest = history[-1] if history else {"summary": {}}
+        row_tenant_id = row["tenant_id"]
+        registration_code = str(row["registration_code"] or "")
+        if not registration_code:
+            registration_code = generate_registration_code()
+            missing_codes.append((registration_code, datetime.now(timezone.utc).isoformat(), row_tenant_id))
+        try:
+            latest_summary = json.loads(row["latest_summary_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            latest_summary = {}
+        latest = {"summary": latest_summary}
+        if row["latest_scan_id"]:
+            latest.update({
+                "scan_id": row["latest_scan_id"],
+                "timestamp": row["latest_timestamp"],
+                "source": row["latest_source"],
+            })
         tenants.append(
             {
-                "tenant_id": tenant_id,
+                "tenant_id": row_tenant_id,
                 "display_name": row["display_name"],
                 "registration_code": registration_code,
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
-                "scan_count": count_scan_history(tenant_id),
+                "scan_count": int(row["scan_count"] or 0),
                 "latest": latest,
-                "retention": data_retention_summary(tenant_id),
+                "retention": {
+                    "tenant_id": row_tenant_id,
+                    "database": db.backend_name(),
+                    "report_count": int(row["scan_count"] or 0),
+                    "audit_events": int(row["audit_count"] or 0),
+                    "alert_events": int(row["alert_count"] or 0),
+                    "incremental_baseline_objects": int(row["baseline_count"] or 0),
+                },
             }
         )
-    if not tenants:
+    if missing_codes:
+        with _lock:
+            with _connect() as conn:
+                conn.executemany(
+                    "UPDATE tenants SET registration_code = ?, updated_at = ? "
+                    "WHERE tenant_id = ? AND (registration_code IS NULL OR registration_code = '')",
+                    missing_codes,
+                )
+    if not tenants and tenant_id is None:
         tenants.append(
             {
                 "tenant_id": "default",
@@ -1749,21 +2724,89 @@ def delete_tenant(tenant_id: str) -> bool:
             return result.rowcount > 0
 
 
+_TENANT_ERASURE_TABLES = (
+    "registration_invites",
+    "api_keys",
+    "scan_reports",
+    "audit_events",
+    "alert_events",
+    "secrets",
+    "scan_object_baselines",
+    "scan_runs",
+    "assets",
+    "asset_versions",
+    "findings",
+    "finding_occurrences",
+    "finding_index",
+    "scan_jobs",
+)
+
+
+def _delete_tenant_scoped_data(conn, tenant_id: str) -> None:
+    """Delete every tenant-keyed record while leaving identity rows to the caller."""
+    for table in _TENANT_ERASURE_TABLES:
+        conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (tenant_id,))
+
+
 def delete_tenant_with_data(tenant_id: str) -> dict:
     usage = tenant_usage(tenant_id)
     with _lock:
         with _connect() as conn:
             conn.execute("DELETE FROM users WHERE tenant_id = ?", (tenant_id,))
-            conn.execute("DELETE FROM scan_reports WHERE tenant_id = ?", (tenant_id,))
-            conn.execute("DELETE FROM audit_events WHERE tenant_id = ?", (tenant_id,))
-            conn.execute("DELETE FROM alert_events WHERE tenant_id = ?", (tenant_id,))
-            conn.execute("DELETE FROM secrets WHERE tenant_id = ?", (tenant_id,))
-            # Phase 1 normalized tables + durable jobs must be erased too -
-            # finding_index.response_json holds the full finding evidence, so
-            # leaving these behind is a data-erasure/GDPR completeness bug.
-            for table in ("scan_runs", "assets", "asset_versions", "findings", "finding_occurrences", "finding_index", "scan_jobs"):
-                conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (tenant_id,))
+            _delete_tenant_scoped_data(conn, tenant_id)
             conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))
+            # Reconciliation state covers the shared optional search projection,
+            # not one tenant. Invalidate it after any erasure so the next pass
+            # detects and removes documents that no longer exist in the DB.
+            conn.execute("DELETE FROM search_reconciliation_state")
+    _invalidate_inventory_query_cache(tenant_id)
+    return usage
+
+
+def reset_default_tenant_data() -> dict:
+    """Return the default tenant to a clean, accessible installation state.
+
+    The built-in admin identity and its password hash are retained so an
+    operator is not locked out. All other default-tenant identities, scans,
+    findings, secrets, invitations, API keys, jobs, and operational history are
+    erased. The registration code is rotated because it is tenant information.
+    """
+    tenant_id = "default"
+    usage = tenant_usage(tenant_id)
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            admin = conn.execute(
+                "SELECT 1 FROM users WHERE username = ? AND tenant_id = ?",
+                ("admin", tenant_id),
+            ).fetchone()
+            if admin is None:
+                raise RuntimeError("Cannot reset the default tenant without its built-in admin user")
+            _delete_tenant_scoped_data(conn, tenant_id)
+            conn.execute(
+                "DELETE FROM users WHERE tenant_id = ? AND username <> ?",
+                (tenant_id, "admin"),
+            )
+            conn.execute(
+                """
+                UPDATE users
+                SET role = 'admin', full_name = 'Local Administrator',
+                    is_active = 1, updated_at = ?, last_login_at = NULL
+                WHERE username = ? AND tenant_id = ?
+                """,
+                (now, "admin", tenant_id),
+            )
+            conn.execute(
+                """
+                UPDATE tenants
+                SET display_name = 'Default', registration_code = ?, updated_at = ?
+                WHERE tenant_id = ?
+                """,
+                (generate_registration_code(), now, tenant_id),
+            )
+            conn.execute("DELETE FROM login_failures")
+            conn.execute("DELETE FROM search_reconciliation_state")
+    _invalidate_inventory_query_cache(tenant_id)
     return usage
 
 
@@ -1774,7 +2817,13 @@ def tenant_usage(tenant_id: str) -> dict:
         audits = conn.execute("SELECT COUNT(*) FROM audit_events WHERE tenant_id = ?", (tenant_id,)).fetchone()[0]
         alerts = conn.execute("SELECT COUNT(*) FROM alert_events WHERE tenant_id = ?", (tenant_id,)).fetchone()[0]
         secrets = conn.execute("SELECT COUNT(*) FROM secrets WHERE tenant_id = ?", (tenant_id,)).fetchone()[0]
-    return {"users": users, "reports": reports, "audits": audits, "alerts": alerts, "secrets": secrets}
+        baseline_objects = conn.execute(
+            "SELECT COUNT(*) FROM scan_object_baselines WHERE tenant_id = ?", (tenant_id,)
+        ).fetchone()[0]
+    return {
+        "users": users, "reports": reports, "audits": audits, "alerts": alerts,
+        "secrets": secrets, "baseline_objects": baseline_objects,
+    }
 
 
 def read_audit_log(tenant_id: str, limit: int = 200) -> list[dict]:
@@ -1816,12 +2865,17 @@ def data_retention_summary(tenant_id: str) -> dict:
             "SELECT COUNT(*) FROM alert_events WHERE tenant_id = ?",
             (tenant_id,),
         ).fetchone()[0]
+        baseline_count = conn.execute(
+            "SELECT COUNT(*) FROM scan_object_baselines WHERE tenant_id = ?",
+            (tenant_id,),
+        ).fetchone()[0]
     return {
         "tenant_id": tenant_id,
         "database": db.backend_name(),
         "report_count": report_count,
         "audit_events": audit_count,
         "alert_events": alert_count,
+        "incremental_baseline_objects": baseline_count,
     }
 
 

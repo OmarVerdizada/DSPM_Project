@@ -86,6 +86,15 @@ def backend_name() -> str:
     return "postgres" if is_postgres() else "sqlite"
 
 
+def _env_number(name: str, default, minimum, maximum, cast):
+    """Read a bounded numeric setting without making startup typo-sensitive."""
+    try:
+        value = cast(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 # ``store.py`` catches this around a best-effort retry. A tuple works in ``except``
 # and covers whichever backend is active (psycopg only when it is installed).
 if psycopg is not None:
@@ -104,6 +113,7 @@ _PK: dict[str, tuple[str, ...]] = {
     "scan_runs": ("tenant_id", "id"),
     "assets": ("tenant_id", "id"),
     "asset_versions": ("tenant_id", "asset_id", "version"),
+    "scan_object_baselines": ("tenant_id", "scope_key", "object_key"),
     "findings": ("tenant_id", "id"),
     "scan_jobs": ("id",),
     "secrets": ("tenant_id", "secret_id"),
@@ -311,7 +321,7 @@ def _pg_connect() -> _PgConn:
             "DSPM_DB_URL selects PostgreSQL but psycopg is not installed. "
             "Install it with:  pip install \"psycopg[binary]\""
         )
-    timeout = int(os.getenv("DSPM_DB_CONNECT_TIMEOUT", "10"))
+    timeout = _env_number("DSPM_DB_CONNECT_TIMEOUT", 10, 1, 120, int)
     raw = psycopg.connect(
         db_url(),
         autocommit=False,
@@ -355,12 +365,14 @@ def _get_pool():
         # disable with DSPM_DB_POOL_CHECK=0 for max throughput where restarts are
         # handled another way.
         check = ConnectionPool.check_connection if os.getenv("DSPM_DB_POOL_CHECK", "1") == "1" else None
+        max_size = _env_number("DSPM_DB_POOL_MAX", 10, 1, 200, int)
+        min_size = min(_env_number("DSPM_DB_POOL_MIN", 1, 0, 200, int), max_size)
         pool = ConnectionPool(
             conninfo=dsn,
-            min_size=int(os.getenv("DSPM_DB_POOL_MIN", "1")),
-            max_size=int(os.getenv("DSPM_DB_POOL_MAX", "10")),
-            timeout=float(os.getenv("DSPM_DB_CONNECT_TIMEOUT", "10")),
-            max_idle=float(os.getenv("DSPM_DB_POOL_MAX_IDLE", "300")),
+            min_size=min_size,
+            max_size=max_size,
+            timeout=_env_number("DSPM_DB_CONNECT_TIMEOUT", 10.0, 0.2, 120.0, float),
+            max_idle=_env_number("DSPM_DB_POOL_MAX_IDLE", 300.0, 1.0, 86_400.0, float),
             check=check,
             kwargs={"row_factory": _pg_row_factory},
             open=True,
@@ -441,6 +453,21 @@ def collate_c(sql_expr: str) -> str:
     if is_postgres():
         return f'({sql_expr}) COLLATE "C"'
     return sql_expr
+
+
+def postgres_extension_available(conn: Any, extension: str) -> bool:
+    """Return whether an extension is installed in the active PostgreSQL DB.
+
+    SQLite always returns ``False``. Extension names are parameters rather than
+    interpolated identifiers, keeping this helper safe for future callers.
+    """
+    if not is_postgres():
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM pg_extension WHERE extname = ?",
+        (extension,),
+    ).fetchone()
+    return row is not None
 
 
 def table_columns(conn: Any, table: str) -> set[str]:

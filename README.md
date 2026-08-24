@@ -7,6 +7,9 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 ## Highlights
 
 - AD/SMB file-server discovery with local enterprise demo data fallback.
+- Tenant-scoped incremental scanning across local, SMB, and WinRM sources: unchanged objects
+  reuse durable findings without content reads, while an explicit full-scan control remains
+  available for periodic verification.
 - Hidden local and SMB file entries are included in scan scope and marked in scan metadata.
 - Regex and heuristic classification for secrets, PCI, PII, finance, HR, legal, customer data, PHI context, source-code assets, passports, national IDs, IBAN, SWIFT/BIC, GitHub, Slack, Google, Azure, JWT, API keys, and private keys.
 - 0-100 file risk scoring with LOW, MEDIUM, HIGH, and CRITICAL severity bands.
@@ -17,7 +20,7 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - Executive dashboard with posture ring, risk distribution, folder heatmap, signal mix, posture trend, topology, MSSP portfolio, and remediation queue.
 - Scan result analytics include risk trend, critical/high file queue, department risk, scan comparison, and top risky folders.
 - Right-side detail drawers for long risk reasons and DLP recommendations.
-- Dashboard tables keep long file paths visible instead of truncating them, and priority queues stay read-only so analysts can search or filter inventory deliberately.
+- Dashboard tables keep long file paths visible instead of truncating them, and priority queues stay read-only so analysts can search or filter inventory deliberately. The Data Inventory table consumes the cursor-paginated `/api/inventory` endpoint in a bounded 100-row page window, caches at most three pages, and refetches evicted pages by cursor instead of growing the DOM indefinitely. Saved-scan restore and scan-completion responses are metadata-only in the console; filter facets come from `/api/inventory/facets`, and full evidence for one row is fetched from `/api/inventory/{asset_id}` only when its detail drawer is opened. Filtered CSV and NDJSON actions stream the normalized inventory directly to disk without constructing a browser Blob.
 - History and security audit views include working date-range filters for all scans, last 24 hours, last 5 days, last 7 days, last 30 days, and custom ranges.
 - Report center with polished Excel, Word, and print/PDF exports, including KPI cards, SVG charts, department risk, folder heatmap, trend context, and priority file queues.
 - Security operations view with API keys, audit trail, DLP policy export, and credential vault support.
@@ -269,17 +272,22 @@ Useful environment variables:
 - `DSPM_ADMIN_PASSWORD`: required in production and overrides the local development admin password. Set `DSPM_SECRET_KEY` and `DSPM_VAULT_KEY` in production as well.
 - `DSPM_DB_PATH`: optional custom SQLite database path. Defaults to `data/dspm.sqlite`.
 - `DSPM_DB_URL`: optional PostgreSQL DSN. When set (e.g. `postgresql://sentro_app:…@host:5432/sentro_dev?sslmode=require`) the store runs on PostgreSQL instead of SQLite — see [PostgreSQL backend](#postgresql-backend-optional) below. Empty by default (SQLite).
+- `DSPM_INVENTORY_FROM_NORMALIZED`: indexed normalized inventory is enabled by default. A completeness/readiness gate automatically retains report-blob compatibility for migrated databases until `python scripts/backfill_normalized.py` succeeds; set this variable to `0` only as an explicit rollback. `DSPM_INVENTORY_COUNT_CACHE_SECONDS` (default `5`, `0` disables) reuses the same capped filtered total across cursor pages and is invalidated on scan saves/backfills. Once normalized reads are selected, operational query failures return retryable `503` responses instead of materializing report blobs.
+- `DSPM_EXPORT_BATCH_SIZE`: normalized inventory rows per streaming CSV/NDJSON database batch, clamped to `10`-`5000` and defaulting to `1000`. Export is always keyset-paginated and intentionally returns `409` instead of using the unbounded report-blob fallback when the normalized mirror is incomplete. See [Streaming inventory exports](docs/inventory/STREAMING_EXPORTS.md).
+- `DSPM_SEARCH_ENGINE`: `database` (default) or `meilisearch` for the optional S-F fuzzy/typo-tolerant inventory-search projection. `DSPM_SEARCH_READ_ENABLED=0` keeps reads on PostgreSQL/SQLite during backfill/shadow indexing; set it to `1` only after verifying the dedicated index. Search failures automatically fall back to the existing database path.
 - `DSPM_ENV`: `local` (default) or `production`. Production enables fail-closed startup checks, disables the OpenAPI docs routes, blocks `--reload`, and denies private/RFC1918 scan targets unless `DSPM_ALLOW_PRIVATE_TARGETS=1`.
 - `DSPM_API_KEYS`: API-key hash mapping in `tenant_id:hash` format.
 - `DSPM_ALERT_WEBHOOK_URL`: optional alert webhook destination, POSTed on CRITICAL findings.
 
 See [`.env.example`](.env.example) for the complete, code-verified list of all supported environment variables with defaults and production guidance. Note that the application does not auto-load `.env` files; export the values into the process environment.
 
+The complete normalized-inventory deployment, cutover, rollback, index verification, 5M-row benchmark, optional-search, and export procedure is in [Track S operations](docs/inventory/TRACK_S_OPERATIONS.md).
+
 Local runtime data is stored in SQLite at `data/dspm.sqlite` and is ignored by git. The database and schema are created automatically on first run after `git clone` or `git pull`, so no machine-specific path changes are required.
 
 ### PostgreSQL backend (optional)
 
-The store (users and password hashes, API-key hashes, the encrypted credential vault, scan history, audit log, login-throttle and token-revocation state) defaults to SQLite. For a hardened, off-host, least-privilege deployment you can run it on **PostgreSQL** without any code change — set `DSPM_DB_URL` to a libpq DSN. The dialect seam lives in [`backend/db.py`](backend/db.py); SQLite remains byte-for-byte the default when `DSPM_DB_URL` is empty.
+The store (users and password hashes, API-key hashes, the encrypted credential vault, scan history, audit log, login-throttle and token-revocation state) defaults to SQLite. For a hardened, off-host, least-privilege deployment you can run it on **PostgreSQL** without any code change — set `DSPM_DB_URL` to a libpq DSN. The dialect seam lives in [`backend/db.py`](backend/db.py); SQLite remains byte-for-byte the default when `DSPM_DB_URL` is empty. PostgreSQL provisioning also installs `pg_trgm`; Track S-D uses its GIN index to accelerate literal substring searches across normalized inventory paths, names, owners, and finding metadata.
 
 **One-command install (Windows).** `scripts/setup_postgres.ps1 install` stands up a persistent, auto-starting `SentroPostgres` Windows service (initialized with scram auth, bound to 127.0.0.1), provisions a least-privilege app role + database, initializes the schema, and writes the `DSPM_DB_URL` to an admin-only credentials file (`C:\SentroPostgres\credentials.env`). It is idempotent, and `uninstall` (with `-RemoveData`) reverses it.
 
@@ -314,6 +322,36 @@ python -m pytest tests/ -q
 ```
 
 For a disposable **local dev** cluster on Windows (trust auth, spare port, no service install), `scripts/pg_dev_cluster.ps1 up` will `initdb` + start one; `down`/`destroy` tear it down.
+
+### Optional dedicated inventory search (S-F)
+
+PostgreSQL remains the source of truth and the default search provider. At very large scale, an operator can enable a metadata-only Meilisearch projection for typo-tolerant inventory text queries. Tenant ID is mandatory in every engine filter; raw evidence and `detail_json` are never indexed. Non-text inventory browsing continues to use S-C keyset pagination, and any dedicated-engine timeout/error falls back to the database.
+
+Use a staged cutover:
+
+```powershell
+$env:DSPM_SEARCH_ENGINE = "meilisearch"
+$env:DSPM_MEILISEARCH_URL = "http://127.0.0.1:7700"
+$env:DSPM_MEILISEARCH_API_KEY = "<admin-key>"  # environment/secret store only
+$env:DSPM_SEARCH_READ_ENABLED = "0"
+
+python -m scripts.reindex_search --rebuild       # bounded DB keyset batches; task-aware writes
+python -m scripts.reindex_search                 # verifies service, index, and current settings
+
+$env:DSPM_SEARCH_READ_ENABLED = "1"              # enable q=... reads after verification
+```
+
+New/updated scans dual-write metadata when `DSPM_SEARCH_DUAL_WRITE=1`. `/api/health` exposes provider availability and read-cutover state without exposing the URL or API key. Rebuild is intentionally explicit because it deletes and recreates only the configured Meilisearch index. See the official [Meilisearch document API](https://www.meilisearch.com/docs/reference/api/documents/add-or-replace-documents) and [filter/sort/facet guide](https://www.meilisearch.com/docs/capabilities/filtering_sorting_faceting/overview) for service-side operations.
+
+S-F.2 adds bounded drift reconciliation and automated repair. Configure
+`DSPM_SEARCH_RECONCILE_SECONDS` (default `300`, `0` disables) and
+`DSPM_SEARCH_RECONCILE_REPAIR` (default `1`). Use
+`python -m scripts.reindex_search --check-drift` for a read-only audit or
+`--repair-drift` to upsert missing/stale documents and remove search-only
+orphans. The last durable reconciliation result is exposed under
+`/api/health.search.reconciliation`. Deployment, backup, upgrade, failure, and
+certification procedures are in
+[`docs/search/MEILISEARCH_OPERATIONS.md`](docs/search/MEILISEARCH_OPERATIONS.md).
 
 ## Dependencies
 

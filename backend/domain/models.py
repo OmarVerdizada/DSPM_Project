@@ -10,6 +10,8 @@ wired into any runtime path yet (see docs/phase1_kickoff_rfc.md).
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 
@@ -41,14 +43,58 @@ def _asset_top_frameworks(record: dict, limit: int = 3) -> str:
     row's at-a-glance column."""
     counter: Counter = Counter()
     for finding in record.get("findings") or []:
-        primary = str(finding.get("framework") or "").strip()
-        if primary:
-            counter[primary] += 1
-        for extra in finding.get("frameworks") or []:
-            label = str(extra or "").strip()
+        for framework in _finding_framework_values(finding):
+            label = str(framework).strip()
             if label:
                 counter[label] += 1
     return ",".join(name for name, _ in counter.most_common(limit))
+
+
+def _framework_key(value: str) -> str:
+    key = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+    aliases = {
+        "pci": "pci_dss", "pcidss": "pci_dss", "pci_dss_4_0": "pci_dss",
+        "nist": "nist_sp800_60_enterprise", "nist_sp_800_60": "nist_sp800_60_enterprise",
+        "nist_sp800_60": "nist_sp800_60_enterprise",
+    }
+    return aliases.get(key, key)
+
+
+def _asset_framework_keys(record: dict) -> str:
+    """JSON array of exact, UI-compatible framework keys for server filtering."""
+    keys: set[str] = set()
+    for finding in record.get("findings") or []:
+        values = _finding_framework_values(finding)
+        keys.update(key for key in (_framework_key(value) for value in values) if key)
+    if not keys:
+        keys.add("standard_scan")
+    return json.dumps(sorted(keys), ensure_ascii=False, separators=(",", ":"))
+
+
+def _finding_label(finding: dict) -> str:
+    raw = (
+        finding.get("display_name") or finding.get("label") or finding.get("data_type")
+        or finding.get("service") or finding.get("type") or finding.get("rule_id")
+        or "Unnamed rule"
+    )
+    label = re.sub(r"\bType\s+\d+\b", "", str(raw).replace("_", " "), flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", label).strip() or "Unnamed rule"
+
+
+def _asset_finding_types(record: dict) -> str:
+    labels = sorted({_finding_label(finding) for finding in record.get("findings") or []}, key=str.lower)
+    return json.dumps(labels, ensure_ascii=False, separators=(",", ":"))
+
+
+def _finding_framework_values(finding: dict) -> list:
+    """Return framework values without splitting a scalar string into letters."""
+    values = [finding.get("framework")]
+    additional = finding.get("frameworks")
+    if isinstance(additional, (list, tuple, set)):
+        values.extend(additional)
+    elif additional:
+        values.append(additional)
+    return [value for value in values if value is not None and str(value).strip()]
 
 
 def asset_identity(tenant_id: str, source: str, stable_object_id: str, path: str) -> str:
@@ -116,6 +162,11 @@ class Asset:
     is_system: int = 0
     is_protected: int = 0
     search_text: str = ""
+    # S-E on-demand read model. List responses omit detail_json; a single asset
+    # detail endpoint reads it without loading/parsing the full report blob.
+    finding_types: str = "[]"
+    framework_keys: str = "[]"
+    detail_json: str = "{}"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -278,7 +329,15 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
             extension = str(record.get("extension") or "").lower()
             owner = str(record.get("owner") or "")
             risk_level, risk_score = _asset_risk(record)
-            search_text = " ".join(p for p in (path, name, owner, extension) if p).lower()
+            share = str(record.get("share") or "")
+            finding_types = _asset_finding_types(record)
+            framework_keys = _asset_framework_keys(record)
+            search_text = " ".join(
+                str(part) for part in (
+                    path, name, owner, extension, source, share, risk_level,
+                    *json.loads(finding_types), *json.loads(framework_keys),
+                ) if part
+            ).lower()
             assets.append(
                 Asset(
                     id=asset_id,
@@ -288,7 +347,7 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
                     path=path,
                     name=name,
                     extension=extension,
-                    share=str(record.get("share") or ""),
+                    share=share,
                     risk_level=risk_level,
                     risk_score=risk_score,
                     size=int(record.get("size") or record.get("total_bytes") or 0),
@@ -300,6 +359,9 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
                     is_system=1 if record.get("is_system") else 0,
                     is_protected=1 if record.get("protected") else 0,
                     search_text=search_text,
+                    finding_types=finding_types,
+                    framework_keys=framework_keys,
+                    detail_json=json.dumps(record, ensure_ascii=False, separators=(",", ":")),
                 )
             )
             asset_versions.append(

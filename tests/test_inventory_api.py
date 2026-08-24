@@ -9,6 +9,8 @@ whichever backend DSPM_DB_URL selects (temp SQLite here; conftest isolates on PG
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import tempfile
 import unittest
@@ -63,7 +65,8 @@ class _SeededStore(unittest.TestCase):
     def _both(self, **kw):
         filt = store._inventory_filters(
             kw.get("risk", ""), kw.get("source", ""), kw.get("framework", ""),
-            kw.get("q", ""), kw.get("extension", ""))
+            kw.get("q", ""), kw.get("extension", ""), kw.get("protected"),
+            kw.get("finding_type", ""))
         args = (self.tid, filt, kw.get("sort", "risk_score"), kw.get("cursor", ""), kw.get("limit", 100))
         return store._list_inventory_normalized(*args), store._list_inventory_blob(*args)
 
@@ -119,6 +122,20 @@ class InventoryKeysetTests(_SeededStore):
         self.assertEqual(self._walk(store._list_inventory_normalized),
                          self._walk(store._list_inventory_blob))
 
+    def test_cursor_is_versioned_sort_bound_and_rejects_search_cursor(self) -> None:
+        filt = store._inventory_filters("", "", "", "", "")
+        first = store._list_inventory_normalized(self.tid, filt, "risk_score", "", 4)
+        decoded = json.loads(base64.urlsafe_b64decode(first["next_cursor"]).decode("utf-8"))
+        self.assertEqual(decoded[:2], ["sc-v2", "risk_score"])
+
+        wrong_sort = store._list_inventory_normalized(self.tid, filt, "size", first["next_cursor"], 4)
+        size_first = store._list_inventory_normalized(self.tid, filt, "size", "", 4)
+        self.assertEqual(wrong_sort, size_first)
+
+        search_cursor = base64.urlsafe_b64encode(b'["sf-v3",999999999]').decode("ascii")
+        forged = store._list_inventory_normalized(self.tid, filt, "risk_score", search_cursor, 4)
+        self.assertEqual(forged, store._list_inventory_normalized(self.tid, filt, "risk_score", "", 4))
+
 
 class InventoryFilterTests(_SeededStore):
     def test_source_filter_and_total(self) -> None:
@@ -139,6 +156,73 @@ class InventoryFilterTests(_SeededStore):
         n, _ = self._both(extension=".txt")
         self.assertTrue(all(i["extension"] == ".txt" for i in n["items"]))
 
+        files = [{
+            "path": "/opaque.bin", "name": "opaque.bin", "risk": {"level": "HIGH", "score": 80},
+            "findings": [{"type": "api_token", "display_name": "Access token", "framework": "GDPR"}],
+        }]
+        store.save_scan_history(self.tid, _report("s-search-metadata", "local", files))
+        normalized, blob = self._both(q="access token")
+        self.assertEqual(normalized, blob)
+        self.assertEqual([item["name"] for item in normalized["items"]], ["opaque.bin"])
+
+    def test_protected_finding_type_and_multi_framework_or(self) -> None:
+        files = [
+            {
+                "path": "/special/locked.txt", "name": "locked.txt", "protected": True,
+                "findings": [{"type": "api_key", "display_name": "API key", "framework": "GDPR"}],
+            },
+            {
+                "path": "/special/card.txt", "name": "card.txt",
+                "findings": [{"type": "pan", "display_name": "Payment card", "framework": "PCI-DSS"}],
+            },
+        ]
+        store.save_scan_history(self.tid, _report("s-filter", "local", files))
+
+        normalized, blob = self._both(protected=True)
+        self.assertEqual(normalized, blob)
+        self.assertEqual([item["name"] for item in normalized["items"]], ["locked.txt"])
+
+        normalized, blob = self._both(finding_type="API key")
+        self.assertEqual(normalized, blob)
+        self.assertEqual([item["name"] for item in normalized["items"]], ["locked.txt"])
+
+        normalized, blob = self._both(framework="gdpr,pci_dss")
+        self.assertEqual(normalized, blob)
+        self.assertIn("locked.txt", {item["name"] for item in normalized["items"]})
+        self.assertIn("card.txt", {item["name"] for item in normalized["items"]})
+
+    def test_normalized_facets_and_asset_detail(self) -> None:
+        files = [{
+            "path": "/detail/secret.txt", "name": "secret.txt", "protected": True,
+            "risk": {"level": "HIGH", "score": 88},
+            "findings": [{"type": "token", "display_name": "Access token", "framework": "GDPR", "samples": ["masked"]}],
+        }]
+        store.save_scan_history(self.tid, _report("s-detail", "local", files))
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "1"}):
+            facets = store.inventory_facets(self.tid)
+            page = store.list_inventory(self.tid, q="detail/secret")
+            detail = store.get_inventory_asset(self.tid, page["items"][0]["id"])
+        self.assertEqual(facets["source"], "normalized")
+        self.assertGreaterEqual(facets["protected"], 1)
+        self.assertIn("Access token", {item["value"] for item in facets["finding_types"]})
+        self.assertEqual(detail["path"], "/detail/secret.txt")
+        self.assertEqual(detail["findings"][0]["samples"], ["masked"])
+
+    def test_search_is_case_insensitive_and_like_wildcards_are_literal(self) -> None:
+        files = [
+            {"path": "/Finance/Q4_100%.xlsx", "name": "Q4_100%.xlsx", "owner": "ACME\\Alice"},
+            {"path": "/Finance/Q4X100-final.xlsx", "name": "Q4X100-final.xlsx", "owner": "ACME\\Bob"},
+        ]
+        store.save_scan_history(self.tid, _report("s3", "local", files))
+
+        normalized, blob = self._both(q="FINANCE/Q4_100%")
+        self.assertEqual(normalized, blob)
+        self.assertEqual([item["name"] for item in normalized["items"]], ["Q4_100%.xlsx"])
+
+        normalized, blob = self._both(q="ACME\\ALICE")
+        self.assertEqual(normalized, blob)
+        self.assertEqual([item["name"] for item in normalized["items"]], ["Q4_100%.xlsx"])
+
     def test_sort_risk_score_descending(self) -> None:
         n, _ = self._both(sort="risk_score", limit=100)
         scores = [i["risk_score"] for i in n["items"]]
@@ -146,11 +230,17 @@ class InventoryFilterTests(_SeededStore):
 
 
 class InventoryReadSwitchTests(_SeededStore):
-    def test_flag_off_serves_blob(self) -> None:
+    def test_explicit_flag_off_serves_blob(self) -> None:
+        env = dict(os.environ)
+        env["DSPM_INVENTORY_FROM_NORMALIZED"] = "0"
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(store.list_inventory(self.tid)["source"], "blob")
+
+    def test_complete_mirror_uses_normalized_path_by_default(self) -> None:
         env = dict(os.environ)
         env.pop("DSPM_INVENTORY_FROM_NORMALIZED", None)
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(store.list_inventory(self.tid)["source"], "blob")
+            self.assertEqual(store.list_inventory(self.tid)["source"], "normalized")
 
     def test_flag_on_and_ready_serves_normalized(self) -> None:
         with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "1"}):
@@ -159,6 +249,74 @@ class InventoryReadSwitchTests(_SeededStore):
     def test_malformed_cursor_serves_first_page(self) -> None:
         r = store.list_inventory(self.tid, cursor="!!!not-base64!!!")
         self.assertTrue(r["items"])
+
+    def test_selected_normalized_path_fails_closed_instead_of_materializing_blobs(self) -> None:
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "1"}), mock.patch(
+            "backend.store._list_inventory_normalized", side_effect=RuntimeError("database interrupted")
+        ), mock.patch("backend.store._list_inventory_blob") as blob:
+            with self.assertRaises(store.InventoryReadUnavailable):
+                store.list_inventory(self.tid)
+        blob.assert_not_called()
+
+    def test_missing_normalized_detail_does_not_scan_report_blobs(self) -> None:
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "1"}), mock.patch(
+            "backend.store._inventory_blob_rows"
+        ) as blob:
+            self.assertIsNone(store.get_inventory_asset(self.tid, "0" * 24))
+        blob.assert_not_called()
+
+    def test_capped_total_is_reused_across_cursor_pages_and_invalidated_on_save(self) -> None:
+        store._invalidate_inventory_query_cache(self.tid)
+        conn = mock.Mock()
+        conn.execute.return_value.fetchone.return_value = (25,)
+        where, params = ["tenant_id = ?"], [self.tid]
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_COUNT_CACHE_SECONDS": "30"}):
+            self.assertEqual(store._capped_inventory_total(conn, self.tid, where, params), 25)
+            self.assertEqual(store._capped_inventory_total(conn, self.tid, where, params), 25)
+            self.assertEqual(conn.execute.call_count, 1)
+            cache_entries = [key for key in store._inventory_count_cache if key[1] == self.tid]
+            self.assertEqual(len(cache_entries), 1)
+            store.save_scan_history(self.tid, _report("cache-invalidation", "local", []))
+            self.assertFalse([key for key in store._inventory_count_cache if key[1] == self.tid])
+
+
+class InventorySEEndpointTests(_SeededStore):
+    def setUp(self) -> None:
+        super().setUp()
+        from fastapi.testclient import TestClient
+        from backend.app import app
+        from backend.security import create_token
+
+        store.create_user("se-viewer", "unused-test-hash", "viewer", self.tid)
+        self.client = TestClient(app)
+        self.headers = {"Authorization": f"Bearer {create_token('se-viewer', 'viewer', self.tid)}"}
+
+    def test_facets_detail_and_compact_history_routes(self) -> None:
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "1"}):
+            facets = self.client.get("/api/inventory/facets", headers=self.headers)
+            page = self.client.get("/api/inventory?limit=1", headers=self.headers)
+            asset_id = page.json()["items"][0]["id"]
+            detail = self.client.get(f"/api/inventory/{asset_id}", headers=self.headers)
+        compact = self.client.get("/api/history/s2/report?include_files=false", headers=self.headers)
+        full = self.client.get("/api/history/s2/report", headers=self.headers)
+
+        self.assertEqual(facets.status_code, 200, facets.text)
+        self.assertEqual(facets.json()["source"], "normalized")
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertIn("path", detail.json()["asset"])
+        self.assertEqual(compact.status_code, 200, compact.text)
+        self.assertEqual(compact.json()["report"]["files"], [])
+        self.assertTrue(compact.json()["report"]["files_omitted"])
+        self.assertEqual(len(full.json()["report"]["files"]), 10)
+
+    def test_inventory_route_accepts_all_server_facets(self) -> None:
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "1"}):
+            response = self.client.get(
+                "/api/inventory?protected=false&finding_type=t&framework=gdpr,pci_dss&limit=5",
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertLessEqual(len(response.json()["items"]), 5)
 
 
 class InventoryEndpointTests(unittest.TestCase):
@@ -180,6 +338,13 @@ class InventoryEndpointTests(unittest.TestCase):
 
     def test_requires_auth(self) -> None:
         self.assertIn(self.client.get("/api/inventory").status_code, (401, 403))
+
+    def test_normalized_operational_failure_is_retryable_503(self) -> None:
+        with mock.patch("backend.app.list_inventory", side_effect=store.InventoryReadUnavailable("hidden")):
+            response = self.client.get("/api/inventory", headers=self.headers)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers["retry-after"], "5")
+        self.assertNotIn("hidden", response.text)
 
 
 if __name__ == "__main__":

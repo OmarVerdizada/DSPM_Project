@@ -57,6 +57,51 @@ class PostgresBackendTests(unittest.TestCase):
         back = store.read_scan_report(self.tenant, "s1")
         self.assertEqual(back["source"], "test")
 
+    def test_incremental_baseline_round_trip_and_scope_isolation(self) -> None:
+        report = {
+            "scan_id": "pa-s1",
+            "source": "local",
+            "timestamp": "2026-08-06T00:00:00Z",
+            "mode": "incremental",
+            "summary": {"total_files": 1},
+            "scan_diagnostics": {
+                "incremental": {
+                    "enabled": True,
+                    "baseline_update": True,
+                    "scope_key": "scope-a",
+                    "version_signature": "policy-v1",
+                    "complete": True,
+                }
+            },
+            "files": [{
+                "path": "/data/a.txt", "reuse_key": "local:///data/a.txt",
+                "name": "a.txt", "size": 7, "modified_at": "2026-08-06T00:00:00Z",
+                "content_hash": "hash-a", "findings": [{"type": "email", "risk": "HIGH"}],
+                "risk": {"level": "HIGH", "score": 80},
+            }],
+        }
+        store.save_scan_history(self.tenant, report)
+        matched = store.probe_incremental_object(
+            self.tenant, "scope-a", "local:///data/a.txt", 7,
+            "2026-08-06T00:00:00Z", "policy-v1",
+        )
+        self.assertEqual(matched["state"], "unchanged")
+        self.assertEqual(matched["snapshot"]["baseline_result"]["findings"][0]["type"], "email")
+        self.assertEqual(
+            store.probe_incremental_object(
+                self.tenant, "scope-b", "local:///data/a.txt", 7,
+                "2026-08-06T00:00:00Z", "policy-v1",
+            )["state"],
+            "new",
+        )
+        self.assertEqual(
+            store.probe_incremental_object(
+                self.tenant, "scope-a", "local:///data/a.txt", 8,
+                "2026-08-06T00:00:00Z", "policy-v1",
+            )["state"],
+            "changed",
+        )
+
     def test_created_at_is_immutable_across_resave(self) -> None:
         report = {"scan_id": "s2", "source": "a", "summary": {}, "files": []}
         store.save_scan_history(self.tenant, report)
@@ -136,6 +181,61 @@ class PostgresBackendTests(unittest.TestCase):
         self.assertFalse(store.tenant_exists(self.tenant))
         self.assertEqual(store.count_scan_history(self.tenant), 0)
         self.assertIsNone(store.read_secret(self.tenant, "s"))
+
+    def test_inventory_search_uses_trigram_gin_index(self) -> None:
+        """Track S-D acceptance: provisioned PG has pg_trgm and the inventory
+        substring predicate is eligible for the matching GIN expression index."""
+        with store._connect() as conn:
+            self.assertTrue(db.postgres_extension_available(conn, "pg_trgm"))
+            row = conn.execute(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname = current_schema() AND indexname = ?",
+                ("idx_assets_search_trgm",),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertIn("gin", str(row[0]).lower())
+            self.assertIn("gin_trgm_ops", str(row[0]).lower())
+
+            # A tiny test table normally makes a sequential scan cheaper. Disable
+            # it for this transaction so EXPLAIN proves the predicate and index
+            # expression match, independent of fixture cardinality.
+            conn.execute("SET LOCAL enable_seqscan = off")
+            plan_rows = conn.execute(
+                "EXPLAIN SELECT id FROM assets "
+                "WHERE lower(COALESCE(search_text, '')) LIKE ? ESCAPE '\\'",
+                ("%quarterly%",),
+            ).fetchall()
+        plan = "\n".join(str(row[0]) for row in plan_rows)
+        self.assertIn("idx_assets_search_trgm", plan)
+
+    def test_inventory_keyset_and_readiness_indexes_are_installed(self) -> None:
+        expected = {
+            "idx_assets_tenant_risk_score_id", "idx_assets_tenant_size_id",
+            "idx_assets_tenant_finding_count_id", "idx_assets_tenant_modified_c_id",
+            "idx_assets_tenant_name_c_id", "idx_assets_tenant_missing_detail",
+        }
+        with store._connect() as conn:
+            rows = conn.execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = current_schema() AND indexname LIKE 'idx_assets_tenant_%_id' "
+                "OR (schemaname = current_schema() AND indexname = 'idx_assets_tenant_missing_detail')"
+            ).fetchall()
+            definitions = {str(row["indexname"]): str(row["indexdef"]) for row in rows}
+            conn.execute("SET LOCAL enable_seqscan = off")
+            risk_plan = conn.execute(
+                "EXPLAIN SELECT id FROM assets WHERE tenant_id = ? "
+                "ORDER BY risk_score DESC, id DESC LIMIT 101",
+                (self.tenant,),
+            ).fetchall()
+            name_plan = conn.execute(
+                'EXPLAIN SELECT id FROM assets WHERE tenant_id = ? '
+                'ORDER BY (COALESCE(name, \'\')) COLLATE "C" ASC, id ASC LIMIT 101',
+                (self.tenant,),
+            ).fetchall()
+        self.assertTrue(expected <= set(definitions))
+        self.assertIn('COLLATE "C"', definitions["idx_assets_tenant_name_c_id"])
+        self.assertIn("idx_assets_tenant_risk_score_id", "\n".join(str(row[0]) for row in risk_plan))
+        self.assertIn("idx_assets_tenant_name_c_id", "\n".join(str(row[0]) for row in name_plan))
 
 
 if __name__ == "__main__":

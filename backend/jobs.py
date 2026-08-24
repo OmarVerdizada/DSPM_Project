@@ -56,7 +56,6 @@ def _finalize(job: "ScanJob", status: str, *, message: str, error: str | None = 
 MAX_WORKERS = int(os.getenv("DSPM_JOB_WORKERS", "4"))
 MAX_JOBS_TOTAL = int(os.getenv("DSPM_MAX_JOBS_TOTAL", "200"))
 MAX_JOBS_PER_TENANT = int(os.getenv("DSPM_MAX_JOBS_PER_TENANT", "10"))
-MAX_RESULT_FILES_IN_MEMORY = int(os.getenv("DSPM_MAX_JOB_RESULT_FILES", "500"))
 JOB_RETENTION_SECONDS = int(os.getenv("DSPM_JOB_RETENTION_SECONDS", "3600"))
 
 # Collection runs as one blocking call with no per-object progress, so the
@@ -184,11 +183,17 @@ def _shrink_result(data: dict) -> dict:
     if not isinstance(data, dict):
         return {}
     files = data.get("files")
-    if isinstance(files, list) and len(files) > MAX_RESULT_FILES_IN_MEMORY:
+    if isinstance(files, list) and files:
         trimmed = dict(data)
-        trimmed["files"] = files[:MAX_RESULT_FILES_IN_MEMORY]
+        # S-E: a completed job is a notification/metadata payload, not a second
+        # report transport. The normalized inventory/detail APIs serve bounded
+        # reads after persistence; retaining even a 500-file preview kept an
+        # unnecessary duplicate alive in the worker and browser.
+        trimmed["files"] = []
+        trimmed["files_omitted"] = True
         trimmed["result_truncated"] = True
         trimmed["result_file_count"] = len(files)
+        trimmed["file_count"] = len(files)
         return trimmed
     return data
 
@@ -317,6 +322,14 @@ def _update_scan_job_progress(job: ScanJob, stage: str, completed: int, total: i
         if reused:
             message += f", {reused} reused from cache"
         job.message = message
+        return
+    if stage == "pipelining":
+        # Collection is still active, so the final total is not known yet.
+        # Report useful overlap without allowing the bar to reach the
+        # post-collection analysis band prematurely.
+        submitted = max(completed_raw, int(total or 0))
+        job.progress = max(job.progress, min(70, 15 + completed_raw // 5))
+        job.message = f"Discovering and analyzing files… {completed_raw}/{submitted} ready"
         return
     total_n = max(int(total or 0), 1)
     completed_c = max(0, min(completed_raw, total_n))

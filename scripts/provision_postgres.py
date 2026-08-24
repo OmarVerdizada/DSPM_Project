@@ -3,6 +3,7 @@
 Creates the least-privilege footprint the app needs and nothing more:
   * a dedicated application database (default ``sentro_dev``),
   * a **non-superuser** login role (default ``sentro_app``) - no CREATEDB/CREATEROLE,
+  * the trusted ``pg_trgm`` extension used by Track S-D inventory search,
   * ``REVOKE ALL ... FROM PUBLIC`` on the database + ``GRANT CONNECT`` to the role,
   * ``GRANT USAGE, CREATE ON SCHEMA public`` so the app owns and manages its tables.
 
@@ -85,6 +86,13 @@ def provision(admin_url: str, db: str, role: str, password: str) -> None:
     # Schema-level grant must be issued while connected to the target database.
     db_admin_url = _swap_dbname(admin_url, db)
     with psycopg.connect(db_admin_url, autocommit=True) as conn:
+        # Track S-D: pg_trgm preserves the inventory API's literal substring
+        # semantics (including path fragments) while allowing a GIN index to
+        # serve ``LIKE '%query%'``.  Install it as the provisioning/admin role;
+        # the runtime app role intentionally has no extension-management power.
+        conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        print("= pg_trgm extension ready (Track S-D inventory search)")
+
         conn.execute(f"GRANT USAGE, CREATE ON SCHEMA public TO {role}")
         print(f"= granted USAGE, CREATE ON SCHEMA public to {role}")
 

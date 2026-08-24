@@ -7,6 +7,7 @@ separately by tests/test_postgres_backend.py (skipped unless DSPM_DB_URL is set)
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest import mock
 
@@ -299,6 +300,12 @@ class WrapperPlumbingTests(unittest.TestCase):
         with mock.patch.object(db, "ConnectionPool", None):
             self.assertIsNone(db._get_pool())
 
+    def test_numeric_pool_settings_are_bounded_and_typo_safe(self) -> None:
+        with mock.patch.dict(os.environ, {"POOL_TEST": "not-a-number"}):
+            self.assertEqual(db._env_number("POOL_TEST", 10, 1, 20, int), 10)
+        with mock.patch.dict(os.environ, {"POOL_TEST": "999"}):
+            self.assertEqual(db._env_number("POOL_TEST", 10, 1, 20, int), 20)
+
     def test_executemany_translates_and_forwards(self) -> None:
         raw = _FakeRaw()
         conn = db._PgConn(raw)
@@ -315,6 +322,19 @@ class WrapperPlumbingTests(unittest.TestCase):
         self.assertEqual(cols, {"username", "role"})
         # The PRAGMA path must NOT be used on Postgres.
         self.assertNotIn("PRAGMA", raw.executed[-1][0].upper())
+
+    def test_postgres_extension_available_uses_catalog(self) -> None:
+        raw = _FakeRaw(rows_for={"pg_extension": [(1,)]})
+        conn = db._PgConn(raw)
+        with mock.patch.dict("os.environ", {"DSPM_DB_URL": "postgresql://x@h/d"}):
+            self.assertTrue(db.postgres_extension_available(conn, "pg_trgm"))
+        sql, params = raw.executed[-1]
+        self.assertIn("pg_extension", sql)
+        self.assertEqual(params, ("pg_trgm",))
+
+    def test_postgres_extension_available_is_false_on_sqlite(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertFalse(db.postgres_extension_available(object(), "pg_trgm"))
 
 
 if __name__ == "__main__":
