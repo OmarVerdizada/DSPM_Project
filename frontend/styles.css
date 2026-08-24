@@ -11606,7 +11606,7 @@ body {
 }
 h1, h2, h3, h4, h5, h6,
 .brand h1, .logo-lockup h1 {
-  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-family: Inter, 'Segoe UI', system-ui, sans-serif;
   letter-spacing: -.02em;
 }
 code, pre, kbd,
@@ -13230,7 +13230,7 @@ body.sidebar-collapsed .app-shell { grid-template-columns: 68px minmax(0, 1fr); 
 .sidebar .logo-lockup h1,
 :root:not([data-theme="dark"]) .sidebar .brand h1,
 :root:not([data-theme="dark"]) .sidebar .logo-lockup h1 {
-  font-family: 'Space Grotesk', 'Inter', sans-serif;
+  font-family: Inter, 'Segoe UI', system-ui, sans-serif;
   font-size: 17px !important;
   letter-spacing: .06em !important;
   color: var(--text) !important;
@@ -21105,3 +21105,129 @@ details.scan-advanced > summary:focus-visible {
   color: var(--muted);
   font-weight: 800;
 }
+
+/* ============================================================================
+   Redesign P2 — "Harbor / Sonar" tokens
+   (docs/frontend/REDESIGN_PLAN_2026-08.md, decision ①-approved severity ramp)
+
+   One authoritative color layer, appended last so it wins every earlier skin
+   layer (teal v1 → blue v4 → v98 WCAG → indigo v-latest) by cascade order at
+   equal specificity. It mirrors the indigo layer's FULL color-token set —
+   redefining only colors; radii, shadows, spacing and every selector the JS
+   binds to are untouched. P6 later collapses the dead layers.
+
+   Palette: graphite-blue "Harbor" ground, the product's own teal disciplined
+   into a single "Sonar" accent, and a monotonic hot→cold severity ramp:
+   critical red · high orange · medium amber · LOW = STEEL BLUE (no longer
+   green). Green now means exactly one thing — success/pass — via the new
+   --ok token; the success-semantic rules below are repointed accordingly.
+   ============================================================================ */
+:root,
+:root:not([data-theme="dark"]) {
+  color-scheme: light;
+  --bg: #f5f7f9;
+  --surface: #ffffff;
+  --surface-soft: #f1f4f7;
+  --card: #ffffff;
+  --card-2: #f4f6f9;
+  --text: #1a2430;
+  --muted: #64707e;
+  --line: #dce2e9;
+  --accent: #0f7a6e;
+  --accent-strong: #0a5a51;
+  --accent-soft: #e8f3f1;
+  --sidebar-bg: #ffffff;
+  --sidebar-soft: #ffffff;
+  --sidebar-text: #4c5866;
+  --sidebar-muted: #98a3ae;
+  --status-critical: #e5484d;
+  --status-high: #f08c00;
+  --status-warning: #f08c00;
+  --status-medium: #d9a514;
+  --status-low: #5b93c4;
+  --status-safe: #0f7a6e;
+  --status-sensitive: #a855f7;
+  --critical: #c13438;
+  --high: #b85607;
+  --medium: #9a7b14;
+  --low: #3d6fa3;
+  --ok: #22863a;
+  --info: #0f7a6e;
+  --glass-topbar: #ffffff;
+  --mc-glow: transparent;
+  --focus-ring: 0 0 0 3px rgba(15, 122, 110, .20);
+  --cp-accent: #0f7a6e;
+  --cp-accent-strong: #0a5a51;
+  --cp-user-bg: #0f7a6e;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f151c;
+  --surface: #161e27;
+  --surface-soft: #121924;
+  --card: #161e27;
+  --card-2: #1b2530;
+  --text: #e7eef4;
+  --muted: #8c9aa8;
+  --line: #26313d;
+  --accent: #2ab9a9;
+  --accent-strong: #6fe0d2;
+  --accent-soft: rgba(42, 185, 169, .14);
+  --sidebar-bg: #121922;
+  --sidebar-soft: #121922;
+  --sidebar-text: #8c9aa8;
+  --sidebar-muted: #64707e;
+  --status-critical: #ec5f64;
+  --status-high: #f76b15;
+  --status-warning: #f76b15;
+  --status-medium: #f3c63f;
+  --status-low: #5b93c4;
+  --status-safe: #2ab9a9;
+  --status-sensitive: #c084fc;
+  --critical: #ec5f64;
+  --high: #f76b15;
+  --medium: #f3c63f;
+  --low: #5b93c4;
+  --ok: #3fb950;
+  --info: #2ab9a9;
+  --glass-topbar: #161e27;
+  --mc-glow: transparent;
+  --focus-ring: 0 0 0 3px rgba(42, 185, 169, .32);
+  --cp-bg: #161e27;
+  --cp-panel: #1b2530;
+  --cp-border: #26313d;
+  --cp-text: #e7eef4;
+  --cp-muted: #8c9aa8;
+  --cp-accent: #2ab9a9;
+  --cp-accent-strong: #6fe0d2;
+  --cp-user-bg: #0f7a6e;
+  --cp-assistant-bg: #1b2530;
+}
+::selection { background: rgba(15, 122, 110, .16); }
+:root[data-theme="dark"] ::selection { background: rgba(42, 185, 169, .28); }
+
+/* Green = pass only: rules whose meaning is SUCCESS (not low severity) move
+   from var(--low) to var(--ok). Everything .LOW/.low-shaped keeps --low and
+   turns steel with the ramp. Re-declared here (same properties, later in the
+   cascade) instead of editing the original rules in place. */
+.panel-avatar::after { background: var(--ok); }
+.profile-state-badge {
+  border: 1px solid color-mix(in srgb, var(--ok) 42%, var(--line));
+  background: color-mix(in srgb, var(--ok) 10%, var(--surface));
+  color: var(--ok);
+}
+.toast.success { border-left-color: var(--ok); }
+.detail-list.recommendations li::before {
+  background: color-mix(in srgb, var(--ok) 15%, var(--surface));
+  color: var(--ok);
+}
+.trend-bar span {
+  background: linear-gradient(180deg, var(--accent), color-mix(in srgb, var(--ok) 70%, var(--accent)));
+}
+.scan-comparison-row small.better { color: var(--ok); }
+.coverage-meter span { background: linear-gradient(90deg, var(--ok), var(--accent)); }
+.logic-control {
+  border-color: color-mix(in srgb, var(--ok) 22%, var(--line)) !important;
+  background: color-mix(in srgb, var(--ok) 7%, var(--surface)) !important;
+}
+.compliance-list li strong.ok { color: var(--ok); }
