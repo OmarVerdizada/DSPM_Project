@@ -4,24 +4,32 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend.app import FRONTEND_DIR, LANDING_DIST, ConnectionRequest, _persist_scan, _prepare_local_scan_data, app
+from backend.app import FRONTEND_DIR, ConnectionRequest, _persist_scan, _prepare_local_scan_data, app
 from backend.security import Principal
 
 
-class LandingRouteTests(unittest.TestCase):
+class RootRouteTests(unittest.TestCase):
+    """The product starts at login: no marketing landing page ships on-prem.
+
+    "/" and "/login" both serve the operator login page directly; the console
+    lives at "/dashboard". (The former frontend-landing React build was removed
+    in redesign P1.)
+    """
+
     def setUp(self):
         self.client = TestClient(app)
 
-    def test_root_serves_built_sentro_landing(self):
-        self.assertTrue((LANDING_DIST / "index.html").is_file())
+    def test_root_and_login_serve_the_login_page(self):
+        for route in ("/", "/login"):
+            response = self.client.get(route)
 
-        response = self.client.get("/")
+            self.assertEqual(response.status_code, 200, route)
+            self.assertIn("SENTRO", response.text, route)
+            self.assertIn("Sign in to your account", response.text, route)
+            # L2 regression lock: no stale default-credential hint may ship.
+            self.assertNotIn("admin123", response.text, route)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("SENTRO", response.text)
-        self.assertIn("Data Security Posture Management", response.text)
-
-    def test_dashboard_remains_separate_from_landing(self):
+    def test_dashboard_serves_the_console(self):
         response = self.client.get("/dashboard")
 
         self.assertEqual(response.status_code, 200)

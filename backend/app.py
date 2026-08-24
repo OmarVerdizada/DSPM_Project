@@ -110,15 +110,18 @@ from collectors.winrm_endpoint_scanner import (
     normalize_endpoint_target_paths,
 )
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
+from discovery.incremental import (
+    apply_reuse_snapshot,
+    incremental_scope_key,
+    qualified_object_key,
+    reuse_snapshot_from_result,
+)
 from risk.risk_engine import get_risk_rules
 from scripts.generate_enterprise_test_data import generate as generate_enterprise_test_data
 from scripts.report import generate_report
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
-# Production build of the SENTRO landing page (frontend-landing). When it
-# exists, the landing is served at "/" and "/login" from this same port.
-LANDING_DIST = BASE_DIR / "frontend-landing" / "dist"
 vault = CredentialVault()
 PROTECTED_USERS = {"admin"}
 DEFAULT_CORS_ORIGINS = [
@@ -126,9 +129,6 @@ DEFAULT_CORS_ORIGINS = [
     "http://localhost:8000",
     "http://127.0.0.1:3000",
     "http://localhost:3000",
-    # SENTRO landing page dev server (its /login posts to /api/auth/login).
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
 ]
 CORS_ORIGINS = [
     origin.strip()
@@ -225,8 +225,6 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 if COPILOT_ENABLED:  # ARCH-002: flag defined near IS_PRODUCTION above
     app.include_router(copilot_router)
-if (LANDING_DIST / "assets").is_dir():
-    app.mount("/assets", StaticFiles(directory=LANDING_DIST / "assets"), name="landing-assets")
 
 
 @app.middleware("http")
@@ -637,17 +635,12 @@ class DemoDataRequest(BaseModel):
 
 @app.get("/")
 def login_root() -> FileResponse:
-    landing = LANDING_DIST / "index.html"
-    if landing.is_file():
-        return FileResponse(landing)
+    # The product starts at login: no marketing landing page ships on-prem.
     return FileResponse(FRONTEND_DIR / "login.html")
 
 
 @app.get("/login")
 def login_page() -> FileResponse:
-    landing = LANDING_DIST / "index.html"
-    if landing.is_file():
-        return FileResponse(landing)
     return FileResponse(FRONTEND_DIR / "login.html")
 
 

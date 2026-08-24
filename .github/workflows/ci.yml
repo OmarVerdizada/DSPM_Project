@@ -66,37 +66,6 @@ jobs:
             node --check "$f"
           done
 
-  landing:
-    name: Landing page build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: frontend-landing/package-lock.json
-
-      - name: Install locked dependencies
-        working-directory: frontend-landing
-        run: npm ci
-
-      - name: Build
-        working-directory: frontend-landing
-        run: npm run build
-
-      # frontend-landing/dist/ is served directly by backend/app.py at runtime
-      # and is committed to the repository. If a rebuild produces different
-      # output, the deployed landing page has drifted from src/.
-      - name: Fail if committed dist/ is stale
-        run: |
-          if ! git diff --quiet -- frontend-landing/dist; then
-            echo "::error::frontend-landing/dist is out of date. Run 'npm run build' in frontend-landing/ and commit the result."
-            git diff --stat -- frontend-landing/dist
-            exit 1
-          fi
-
   hygiene:
     name: Repository hygiene
     runs-on: ubuntu-latest
@@ -204,21 +173,6 @@ jobs:
         run: |
           python -m pip install pip-audit
           python -m pip_audit -r requirements.lock
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: frontend-landing/package-lock.json
-
-      - name: Install landing dependencies
-        working-directory: frontend-landing
-        run: npm ci
-
-      # M16: fail the build on a high-or-critical npm advisory.
-      - name: npm audit (blocking, high+)
-        working-directory: frontend-landing
-        run: npm audit --audit-level=high
 
   lock-drift:
     name: requirements.lock drift gate
