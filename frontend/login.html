@@ -8,26 +8,28 @@
   <!-- Apply saved theme BEFORE CSS so there's no flash -->
   <script>var _t=localStorage.getItem('dspm-theme');if(_t)document.documentElement.setAttribute('data-theme',_t);</script>
 
-  <!-- System font stacks only: air-gap friendly, no external requests. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; font-family: Inter, 'Segoe UI', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+    html, body { height: 100%; font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; }
 
     /* ─── LIGHT (default) ─── */
     :root {
       --lbg:    #ffffff;
-      --ltxt:   #1a2430;
-      --lsub:   #64707e;
-      --lmut:   #98a3ae;
-      --ibg:    #f7f9fa;
-      --ibdr:   #dce2e9;
-      --ifoc:   #0f7a6e;
-      --itxt:   #1a2430;
-      --iph:    #98a3ae;
-      --divdr:  #eff2f5;
-      --lnk:    #0f7a6e;
-      --rbg:    #0e5f55;
+      --ltxt:   #111827;
+      --lsub:   #6b7280;
+      --lmut:   #9ca3af;
+      --ibg:    #f9fafb;
+      --ibdr:   #e5e7eb;
+      --ifoc:   #2563eb;
+      --itxt:   #111827;
+      --iph:    #9ca3af;
+      --divdr:  #f3f4f6;
+      --lnk:    #2563eb;
+      --rbg:    #1d4ed8;
       --rglow:  rgba(255,255,255,0.13);
       --rring:  rgba(255,255,255,0.2);
       --rnode:  rgba(255,255,255,0.13);
@@ -41,41 +43,41 @@
       --cbdr:   rgba(255,255,255,0.25);
       --ctxt:   #ffffff;
       --cmut:   rgba(255,255,255,0.6);
-      --tbg:    #eff2f5;
-      --tbdr:   #dce2e9;
-      --tico:   #3d4854;
+      --tbg:    #f3f4f6;
+      --tbdr:   #e5e7eb;
+      --tico:   #374151;
     }
 
     /* ─── DARK ─── */
     html[data-theme="dark"] {
-      --lbg:    #0f151c;
-      --ltxt:   #e7eef4;
-      --lsub:   #8c9aa8;
-      --lmut:   #5a6774;
-      --ibg:    #161e27;
-      --ibdr:   #26313d;
-      --ifoc:   #2ab9a9;
-      --itxt:   #e7eef4;
-      --iph:    #5a6774;
-      --divdr:  #1b242e;
-      --lnk:    #4fd0c0;
-      --rbg:    #0a1118;
-      --rglow:  rgba(42,185,169,0.14);
-      --rring:  rgba(42,185,169,0.2);
-      --rnode:  rgba(10,17,24,0.95);
-      --rbdr:   rgba(111,224,210,0.3);
-      --rline:  rgba(111,224,210,0.28);
-      --rtxt:   #eaf4f2;
-      --rsub:   rgba(140,154,168,0.7);
-      --dotoff: rgba(111,224,210,0.22);
-      --doton:  #6fe0d2;
-      --cbg:    rgba(10,17,24,0.92);
-      --cbdr:   rgba(42,185,169,0.3);
-      --ctxt:   #eaf4f2;
-      --cmut:   rgba(140,154,168,0.6);
-      --tbg:    #161e27;
-      --tbdr:   #26313d;
-      --tico:   #8c9aa8;
+      --lbg:    #0f172a;
+      --ltxt:   #f1f5f9;
+      --lsub:   #94a3b8;
+      --lmut:   #475569;
+      --ibg:    #1e293b;
+      --ibdr:   #334155;
+      --ifoc:   #3b82f6;
+      --itxt:   #f1f5f9;
+      --iph:    #475569;
+      --divdr:  #1e293b;
+      --lnk:    #60a5fa;
+      --rbg:    #060914;
+      --rglow:  rgba(37,99,235,0.15);
+      --rring:  rgba(37,99,235,0.2);
+      --rnode:  rgba(10,14,26,0.95);
+      --rbdr:   rgba(56,189,248,0.3);
+      --rline:  rgba(56,189,248,0.28);
+      --rtxt:   #e9f1ff;
+      --rsub:   rgba(148,163,184,0.7);
+      --dotoff: rgba(56,189,248,0.2);
+      --doton:  #38bdf8;
+      --cbg:    rgba(10,14,26,0.92);
+      --cbdr:   rgba(37,99,235,0.3);
+      --ctxt:   #e9f1ff;
+      --cmut:   rgba(148,163,184,0.6);
+      --tbg:    #1e293b;
+      --tbdr:   #334155;
+      --tico:   #94a3b8;
     }
 
     /* ─── LAYOUT ─── */
@@ -109,9 +111,8 @@
     /* Logo */
     .logo-row { display: flex; align-items: center; gap: .8rem; margin-bottom: 2.5rem; }
     .logo-name {
-      font-family: Inter, 'Segoe UI', system-ui, sans-serif;
-      font-weight: 800;
-      font-size: 1.15rem; letter-spacing: .14em;
+      font-family: 'Audiowide', sans-serif;
+      font-size: 1.15rem; letter-spacing: .1em;
       color: var(--ltxt); transition: color .3s;
     }
 
@@ -134,10 +135,10 @@
       padding: 0 .9rem 0 2.55rem;
       background: var(--ibg); border: 1.5px solid var(--ibdr);
       border-radius: 8px;
-      color: var(--itxt); font-family: Inter, 'Segoe UI', system-ui, sans-serif; font-size: .88rem;
+      color: var(--itxt); font-family: 'Inter', sans-serif; font-size: .88rem;
       outline: none; transition: border-color .2s, box-shadow .2s, background .3s, color .3s;
     }
-    .finput:focus { border-color: var(--ifoc); box-shadow: 0 0 0 3px rgba(15,122,110,.12); }
+    .finput:focus { border-color: var(--ifoc); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
     .finput::placeholder { color: var(--iph); }
     .finput.pw { padding-right: 2.75rem; }
 
@@ -153,13 +154,13 @@
     /* Sign in button */
     .btn-sign {
       display: block; width: 100%; height: 48px;
-      background: linear-gradient(135deg, #0a5a51 0%, #0f7a6e 100%);
+      background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
       color: #fff; border: none; border-radius: 8px;
-      font-family: Inter, 'Segoe UI', system-ui, sans-serif; font-size: .92rem; font-weight: 600;
+      font-family: 'Inter', sans-serif; font-size: .92rem; font-weight: 600;
       cursor: pointer; margin-top: 1.25rem;
       transition: box-shadow .2s, transform .15s;
     }
-    .btn-sign:hover { box-shadow: 0 6px 20px rgba(15,122,110,.38); transform: translateY(-1px); }
+    .btn-sign:hover { box-shadow: 0 6px 20px rgba(37,99,235,.38); transform: translateY(-1px); }
     .btn-sign:active { transform: none; }
 
     .status-msg {
@@ -305,7 +306,7 @@
   <div class="left">
     <div class="form-box">
 
-      <!-- Logo: full-colour turbine at 44px + wordmark -->
+      <!-- Logo: full-colour turbine at 44px + Audiowide wordmark -->
       <div class="logo-row">
         <svg width="44" height="44" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"
              style="filter:drop-shadow(0 0 10px rgba(74,124,255,.45));flex-shrink:0" aria-label="SENTRO">

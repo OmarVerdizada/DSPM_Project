@@ -252,11 +252,9 @@ async def secure_response_headers(request: Request, call_next):
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     response.headers.setdefault(
         "Content-Security-Policy",
-        # P2 removed the Google Fonts CDN (system font stacks only), so the CSP
-        # no longer allowlists those hosts: self + inline styles + data URIs.
         "default-src 'self'; script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-        "font-src 'self' data:; connect-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; "
+        "font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     )
     if request.url.scheme == "https" or IS_PRODUCTION:
