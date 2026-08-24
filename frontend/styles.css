@@ -21475,14 +21475,14 @@ details.scan-advanced > summary:focus-visible {
 }
 
 /* ============================================================================
-   Redesign P3.1 — sidebar sub-navigation + in-sidebar collapse.
+   Redesign P3.2 — sidebar navigation system (reference-style).
 
-   Merged destinations (Scan, Evidence, Administration) expand under their own
-   sidebar entry: the active destination shows its member pages as indented
-   sub-links (no in-page switcher strips). The collapse control is pinned to
-   the bottom of the sidebar; collapsed keeps a 68px icon rail — icons stay,
-   labels and sub-links hide. The topbar hamburger remains only as the
-   small-screen off-canvas opener.
+   Head: logo left, hamburger right — the only collapse control. Merged
+   destinations (Scan, Evidence, Administration) carry a caret and expand
+   their members as plain indented sub-links (no background fills), animated
+   with a grid-rows transition. Collapse ALWAYS keeps the icon rail: logo,
+   hamburger, and destination icons stay at every viewport width — the old
+   off-canvas slide-out and the topbar hamburger are retired.
    ============================================================================ */
 .sidebar {
   display: flex;
@@ -21491,82 +21491,100 @@ details.scan-advanced > summary:focus-visible {
 .side-nav {
   flex: 0 0 auto;
 }
-.nav-sub {
-  display: grid;
-  gap: 2px;
-  margin: 2px 0 6px;
-  padding-left: 38px;
-}
-.nav-sub-link {
-  min-height: 30px;
-  padding: 4px 10px;
+.brand.logo-lockup .nav-burger {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  min-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: var(--sidebar-muted, var(--muted));
+  color: var(--muted);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.brand.logo-lockup .nav-burger:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.brand.logo-lockup .nav-burger:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nav-burger svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.side-nav .tab .nav-caret {
+  margin-left: auto;
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  opacity: .55;
+  flex: 0 0 auto;
+  transition: transform 180ms ease;
+}
+.side-nav .tab.active .nav-caret { transform: rotate(180deg); opacity: .85; }
+.nav-sub {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 220ms ease;
+}
+.nav-sub.open { grid-template-rows: 1fr; margin: 2px 0 6px; }
+.nav-sub-inner {
+  overflow: hidden;
+  min-height: 0;
+  display: grid;
+  gap: 2px;
+  padding-left: 40px;
+}
+/* !important throughout: the app's generic primary-button rule
+   (button:not(.tab):not(...)) paints any unlisted button with the accent
+   background — sub-links must stay plain text per operator direction. */
+.nav-sub-link {
+  min-height: 28px;
+  padding: 4px 8px !important;
+  border: 0 !important;
+  border-radius: 6px;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--sidebar-muted, var(--muted)) !important;
   font-size: 12.5px;
   font-weight: 600;
   text-align: left;
   cursor: pointer;
+  transform: none !important;
 }
-.nav-sub-link:hover {
-  color: var(--text);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+.nav-sub-link:hover { color: var(--text) !important; background: transparent !important; }
+.nav-sub-link.active { color: var(--accent) !important; background: transparent !important; font-weight: 700; }
+.nav-sub-link:focus-visible { outline: none; box-shadow: var(--focus-ring) !important; }
+@media (prefers-reduced-motion: reduce) {
+  .nav-sub, .side-nav .tab .nav-caret { transition: none; }
 }
-.nav-sub-link.active {
-  color: var(--accent-strong);
-  background: var(--accent-soft);
-  font-weight: 700;
-}
-.nav-sub-link:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-.sidebar-collapse-btn {
-  margin-top: auto;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 6px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12.5px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.sidebar-collapse-btn:hover {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
-}
-.sidebar-collapse-btn .collapse-ico {
-  width: 16px;
-  height: 16px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 2;
-  transition: transform 160ms ease;
-}
-.sidebar-collapse-btn:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-body.sidebar-collapsed .sidebar-collapse-btn {
-  justify-content: center;
-  padding: 6px;
-}
-body.sidebar-collapsed .sidebar-collapse-btn span { display: none; }
-body.sidebar-collapsed .sidebar-collapse-btn .collapse-ico { transform: rotate(180deg); }
+/* Rail: sub-links and carets hide; burger centers under the logo, which STAYS
+   visible (an older layer hides .brand-mark when collapsed — overridden). */
 body.sidebar-collapsed .nav-sub { display: none !important; }
-/* Desktop: the topbar hamburger is redundant (collapse lives in the sidebar).
-   `button` in the selector matches the older `.topbar button.sidebar-toggle`
-   inline-flex rule's specificity so this later declaration wins. */
-.topbar button.sidebar-toggle { display: none !important; }
+body.sidebar-collapsed .side-nav .tab .nav-caret { display: none; }
+body.sidebar-collapsed .brand.logo-lockup .nav-burger { margin: 8px auto 0; }
+body.sidebar-collapsed .brand-mark { display: inline-flex !important; }
+/* One responsive model at EVERY width: the sidebar stays in flow — expanded
+   column or 68px icon rail. The old <=860 off-canvas slide-out is overridden. */
+.app-shell > .sidebar,
+body.sidebar-collapsed .app-shell > .sidebar {
+  position: sticky !important;
+  transform: none !important;
+}
+@media (max-width: 980px) {
+  .app-shell { grid-template-columns: 232px minmax(0, 1fr) !important; }
+  body.sidebar-collapsed .app-shell { grid-template-columns: 68px minmax(0, 1fr) !important; }
+  .app-shell > .sidebar { height: 100vh !important; overflow: auto !important; }
+}
 @media (max-width: 860px) {
-  .topbar button.sidebar-toggle { display: inline-flex !important; }
-  .sidebar-collapse-btn { display: none; }
+  .app-shell { grid-template-columns: 212px minmax(0, 1fr) !important; }
+  body.sidebar-collapsed .app-shell { grid-template-columns: 68px minmax(0, 1fr) !important; }
 }
 
 /* ============================================================================

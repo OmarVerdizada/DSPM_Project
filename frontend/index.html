@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=175" />
+    <link rel="stylesheet" href="/static/styles.css?v=176" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -50,6 +50,9 @@
           <div class="brand-copy">
             <h1>SENTRO</h1>
           </div>
+          <button type="button" id="sidebar-toggle" data-sidebar-toggle class="nav-burger" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
         </div>
 
         <nav class="side-nav" aria-label="Product navigation">
@@ -63,10 +66,13 @@
           <button type="button" class="tab" data-tab="file-servers" title="File server and endpoint scans">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
             <span>Scan</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
           </button>
-          <div class="nav-sub" data-nav-sub="file-servers" hidden>
-            <button type="button" class="nav-sub-link" data-tab-jump="file-servers">File server</button>
-            <button type="button" class="nav-sub-link" data-tab-jump="endpoint">Endpoint</button>
+          <div class="nav-sub" data-nav-sub="file-servers" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="file-servers">File server</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="endpoint">Endpoint</button>
+            </div>
           </div>
           <button type="button" class="tab" data-tab="findings" title="Secrets, PII, regulated data">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4M11 8v3M11 14h.01"/></svg>
@@ -79,34 +85,33 @@
           <button type="button" class="tab" data-tab="reports" title="Reports, scan history, audit trail">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/></svg>
             <span>Evidence</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
           </button>
-          <div class="nav-sub" data-nav-sub="reports" hidden>
-            <button type="button" class="nav-sub-link" data-tab-jump="reports">Reports</button>
-            <button type="button" class="nav-sub-link" data-tab-jump="history">History &amp; audit</button>
+          <div class="nav-sub" data-nav-sub="reports" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="reports">Reports</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="history">History &amp; audit</button>
+            </div>
           </div>
           <button type="button" class="tab" data-tab="security" title="Users, tenants, asset rules, risk logic">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
             <span>Administration</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
           </button>
-          <div class="nav-sub" data-nav-sub="security" hidden>
-            <button type="button" class="nav-sub-link" data-tab-jump="security">Security ops</button>
-            <button type="button" class="nav-sub-link" data-tab-jump="admin">Tenants</button>
-            <button type="button" class="nav-sub-link" data-tab-jump="settings">Asset rules</button>
-            <button type="button" class="nav-sub-link" data-tab-jump="logic">Risk logic</button>
+          <div class="nav-sub" data-nav-sub="security" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="security">Security ops</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="admin">Tenants</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="settings">Asset rules</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="logic">Risk logic</button>
+            </div>
           </div>
         </nav>
-        <button type="button" id="sidebar-toggle" data-sidebar-toggle class="sidebar-collapse-btn" aria-expanded="true" title="Collapse navigation">
-          <svg class="collapse-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>
-          <span>Collapse</span>
-        </button>
       </aside>
 
       <main>
         <section class="topbar">
           <div class="topbar-left">
-            <button type="button" data-sidebar-toggle class="sidebar-toggle tb-icon-btn" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-            </button>
             <button type="button" id="fx-search" class="tb-search" aria-label="Search or type a command">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
               <span>Search or type command...</span>

@@ -2861,17 +2861,18 @@ function switchTab(tabName) {
     tab.setAttribute("aria-current", isActive ? "page" : "false");
   });
   // Sidebar sub-navigation: the active destination expands its members as
-  // indented sub-links under its entry; every other group stays collapsed.
+  // indented sub-links under its entry (animated via .open); every other
+  // group stays collapsed.
   document.querySelectorAll(".side-nav .nav-sub").forEach((group) => {
     const open = group.dataset.navSub === destination;
-    group.hidden = !open;
-    if (open) {
-      group.querySelectorAll(".nav-sub-link").forEach((link) => {
-        const isCurrent = resolveTabName(link.dataset.tabJump) === resolvedTab;
-        link.classList.toggle("active", isCurrent);
-        link.setAttribute("aria-current", isCurrent ? "page" : "false");
-      });
-    }
+    group.classList.toggle("open", open);
+    group.setAttribute("aria-hidden", open ? "false" : "true");
+    group.querySelectorAll(".nav-sub-link").forEach((link) => {
+      const isCurrent = open && resolveTabName(link.dataset.tabJump) === resolvedTab;
+      link.classList.toggle("active", isCurrent);
+      link.setAttribute("aria-current", isCurrent ? "page" : "false");
+      link.tabIndex = open ? 0 : -1;
+    });
   });
   tabPanels.forEach((panel) => panel.classList.toggle("active", panel === activePanel));
 
