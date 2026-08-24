@@ -8,6 +8,8 @@ contract tests). They guard:
   live scan (the stuck-progress class of bug);
 * the dashboard risk-summary delta having a human-readable tooltip/label so the
   negative values are self-explanatory.
+* the operator-density information architecture requested for Dashboard,
+  discovery, and Remediation Center.
 """
 from __future__ import annotations
 
@@ -19,6 +21,8 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app_js = Path("frontend/app.js").read_text(encoding="utf-8")
+        cls.index_html = Path("frontend/index.html").read_text(encoding="utf-8")
+        cls.styles_css = Path("frontend/styles.css").read_text(encoding="utf-8")
 
     def test_pollscan_tolerates_transient_errors(self) -> None:
         # A single poll error must not abandon monitoring; the poller retries a
@@ -50,6 +54,45 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         # Completion pins 100 and failure/cancel surfaces an error (no stale bar).
         self.assertIn('setScanProgress(true, 100', poll_body)
         self.assertIn('job.status === "failed"', poll_body)
+
+    def test_dashboard_command_memo_and_posture_workflow_are_removed(self) -> None:
+        self.assertNotIn('class="command-hero"', self.index_html)
+        self.assertNotIn("Posture workflow", self.index_html)
+
+    def test_discovery_workspace_context_is_last(self) -> None:
+        file_panel = self.index_html[
+            self.index_html.index('id="tab-file-servers"'):
+            self.index_html.index('id="tab-overview"')
+        ]
+        endpoint_panel = self.index_html[
+            self.index_html.index('id="tab-endpoint"'):
+            self.index_html.index('id="tab-security"')
+        ]
+        self.assertGreater(
+            file_panel.index('id="file-server-context"'),
+            file_panel.index('class="scan-layout"'),
+        )
+        self.assertGreater(
+            endpoint_panel.index('id="endpoint-context"'),
+            endpoint_panel.index('id="endpoint-status"'),
+        )
+
+    def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
+        risk_panel = self.index_html[
+            self.index_html.index('id="tab-risk"'):
+            self.index_html.index('id="tab-settings"')
+        ]
+        self.assertIn("Remediation Center", risk_panel)
+        self.assertIn("remediation-summary", risk_panel)
+        self.assertIn("remediation-workspace-status", risk_panel)
+        self.assertIn("remediation-queue-panel", risk_panel)
+        self.assertLess(
+            risk_panel.index('id="remediation-workflow"'),
+            risk_panel.index('class="risk-analytics-side"'),
+        )
+        self.assertIn("remediation-row", self.app_js)
+        self.assertIn("priority-file-row", self.app_js)
+        self.assertIn("Remediation Center — compact", self.styles_css)
 
 
 if __name__ == "__main__":

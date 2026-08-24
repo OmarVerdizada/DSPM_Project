@@ -162,15 +162,6 @@
             </div>
           </div>
 
-          <section class="context-strip" id="file-server-context">
-            <div>
-              <span>Latest workspace data</span>
-              <strong>No scan loaded</strong>
-              <p>Run a file-server scan or open Data Inventory after another scan completes.</p>
-            </div>
-            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
-          </section>
-
           <div class="scan-layout">
             <form id="connection-form" class="scan-form-column">
               <section class="scan-card" aria-label="Connection and scope">
@@ -229,6 +220,11 @@
                   <label class="checkbox-row option-tile">
                     <input id="async_scan" name="async_scan" type="checkbox" checked />
                     <span class="scan-option-copy">Run through async queue</span>
+                    <span class="scan-option-check" aria-hidden="true"></span>
+                  </label>
+                  <label class="checkbox-row option-tile">
+                    <input id="incremental_enabled" name="incremental_enabled" type="checkbox" checked />
+                    <span class="scan-option-copy">Incremental scan (read new/changed files only)</span>
                     <span class="scan-option-check" aria-hidden="true"></span>
                   </label>
                   <label class="checkbox-row option-tile">
@@ -407,6 +403,15 @@
               </section>
             </aside>
           </div>
+
+          <section class="context-strip context-strip-trailing" id="file-server-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run a file-server scan or open Data Inventory after another scan completes.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+          </section>
         </section>
 
         <section id="tab-overview" class="tab-panel active">
@@ -418,32 +423,6 @@
               <symbol id="li-rotate-ccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
             </defs>
           </svg>
-          <section class="command-hero" aria-label="DSPM command center introduction">
-            <div class="command-fx" aria-hidden="true">
-              <i class="fx-sweep"></i>
-              <i class="fx-node fx-node-1"></i>
-              <i class="fx-node fx-node-2"></i>
-              <i class="fx-node fx-node-3"></i>
-            </div>
-            <div class="command-hero-copy">
-              <div class="command-actions">
-                <button type="button" data-tab-jump="file-servers"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-folder-search"/></svg>Start file scan</button>
-                <button type="button" class="secondary-btn" data-tab-jump="endpoint"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-monitor-cog"/></svg>Start endpoint scan</button>
-                <button type="button" class="secondary-btn" data-tab-jump="reports"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-bar-chart-2"/></svg>Open reports</button>
-              </div>
-            </div>
-            <div class="command-hero-panel" aria-hidden="true">
-              <span>Posture workflow</span>
-              <div class="hero-flow overview-flow"><b>Discover</b><i></i><b>Classify</b><i></i><b>Remediate</b></div>
-              <div class="hero-mini-grid overview-tile-grid">
-                <div><span class="hm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span><strong>SMB</strong><small>File servers</small></div>
-                <div><span class="hm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-monitor-cog"/></svg></span><strong>WinRM</strong><small>Endpoints</small></div>
-                <div><span class="hm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-shield-check"/></svg></span><strong>DLP</strong><small>Export</small></div>
-                <div><span class="hm-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-building-2"/></svg></span><strong>MSSP</strong><small>Tenants</small></div>
-              </div>
-            </div>
-          </section>
-
           <section class="metrics" aria-label="Risk summary">
             <div class="metric critical">
               <span>Critical</span>
@@ -480,9 +459,16 @@
                 <h3>Data inventory</h3>
                 <p id="scan-meta">No scan has been run yet.</p>
               </div>
-              <div class="inventory-search-box">
-                <span aria-hidden="true"><svg class="f-ico" aria-hidden="true"><use href="#li-search"/></svg></span>
-                <input id="filter" placeholder="Search file, path, finding, source, risk..." autocomplete="off" />
+              <div class="inventory-toolbar-actions">
+                <div class="inventory-search-box">
+                  <span aria-hidden="true"><svg class="f-ico" aria-hidden="true"><use href="#li-search"/></svg></span>
+                  <input id="filter" placeholder="Search file, path, finding, source, risk..." autocomplete="off" />
+                </div>
+                <div class="inventory-export-actions" aria-label="Stream filtered inventory">
+                  <button type="button" id="inventory-export-csv" class="secondary-btn mini-btn" aria-describedby="inventory-export-status">Stream CSV</button>
+                  <button type="button" id="inventory-export-ndjson" class="secondary-btn mini-btn" aria-describedby="inventory-export-status">Stream NDJSON</button>
+                </div>
+                <span id="inventory-export-status" class="visually-hidden" role="status" aria-live="polite">Exports stream filtered metadata directly to disk.</span>
               </div>
             </div>
 
@@ -534,7 +520,7 @@
                     <th>DLP recommendations</th>
                   </tr>
                 </thead>
-                <tbody id="results-body">
+                <tbody id="results-body" aria-live="polite" aria-relevant="all">
                   <tr>
                     <td colspan="7" class="empty">Run a scan to see file risk assessment.</td>
                   </tr>
@@ -587,17 +573,14 @@
           </svg>
           <div class="section-header">
             <div>
-              <h3>Risk and remediation</h3>
+              <h3>Remediation Center</h3>
             </div>
             <button type="button" id="refresh-executive-btn" class="secondary-btn">Refresh</button>
           </div>
 
-          <div id="executive-hero" class="executive-hero"></div>
-          <section class="visual-panel mssp-panel">
-            <div class="panel-title">
-              <h4>MSSP customer portfolio</h4>
-            </div>
-            <div id="mssp-portfolio" class="mssp-portfolio"></div>
+          <div id="executive-hero" class="executive-hero remediation-summary"></div>
+          <section class="visual-panel mssp-panel remediation-workspace-panel" aria-label="Workspace status">
+            <div id="mssp-portfolio" class="mssp-portfolio remediation-workspace-status"></div>
           </section>
           <div class="risk-analytics">
             <div class="risk-analytics-main">
@@ -613,6 +596,13 @@
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-siren"/></svg></span>Critical and high files</h4>
                 </div>
                 <div id="priority-risk-files"></div>
+              </section>
+              <section class="visual-panel remediation-queue-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Remediation queue</h4>
+                  <span>Highest priority first</span>
+                </div>
+                <div id="remediation-workflow" class="remediation-workflow"></div>
               </section>
               <section class="visual-panel exposure-insights">
                 <div class="panel-title">
@@ -647,12 +637,6 @@
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-activity"/></svg></span>Posture trend</h4>
                 </div>
                 <div id="posture-trend" class="posture-trend"></div>
-              </section>
-              <section class="visual-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Remediation workflow</h4>
-                </div>
-                <div id="remediation-workflow" class="remediation-workflow"></div>
               </section>
               <section class="visual-panel">
                 <div class="panel-title">
@@ -828,15 +812,6 @@
             </div>
           </div>
 
-          <section class="context-strip" id="endpoint-context">
-            <div>
-              <span>Latest workspace data</span>
-              <strong>No scan loaded</strong>
-              <p>Run an endpoint scan or review the latest file-server scan in Data Inventory.</p>
-            </div>
-            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
-          </section>
-
           <details class="scan-advanced">
             <summary>Optional — prepare local backend WinRM (rarely needed)</summary>
 
@@ -972,6 +947,11 @@
                 <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-circle-stop"/></svg>
                 Run as cancellable job
               </label>
+              <label class="checkbox-row endpoint-checkbox">
+                <input id="endpoint-incremental-enabled" type="checkbox" checked />
+                <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-scan-search"/></svg>
+                Incremental (new/changed content only)
+              </label>
             </div>
             <div class="extension-filter endpoint-extension-filter">
               <label>Endpoint extension policy</label>
@@ -1047,6 +1027,15 @@
               </div>
             </div>
             <p id="endpoint-status" class="save-status">Fill the endpoint scan details after WinRM is active on the workstation.</p>
+          </section>
+
+          <section class="context-strip context-strip-trailing" id="endpoint-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run an endpoint scan or review the latest file-server scan in Data Inventory.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
           </section>
         </section>
 

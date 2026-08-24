@@ -4901,6 +4901,20 @@ td, th { border-color: var(--line) !important; }
   align-items: stretch;
 }
 
+.inventory-toolbar-actions {
+  display: flex;
+  flex: 1 1 620px;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+}
+
+.inventory-export-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .inventory-search-box {
   position: relative;
   min-width: min(420px, 100%);
@@ -5208,6 +5222,8 @@ button.finding-chip.muted-chip {
 
 @media (max-width: 720px) {
   .inventory-toolbar { display: grid; }
+  .inventory-toolbar-actions { display: grid; justify-content: stretch; }
+  .inventory-export-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .inventory-search-box { min-width: 0; flex-basis: auto; }
   .inventory-facet-row { grid-template-columns: 1fr; }
   .inventory-context-metrics { grid-template-columns: 1fr; }
@@ -7127,14 +7143,14 @@ body.sidebar-collapsed .sidebar-toggle {
 
 #report-preview .report-document,
 #report-preview .premium-report-preview {
-  min-width: 860px !important;
+  min-width: 0 !important;
   overflow: visible !important;
 }
 
 #report-preview .report-kpis,
 #report-preview .report-row,
 #report-preview .signal-bars {
-  min-width: 760px !important;
+  min-width: 0 !important;
 }
 
 #tab-risk #remediation-workflow::-webkit-scrollbar,
@@ -19109,6 +19125,41 @@ body.sidebar-collapsed .app-shell > main {
 #inventory-workspace .inventory-table tbody tr:hover {
   background: color-mix(in srgb, var(--accent) 3%, transparent);
 }
+#inventory-workspace .inventory-window-row:hover,
+#inventory-workspace .inventory-window-status:hover {
+  background: transparent;
+}
+#inventory-workspace .inventory-window-row td,
+#inventory-workspace .inventory-window-status {
+  background: color-mix(in srgb, var(--card-2) 82%, transparent);
+}
+#inventory-workspace .inventory-window-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  min-height: 42px;
+}
+#inventory-workspace .inventory-window-controls > span {
+  min-width: 260px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+#inventory-workspace .inventory-window-controls > span strong {
+  color: var(--text);
+}
+#inventory-workspace .inventory-window-controls button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+@media (max-width: 720px) {
+  #inventory-workspace .inventory-window-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  #inventory-workspace .inventory-window-controls > span { min-width: 0; }
+}
 /* Subtle severity accent on the row edge */
 #results-body tr.severity-row td:first-child { position: relative; }
 #results-body tr.severity-row td:first-child::before {
@@ -21104,6 +21155,330 @@ details.scan-advanced > summary:focus-visible {
   letter-spacing: .05em;
   color: var(--muted);
   font-weight: 800;
+}
+
+/* ============================================================================
+   Remediation Center — compact, queue-first operator layout.
+   ========================================================================== */
+:root .context-strip.context-strip-trailing {
+  margin: 12px 0 0;
+}
+
+:root #tab-risk .executive-hero.remediation-summary {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) auto !important;
+  align-items: center;
+  gap: 16px;
+  min-height: 0 !important;
+  margin: 0 0 10px;
+  padding: 13px 16px !important;
+  border-radius: 14px !important;
+  background: color-mix(in srgb, var(--accent-soft) 42%, var(--card)) !important;
+  box-shadow: none !important;
+  overflow: visible;
+}
+
+#tab-risk .remediation-score {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: baseline;
+  min-width: 74px;
+  padding-right: 16px;
+  border-right: 1px solid var(--line);
+}
+#tab-risk .remediation-score strong {
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: -.04em;
+}
+#tab-risk .remediation-score > span {
+  margin-left: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+#tab-risk .remediation-score small {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#tab-risk .remediation-summary-copy {
+  min-width: 0;
+}
+#tab-risk .remediation-summary-copy > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#tab-risk .remediation-summary-copy h3 {
+  margin: 2px 0 3px;
+  font-size: 18px;
+  line-height: 1.2;
+}
+#tab-risk .remediation-summary-copy p {
+  margin: 0 !important;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+#tab-risk .remediation-summary-actions {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+#tab-risk .remediation-summary-actions button {
+  min-height: 34px;
+  padding: 7px 11px;
+  white-space: nowrap;
+}
+
+:root #tab-risk .visual-panel.remediation-workspace-panel {
+  margin: 0 0 12px;
+  padding: 0 !important;
+  border-radius: 12px !important;
+  box-shadow: none !important;
+  overflow: hidden;
+}
+#tab-risk .remediation-workspace-status {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.4fr) repeat(3, minmax(100px, .75fr));
+  gap: 0;
+}
+#tab-risk .workspace-status-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 13px;
+  border-right: 1px solid var(--line);
+}
+#tab-risk .workspace-status-item:last-child {
+  border-right: 0;
+}
+#tab-risk .workspace-status-item span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+#tab-risk .workspace-status-item strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#tab-risk .workspace-status-item.needs-attention strong {
+  color: var(--critical);
+}
+
+:root #tab-risk .risk-analytics {
+  grid-template-columns: minmax(0, 1fr) minmax(250px, .38fr);
+  gap: 12px;
+  margin-top: 0;
+}
+:root #tab-risk .risk-analytics-main {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+:root #tab-risk .risk-analytics-side {
+  gap: 12px;
+}
+:root #tab-risk .risk-analytics .visual-panel {
+  gap: 10px;
+  padding: 13px !important;
+  border-radius: 12px !important;
+  box-shadow: none !important;
+}
+#tab-risk .risk-analytics .remediation-queue-panel,
+#tab-risk .risk-analytics .exposure-insights {
+  grid-column: 1 / -1;
+}
+#tab-risk .risk-analytics .panel-title {
+  margin-bottom: 0;
+}
+#tab-risk .risk-analytics .panel-title > span {
+  padding: 3px 8px;
+  font-size: 9px;
+}
+
+#tab-risk #remediation-workflow,
+#tab-risk #priority-risk-files {
+  min-width: 0 !important;
+  overflow: hidden !important;
+}
+#tab-risk #remediation-workflow .remediation-queue,
+#tab-risk #priority-risk-files .dense-risk-list {
+  display: grid;
+  gap: 0 !important;
+  max-height: 330px !important;
+  padding: 0 !important;
+  overflow: auto !important;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+#tab-risk #remediation-workflow .remediation-row {
+  display: grid !important;
+  grid-template-columns: max-content minmax(0, 1fr) minmax(150px, .42fr) !important;
+  align-items: center !important;
+  gap: 10px !important;
+  min-width: 0 !important;
+  max-height: none !important;
+  padding: 8px 10px !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--line) !important;
+  border-radius: 0 !important;
+  background: var(--card) !important;
+  box-shadow: none !important;
+  overflow: visible !important;
+}
+#tab-risk #remediation-workflow .remediation-row:last-child,
+#tab-risk #priority-risk-files .priority-file-row:last-child {
+  border-bottom: 0 !important;
+}
+#tab-risk .remediation-row > .badge {
+  order: 0 !important;
+  align-self: start;
+  margin-top: 1px;
+}
+#tab-risk .remediation-file,
+#tab-risk .remediation-assignment {
+  display: grid;
+  min-width: 0;
+}
+#tab-risk .remediation-file {
+  gap: 2px;
+}
+#tab-risk .remediation-file strong,
+#tab-risk .remediation-assignment strong {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#tab-risk .remediation-file > span,
+#tab-risk .remediation-file small,
+#tab-risk .remediation-assignment span,
+#tab-risk .remediation-assignment small {
+  overflow: hidden !important;
+  color: var(--muted);
+  font-size: 10px !important;
+  line-height: 1.3 !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+#tab-risk .remediation-assignment {
+  justify-items: end;
+  gap: 1px;
+  text-align: right;
+}
+#tab-risk .remediation-assignment strong {
+  max-width: 100%;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+#tab-risk #priority-risk-files .priority-file-row {
+  display: grid !important;
+  grid-template-columns: max-content minmax(0, 1fr) !important;
+  align-items: start !important;
+  gap: 9px !important;
+  min-width: 0 !important;
+  padding: 8px 10px !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--line) !important;
+  border-radius: 0 !important;
+  background: var(--card) !important;
+  box-shadow: none !important;
+  overflow: visible !important;
+}
+#tab-risk #priority-risk-files .priority-file-row > .badge {
+  order: 0 !important;
+  position: static !important;
+  align-self: start;
+  transform: none !important;
+}
+#tab-risk #priority-risk-files .priority-file-row > div {
+  order: 1 !important;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+#tab-risk #priority-risk-files .priority-file-row strong {
+  overflow: hidden;
+  font-size: 12px !important;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#tab-risk #priority-risk-files .priority-file-row p,
+#tab-risk #priority-risk-files .priority-file-row small {
+  margin: 0;
+  overflow: hidden !important;
+  font-size: 10px !important;
+  line-height: 1.3 !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+@media (max-width: 1280px) {
+  :root #tab-risk .risk-analytics-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  #tab-risk .risk-analytics .remediation-queue-panel,
+  #tab-risk .risk-analytics .exposure-insights {
+    grid-column: auto;
+  }
+}
+@media (max-width: 980px) {
+  :root #tab-risk .risk-analytics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 720px) {
+  :root #tab-risk .executive-hero.remediation-summary {
+    grid-template-columns: auto minmax(0, 1fr) !important;
+  }
+  #tab-risk .remediation-summary-actions {
+    grid-column: 1 / -1;
+  }
+  #tab-risk .remediation-workspace-status {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  #tab-risk .workspace-status-item:nth-child(2) {
+    border-right: 0;
+  }
+  #tab-risk .workspace-status-item:nth-child(-n+2) {
+    border-bottom: 1px solid var(--line);
+  }
+  #tab-risk #remediation-workflow .remediation-row {
+    grid-template-columns: max-content minmax(0, 1fr) !important;
+  }
+  #tab-risk .remediation-assignment {
+    grid-column: 2;
+    justify-items: start;
+    text-align: left;
+  }
+}
+@media (max-width: 460px) {
+  :root #tab-risk .executive-hero.remediation-summary {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  #tab-risk .remediation-score {
+    border-right: 0;
+  }
+  #tab-risk .remediation-summary-actions {
+    grid-column: auto;
+    flex-wrap: wrap;
+  }
 }
 
 /* ============================================================================

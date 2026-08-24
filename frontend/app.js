@@ -29,6 +29,9 @@ const inventorySourceFilter = document.querySelector("#inventory-source-filter")
 const inventoryFindingFilter = document.querySelector("#inventory-finding-filter");
 const inventoryFrameworkFilter = document.querySelector("#inventory-framework-filter");
 const inventoryClearFiltersBtn = document.querySelector("#clear-inventory-filters");
+const inventoryExportCsvBtn = document.querySelector("#inventory-export-csv");
+const inventoryExportNdjsonBtn = document.querySelector("#inventory-export-ndjson");
+const inventoryExportStatus = document.querySelector("#inventory-export-status");
 const inventoryContextMetrics = document.querySelector("#inventory-context-metrics");
 const resultsBody = document.querySelector("#results-body");
 const riskRulesBody = document.querySelector("#risk-rules-body");
@@ -488,6 +491,11 @@ let latestComplianceKeywordLibraries = {};
 let lastRenderedFileKeys = new Set();
 let hasRenderedScanRows = false;
 let renderedRowsLimit = 200;
+let inventoryPageWindow = createInventoryPageWindow();
+let inventoryPageRequest = 0;
+let inventoryPageAbortController = null;
+let inventoryFacets = null;
+let inventoryFacetRequest = 0;
 let activeScanJobId = "";
 let activeEndpointJobId = "";
 let scanProgressValue = 0;
@@ -504,6 +512,19 @@ let inventoryFrameworkFacets = new Set();
 let fileSearchIndex = new WeakMap();
 
 const ROW_PAGE_SIZE = 200;
+const INVENTORY_SERVER_PAGE_SIZE = 100;
+const INVENTORY_MAX_CACHED_PAGES = 3;
+
+function createInventoryPageWindow(active = false) {
+  return {
+    active,
+    loading: false,
+    pageIndex: 0,
+    pageStarts: [""],
+    pages: new Map(),
+    error: "",
+  };
+}
 
 // Debounce: coalesce rapid-fire events (every keystroke in a search box) into a
 // single trailing call, so the expensive re-filter + full table re-render runs
@@ -533,11 +554,12 @@ function debounce(fn, wait = 160) {
 }
 const ARCHIVE_EXTENSIONS = new Set([".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip"]);
 
-async function api(path, payload, method = "POST") {
+async function api(path, payload, method = "POST", options = {}) {
   const response = await fetch(path, {
     method,
     headers: authHeaders(),
     body: payload ? JSON.stringify(payload) : undefined,
+    signal: options.signal,
   });
 
   if (!response.ok) {
@@ -607,6 +629,7 @@ function readPayload() {
     include_admin_shares: Boolean(data.get("include_admin_shares")),
     inspect_archives: Boolean(data.get("inspect_archives")),
     async_scan: Boolean(data.get("async_scan")),
+    incremental_enabled: Boolean(data.get("incremental_enabled")),
     asset_overrides: assetRules,
     compliance_enabled: selectedComplianceFrameworks.length > 0,
     compliance_frameworks: selectedComplianceFrameworks,
@@ -955,6 +978,7 @@ function readEndpointPayload() {
     read_acl: document.querySelector("#endpoint-read-acl")?.checked || false,
     inspect_archives: document.querySelector("#endpoint-inspect-archives")?.checked || false,
     async_scan: document.querySelector("#endpoint-async-scan")?.checked || false,
+    incremental_enabled: document.querySelector("#endpoint-incremental-enabled")?.checked ?? true,
     allowed_extensions: effectiveAllowedExtensions,
     extension_filter_enabled: effectiveAllowedExtensions.length > 0,
     include_hidden: true,
@@ -1207,6 +1231,11 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
   const unreadable = (diagnostics.unreadable_dirs || []).slice(0, 3).join("; ");
   const allowed = (diagnostics.allowed_extensions || endpoint.allowed_extensions || []).join(", ");
   const parts = [`Visited: ${visited}`, `Matched: ${matched}`];
+  const incremental = diagnostics.incremental || {};
+  if (incremental.enabled) {
+    parts.push(`Delta: ${Number(incremental.unchanged_objects || 0)} reused, ${Number(incremental.content_reads || 0)} read`);
+    if (Number(incremental.deleted_objects || 0)) parts.push(`Deleted: ${Number(incremental.deleted_objects)}`);
+  }
   if (skippedDirs) parts.push(`Skipped dirs: ${skippedDirs}`);
   if (filteredWrongProfile) parts.push(`Wrong-profile files ignored: ${filteredWrongProfile}`);
   if (archiveFiles || archiveEntries) parts.push(`Archives: ${archiveFiles}`, `Archive entries: ${archiveEntries}`);
@@ -1221,6 +1250,11 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
 function summarizeFileServerDiagnostics(report = {}) {
   const diagnostics = report.scan_diagnostics || {};
   const parts = [];
+  const incremental = diagnostics.incremental || {};
+  if (incremental.enabled) {
+    parts.push(`Delta: ${Number(incremental.unchanged_objects || 0)} reused, ${Number(incremental.content_reads || 0)} read`);
+    if (Number(incremental.deleted_objects || 0)) parts.push(`Deleted: ${Number(incremental.deleted_objects)}`);
+  }
   if (Number.isFinite(Number(diagnostics.records))) parts.push(`Records: ${Number(diagnostics.records)}`);
   if (Number.isFinite(Number(diagnostics.owner_resolved))) parts.push(`Owners: ${Number(diagnostics.owner_resolved)} resolved`);
   if (Number.isFinite(Number(diagnostics.owner_missing)) && Number(diagnostics.owner_missing)) parts.push(`${Number(diagnostics.owner_missing)} owner missing`);
@@ -1382,7 +1416,7 @@ async function logout() {
 function isProtectedFile(file = {}) {
   const status = String(file.content_status || file.scan_error || file.protection_type || "").toLowerCase();
   const extension = String(file.extension || "").toLowerCase();
-  return Boolean(file.protected)
+  return Boolean(file.protected || file.is_protected)
     || /protected|password|encrypted|locked|unreadable|unsupported_archive|bad_archive/.test(status)
     || [".gpg", ".pgp", ".kdbx", ".p12", ".pfx"].includes(extension);
 }
@@ -1556,6 +1590,7 @@ function isSampleDataPath(value = "") {
 }
 
 function isDemoSampleReport(report = {}) {
+  if (report.is_demo_sample !== undefined) return Boolean(report.is_demo_sample);
   const files = Array.isArray(report.files) ? report.files : [];
   if (!files.length) return false;
   const sampleCount = files.filter((file) => isSampleDataPath(file.path || file.full_path || file.name || "")).length;
@@ -1563,6 +1598,9 @@ function isDemoSampleReport(report = {}) {
 }
 
 function clearActiveScanReport(message = "No scan loaded") {
+  resetInventoryPageWindow();
+  inventoryFacetRequest += 1;
+  inventoryFacets = null;
   latestReport = null;
   latestFiles = [];
   latestScanKind = "none";
@@ -1582,12 +1620,24 @@ function applyScanReport(report, scanKind = "file-server") {
   latestReport = report;
   latestFiles = report.files || [];
   latestScanKind = scanKind;
+  inventoryFacetRequest += 1;
+  inventoryFacets = null;
   fileSearchIndex = new WeakMap();
   renderedRowsLimit = ROW_PAGE_SIZE;
-  updateSummaryFromFiles(latestFiles);
+  resetInventoryPageWindow();
+  if (report.files_omitted) {
+    updateSummary(report.summary || {});
+    renderReportPreview();
+    renderExecutiveExperience();
+    renderScanContextPanels();
+    renderFindingsWorkspace();
+  } else {
+    updateSummaryFromFiles(latestFiles);
+  }
   hasRenderedScanRows = true;
   renderRows(latestFiles);
   scanMeta.textContent = buildScanMetaText(report, scanKind);
+  refreshInventoryPageWindow();
 }
 
 function buildScanMetaText(report = latestReport, scanKind = latestScanKind) {
@@ -1596,7 +1646,15 @@ function buildScanMetaText(report = latestReport, scanKind = latestScanKind) {
     ? report.endpoint?.host || report.source || "endpoint"
     : report.source || readPayload().server || "file server";
   const label = scanKind === "endpoint" ? "endpoint files" : "files";
-  return `${latestFiles.length} ${label} scanned from ${source} at ${report.timestamp || "latest run"}`;
+  const incremental = report.scan_diagnostics?.incremental || report.endpoint?.scan_diagnostics?.incremental || {};
+  const delta = incremental.enabled
+    ? ` Â· ${Number(incremental.unchanged_objects || 0)} unchanged reused Â· ${Number(incremental.content_reads || 0)} content reads`
+    : " Â· full scan";
+  return `${activeReportFileCount()} ${label} scanned from ${source} at ${report.timestamp || "latest run"}${delta}`;
+}
+
+function activeReportFileCount() {
+  return Number(latestReport?.file_count || latestReport?.result_file_count || latestReport?.summary?.total_files || latestFiles.length || 0);
 }
 
 function getScanKindLabel() {
@@ -1610,7 +1668,7 @@ function renderScanContextPanels() {
     : latestReport?.source || readPayload().server || "file server";
   const hasData = summary.total_files > 0;
   const title = hasData ? `${getScanKindLabel()} - ${summary.total_files} files` : "No scan loaded";
-  const protectedFiles = latestFiles.filter(isProtectedFile).length;
+  const protectedFiles = Number(summary.protected_files || latestFiles.filter(isProtectedFile).length || 0);
   const body = hasData
     ? `${summary.critical || 0} critical, ${summary.high || 0} high, ${countSensitiveFiles(latestFiles)} sensitive, ${protectedFiles} protected/locked files from ${source}.`
     : "Run a file-server or endpoint scan to populate the shared workspace.";
@@ -1651,6 +1709,23 @@ function renderFindingsWorkspace() {
   if (!findingsSignalSummary || !findingsPrioritySummary) return;
   const stats = buildFindingStats(Number.POSITIVE_INFINITY);
   if (!latestFiles.length) {
+    const summary = buildCurrentSummary();
+    if (summary.total_files) {
+      findingsSignalSummary.className = "summary-list";
+      findingsPrioritySummary.className = "summary-list";
+      findingsSignalSummary.innerHTML = `
+        <div class="finding-kpi-grid">
+          <div class="finding-kpi critical"><span>Critical files</span><strong>${escapeHtml(summary.critical || 0)}</strong></div>
+          <div class="finding-kpi high"><span>High-risk files</span><strong>${escapeHtml(summary.high || 0)}</strong></div>
+          <div class="finding-kpi medium"><span>Protected / locked</span><strong>${escapeHtml(summary.protected_files || 0)}</strong></div>
+        </div>
+        <div class="summary-row finding-signal-row"><span>Inventory mode</span><strong>Windowed</strong></div>
+      `;
+      findingsPrioritySummary.innerHTML = `
+        <div class="summary-row finding-file-card HIGH"><span><b>${escapeHtml(summary.total_files)} assets indexed</b><small>Open Data Inventory to query bounded pages and load evidence on demand.</small></span><strong class="badge HIGH">LIVE</strong></div>
+      `;
+      return;
+    }
     findingsSignalSummary.className = "summary-list";
     findingsPrioritySummary.className = "summary-list";
     findingsSignalSummary.innerHTML = `
@@ -1997,16 +2072,286 @@ function detailButton(items, file, type, label, emptyText) {
   `;
 }
 
-function renderRows(files) {
-  const visible = getVisibleInventoryFiles(files);
-  const page = visible.slice(0, renderedRowsLimit);
+function currentInventoryPage() {
+  return inventoryPageWindow.pages.get(inventoryPageWindow.pageIndex) || null;
+}
+
+function resetInventoryPageWindow(active = false) {
+  inventoryPageAbortController?.abort();
+  inventoryPageAbortController = null;
+  inventoryPageRequest += 1;
+  inventoryPageWindow = createInventoryPageWindow(active);
+  resultsBody?.setAttribute("aria-busy", "false");
+}
+
+function renderInventoryRiskSelection() {
+  inventoryRiskFilters.forEach((button) => {
+    const active = (button.dataset.riskFilter || "ALL") === inventoryRiskFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+}
+
+function canUseInventoryPageWindow() {
+  // S-E.2 represents every inventory facet on the server. Browser-local risk
+  // overrides may still change a displayed row, but they never force the
+  // browser to hydrate the unbounded saved report.
+  return Boolean(accessToken && latestReport?.scan_id);
+}
+
+function inventoryDetailKey(file = {}) {
+  return `${String(file.path || "").toLowerCase()}|${String(file.name || "").toLowerCase()}`;
+}
+
+function summarizedInventoryFindings(item = {}) {
+  const count = Number(item.finding_count || 0);
+  if (!count) return [];
+  const frameworks = String(item.top_frameworks || "")
+    .split(",")
+    .map((framework) => normalizeFrameworkId(framework.trim()))
+    .filter(Boolean);
+  const types = parseInventoryListField(item.finding_types);
+  return (types.length ? types : ["Indexed findings"]).map((type, index) => ({
+    type,
+    count: index === 0 ? count : 1,
+    framework: frameworks[0] || "standard_scan",
+    frameworks,
+    description: "Summary from the normalized inventory index. Open this row to load full finding evidence.",
+  }));
+}
+
+function parseInventoryListField(value) {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  try {
+    const parsed = JSON.parse(String(value || "[]"));
+    return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function hydrateInventoryPageItem(item = {}) {
+  const detailKey = inventoryDetailKey(item);
+  const detail = latestFiles.find((file) => inventoryDetailKey(file) === detailKey);
+  return {
+    ...(detail || {}),
+    ...item,
+    protected: detail?.protected ?? Boolean(item.is_protected),
+    risk: detail?.risk || {
+      level: String(item.risk_level || "LOW").toUpperCase(),
+      score: Number(item.risk_score || 0),
+      reasons: [],
+      dlp_recommendations: [],
+    },
+    findings: detail?.findings || summarizedInventoryFindings(item),
+    __inventory_page_item: true,
+  };
+}
+
+function inventoryFilterParams() {
+  const params = new URLSearchParams();
+  const query = filterInput?.value?.trim() || "";
+  if (!["ALL", "PROTECTED"].includes(inventoryRiskFilter)) params.set("risk", inventoryRiskFilter);
+  if (inventoryRiskFilter === "PROTECTED") params.set("protected", "true");
+  if (inventorySourceFacet !== "ALL") params.set("source", inventorySourceFacet);
+  if (inventoryFindingFacet === "Protected / locked") params.set("protected", "true");
+  else if (inventoryFindingFacet !== "ALL") params.set("finding_type", inventoryFindingFacet);
+  if (inventoryFrameworkFacets.size) params.set("framework", [...inventoryFrameworkFacets].join(","));
+  if (query) params.set("q", query);
+  return params;
+}
+
+function inventoryPageQuery(cursor = "") {
+  const params = inventoryFilterParams();
+  params.set("sort", "risk_score");
+  params.set("limit", String(INVENTORY_SERVER_PAGE_SIZE));
+  if (cursor) params.set("after", cursor);
+  return params.toString();
+}
+
+function inventoryExportQuery(format) {
+  const params = inventoryFilterParams();
+  params.set("format", format);
+  return params.toString();
+}
+
+async function streamInventoryExport(format) {
+  requireAuth();
+  if (typeof window.showSaveFilePicker !== "function" || typeof WritableStream === "undefined") {
+    throw new Error("This browser cannot stream authenticated downloads to disk. Use current Chrome or Edge, or call /api/inventory/export with an API client.");
+  }
+
+  const extension = format === "csv" ? "csv" : "ndjson";
+  [inventoryExportCsvBtn, inventoryExportNdjsonBtn].forEach((button) => {
+    if (button) button.disabled = true;
+  });
+  if (inventoryExportStatus) inventoryExportStatus.textContent = `Preparing ${extension.toUpperCase()} export.`;
+  try {
+    const picker = await window.showSaveFilePicker({
+      suggestedName: `sentro-inventory-${new Date().toISOString().slice(0, 10)}.${extension}`,
+      types: [{
+        description: format === "csv" ? "CSV inventory" : "NDJSON inventory",
+        accept: { [format === "csv" ? "text/csv" : "application/x-ndjson"]: [`.${extension}`] },
+      }],
+    });
+    const writable = await picker.createWritable();
+    const response = await fetch(`/api/inventory/export?${inventoryExportQuery(format)}`, {
+      method: "GET",
+      headers: authHeaders(),
+    });
+    try {
+      if (!response.ok) throw new Error(`${response.status}: ${await readErrorMessage(response)}`);
+      if (!response.body) throw new Error("The browser did not expose the export response stream.");
+      if (inventoryExportStatus) inventoryExportStatus.textContent = `Streaming ${extension.toUpperCase()} directly to disk.`;
+      await response.body.pipeTo(writable);
+    } catch (error) {
+      try { await writable.abort(); } catch { /* already closed or aborted */ }
+      throw error;
+    }
+    if (inventoryExportStatus) inventoryExportStatus.textContent = `${extension.toUpperCase()} inventory export complete.`;
+    showToast("Inventory export complete", `${extension.toUpperCase()} was streamed directly to disk.`, "success");
+  } catch (error) {
+    if (inventoryExportStatus) {
+      inventoryExportStatus.textContent = error?.name === "AbortError" ? "Inventory export cancelled." : "Inventory export failed.";
+    }
+    throw error;
+  } finally {
+    [inventoryExportCsvBtn, inventoryExportNdjsonBtn].forEach((button) => {
+      if (button) button.disabled = false;
+    });
+  }
+}
+
+async function refreshInventoryFacets() {
+  if (!canUseInventoryPageWindow()) return;
+  const scanId = latestReport?.scan_id;
+  const requestId = ++inventoryFacetRequest;
+  try {
+    const facets = await api("/api/inventory/facets", null, "GET");
+    if (requestId !== inventoryFacetRequest || latestReport?.scan_id !== scanId) return;
+    inventoryFacets = facets;
+    const page = currentInventoryPage();
+    if (page) renderRows(page.items, { serverPage: page });
+  } catch (error) {
+    if (requestId === inventoryFacetRequest) {
+      inventoryFacets = null;
+      setStatus(`Inventory facets unavailable: ${error.message}`);
+    }
+  }
+}
+
+function trimInventoryPageCache() {
+  while (inventoryPageWindow.pages.size > INVENTORY_MAX_CACHED_PAGES) {
+    const candidates = [...inventoryPageWindow.pages.keys()]
+      .filter((index) => index !== inventoryPageWindow.pageIndex)
+      .sort((a, b) => Math.abs(b - inventoryPageWindow.pageIndex) - Math.abs(a - inventoryPageWindow.pageIndex));
+    if (!candidates.length) break;
+    inventoryPageWindow.pages.delete(candidates[0]);
+  }
+}
+
+function renderInventoryPageLoading() {
+  resultsBody.setAttribute("aria-busy", "true");
+  resultsBody.innerHTML = `<tr><td colspan="7" class="empty inventory-window-status">
+    <strong>Loading inventory page...</strong>
+    <span>The browser keeps only a bounded page window while the database filters and sorts.</span>
+  </td></tr>`;
+}
+
+async function loadInventoryWindowPage(pageIndex = 0) {
+  if (!inventoryPageWindow.active) return;
+  inventoryPageAbortController?.abort();
+  inventoryPageAbortController = null;
+  const requestId = ++inventoryPageRequest;
+  const cached = inventoryPageWindow.pages.get(pageIndex);
+  inventoryPageWindow.pageIndex = pageIndex;
+  if (cached) {
+    resultsBody.setAttribute("aria-busy", "false");
+    renderRows(cached.items, { serverPage: cached });
+    return;
+  }
+
+  const cursor = inventoryPageWindow.pageStarts[pageIndex];
+  if (cursor === undefined) return;
+  const controller = new AbortController();
+  inventoryPageAbortController = controller;
+  inventoryPageWindow.loading = true;
+  renderInventoryPageLoading();
+  try {
+    const data = await api(`/api/inventory?${inventoryPageQuery(cursor)}`, null, "GET", { signal: controller.signal });
+    if (requestId !== inventoryPageRequest || !inventoryPageWindow.active) return;
+    const page = {
+      items: (data.items || []).map(hydrateInventoryPageItem),
+      nextCursor: data.next_cursor || "",
+      hasMore: Boolean(data.has_more),
+      total: Number(data.total || 0),
+      totalIsEstimate: Boolean(data.total_is_estimate),
+      source: String(data.source || "database"),
+    };
+    inventoryPageWindow.pages.set(pageIndex, page);
+    if (page.hasMore && page.nextCursor) inventoryPageWindow.pageStarts[pageIndex + 1] = page.nextCursor;
+    inventoryPageWindow.loading = false;
+    resultsBody.setAttribute("aria-busy", "false");
+    trimInventoryPageCache();
+    renderRows(page.items, { serverPage: page });
+  } catch (error) {
+    if (error?.name === "AbortError" || requestId !== inventoryPageRequest) return;
+    inventoryPageWindow.loading = false;
+    resultsBody.setAttribute("aria-busy", "false");
+    inventoryPageWindow.error = error.message;
+    inventoryPageWindow.active = false;
+    renderedRowsLimit = ROW_PAGE_SIZE;
+    renderRows(latestFiles);
+    setStatus(latestFiles.length
+      ? `Windowed inventory unavailable; using the bounded local preview: ${error.message}`
+      : `Windowed inventory unavailable; no report blob was loaded: ${error.message}`);
+  } finally {
+    if (inventoryPageAbortController === controller) inventoryPageAbortController = null;
+  }
+}
+
+function refreshInventoryPageWindow() {
+  if (!canUseInventoryPageWindow()) {
+    resetInventoryPageWindow();
+    renderedRowsLimit = ROW_PAGE_SIZE;
+    renderRows(latestFiles);
+    return;
+  }
+  resetInventoryPageWindow(true);
+  if (!inventoryFacets) refreshInventoryFacets();
+  loadInventoryWindowPage(0);
+}
+
+function inventoryWindowControls(page) {
+  const pageIndex = inventoryPageWindow.pageIndex;
+  const start = page.total ? (pageIndex * INVENTORY_SERVER_PAGE_SIZE) + 1 : 0;
+  const end = start ? start + page.items.length - 1 : 0;
+  const totalLabel = `${page.total}${page.totalIsEstimate ? "+" : ""}`;
+  return `<tr class="inventory-window-row"><td colspan="7">
+    <div class="inventory-window-controls" aria-label="Inventory page controls" role="status" aria-live="polite">
+      <button type="button" class="secondary-btn mini-btn" data-inventory-page="previous" ${pageIndex === 0 ? "disabled" : ""}>Previous page</button>
+      <span><strong>${start}-${end}</strong> of ${totalLabel} files · page ${pageIndex + 1} · ${escapeHtml(page.source)} source</span>
+      <button type="button" class="secondary-btn mini-btn" data-inventory-page="next" ${!page.hasMore ? "disabled" : ""}>Next page</button>
+    </div>
+  </td></tr>`;
+}
+
+function renderRows(files, options = {}) {
+  if (!options.serverPage && inventoryPageWindow.active && currentInventoryPage()) {
+    const current = currentInventoryPage();
+    renderRows(current.items, { serverPage: current });
+    return;
+  }
+  const serverPage = options.serverPage || null;
+  const visible = serverPage ? (files || []) : getVisibleInventoryFiles(files);
+  const page = serverPage ? visible : visible.slice(0, renderedRowsLimit);
   const currentKeys = new Set(page.map((file) => fileKey(file)));
   const hashChangedKeys = changedHashKeys();
   const duplicateHashPathKeys = duplicateHashKeys();
-  renderInventoryControlState(files, visible);
+  renderInventoryControlState(serverPage ? latestFiles : files, visible, serverPage);
 
   if (visible.length === 0) {
-    const hasAnyFiles = Boolean(files?.length);
+    const hasAnyFiles = Boolean(serverPage ? latestFiles.length || serverPage.total : files?.length);
     resultsBody.innerHTML = `<tr><td colspan="7" class="empty inventory-empty-state">
       <strong>${hasAnyFiles ? "No files match the current filters." : "Run a scan to see file risk assessment."}</strong>
       <span>${hasAnyFiles ? "Try clearing risk, source, finding, or search filters." : "File-server and endpoint results will appear here with findings, risk, reasons, and DLP actions."}</span>
@@ -2028,7 +2373,7 @@ function renderRows(files) {
       const hashChanged = hashChangedKeys.has(hashComparisonKey(file));
       const duplicateHashPath = duplicateHashPathKeys.has(hashComparisonKey(file));
       const preview = renderPreview(file.preview);
-      const flash = hasRenderedScanRows && !lastRenderedFileKeys.has(key) ? " row-flash" : "";
+      const flash = !serverPage && hasRenderedScanRows && !lastRenderedFileKeys.has(key) ? " row-flash" : "";
       const fileFlags = [
         file.is_hidden ? "Hidden" : "",
         file.is_system ? "System" : "",
@@ -2111,9 +2456,11 @@ function renderRows(files) {
       `;
     })
     .join("");
-  const moreRow = visible.length > page.length
-    ? `<tr><td colspan="7" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
-    : "";
+  const moreRow = serverPage
+    ? inventoryWindowControls(serverPage)
+    : visible.length > page.length
+      ? `<tr><td colspan="7" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
+      : "";
   resultsBody.innerHTML = rows + moreRow;
   lastRenderedFileKeys = currentKeys;
   hasRenderedScanRows = true;
@@ -2136,26 +2483,36 @@ function getVisibleInventoryFiles(files = latestFiles) {
   });
 }
 
-function renderInventoryControlState(files = latestFiles, visible = getVisibleInventoryFiles(files)) {
+function renderInventoryControlState(files = latestFiles, visible = getVisibleInventoryFiles(files), serverPage = null) {
   updateInventoryFilterOptions(files || []);
+  renderInventoryRiskSelection();
   inventoryRiskFilters.forEach((button) => {
     const risk = button.dataset.riskFilter || "ALL";
-    button.classList.toggle("active", risk === inventoryRiskFilter);
-    const count = risk === "ALL"
-      ? (files || []).length
-      : risk === "PROTECTED"
-        ? (files || []).filter(isProtectedFile).length
-        : (files || []).filter((file) => getEffectiveRisk(file).level === risk).length;
+    const serverCounts = serverPage && inventoryFacets ? inventoryFacets.risk_counts || {} : null;
+    const count = serverCounts
+      ? risk === "ALL"
+        ? Number(inventoryFacets.total || 0)
+        : risk === "PROTECTED"
+          ? Number(inventoryFacets.protected || 0)
+          : Number(serverCounts[risk] || 0)
+      : risk === "ALL"
+        ? (files || []).length
+        : risk === "PROTECTED"
+          ? (files || []).filter(isProtectedFile).length
+          : (files || []).filter((file) => getEffectiveRisk(file).level === risk).length;
     button.dataset.count = String(count);
   });
   if (inventoryContextMetrics) {
-    const sensitive = visible.filter((file) => (file.findings || []).length).length;
+    const sensitive = serverPage
+      ? visible.filter((file) => Number(file.finding_count || (file.findings || []).length) > 0).length
+      : visible.filter((file) => (file.findings || []).length).length;
     const avgRisk = visible.length
       ? Math.round(visible.reduce((sum, file) => sum + (Number(getEffectiveRisk(file).score) || 0), 0) / visible.length)
       : 0;
     const topSource = visible.length ? getTopFacet(visible.map(getInventorySourceValue)) : "none";
+    const inventoryTotal = serverPage ? `${serverPage.total}${serverPage.totalIsEstimate ? "+" : ""}` : (files || []).length;
     inventoryContextMetrics.innerHTML = `
-      <div><span>Visible</span><strong>${visible.length}</strong><small>of ${(files || []).length} files</small></div>
+      <div><span>Visible</span><strong>${visible.length}</strong><small>of ${inventoryTotal} files</small></div>
       <div><span>Sensitive</span><strong>${sensitive}</strong><small>${Math.round((sensitive / Math.max(1, visible.length)) * 100)}% in view</small></div>
       <div><span>Avg risk</span><strong>${avgRisk}</strong><small>/100</small></div>
       <div><span>Top source</span><strong>${escapeHtml(topSource)}</strong><small>current filter</small></div>
@@ -2165,7 +2522,9 @@ function renderInventoryControlState(files = latestFiles, visible = getVisibleIn
 
 function updateInventoryFilterOptions(files = latestFiles) {
   if (inventorySourceFilter) {
-    const sources = [...new Set(files.map(getInventorySourceValue).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const sources = inventoryFacets
+      ? (inventoryFacets.sources || []).map((item) => String(item.value || "")).filter(Boolean)
+      : [...new Set(files.map(getInventorySourceValue).filter(Boolean))].sort((a, b) => a.localeCompare(b));
     const current = sources.includes(inventorySourceFacet) ? inventorySourceFacet : "ALL";
     inventorySourceFacet = current;
     inventorySourceFilter.innerHTML = ["ALL", ...sources]
@@ -2173,7 +2532,9 @@ function updateInventoryFilterOptions(files = latestFiles) {
       .join("");
   }
   if (inventoryFindingFilter) {
-    const findings = [...new Set(files.flatMap(getFileFindingTypes))].sort((a, b) => a.localeCompare(b));
+    const findings = inventoryFacets
+      ? (inventoryFacets.finding_types || []).map((item) => String(item.value || "")).filter(Boolean)
+      : [...new Set(files.flatMap(getFileFindingTypes))].sort((a, b) => a.localeCompare(b));
     const current = findings.includes(inventoryFindingFacet) ? inventoryFindingFacet : "ALL";
     inventoryFindingFacet = current;
     inventoryFindingFilter.innerHTML = ["ALL", ...findings]
@@ -2195,11 +2556,15 @@ function inventoryFrameworkOptions(files = latestFiles) {
     ["nist_sp800_60_enterprise", "NIST"],
   ];
   const counts = new Map(allOptions.map(([id]) => [id, 0]));
-  (files || []).forEach((file) => {
-    getFileFrameworks(file).forEach((framework) => {
-      counts.set(framework, (counts.get(framework) || 0) + 1);
+  if (inventoryFacets) {
+    (inventoryFacets.frameworks || []).forEach((item) => counts.set(String(item.value || ""), Number(item.count || 0)));
+  } else {
+    (files || []).forEach((file) => {
+      getFileFrameworks(file).forEach((framework) => {
+        counts.set(framework, (counts.get(framework) || 0) + 1);
+      });
     });
-  });
+  }
   return allOptions.map(([id, label]) => ({ id, label, count: counts.get(id) || 0 }));
 }
 
@@ -2228,6 +2593,13 @@ function getFileFrameworks(file = {}) {
       frameworks.add("standard_scan");
     }
   });
+  if (!frameworks.size && file.top_frameworks) {
+    String(file.top_frameworks)
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((framework) => frameworks.add(normalizeFrameworkId(framework)));
+  }
   if (!frameworks.size) frameworks.add("standard_scan");
   return [...frameworks];
 }
@@ -2444,7 +2816,10 @@ function riskOption(value, label, selected) {
 function getEffectiveRisk(file) {
   const level = rowOverrides[fileKey(file)];
   if (!level) {
-    return file.risk || { level: "LOW", score: 0 };
+    return file.risk || {
+      level: String(file.risk_level || "LOW").toUpperCase(),
+      score: Number(file.risk_score || 0),
+    };
   }
 
   return {
@@ -2474,8 +2849,24 @@ function hashString(value) {
   return hash;
 }
 
-function openDetailDrawer(key, type) {
-  const file = latestFiles.find((item) => fileKey(item) === key);
+async function openDetailDrawer(key, type) {
+  let file = latestFiles.find((item) => fileKey(item) === key)
+    || currentInventoryPage()?.items.find((item) => fileKey(item) === key);
+  if (file?.__inventory_page_item && !file.__inventory_detail_loaded && file.id) {
+    detailDrawerEyebrow.textContent = "Inventory detail";
+    detailDrawerTitle.textContent = file.name || "Loading asset";
+    detailDrawerMeta.textContent = file.path || "";
+    detailDrawerBody.innerHTML = '<p class="subtext">Loading full detail for this asset...</p>';
+    detailDrawer.classList.remove("hidden");
+    detailDrawer.getBoundingClientRect();
+    detailDrawer.classList.add("open");
+    const data = await api(`/api/inventory/${encodeURIComponent(file.id)}`, null, "GET");
+    Object.assign(file, data.asset || {}, {
+      __inventory_page_item: true,
+      __inventory_detail_loaded: true,
+    });
+    file = hydrateInventoryPageItem(file);
+  }
   const isRecommendation = type === "recommendations";
   const isFindings = type === "findings";
   const items = isRecommendation ? file?.risk?.dlp_recommendations || [] : isFindings ? file?.findings || [] : file?.risk?.reasons || [];
@@ -3939,7 +4330,7 @@ function safeSessionSet(key, value) {
 }
 
 function renderReportPreview() {
-  if (!latestFiles.length) {
+  if (!activeReportFileCount()) {
     reportPreview.innerHTML = `
       <div class="report-empty product-report-empty">
         <span class="report-empty-icon">&nearr;</span>
@@ -4255,6 +4646,11 @@ function renderExecutiveExperience() {
   const distribution = buildRiskDistribution(summary);
   const topFiles = [...latestFiles].sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score).slice(0, 6);
   const criticalCount = summary.critical || 0;
+  const highCount = summary.high || 0;
+  const queueCount = latestFiles.length
+    ? latestFiles.filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level) || isProtectedFile(file)).length
+    : Number(summary.critical || 0) + Number(summary.high || 0) + Number(summary.medium || 0);
+  const postureLabel = score >= 80 ? "Low risk" : score >= 55 ? "Elevated risk" : "Critical risk";
 
   overviewInsights.innerHTML = `
     <div class="insight-card posture">
@@ -4290,20 +4686,19 @@ function renderExecutiveExperience() {
   `;
 
   executiveHero.innerHTML = `
-    <div class="posture-meter" style="--meter:${score}; --needle:${-90 + score * 1.8}deg">
-      <div class="meter-arc"></div>
-      <div class="meter-needle"></div>
+    <div class="remediation-score" aria-label="Posture score ${score} out of 100">
       <strong>${score}</strong>
-      <span>Posture: ${score} - ${score >= 80 ? "Low risk" : score >= 55 ? "High risk" : "Critical risk"}</span>
+      <span>/100</span>
+      <small>${postureLabel}</small>
     </div>
-    <div>
-      <p class="eyebrow">Latest assessment</p>
-      <h3>${summary.total_files ? `${summary.total_files} files analyzed` : "No scan has been run yet"}</h3>
-      <p>${summary.critical || summary.high ? "Prioritize critical and high exposure before broad cleanup." : "The current scan does not show urgent high-risk exposure."}</p>
-      <div class="hero-actions">
-        <button type="button" class="secondary-btn" data-tab-jump="overview">Review files</button>
-        <button type="button" data-tab-jump="security">Export controls</button>
-      </div>
+    <div class="remediation-summary-copy">
+      <span>Latest assessment</span>
+      <h3>${queueCount ? `${queueCount} items need review` : "No active remediation work"}</h3>
+      <p>${criticalCount || highCount ? `${criticalCount} critical and ${highCount} high-risk files are at the front of the queue.` : "No urgent exposure is present in the current workspace."}</p>
+    </div>
+    <div class="remediation-summary-actions">
+      <button type="button" class="secondary-btn" data-tab-jump="overview">Open inventory</button>
+      <button type="button" data-tab-jump="security">Export controls</button>
     </div>
   `;
 
@@ -4324,7 +4719,7 @@ function renderExecutiveExperience() {
 }
 
 function getCurrentPostureScore(summary = buildCurrentSummary()) {
-  if (latestFiles.length) {
+  if (latestFiles.length || latestReport?.files_omitted) {
     return calculatePostureScore(summary, latestFiles);
   }
   const dashboardSummary = latestDashboard?.latest?.summary;
@@ -4421,14 +4816,14 @@ function buildRemediationWorkflow() {
   const items = latestFiles
     .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level) || isProtectedFile(file))
     .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
-    .slice(0, 18);
+    .slice(0, 12);
 
   if (!items.length) {
     return '<div class="empty compact">No active remediation queue yet. Critical, high, protected, and medium-risk files will appear here after a scan.</div>';
   }
 
   return `
-    <div class="scroll-card-list remediation-list remediation-kanban">
+    <div class="scroll-card-list remediation-list remediation-queue">
       ${items.map((file, index) => {
         const risk = getEffectiveRisk(file);
         const remediation = file.risk?.remediation || {};
@@ -4438,20 +4833,17 @@ function buildRemediationWorkflow() {
         const ticket = remediation.ticket || `DSPM-${String(index + 1).padStart(4, "0")}`;
         const sla = remediation.sla || (risk.level === "CRITICAL" ? "24 hours" : risk.level === "HIGH" ? "3 business days" : "14 days");
         return `
-          <article class="remediation-item compact-risk-card ${risk.level}">
-            <div class="remediation-head">
-              <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
-              <span class="remediation-ticket">${escapeHtml(ticket)}</span>
+          <article class="remediation-item remediation-row compact-risk-card ${risk.level}">
+            <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
+            <div class="remediation-file">
+              <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
+              <span title="${escapeHtml(file.path || "")}">${escapeHtml(file.path || file.source || "Workspace")}</span>
+              <small>${escapeHtml(ticket)} &middot; ${findingCount} finding${findingCount === 1 ? "" : "s"}</small>
             </div>
-            <div class="remediation-body">
-              <h4>${escapeHtml(file.name || file.path || "Unknown file")}</h4>
-              <p title="${escapeHtml(file.path || "")}">${escapeHtml(file.path || file.source || "Workspace")}</p>
-              <div class="remediation-meta">
-                <span>${findingCount} finding${findingCount === 1 ? "" : "s"}</span>
-                <span>${escapeHtml(owner)}</span>
-                <span>SLA ${escapeHtml(sla)}</span>
-              </div>
-              <small>${escapeHtml(actions[0])}</small>
+            <div class="remediation-assignment">
+              <span>${escapeHtml(owner)}</span>
+              <small>SLA ${escapeHtml(sla)}</small>
+              <strong>${escapeHtml(actions[0])}</strong>
             </div>
           </article>
         `;
@@ -4465,34 +4857,27 @@ function buildMsspPortfolio() {
     ? tenantPortfolio
     : [{ tenant_id: currentTenant, scan_count: latestDashboard?.trend?.length || 0, latest: latestDashboard?.latest || { summary: buildCurrentSummary() } }];
 
-  const totalCustomers = tenants.length;
   const activeTenant = tenants.find((tenant) => tenant.tenant_id === currentTenant) || tenants[0];
   const activeSummary = activeTenant.latest?.summary || buildCurrentSummary();
-  const openCritical = tenants.reduce((sum, tenant) => sum + Number(tenant.latest?.summary?.critical || 0), 0);
+  const urgentCount = Number(activeSummary.critical || 0) + Number(activeSummary.high || 0);
 
   return `
-    <article class="mssp-summary-card">
-      <span>Managed customers</span>
-      <strong>${totalCustomers}</strong>
-      <p>Active customer: ${escapeHtml(currentTenant)} &middot; ${activeSummary.total_files || 0} files in scope</p>
-    </article>
-    <article class="mssp-summary-card">
-      <span>Open critical exposure</span>
-      <strong>${openCritical}</strong>
-      <p>Aggregated across tenant-isolated customer workspaces.</p>
-    </article>
-    ${tenants.slice(0, 4).map((tenant) => {
-      const summary = tenant.latest?.summary || {};
-      const score = calculatePostureScore(summary);
-      const isActive = tenant.tenant_id === currentTenant;
-      return `
-        <article class="portfolio-card ${isActive ? "active" : ""}" data-tenant-jump="${escapeHtml(tenant.tenant_id)}">
-          <span>${escapeHtml(tenant.tenant_id)}</span>
-          <strong>${score}</strong>
-          <p>${summary.total_files || 0} files &middot; ${summary.critical || 0} critical &middot; ${tenant.scan_count || 0} scans</p>
-        </article>
-      `;
-    }).join("")}
+    <div class="workspace-status-item workspace-name">
+      <span>Workspace</span>
+      <strong>${escapeHtml(currentTenant)}</strong>
+    </div>
+    <div class="workspace-status-item">
+      <span>Saved scans</span>
+      <strong>${activeTenant.scan_count || 0}</strong>
+    </div>
+    <div class="workspace-status-item">
+      <span>Files in scope</span>
+      <strong>${activeSummary.total_files || 0}</strong>
+    </div>
+    <div class="workspace-status-item ${urgentCount ? "needs-attention" : ""}">
+      <span>Urgent items</span>
+      <strong>${urgentCount}</strong>
+    </div>
   `;
 }
 
@@ -4602,19 +4987,19 @@ function buildPriorityRiskFiles() {
   const items = latestFiles
     .filter((file) => ["CRITICAL", "HIGH"].includes(getEffectiveRisk(file).level) || isProtectedFile(file))
     .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
-    .slice(0, 16);
+    .slice(0, 10);
 
   if (!items.length) {
     return '<div class="empty compact">Critical, high, and protected files will appear after a risky scan.</div>';
   }
 
   return `
-    <div class="scroll-card-list priority-file-list">
+    <div class="scroll-card-list priority-file-list dense-risk-list">
       ${items.map((file) => {
         const risk = getEffectiveRisk(file);
         const findings = (file.findings || []).map((finding) => finding.type).slice(0, 3).join(", ") || "Risk context";
         return `
-          <article class="priority-file compact-risk-card ${risk.level}" title="${escapeHtml(file.path || file.name || "")}">
+          <article class="priority-file priority-file-row compact-risk-card ${risk.level}" title="${escapeHtml(file.path || file.name || "")}">
             <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
             <div>
               <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
@@ -4863,6 +5248,16 @@ function renderFindingBars(items, extraClass = "") {
 }
 
 function buildCurrentSummary() {
+  if (latestReport?.files_omitted) {
+    return {
+      total_files: activeReportFileCount(),
+      critical: Number(latestReport.summary?.critical || 0),
+      high: Number(latestReport.summary?.high || 0),
+      medium: Number(latestReport.summary?.medium || 0),
+      low: Number(latestReport.summary?.low || 0),
+      protected_files: Number(latestReport.summary?.protected_files || 0),
+    };
+  }
   const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
   latestFiles.forEach((file) => {
     const level = getEffectiveRisk(file).level;
@@ -5957,7 +6352,7 @@ async function ensureCredential(payload) {
 }
 
 async function runQueuedScan(payload) {
-  const job = await api("/api/scan", { ...payload, async_scan: true, save_report: true });
+  const job = await api("/api/scan", { ...payload, async_scan: true, save_report: true, compact_result: true });
   activeScanJobId = job.id;
   scanStartedAt = performance.now();
   if (scanCancelBtn) {
@@ -5978,7 +6373,7 @@ async function runQueuedScan(payload) {
 }
 
 async function runQueuedEndpointScan(payload) {
-  const job = await api("/api/endpoint/scan", { ...payload, async_scan: true, save_report: true });
+  const job = await api("/api/endpoint/scan", { ...payload, async_scan: true, save_report: true, compact_result: true });
   activeEndpointJobId = job.id;
   endpointScanStartedAt = performance.now();
   if (endpointCancelBtn) {
@@ -6007,11 +6402,11 @@ async function runQueuedEndpointScan(payload) {
   }
 }
 
-async function loadSavedReportById(scanId, retries = 3, delayMs = 350) {
+async function loadSavedReportById(scanId, retries = 3, delayMs = 350, includeFiles = false) {
   if (!scanId) return null;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      const data = await api(`/api/history/${encodeURIComponent(scanId)}/report`, null, "GET");
+      const data = await api(`/api/history/${encodeURIComponent(scanId)}/report?include_files=${includeFiles ? "true" : "false"}`, null, "GET");
       if (data.report) return data.report;
     } catch (error) {
       if (attempt >= retries) return null;
@@ -6113,15 +6508,17 @@ async function refreshHashComparison() {
   ]);
   latestDashboard = dashboard;
   latestHashComparison = hashComparison;
-  if (latestFiles.length) {
-    renderRows(latestFiles);
+  if (latestFiles.length || currentInventoryPage()) {
+    const page = currentInventoryPage();
+    if (page) renderRows(page.items, { serverPage: page });
+    else renderRows(latestFiles);
     renderFindingsWorkspace();
   }
   renderExecutiveExperience();
 }
 
 async function restoreLatestSavedReport(historyItems = latestHistoryItems) {
-  if (latestFiles.length || !Array.isArray(historyItems) || !historyItems.length) {
+  if (latestReport?.scan_id || !Array.isArray(historyItems) || !historyItems.length) {
     return;
   }
   const candidates = [...historyItems].reverse();
@@ -6130,12 +6527,12 @@ async function restoreLatestSavedReport(historyItems = latestHistoryItems) {
     if (!scanId) continue;
     try {
       const report = await loadSavedReportById(scanId) || {};
-      if (!Array.isArray(report.files) || !report.files.length || isDemoSampleReport(report)) {
+      if (!activeCompactReportCount(report) || isDemoSampleReport(report)) {
         continue;
       }
       const scanKind = report.endpoint ? "endpoint" : "file-server";
       applyScanReport(report, scanKind);
-      scanMeta.textContent = `Restored ${report.files.length} files from saved scan ${scanId}.`;
+      scanMeta.textContent = `Restored ${activeCompactReportCount(report)} indexed files from saved scan ${scanId}.`;
       return;
     } catch (error) {
       setStatus(`Saved scan restore failed: ${error.message}`);
@@ -6143,6 +6540,10 @@ async function restoreLatestSavedReport(historyItems = latestHistoryItems) {
     }
   }
   clearActiveScanReport("No non-demo saved scan loaded. Run an endpoint or real file-server scan.");
+}
+
+function activeCompactReportCount(report = {}) {
+  return Number(report.file_count || report.result_file_count || report.summary?.total_files || report.files?.length || 0);
 }
 
 async function loadTenants() {
@@ -6649,22 +7050,16 @@ form.addEventListener("submit", async (event) => {
     if (payload.async_scan) {
       window.clearInterval(progressTimer);
     }
-    let report = payload.async_scan ? await runQueuedScan(payload) : await api("/api/scan", { ...payload, save_report: true });
-    if (report?.scan_id) {
-      const fullReport = await loadSavedReportById(report.scan_id, 8, 750);
-      if (fullReport) {
-        report = fullReport;
-      } else if (report.result_truncated) {
-        setStatus("Full saved scan report is still loading. Showing the queued result preview for now; open History to reload the full scan.");
-      }
-    }
+    const report = payload.async_scan
+      ? await runQueuedScan(payload)
+      : await api("/api/scan", { ...payload, save_report: true, compact_result: true });
     applyScanReport(report, "file-server");
     await refreshHashComparison();
     const diagnostics = summarizeFileServerDiagnostics(report);
     lastScanElapsedSeconds = report.__job_elapsed_seconds || scanElapsedSeconds(scanStartedAt);
     setStatus(`Scan completed in ${formatElapsedTime(lastScanElapsedSeconds)} and report.json updated.${diagnostics ? ` ${diagnostics}` : ""}`);
     setScanProgress(true, 100, "Scan completed", lastScanElapsedSeconds);
-    showToast("Scan completed", `${latestFiles.length} files found · ${formatElapsedTime(lastScanElapsedSeconds)}`, latestReport.summary?.critical ? "danger" : "success");
+    showToast("Scan completed", `${activeReportFileCount()} files found · ${formatElapsedTime(lastScanElapsedSeconds)}`, latestReport.summary?.critical ? "danger" : "success");
     if (latestReport.summary?.critical) {
       showToast("Critical exposure", `${latestReport.summary.critical} critical files found`, "danger");
     }
@@ -6773,15 +7168,9 @@ endpointScanBtn.addEventListener("click", async () => {
     if (payload.async_scan) {
       window.clearInterval(endpointProgressTimer);
     }
-    let report = payload.async_scan ? await runQueuedEndpointScan(payload) : await api("/api/endpoint/scan", payload);
-    if (report?.scan_id) {
-      const fullReport = await loadSavedReportById(report.scan_id, 8, 750);
-      if (fullReport) {
-        report = fullReport;
-      } else if (report.result_truncated) {
-        endpointStatus.textContent = "Full saved endpoint report is still loading. Showing the queued result preview for now; open History to reload the full scan.";
-      }
-    }
+    const report = payload.async_scan
+      ? await runQueuedEndpointScan(payload)
+      : await api("/api/endpoint/scan", { ...payload, compact_result: true });
     if (!report?.endpoint) {
       throw new Error("Endpoint scan returned non-endpoint data. Previous SMB/demo report was not displayed.");
     }
@@ -6790,11 +7179,11 @@ endpointScanBtn.addEventListener("click", async () => {
     const extensionCounts = summarizeExtensions(latestFiles, report.endpoint?.extension_counts);
     const diagnostics = summarizeEndpointDiagnostics(report.endpoint);
     lastEndpointElapsedSeconds = report.__job_elapsed_seconds || scanElapsedSeconds(endpointScanStartedAt);
-    endpointStatus.textContent = `Endpoint scan completed in ${formatElapsedTime(lastEndpointElapsedSeconds)}. ${latestFiles.length} files analyzed. ${extensionCounts} ${diagnostics}`;
+    endpointStatus.textContent = `Endpoint scan completed in ${formatElapsedTime(lastEndpointElapsedSeconds)}. ${activeReportFileCount()} files analyzed. ${extensionCounts} ${diagnostics}`;
     if (endpointViewOverviewBtn) endpointViewOverviewBtn.classList.remove("hidden");
     setStatus(`Endpoint scan completed in ${formatElapsedTime(lastEndpointElapsedSeconds)} and report.json updated.`);
     setEndpointScanProgress(true, 100, "Endpoint scan completed", lastEndpointElapsedSeconds);
-    showToast("Endpoint scan completed", `${latestFiles.length} files found · ${formatElapsedTime(lastEndpointElapsedSeconds)}`, latestReport.summary?.critical ? "danger" : "success");
+    showToast("Endpoint scan completed", `${activeReportFileCount()} files found · ${formatElapsedTime(lastEndpointElapsedSeconds)}`, latestReport.summary?.critical ? "danger" : "success");
     await loadHistory();
   } catch (error) {
     endpointStatus.textContent = `Endpoint scan failed: ${error.message}`;
@@ -6837,27 +7226,28 @@ document.querySelector("#endpoint-target-username")?.addEventListener("input", (
 
 filterInput.addEventListener("input", debounce(() => {
   renderedRowsLimit = ROW_PAGE_SIZE;
-  renderRows(latestFiles);
-}));
+  refreshInventoryPageWindow();
+}, 300));
 
 inventoryRiskFilters.forEach((button) => {
   button.addEventListener("click", () => {
     inventoryRiskFilter = button.dataset.riskFilter || "ALL";
+    renderInventoryRiskSelection();
     renderedRowsLimit = ROW_PAGE_SIZE;
-    renderRows(latestFiles);
+    refreshInventoryPageWindow();
   });
 });
 
 inventorySourceFilter?.addEventListener("change", () => {
   inventorySourceFacet = inventorySourceFilter.value || "ALL";
   renderedRowsLimit = ROW_PAGE_SIZE;
-  renderRows(latestFiles);
+  refreshInventoryPageWindow();
 });
 
 inventoryFindingFilter?.addEventListener("change", () => {
   inventoryFindingFacet = inventoryFindingFilter.value || "ALL";
   renderedRowsLimit = ROW_PAGE_SIZE;
-  renderRows(latestFiles);
+  refreshInventoryPageWindow();
 });
 
 inventoryFrameworkFilter?.addEventListener("change", () => {
@@ -6865,7 +7255,7 @@ inventoryFrameworkFilter?.addEventListener("change", () => {
   const allValues = inventoryFrameworkOptions(latestFiles).map((item) => item.id);
   inventoryFrameworkFacets = checked.length && checked.length < allValues.length ? new Set(checked) : new Set();
   renderedRowsLimit = ROW_PAGE_SIZE;
-  renderRows(latestFiles);
+  refreshInventoryPageWindow();
 });
 
 inventoryClearFiltersBtn?.addEventListener("click", () => {
@@ -6875,11 +7265,17 @@ inventoryClearFiltersBtn?.addEventListener("click", () => {
   inventoryFrameworkFacets = new Set();
   if (filterInput) filterInput.value = "";
   renderedRowsLimit = ROW_PAGE_SIZE;
-  renderRows(latestFiles);
+  refreshInventoryPageWindow();
   renderFindingsWorkspace();
 });
 
 document.addEventListener("click", (event) => {
+  const pageAction = event.target.closest("[data-inventory-page]");
+  if (pageAction && !pageAction.disabled) {
+    const nextIndex = inventoryPageWindow.pageIndex + (pageAction.dataset.inventoryPage === "next" ? 1 : -1);
+    loadInventoryWindowPage(Math.max(0, nextIndex));
+    return;
+  }
   if (event.target.closest("#load-more-results")) {
     renderedRowsLimit += ROW_PAGE_SIZE;
     renderRows(latestFiles);
@@ -6965,7 +7361,8 @@ resultsBody.addEventListener("click", (event) => {
 
   const detailButton = event.target.closest(".detail-toggle");
   if (detailButton) {
-    openDetailDrawer(detailButton.dataset.detailKey || "", detailButton.dataset.detailType || "reasons");
+    openDetailDrawer(detailButton.dataset.detailKey || "", detailButton.dataset.detailType || "reasons")
+      .catch((error) => showToast("Asset detail failed", error.message, "danger"));
     return;
   }
 
@@ -7013,12 +7410,27 @@ resultsBody.addEventListener("change", (event) => {
 
   saveRowOverrides();
   updateSummaryFromFiles(latestFiles);
-  renderRows(latestFiles);
+  const currentPage = currentInventoryPage();
+  if (inventoryPageWindow.active && currentPage) {
+    renderRows(currentPage.items, { serverPage: currentPage });
+  } else {
+    renderRows(latestFiles);
+  }
 });
 
 exportCsvBtn.addEventListener("click", exportCsv);
 exportWordBtn.addEventListener("click", exportWord);
 exportPdfBtn.addEventListener("click", exportPdf);
+inventoryExportCsvBtn?.addEventListener("click", () => {
+  streamInventoryExport("csv").catch((error) => {
+    if (error?.name !== "AbortError") showToast("Inventory export failed", error.message, "danger");
+  });
+});
+inventoryExportNdjsonBtn?.addEventListener("click", () => {
+  streamInventoryExport("ndjson").catch((error) => {
+    if (error?.name !== "AbortError") showToast("Inventory export failed", error.message, "danger");
+  });
+});
 refreshHistoryBtn.addEventListener("click", () => {
   loadHistory().catch((error) => setStatus(`History failed: ${error.message}`));
 });
@@ -7182,6 +7594,7 @@ document.addEventListener("click", (event) => {
 tenantSwitcher.addEventListener("change", async () => {
   currentTenant = tenantSwitcher.value || "default";
   safeSessionSet("dspm-tenant-id", currentTenant);
+  resetInventoryPageWindow();
   latestFiles = [];
   fileSearchIndex = new WeakMap();
   latestReport = null;
