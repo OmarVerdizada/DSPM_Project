@@ -18,11 +18,11 @@ function sentroEyeToggle() {
 /* ── Theme toggle ── */
 function sentroThemeToggle() {
   var root  = document.documentElement;
-  var tBtn  = document.getElementById('themeBtn');
+  var icon  = document.querySelector('#themeBtn .theme-icon');
   var dark  = root.getAttribute('data-theme') === 'dark';
   var next  = dark ? 'light' : 'dark';
   root.setAttribute('data-theme', next);
-  if (tBtn) tBtn.textContent = next === 'dark' ? '☀️' : '🌙';
+  if (icon) icon.innerHTML = next === 'dark' ? '&#9728;' : '&#9790;';
   try { localStorage.setItem('dspm-theme', next); } catch (e) {}
 }
 
@@ -34,7 +34,8 @@ function sentroThemeToggle() {
 
   /* Sync button icon to whatever theme auth-boot.js restored */
   var t = document.documentElement.getAttribute('data-theme');
-  if (themeBtn) themeBtn.textContent = t === 'dark' ? '☀️' : '🌙';
+  var icon = document.querySelector('#themeBtn .theme-icon');
+  if (icon) icon.innerHTML = t === 'dark' ? '&#9728;' : '&#9790;';
 })();
 
 /* ── Carousel dots ── */

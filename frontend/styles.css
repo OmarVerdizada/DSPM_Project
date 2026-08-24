@@ -5308,6 +5308,11 @@ body.sidebar-collapsed .brand-mark { margin: 0; }
 body.sidebar-collapsed .sidebar-toggle { position: absolute; right: 5px; top: 6px; width: 28px; min-width: 28px; height: 28px; border-radius: 999px; }
 body.sidebar-collapsed .sidebar-toggle span { transform: rotate(90deg); }
 body.sidebar-collapsed .side-nav { gap: 10px; }
+body.sidebar-collapsed .side-nav {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px;
+}
 body.sidebar-collapsed .side-nav .tab {
   min-height: 50px;
   display: grid;
@@ -6552,9 +6557,9 @@ body.sidebar-collapsed .brand.logo-lockup {
 body.sidebar-collapsed .brand-mark,
 body.sidebar-collapsed .brand-copy,
 body.sidebar-collapsed .nav-group-label,
-body.sidebar-collapsed .side-nav {
-  display: none !important;
-}
+/* (P3.2) removed: this layer hid the ENTIRE nav list when collapsed — the
+   root cause of "collapsed shows no menu icons". The rail always shows the
+   destination icons now (see the P3.2 block). */
 
 body.sidebar-collapsed .sidebar-toggle {
   position: static !important;
@@ -21491,26 +21496,32 @@ details.scan-advanced > summary:focus-visible {
 .side-nav {
   flex: 0 0 auto;
 }
-.brand.logo-lockup .nav-burger {
-  margin-left: auto;
+/* Collapse control: a plain three-line icon pinned at the BOTTOM of the
+   sidebar — no background ever (!important beats the app's generic
+   primary-button painter, which was filling it with the accent). */
+.nav-burger {
+  margin: auto 0 0 6px;
   width: 34px;
   height: 34px;
-  min-height: 0;
+  min-height: 0 !important;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 0;
+  border: 0 !important;
   border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--muted) !important;
   cursor: pointer;
   flex: 0 0 auto;
+  transform: none !important;
+  padding: 0 !important;
 }
-.brand.logo-lockup .nav-burger:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-.brand.logo-lockup .nav-burger:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nav-burger:hover { color: var(--text) !important; background: transparent !important; }
+.nav-burger:focus-visible { outline: none; box-shadow: var(--focus-ring) !important; }
 .nav-burger svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   stroke: currentColor;
   fill: none;
   stroke-width: 2;
@@ -21561,15 +21572,40 @@ details.scan-advanced > summary:focus-visible {
 .nav-sub-link:hover { color: var(--text) !important; background: transparent !important; }
 .nav-sub-link.active { color: var(--accent) !important; background: transparent !important; font-weight: 700; }
 .nav-sub-link:focus-visible { outline: none; box-shadow: var(--focus-ring) !important; }
+/* Theme toggle: one button style across pages — the dashboard's glyph button
+   picks up the login page's playful hover (rotate + scale). */
+.topbar .theme-toggle { transition: transform .2s ease; }
+.topbar .theme-toggle:hover { transform: rotate(20deg) scale(1.1); }
 @media (prefers-reduced-motion: reduce) {
-  .nav-sub, .side-nav .tab .nav-caret { transition: none; }
+  .nav-sub, .side-nav .tab .nav-caret, .topbar .theme-toggle { transition: none; }
+  .topbar .theme-toggle:hover { transform: none; }
 }
-/* Rail: sub-links and carets hide; burger centers under the logo, which STAYS
-   visible (an older layer hides .brand-mark when collapsed — overridden). */
+/* Rail: sub-links and carets hide; the logo STAYS visible (an older layer
+   hides .brand-mark when collapsed — overridden) and the burger centers at
+   the rail's bottom. The icon-size rules are the guarantee that the rail
+   really shows every destination icon: the nav-ico SVGs have no intrinsic
+   size, and older collapsed layers zero the tab box (padding 0 + hidden
+   label left the buttons 0x0 — "no icons when collapsed"). */
+.side-nav .tab .nav-ico { width: 18px; height: 18px; flex: 0 0 auto; }
 body.sidebar-collapsed .nav-sub { display: none !important; }
 body.sidebar-collapsed .side-nav .tab .nav-caret { display: none; }
-body.sidebar-collapsed .brand.logo-lockup .nav-burger { margin: 8px auto 0; }
+body.sidebar-collapsed .nav-burger { margin: auto auto 0; }
 body.sidebar-collapsed .brand-mark { display: inline-flex !important; }
+body.sidebar-collapsed .side-nav .tab {
+  min-height: 40px !important;
+  height: 40px !important;
+  width: 44px !important;
+  margin: 0 auto !important;
+  padding: 0 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+body.sidebar-collapsed .side-nav .tab .nav-ico {
+  width: 20px !important;
+  height: 20px !important;
+  display: block !important;
+}
 /* One responsive model at EVERY width: the sidebar stays in flow — expanded
    column or 68px icon rail. The old <=860 off-canvas slide-out is overridden. */
 .app-shell > .sidebar,
