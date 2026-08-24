@@ -2335,6 +2335,29 @@ function resolveTabName(tabName) {
   return aliases[tabName] || tabName || "overview";
 }
 
+// Redesign P3: the sidebar shows 6 destinations while the tab panels keep their
+// original names (old data-tab-jump deep links stay valid). Merged destinations
+// own several member panels; navDestination() maps any panel to the sidebar
+// button that should light up for it. In-page .subnav strips switch between
+// members via the existing data-tab-jump wiring.
+const NAV_DESTINATIONS = {
+  overview: "overview",
+  "file-servers": "file-servers",
+  endpoint: "file-servers",
+  findings: "findings",
+  risk: "risk",
+  reports: "reports",
+  history: "reports",
+  security: "security",
+  admin: "security",
+  settings: "security",
+  logic: "security",
+};
+
+function navDestination(tabName) {
+  return NAV_DESTINATIONS[resolveTabName(tabName)] || "overview";
+}
+
 function hydrateNavigation() {
   const icons = {
     overview: "DB",
@@ -2364,8 +2387,11 @@ function switchTab(tabName) {
   const activePanel = document.getElementById(`tab-${resolvedTab}`);
   if (!activePanel) return;
 
+  const destination = navDestination(resolvedTab);
   tabs.forEach((tab) => {
-    const isActive = tab.dataset.tab === resolvedTab;
+    // The sidebar button owning this panel's destination lights up, so merged
+    // destinations (Scan, Evidence, Administration) stay active for members.
+    const isActive = tab.dataset.tab === destination;
     tab.classList.toggle("active", isActive);
     tab.setAttribute("aria-current", isActive ? "page" : "false");
   });

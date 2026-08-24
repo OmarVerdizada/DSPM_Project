@@ -21231,3 +21231,40 @@ details.scan-advanced > summary:focus-visible {
   background: color-mix(in srgb, var(--ok) 7%, var(--surface)) !important;
 }
 .compliance-list li strong.ok { color: var(--ok); }
+
+/* ============================================================================
+   Redesign P3 — subnav: in-page section switcher for merged destinations
+   (Scan = file-server/endpoint, Evidence = reports/history, Administration =
+   security/tenants/asset rules/risk logic). Buttons reuse the existing
+   data-tab-jump wiring; each panel's own strip marks itself active.
+   ============================================================================ */
+.subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.subnav-tab {
+  min-height: 32px;
+  padding: 4px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.subnav-tab:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+.subnav-tab.active {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: var(--accent-strong);
+}
+.subnav-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
