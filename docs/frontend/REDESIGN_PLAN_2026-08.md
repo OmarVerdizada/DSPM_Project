@@ -84,7 +84,15 @@ scrollbar, risk-engine memo). The plan builds on this baseline.
 
 ## 3. Design direction
 
-### 3.1 Palette — "Harbor / Sonar" (dark-first, light derived)
+> **⚠ SUPERSEDED (2026-08-24, d8cb9d6):** the Harbor/Sonar teal direction below was
+> rejected by the operator and fully reverted — Sentro's identity is the **blue/indigo**
+> system (light `#4f46e5` / dark `#6366f1`, original fonts incl. Audiowide wordmark,
+> Google-Fonts links restored). Color work is **tone-only within the existing hue
+> families**; a follow-up AA pass (c881090) darkened seven light-theme text-role tokens
+> one shade in-hue (high→`#b45309`, low→`#15803d`, status chips) — dark theme measured
+> clean and is untouched. Sections 3.1/3.2 kept for the record only.
+
+### 3.1 Palette — "Harbor / Sonar" (dark-first, light derived) — SUPERSEDED, see above
 
 Keep Sentro's teal identity; deepen the ground, and make **color carry information**: severity is
 the only place strong color appears in quantity; green is reserved exclusively for success/pass.
