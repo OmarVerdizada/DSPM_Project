@@ -1090,7 +1090,11 @@ function animateNumber(element, target) {
   const end = Number(target || 0);
   const start = Number(element.dataset.value || element.textContent || 0) || 0;
   element.dataset.value = String(end);
-  if (start === end) {
+  // Hidden tabs throttle requestAnimationFrame to zero, which would freeze the
+  // count-up mid-flight and show a stale number until the next repaint. The
+  // value itself must never depend on animation: set it when the page is
+  // hidden, animate only when someone can watch.
+  if (start === end || document.hidden) {
     element.textContent = String(end);
     return;
   }
@@ -1564,6 +1568,18 @@ function updateSummary(summary = {}) {
 }
 
 function updateSummaryFromFiles(files = []) {
+  // Compact reports (files_omitted) keep the full file list server-side; the
+  // client array is either empty or a bounded top-risk workspace slice.
+  // Counting it would misreport the tiles, so the report summary stays the
+  // authority for the numbers while the renderers use whatever slice we hold.
+  if (latestReport?.files_omitted && latestReport?.summary) {
+    updateSummary(latestReport.summary);
+    renderReportPreview();
+    renderExecutiveExperience();
+    renderScanContextPanels();
+    renderFindingsWorkspace();
+    return;
+  }
   const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
   files.forEach((file) => {
     const effective = getEffectiveRisk(file).level;
@@ -1638,6 +1654,34 @@ function applyScanReport(report, scanKind = "file-server") {
   renderRows(latestFiles);
   scanMeta.textContent = buildScanMetaText(report, scanKind);
   refreshInventoryPageWindow();
+  hydrateWorkspaceSlice();
+}
+
+// P4: compact reports (files_omitted) deliberately ship no file array, which
+// left every latestFiles-driven workspace (remediation queue, findings queue,
+// priority files, exposure insights) empty. Hydrate a bounded top-risk slice
+// from the inventory API (server-sorted by risk_score) and re-render those
+// workspaces from it. Tiles keep using the report summary (see
+// updateSummaryFromFiles), so the slice never skews the numbers.
+let workspaceSliceRequest = 0;
+async function hydrateWorkspaceSlice() {
+  if (!latestReport?.files_omitted) return;
+  const requestId = ++workspaceSliceRequest;
+  try {
+    const data = await api("/api/inventory?sort=risk_score&limit=200", null, "GET");
+    if (requestId !== workspaceSliceRequest || !latestReport?.files_omitted) return;
+    const items = (data?.items || []).map((item) => hydrateInventoryPageItem(item));
+    if (!items.length) return;
+    latestFiles = items;
+    fileSearchIndex = new WeakMap();
+    renderReportPreview();
+    renderExecutiveExperience();
+    renderScanContextPanels();
+    renderFindingsWorkspace();
+  } catch (_) {
+    // Workspaces stay on the summary-only view; the inventory table is
+    // unaffected (it reads its own page window).
+  }
 }
 
 function buildScanMetaText(report = latestReport, scanKind = latestScanKind) {
@@ -1769,7 +1813,9 @@ function buildFindingQueueRows() {
   const rows = [];
   latestFiles.forEach((file) => {
     primaryFindingsForFile(file).forEach((finding) => {
-      const level = String(finding.risk || finding.severity || "LOW").toUpperCase();
+      // Inventory-hydrated slices summarize findings without per-finding risk;
+      // fall back to the file's effective level so the queue still triages.
+      const level = String(finding.risk || finding.severity || getEffectiveRisk(file).level || "LOW").toUpperCase();
       rows.push({
         file,
         finding,
@@ -1802,12 +1848,45 @@ function severityScore(level = "LOW") {
 // remaining 7 fields (confidence, protection state, exposure, occurrences,
 // unique records, owner, last seen) are demoted into a per-row expander so the
 // table stays legible without losing any data.
+// P4: every primary column is click-sortable (severity by score, the rest as
+// text); the active column carries aria-sort and re-renders the workspace.
+let findingQueueSort = { key: "score", dir: -1 };
+
+const FINDING_QUEUE_SORT_KEYS = {
+  score: (row) => row.score,
+  finding: (row) => findingDisplayName(row.finding) || "",
+  framework: (row) => row.framework || "",
+  dataElement: (row) => row.dataElement || "",
+  asset: (row) => row.asset || "",
+  location: (row) => row.location || "",
+  status: (row) => row.status || "",
+  sla: (row) => row.sla || "",
+};
+
+function sortFindingQueueRows(rows) {
+  const pick = FINDING_QUEUE_SORT_KEYS[findingQueueSort.key] || FINDING_QUEUE_SORT_KEYS.score;
+  const dir = findingQueueSort.dir;
+  return [...rows].sort((a, b) => {
+    const left = pick(a);
+    const right = pick(b);
+    if (typeof left === "number" && typeof right === "number") return (left - right) * dir;
+    return String(left).localeCompare(String(right)) * dir;
+  });
+}
+
+function findingQueueHeader(label, key, extraClass = "") {
+  const active = findingQueueSort.key === key;
+  const ariaSort = active ? (findingQueueSort.dir === 1 ? "ascending" : "descending") : "none";
+  return `<th data-sort="${key}" aria-sort="${ariaSort}"${extraClass ? ` class="${extraClass}"` : ""}>${label}</th>`;
+}
+
 function renderFindingQueueTable(rows) {
+  rows = sortFindingQueueRows(rows);
   return `
     <div class="report-register-wrap finding-queue-wrap">
       <table class="report-register-table finding-queue-table">
         <thead>
-          <tr><th>Severity</th><th>Finding</th><th>Framework</th><th>Data Element</th><th>Asset</th><th>Exact Location</th><th>Status</th><th>SLA</th><th class="finding-expand-col" aria-label="More detail"></th></tr>
+          <tr>${findingQueueHeader("Severity", "score")}${findingQueueHeader("Finding", "finding")}${findingQueueHeader("Framework", "framework")}${findingQueueHeader("Data Element", "dataElement")}${findingQueueHeader("Asset", "asset")}${findingQueueHeader("Exact Location", "location")}${findingQueueHeader("Status", "status")}${findingQueueHeader("SLA", "sla")}<th class="finding-expand-col" aria-label="More detail"></th></tr>
         </thead>
         <tbody>
           ${rows.map(({ file, finding, severity, confidence, framework, dataElement, asset, location, exposure, occurrences, uniqueRecords, status, owner, sla, lastSeen }) => `
@@ -1852,6 +1931,20 @@ document.addEventListener("click", (event) => {
   const open = !detail.classList.toggle("hidden");
   btn.setAttribute("aria-expanded", open ? "true" : "false");
   btn.innerHTML = open ? "&#10005;" : "&#8943;";
+});
+
+// P4: delegated sort for the finding-queue headers. Clicking the active column
+// flips direction; a new column starts descending (worst first).
+document.addEventListener("click", (event) => {
+  const th = event.target.closest(".finding-queue-table th[data-sort]");
+  if (!th) return;
+  const key = th.dataset.sort;
+  if (findingQueueSort.key === key) {
+    findingQueueSort.dir *= -1;
+  } else {
+    findingQueueSort = { key, dir: -1 };
+  }
+  renderFindingsWorkspace();
 });
 
 function primaryFindingsForFile(file) {
@@ -4663,25 +4756,21 @@ function renderExecutiveExperience() {
       <strong>${criticalCount}</strong>
       <p>${criticalCount ? "Threshold alert will be generated after scan save." : "No critical exposure in current view."}</p>
     </div>
-    <div class="insight-card">
+    <div class="insight-card" title="Files with PII, secrets, PCI, health data, or ML context signals.">
       <span>Sensitive files</span>
       <strong>${latestReport?.summary?.sensitive_files || countSensitiveFiles(latestFiles)}</strong>
-      <p>Files with PII, secrets, PCI, health data, or ML context signals.</p>
     </div>
-    <div class="insight-card">
+    <div class="insight-card" title="Hidden local and SMB entries are included in discovery scope.">
       <span>Hidden files</span>
       <strong>${latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length}</strong>
-      <p>Hidden local and SMB entries are included in discovery scope.</p>
     </div>
-    <div class="insight-card protected">
+    <div class="insight-card protected" title="Password-protected archives, encrypted vaults, and unreadable files needing owner review.">
       <span>Protected / locked</span>
       <strong>${latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length}</strong>
-      <p>Password-protected archives, encrypted vaults, and unreadable files needing owner review.</p>
     </div>
-    <div class="insight-card">
+    <div class="insight-card" title="History, audit, and vault data are isolated by tenant.">
       <span>Tenant</span>
       <strong>${escapeHtml(currentTenant)}</strong>
-      <p>History, audit, and vault data are isolated by tenant.</p>
     </div>
   `;
 
@@ -4819,7 +4908,7 @@ function buildRemediationWorkflow() {
     .slice(0, 12);
 
   if (!items.length) {
-    return '<div class="empty compact">No active remediation queue yet. Critical, high, protected, and medium-risk files will appear here after a scan.</div>';
+    return '<div class="empty compact">No active remediation queue yet.</div>';
   }
 
   return `

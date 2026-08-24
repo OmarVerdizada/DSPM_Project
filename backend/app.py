@@ -252,15 +252,22 @@ async def secure_response_headers(request: Request, call_next):
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
     response.headers.setdefault(
         "Content-Security-Policy",
+        # P2 removed the Google Fonts CDN (system font stacks only), so the CSP
+        # no longer allowlists those hosts: self + inline styles + data URIs.
         "default-src 'self'; script-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; "
-        "font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "font-src 'self' data:; connect-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     )
     if request.url.scheme == "https" or IS_PRODUCTION:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
+    elif (response.headers.get("content-type") or "").startswith("text/html"):
+        # Operator pages must revalidate on every load so an upgraded install
+        # never serves a stale console shell; the versioned ?v= query strings
+        # keep the JS/CSS assets themselves cache-friendly.
+        response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 
