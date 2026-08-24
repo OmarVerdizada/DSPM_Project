@@ -13084,17 +13084,21 @@ button:disabled {
   --sidebar-soft: #ffffff;
   --sidebar-text: #4b5563;
   --sidebar-muted: #9ca3af;
-  --status-critical: #ef4444;
-  --status-high: #f59e0b;
-  --status-warning: #f59e0b;
+  /* Tone-only AA pass (2026-08): same hue families, one shade darker where a
+     token is used as TEXT on white and measured below 4.5:1 (high 3.19,
+     low 3.30, status-high 2.15, status-low 2.28, status-critical 3.76,
+     status-sensitive 3.96). Dark-theme values all pass and are untouched. */
+  --status-critical: #dc2626;
+  --status-high: #b45309;
+  --status-warning: #b45309;
   --status-medium: #3b82f6;
-  --status-low: #22c55e;
+  --status-low: #15803d;
   --status-safe: #4f46e5;
-  --status-sensitive: #a855f7;
+  --status-sensitive: #7e22ce;
   --critical: #dc2626;
-  --high: #d97706;
+  --high: #b45309;
   --medium: #2563eb;
-  --low: #16a34a;
+  --low: #15803d;
   --info: #4f46e5;
   --shadow: 0 4px 16px rgba(17, 24, 39, .06);
   --shadow-soft: 0 1px 3px rgba(17, 24, 39, .05);
