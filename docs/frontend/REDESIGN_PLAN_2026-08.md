@@ -190,6 +190,17 @@ touching the inventory surface itself waits until Track S lands.
 | **P5 — Motion budget (U-D)** | sonar sweep as sole hero motion; ≤160 ms micro-transitions; remove custom cursor + mouse spotlight | sentro-fx.js, styles.css keyframes | Low | interaction never blocked; reduced-motion audit passes |
 | **P6 — CSS consolidation (debt)** | rebuild styles.css as ordered layers (tokens → base → components → pages), collapsing the v80/v104 override chains and `!important` wars; byte-budget target ≤ 250 KB | styles.css (mechanical, behind visual-diff checks) | High effort, do last — after P2-P4 stop churning styles | identical rendering (spot-check), file halved, no `:root:root` hacks needed |
 
+**P3.1 addendum (a00649f, operator-directed):** the in-page `.subnav` strips were rejected
+— merged destinations now expand as **indented sub-links under their own sidebar entry**
+(Scan → File server/Endpoint; Evidence → Reports/History; Administration → 4 sub-links);
+only the active destination's group is open. Sidebar **collapse keeps a 68px icon rail**
+(three conflicting historical layers — v93 hidden / v95 rail / v113 hidden — reconciled to
+the rail), the collapse button lives **in the sidebar** (bottom-pinned), and the topbar
+hamburger only appears ≤860px for off-canvas. Also fixed in the same commit: the CSP
+(`script-src 'self'`) had been silently blocking every inline `<script>` and `onclick=` —
+login's theme toggle/eye/canvas, profile's theme restore, and the scan-form summary mirror
+never ran; all externalized (`auth-boot.js`, `login-fx.js`, `scan-summary.js`).
+
 **Sequencing logic:** P1 is the user's explicit ask and pure deletion — first. P2 is global but
 rides existing tokens — early, so every later screenshot is in the new skin. P3 before P4 so
 surface work happens in the final page structure. P6 last, once the styling churn is over.
