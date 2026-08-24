@@ -1,0 +1,89 @@
+{
+  "track": "S-C.1",
+  "generated_at": "2026-08-07T07:50:14.293380+00:00",
+  "database": "postgresql",
+  "mode": "smoke",
+  "documents": 100000,
+  "tenant_documents": 50000,
+  "repeats": 20,
+  "ingest_and_index_seconds": 7.281,
+  "scenarios": {
+    "first_page": {
+      "rows": 101,
+      "p50_ms": 4.57,
+      "p95_ms": 5.653,
+      "max_ms": 5.956,
+      "under_300ms": true,
+      "plan": [
+        "Limit  (cost=0.42..28.34 rows=101 width=29)",
+        "  ->  Index Only Scan Backward using track_s_bench_3b418452f240_risk_id on track_s_bench_3b418452f240  (cost=0.42..13847.05 rows=50090 width=29)",
+        "        Index Cond: (tenant_id = 'bench-a'::text)"
+      ]
+    },
+    "deep_keyset": {
+      "rows": 101,
+      "p50_ms": 9.749,
+      "p95_ms": 10.635,
+      "max_ms": 11.107,
+      "under_300ms": true,
+      "plan": [
+        "Limit  (cost=0.42..52.22 rows=101 width=29)",
+        "  ->  Index Only Scan Backward using track_s_bench_3b418452f240_risk_id on track_s_bench_3b418452f240  (cost=0.42..12605.26 rows=24575 width=29)",
+        "        Index Cond: ((tenant_id = 'bench-a'::text) AND (ROW(risk_score, id) < ROW('50'::smallint, 'ffffffffffffffffffffffff'::text)))"
+      ]
+    },
+    "filtered": {
+      "rows": 101,
+      "p50_ms": 12.647,
+      "p95_ms": 15.74,
+      "max_ms": 19.144,
+      "under_300ms": true,
+      "plan": [
+        "Limit  (cost=0.42..3192.54 rows=101 width=29)",
+        "  ->  Index Scan Backward using track_s_bench_3b418452f240_risk_id on track_s_bench_3b418452f240  (cost=0.42..14222.73 rows=450 width=29)",
+        "        Index Cond: (tenant_id = 'bench-a'::text)",
+        "        Filter: ((risk_level = 'CRITICAL'::text) AND (source = 'smb'::text) AND (extension = '.txt'::text))"
+      ]
+    },
+    "protected": {
+      "rows": 101,
+      "p50_ms": 21.369,
+      "p95_ms": 27.576,
+      "max_ms": 27.625,
+      "under_300ms": true,
+      "plan": [
+        "Limit  (cost=784.73..784.98 rows=101 width=29)",
+        "  ->  Sort  (cost=784.73..785.35 rows=249 width=29)",
+        "        Sort Key: risk_score DESC, id DESC",
+        "        ->  Bitmap Heap Scan on track_s_bench_3b418452f240  (cost=6.84..775.20 rows=249 width=29)",
+        "              Recheck Cond: ((tenant_id = 'bench-a'::text) AND is_protected)",
+        "              ->  Bitmap Index Scan on track_s_bench_3b418452f240_protected  (cost=0.00..6.78 rows=249 width=0)",
+        "                    Index Cond: ((tenant_id = 'bench-a'::text) AND (is_protected = true))"
+      ]
+    },
+    "filtered_search": {
+      "rows": 19,
+      "p50_ms": 5.539,
+      "p95_ms": 7.755,
+      "max_ms": 8.398,
+      "under_300ms": true,
+      "plan": [
+        "Limit  (cost=1344.29..1344.38 rows=36 width=29)",
+        "  ->  Sort  (cost=1344.29..1344.38 rows=36 width=29)",
+        "        Sort Key: risk_score DESC, id DESC",
+        "        ->  Bitmap Heap Scan on track_s_bench_3b418452f240  (cost=353.04..1343.36 rows=36 width=29)",
+        "              Recheck Cond: ((lower(COALESCE(search_text, ''::text)) ~~ '%sentroneedle%'::text) AND (tenant_id = 'bench-a'::text) AND (source = 'smb'::text))",
+        "              Filter: (risk_level = 'CRITICAL'::text)",
+        "              ->  BitmapAnd  (cost=353.04..353.04 rows=337 width=0)",
+        "                    ->  Bitmap Index Scan on track_s_bench_3b418452f240_trgm  (cost=0.00..125.80 rows=2020 width=0)",
+        "                          Index Cond: (lower(COALESCE(search_text, ''::text)) ~~ '%sentroneedle%'::text)",
+        "                    ->  Bitmap Index Scan on track_s_bench_3b418452f240_source  (cost=0.00..226.97 rows=16668 width=0)",
+        "                          Index Cond: ((tenant_id = 'bench-a'::text) AND (source = 'smb'::text))"
+      ]
+    }
+  },
+  "gates": {
+    "all_inventory_p95_under_300ms": true,
+    "five_million_rows": false
+  }
+}
