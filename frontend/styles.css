@@ -20442,3 +20442,33 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   text-transform: none !important;
   letter-spacing: normal !important;
 }
+
+
+/* == Data inventory tidy, round 2 ================================= */
+/* Risk filter: equal segmented tiles at every width. flex:1 1 118px let a
+   wrapped orphan stretch across the whole row; equal grid tracks keep the
+   even wide-viewport distribution and wrap into matching cells instead. */
+:root:root #inventory-workspace .risk-filter-group {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 6px !important;
+}
+:root:root #inventory-workspace .risk-filter-group .risk-filter {
+  width: 100% !important;
+  margin: 0 !important;
+}
+/* One ring, not two: the active pill kept a 2px outline on top of its
+   colored border. The outline now belongs to keyboard focus only. */
+:root:root #inventory-workspace .risk-filter.active { outline: none !important; }
+:root:root #inventory-workspace .risk-filter:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px;
+}
+/* Facet row: sit on the same 14px gutter as the rows above and below
+   (content indented to x=26 before), and the Clear button rides the same
+   centerline as the selects instead of hanging 7px low on a top margin. */
+:root:root #inventory-workspace .inventory-facet-row { padding: 12px 1px 6px !important; }
+:root:root #inventory-workspace #clear-inventory-filters {
+  margin: 0 !important;
+  align-self: center !important;
+}
