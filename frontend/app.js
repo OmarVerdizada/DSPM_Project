@@ -2795,7 +2795,7 @@ function getFileSearchText(file) {
 }
 
 function resolveTabName(tabName) {
-  const aliases = { inventory: "overview" };
+  const aliases = { inventory: "findings" };
   return aliases[tabName] || tabName || "overview";
 }
 
@@ -7326,10 +7326,22 @@ document.querySelector("#endpoint-target-username")?.addEventListener("input", (
   updateEndpointCustomPathState();
 });
 
+let lastInventoryQuery = "";
 filterInput.addEventListener("input", debounce(() => {
+  const next = filterInput.value.trim();
+  if (next === lastInventoryQuery) return;   // identical query - no refetch
+  lastInventoryQuery = next;
   renderedRowsLimit = ROW_PAGE_SIZE;
   refreshInventoryPageWindow();
 }, 300));
+filterInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && filterInput.value) {
+    filterInput.value = "";
+    lastInventoryQuery = "";
+    renderedRowsLimit = ROW_PAGE_SIZE;
+    refreshInventoryPageWindow();
+  }
+});
 
 inventoryRiskFilters.forEach((button) => {
   button.addEventListener("click", () => {

@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=182" />
+    <link rel="stylesheet" href="/static/styles.css?v=183" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -50,6 +50,12 @@
           <div class="brand-copy">
             <h1>SENTRO</h1>
           </div>
+          <button type="button" id="sidebar-toggle" data-sidebar-toggle class="nav-burger" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <button type="button" data-sidebar-toggle class="rail-expand" aria-label="Expand navigation" title="Expand navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
         </div>
 
         <nav class="side-nav" aria-label="Product navigation">
@@ -59,6 +65,14 @@
           <button type="button" class="tab active" data-tab="overview" aria-current="page" title="Posture, inventory, latest scan">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8v8H3zM13 3h8v5h-8zM13 12h8v9h-8zM3 15h8v6H3z"/></svg>
             <span>Dashboard</span>
+          </button>
+          <button type="button" class="tab" data-tab="findings" title="Secrets, PII, regulated data">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4M11 8v3M11 14h.01"/></svg>
+            <span>Findings</span>
+          </button>
+          <button type="button" class="tab" data-tab="risk" title="Risk score, SLA, owners">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span>Remediation</span>
           </button>
           <button type="button" class="tab" data-tab="file-servers" title="File server and endpoint scans">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
@@ -71,14 +85,6 @@
               <button type="button" class="nav-sub-link" data-tab-jump="endpoint">Endpoint</button>
             </div>
           </div>
-          <button type="button" class="tab" data-tab="findings" title="Secrets, PII, regulated data">
-            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4M11 8v3M11 14h.01"/></svg>
-            <span>Findings</span>
-          </button>
-          <button type="button" class="tab" data-tab="risk" title="Risk score, SLA, owners">
-            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
-            <span>Remediation</span>
-          </button>
           <button type="button" class="tab" data-tab="reports" title="Reports, scan history, audit trail">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/></svg>
             <span>Evidence</span>
@@ -104,9 +110,6 @@
             </div>
           </div>
         </nav>
-        <button type="button" id="sidebar-toggle" data-sidebar-toggle class="nav-burger" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-        </button>
       </aside>
 
       <main>
@@ -450,22 +453,18 @@
             <div class="metric critical">
               <span>Critical</span>
               <strong id="critical-count">0</strong>
-              <i class="kpi-spark" data-spark="critical" aria-hidden="true"></i>
             </div>
             <div class="metric high">
               <span>High</span>
               <strong id="high-count">0</strong>
-              <i class="kpi-spark" data-spark="high" aria-hidden="true"></i>
             </div>
             <div class="metric medium">
               <span>Medium</span>
               <strong id="medium-count">0</strong>
-              <i class="kpi-spark" data-spark="medium" aria-hidden="true"></i>
             </div>
             <div class="metric low">
               <span>Low</span>
               <strong id="low-count">0</strong>
-              <i class="kpi-spark" data-spark="low" aria-hidden="true"></i>
             </div>
             <div class="metric protected">
               <span>Protected / Locked</span>
@@ -492,6 +491,7 @@
               <div class="panel-title"><h4>Severity mix</h4></div>
               <div id="fx-severity-donut"></div>
             </section>
+            <section id="overview-insights" class="insights-grid dash-span"></section>
             <section class="visual-panel col-scans">
               <div class="panel-title"><h4>Recent scans</h4></div>
               <div id="fx-recent-scans"></div>
@@ -502,7 +502,36 @@
             </section>
           </div>
 
-          <section id="overview-insights" class="insights-grid"></section>
+        </section>
+
+        <section id="tab-findings" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></symbol>
+              <symbol id="li-clock-3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4.5"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
+              <h3>Sensitive findings</h3>
+            </div>
+          </div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Detection signal mix</h4>
+                <span>From latest scan</span>
+              </div>
+              <div id="findings-signal-summary" class="empty compact">Run a scan to populate finding categories.</div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Priority finding queue</h4>
+                <span>Critical and high sensitivity</span>
+              </div>
+              <div id="findings-priority-summary" class="empty compact">Sensitive files will appear in Data Inventory and Risk & Remediation.</div>
+            </section>
+          </div>
 
           <section class="workspace" id="inventory-workspace">
             <div class="table-toolbar inventory-toolbar">
@@ -580,36 +609,6 @@
               </table>
             </div>
           </section>
-        </section>
-
-        <section id="tab-findings" class="tab-panel">
-          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
-            <defs>
-              <symbol id="li-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></symbol>
-              <symbol id="li-clock-3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4.5"/></symbol>
-            </defs>
-          </svg>
-          <div class="section-header">
-            <div>
-              <h3>Sensitive findings</h3>
-            </div>
-          </div>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Detection signal mix</h4>
-                <span>From latest scan</span>
-              </div>
-              <div id="findings-signal-summary" class="empty compact">Run a scan to populate finding categories.</div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Priority finding queue</h4>
-                <span>Critical and high sensitivity</span>
-              </div>
-              <div id="findings-priority-summary" class="empty compact">Sensitive files will appear in Data Inventory and Risk & Remediation.</div>
-            </section>
-          </div>
         </section>
 
         <section id="tab-risk" class="tab-panel">
@@ -1350,11 +1349,11 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=144"></script>
+    <script src="/static/app.js?v=145"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
-    <script src="/static/sentro-fx.js?v=6" defer></script>
+    <script src="/static/sentro-fx.js?v=7" defer></script>
   </body>
 </html>

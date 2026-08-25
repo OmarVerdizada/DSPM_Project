@@ -494,12 +494,7 @@
       var gid = "fxg" + Math.round(Math.random() * 1e6);
       postureHost.innerHTML =
         '<svg viewBox="0 0 ' + W + " " + H + '" role="img" aria-label="Findings trend across scans">' +
-        "<defs><linearGradient id=\"" + gid + '" x1="0" y1="0" x2="0" y2="1">' +
-        '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.22"></stop>' +
-        '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"></stop>' +
-        "</linearGradient></defs>" +
         grid +
-        '<path d="' + area + '" fill="url(#' + gid + ')"></path>' +
         '<path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round"></path>' +
         dots +
         '<text x="' + padL + '" y="' + (H - 8) + '" font-size="10" fill="' + cssVar("--muted") + '">' + esc(labels[0]) + "</text>" +
@@ -557,7 +552,7 @@
         scansHost.innerHTML = emptyBlock("No scans yet.", "Run your first scan", "file-servers");
         return;
       }
-      var rows = historyItems.slice(-6).reverse().map(function (item) {
+      var rows = historyItems.slice(-5).reverse().map(function (item) {
         var c = counts(item);
         var totalFindings = c.critical + c.high + c.medium + c.low;
         var level = c.critical ? "CRITICAL" : c.high ? "HIGH" : c.medium ? "MEDIUM" : "LOW";
@@ -585,7 +580,7 @@
         feedHost.innerHTML = emptyBlock("No activity recorded yet.");
         return;
       }
-      feedHost.innerHTML = '<div class="fx-feed">' + events.slice(-8).reverse().map(function (ev) {
+      feedHost.innerHTML = '<div class="fx-feed">' + events.slice(-5).reverse().map(function (ev) {
         var action = String(ev.action || ev.event || "event");
         var initial = (String(ev.actor || ev.user || "S").charAt(0) || "S").toUpperCase();
         return '<div class="fx-feed-item"><span class="fx-feed-ico">' + esc(initial) + "</span>" +

@@ -19929,3 +19929,74 @@ tbody tr.row-flash { animation-duration: 800ms !important; }
   .dash-grid .col-main, .dash-grid .col-side,
   .dash-grid .col-scans, .dash-grid .col-activity { grid-column: span 12; }
 }
+
+/* ============================================================================
+   Dashboard order + sidebar head controls (operator direction, 2026-08).
+   - #overview-insights ("posture intelligence" cards) sits inside .dash-grid
+     as a full-width row between [trend|mix] and [scans|activity].
+   - Recent scans / Activity are height-capped with internal scroll.
+   - The burger returns to the sidebar HEAD (right of the logo). In the
+     collapsed rail the burger hides; hovering (or keyboard-focusing) the
+     SENTRO logo crossfades it into an expand control.
+   ============================================================================ */
+.dash-grid .dash-span { grid-column: 1 / -1; margin: 0; }
+.dash-grid .col-scans #fx-recent-scans,
+.dash-grid .col-activity #fx-activity {
+  max-height: 236px;
+  overflow-y: auto;
+}
+.dash-grid .col-scans .visual-panel,
+.dash-grid .col-activity .visual-panel { min-height: 0; }
+
+/* Burger in the brand row (right edge); hidden in the rail. */
+.brand.logo-lockup { position: relative; }
+.nav-burger {
+  margin: 0 0 0 auto !important;
+}
+body.sidebar-collapsed .nav-burger { display: none !important; }
+
+/* Rail logo-morph: the expand control sits exactly over the logo, invisible
+   until hover/focus, then the logo fades+shrinks out and the control fades in. */
+.rail-expand {
+  display: none;
+  position: absolute;
+  inset: 0;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 12px;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--muted) !important;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  z-index: 5;
+}
+.rail-expand svg {
+  width: 20px;
+  height: 20px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+body.sidebar-collapsed .rail-expand { display: flex; }
+body.sidebar-collapsed .brand-mark {
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+body.sidebar-collapsed .brand.logo-lockup:hover .brand-mark,
+body.sidebar-collapsed .brand.logo-lockup:focus-within .brand-mark {
+  opacity: 0;
+  transform: scale(.82);
+}
+body.sidebar-collapsed .brand.logo-lockup:hover .rail-expand,
+body.sidebar-collapsed .rail-expand:focus-visible {
+  opacity: 1;
+}
+.rail-expand:focus-visible { outline: none; box-shadow: var(--focus-ring) !important; }
+@media (prefers-reduced-motion: reduce) {
+  .rail-expand, body.sidebar-collapsed .brand-mark { transition: none; }
+}
