@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import os
+import random
 import unittest
 from unittest import mock
 
@@ -58,8 +59,12 @@ class TriageRecallSafetyTests(unittest.TestCase):
     otherwise the skip lost a finding."""
 
     def test_skipped_binary_has_no_findings_under_full_scan(self) -> None:
+        # Seeded, not os.urandom: lucky random bytes occasionally decode into
+        # enough finance-ish token soup to trip the heuristic context classifier,
+        # which fails the [] assertion below on a blob no real scan would see.
+        rng = random.Random(1787)
         blobs = [
-            os.urandom(9000).decode("utf-8", "replace"),
+            bytes(rng.randrange(256) for _ in range(9000)).decode("utf-8", "replace"),
             gzip.compress(b"secret ssn 111-22-3333 email x@y.com " * 400).decode("utf-8", "replace"),
             (b"\x00\x01\x02\x03" * 3000).decode("utf-8", "replace"),
         ]
