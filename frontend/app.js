@@ -7353,29 +7353,6 @@ document.querySelector("#endpoint-target-username")?.addEventListener("input", (
   updateEndpointCustomPathState();
 });
 
-// Topbar search = normal searching: typing routes straight into the Findings
-// inventory search (no popup). Enter focuses the results filter, Escape clears.
-const globalSearch = document.querySelector("#fx-search");
-const pushGlobalSearch = debounce(() => {
-  if (!globalSearch) return;
-  const q = globalSearch.value.trim();
-  switchTab("findings");
-  if (filterInput && filterInput.value.trim() !== q) {
-    filterInput.value = q;
-    filterInput.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-}, 300);
-globalSearch?.addEventListener("input", pushGlobalSearch);
-globalSearch?.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    switchTab("findings");
-    filterInput?.focus();
-  } else if (event.key === "Escape" && globalSearch.value) {
-    globalSearch.value = "";
-    pushGlobalSearch();
-  }
-});
-
 let lastInventoryQuery = "";
 filterInput.addEventListener("input", debounce(() => {
   const next = filterInput.value.trim();

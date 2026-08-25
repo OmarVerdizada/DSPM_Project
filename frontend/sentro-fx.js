@@ -297,8 +297,75 @@
     new MutationObserver(decorate).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
   });
 
-  /* The topbar search is a real input now (app.js routes it to the Findings
-     inventory search); the command palette stays on Ctrl/Cmd+K only. */
+  /* ── Topbar search: standalone inline suggestions (pages + actions, the
+     same entries the old palette suggested) anchored under the bar — no modal
+     window, and no connection to the Data-inventory search. Ctrl/Cmd+K still
+     opens the full palette. ── */
+  (function () {
+    var input = document.getElementById("fx-search");
+    var wrap = input && input.closest(".tb-search");
+    if (!input || !wrap) return;
+    var box = document.createElement("div");
+    box.className = "tb-suggest";
+    box.hidden = true;
+    box.setAttribute("role", "listbox");
+    wrap.appendChild(box);
+    var items = [], active = 0;
+
+    function close() { box.hidden = true; box.textContent = ""; items = []; active = 0; }
+    function paint() {
+      Array.prototype.forEach.call(box.children, function (c, i) {
+        c.classList.toggle("is-active", i === active);
+      });
+    }
+    function choose(en) {
+      close();
+      input.value = "";
+      input.blur();
+      en.run();
+    }
+    function render() {
+      var qv = input.value.trim().toLowerCase();
+      var entries = orderEntries(collectEntries()).filter(function (en) {
+        return !qv ||
+          en.title.toLowerCase().indexOf(qv) !== -1 ||
+          en.subtitle.toLowerCase().indexOf(qv) !== -1;
+      }).slice(0, 8);
+      items = entries; active = 0; box.textContent = "";
+      if (!entries.length) { close(); return; }
+      entries.forEach(function (en, i) {
+        var el = document.createElement("button");
+        el.type = "button";
+        el.className = "tb-suggest-item" + (i === 0 ? " is-active" : "");
+        el.setAttribute("role", "option");
+        var k = document.createElement("span");
+        k.className = "tb-suggest-k";
+        k.textContent = en.isRecent && !qv ? "Recent" : en.kind;
+        var t = document.createElement("span");
+        t.className = "tb-suggest-t";
+        t.textContent = en.title;
+        var s = document.createElement("small");
+        s.textContent = en.subtitle;
+        el.appendChild(k); el.appendChild(t);
+        if (en.subtitle) el.appendChild(s);
+        el.addEventListener("mousedown", function (e) { e.preventDefault(); choose(en); });
+        el.addEventListener("mouseenter", function () { active = i; paint(); });
+        box.appendChild(el);
+      });
+      box.hidden = false;
+    }
+
+    input.addEventListener("input", render);
+    input.addEventListener("focus", render);
+    input.addEventListener("blur", function () { setTimeout(close, 140); });
+    input.addEventListener("keydown", function (e) {
+      if (box.hidden) { if (e.key === "ArrowDown") { render(); e.preventDefault(); } return; }
+      if (e.key === "ArrowDown") { e.preventDefault(); active = (active + 1) % items.length; paint(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); active = (active + items.length - 1) % items.length; paint(); }
+      else if (e.key === "Enter") { e.preventDefault(); if (items[active]) choose(items[active]); }
+      else if (e.key === "Escape") { close(); input.blur(); }
+    });
+  })();
 
   /* ── v3: "+ New Scan" dropdown (buttons use data-tab-jump,
      handled by app.js's own delegated click listener) ────── */
