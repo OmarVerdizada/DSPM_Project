@@ -86,9 +86,16 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn("remediation-summary", risk_panel)
         self.assertIn("remediation-workspace-status", risk_panel)
         self.assertIn("remediation-queue-panel", risk_panel)
+        # The queue and exposure insights are full-width rows BELOW the
+        # analytics grid (main column + side rail) - they used to sit inside
+        # the narrow main column and left the rail's dead space beside them.
         self.assertLess(
-            risk_panel.index('id="remediation-workflow"'),
             risk_panel.index('class="risk-analytics-side"'),
+            risk_panel.index("remediation-queue-panel"),
+        )
+        self.assertLess(
+            risk_panel.index("remediation-queue-panel"),
+            risk_panel.index("exposure-insights"),
         )
         self.assertIn("remediation-row", self.app_js)
         self.assertIn("priority-file-row", self.app_js)

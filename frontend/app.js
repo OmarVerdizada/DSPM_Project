@@ -2674,9 +2674,11 @@ function renderInventoryFrameworkFilter(files = latestFiles) {
     `;
   }).join("");
 }
-// Without this the filter is invisible on a fresh install until the first scan:
-// only clearResultsFilter() and the scan-data pipeline call the renderer.
+// Without these a fresh install shows an empty framework filter and count-less
+// risk pills until the first scan: only clearResultsFilter() and the scan-data
+// pipeline call the renderers, and the pill ovals read counts from data-count.
 renderInventoryFrameworkFilter();
+renderInventoryControlState();
 
 function getFileFrameworks(file = {}) {
   const frameworks = new Set();

@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=198" />
+    <link rel="stylesheet" href="/static/styles.css?v=199" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -648,14 +648,34 @@
                 </div>
                 <div id="priority-risk-files"></div>
               </section>
-              <section class="visual-panel remediation-queue-panel">
+              
+              
+            </div>
+            <aside class="risk-analytics-side">
+              <section class="visual-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-activity"/></svg></span>Posture trend</h4>
+                </div>
+                <div id="posture-trend" class="posture-trend"></div>
+              </section>
+              <section class="visual-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-git-compare"/></svg></span>Scan comparison</h4>
+                </div>
+                <div id="scan-comparison"></div>
+              </section>
+            </aside>
+          </div>
+
+          <section class="visual-panel remediation-queue-panel">
                 <div class="panel-title">
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Remediation queue</h4>
                   <span>Highest priority first</span>
                 </div>
                 <div id="remediation-workflow" class="remediation-workflow"></div>
               </section>
-              <section class="visual-panel exposure-insights">
+
+          <section class="visual-panel exposure-insights">
                 <div class="panel-title">
                   <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-open-dot"/></svg></span>Exposure insights</h4>
                 </div>
@@ -681,22 +701,7 @@
                   </div>
                 </div>
               </section>
-            </div>
-            <aside class="risk-analytics-side">
-              <section class="visual-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-activity"/></svg></span>Posture trend</h4>
-                </div>
-                <div id="posture-trend" class="posture-trend"></div>
-              </section>
-              <section class="visual-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-git-compare"/></svg></span>Scan comparison</h4>
-                </div>
-                <div id="scan-comparison"></div>
-              </section>
-            </aside>
-          </div>
+
           <div id="executive-top-files" class="top-files-grid hidden" aria-hidden="true"></div>
         </section>
 
@@ -1349,11 +1354,11 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=150"></script>
+    <script src="/static/app.js?v=151"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
-    <script src="/static/sentro-fx.js?v=10" defer></script>
+    <script src="/static/sentro-fx.js?v=11" defer></script>
   </body>
 </html>

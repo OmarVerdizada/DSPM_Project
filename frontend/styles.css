@@ -20472,3 +20472,68 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   margin: 0 !important;
   align-self: center !important;
 }
+
+
+/* == Data inventory tidy, round 3 ================================= */
+/* Framework count: a compact centered chip immune to baseline/line-height
+   drift (it used to hang below the pill's centerline). */
+:root:root #inventory-workspace .inventory-framework-option b {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 16px !important;
+  min-width: 16px;
+  padding: 0 5px !important;
+  border-radius: 9px;
+  font-size: 10.5px !important;
+  line-height: 1 !important;
+  margin: 0 !important;
+}
+/* Risk-pill count oval: never paint an empty oval when the count attribute
+   is missing (app.js also seeds data-count="0" on boot now). */
+:root:root .risk-filter:not([data-count])::after { content: none !important; }
+
+/* Topbar search: the input drew its own border + background inside the
+   .tb-search shell - a box inside a box, worse on focus. The shell is the
+   only visible field now. */
+:root:root .tb-search input,
+:root:root .tb-search input:focus,
+:root:root .tb-search input:focus-visible {
+  border: 0 !important;
+  outline: none !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+/* Suggestion rows: kind chip and title sit together on the left; the
+   destination hint keeps to the right edge, muted. */
+:root:root .tb-suggest-item {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 10px !important;
+  width: 100%;
+  text-align: left !important;
+}
+:root:root .tb-suggest-item .tb-suggest-k { flex: 0 0 auto; }
+:root:root .tb-suggest-item .tb-suggest-t { flex: 0 1 auto; margin: 0 !important; }
+:root:root .tb-suggest-item small { margin-left: auto !important; color: var(--muted); }
+
+/* Empty-state table cells: display:flex broke the colspan - the cell
+   shrank to half the table and its message sat off-center. Table-cell +
+   centered block content spans the full row again. */
+:root:root td.empty {
+  display: table-cell !important;
+  text-align: center !important;
+  vertical-align: middle;
+}
+:root:root td.empty::before { display: block; margin: 0 auto 14px; }
+
+/* Findings: the search-results table gets the widest, tallest area the
+   tab can give it. */
+:root:root #tab-findings { padding-left: 16px !important; padding-right: 16px !important; }
+:root:root #inventory-workspace .inventory-table-wrap {
+  max-height: calc(100vh - 230px) !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+:root:root #inventory-workspace .inventory-table-wrap table { width: 100%; }

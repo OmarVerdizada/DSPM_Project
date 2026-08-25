@@ -595,31 +595,35 @@
         low: kpiValue("low-count"),
       };
       var total = SEVS.reduce(function (sum, s) { return sum + values[s]; }, 0);
-      var R = 62, C = 2 * Math.PI * R, cx = 75, cy = 75;
-      var segments = "";
-      if (total === 0) {
-        segments = '<circle cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none" stroke="' + cssVar("--line") + '" stroke-width="14"></circle>';
-      } else {
-        var offset = 0;
+      var R = 58, C = 2 * Math.PI * R, cx = 75, cy = 75;
+      /* Quiet full-circle track behind the data; dotted when there is nothing
+         to show so the empty state reads as "waiting", not "broken". */
+      var segments = '<circle cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none" stroke="' + cssVar("--line") +
+        '" stroke-width="' + (total === 0 ? 3 : 8) + '"' +
+        (total === 0 ? ' stroke-dasharray="2 8" stroke-linecap="round" opacity=".9"' : ' opacity=".45"') + "></circle>";
+      if (total > 0) {
+        var offset = 0, GAP = 4;
         SEVS.forEach(function (sev) {
           if (!values[sev]) return;
           var frac = values[sev] / total;
+          var arc = Math.max(frac * C - GAP, 2);
           segments += '<circle data-sev="' + sev + '" cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none" stroke="' + sevColor(sev) +
-            '" stroke-width="14" stroke-dasharray="' + (frac * C - (frac * C > 3 ? 3 : 0)).toFixed(2) + " " + C.toFixed(2) +
-            '" stroke-dashoffset="' + (-offset * C).toFixed(2) + '" transform="rotate(-90 ' + cx + " " + cy + ')"></circle>';
+            '" stroke-width="12" stroke-linecap="round" stroke-dasharray="' + arc.toFixed(2) + " " + C.toFixed(2) +
+            '" stroke-dashoffset="' + (-(offset * C + GAP / 2)).toFixed(2) + '" transform="rotate(-90 ' + cx + " " + cy + ')">' +
+            "<title>" + sev.charAt(0).toUpperCase() + sev.slice(1) + ": " + values[sev] + "</title></circle>";
           offset += frac;
         });
       }
       var legend = SEVS.map(function (sev) {
         var pct = total ? Math.round((values[sev] / total) * 100) : 0;
         return '<div data-sev="' + sev + '"><i style="background:' + sevColor(sev) + '"></i>' +
-          sev.charAt(0).toUpperCase() + sev.slice(1) + "<b>" + (total ? pct + "%" : "0") + "</b></div>";
+          sev.charAt(0).toUpperCase() + sev.slice(1) + "<b>" + (total ? values[sev] + " · " + pct + "%" : "0") + "</b></div>";
       }).join("");
       donutHost.innerHTML =
         '<svg width="150" height="150" viewBox="0 0 150 150" role="img" aria-label="Findings by severity">' + segments +
-        '<text x="75" y="71" text-anchor="middle" font-size="24" font-weight="600" fill="' + cssVar("--text") + '">' + total + "</text>" +
-        '<text x="75" y="90" text-anchor="middle" font-size="10.5" fill="' + cssVar("--muted") + '">' +
-        (total === 0 ? "no findings" : "findings") + "</text></svg>" +
+        '<text x="75" y="72" text-anchor="middle" font-size="27" font-weight="700" fill="' + cssVar("--text") + '">' + total + "</text>" +
+        '<text x="75" y="91" text-anchor="middle" font-size="10" letter-spacing=".04em" fill="' + cssVar("--muted") + '">' +
+        (total === 0 ? "no findings yet" : "findings") + "</text></svg>" +
         '<div class="fx-legend">' + legend + "</div>";
     }
 
