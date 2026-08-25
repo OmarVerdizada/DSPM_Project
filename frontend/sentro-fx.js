@@ -430,6 +430,19 @@
     var historyItems = [];
     var postureMode = "all";
 
+    /* Severity mix is a drill-down: a segment or legend row opens the
+       Data inventory on Findings filtered to that severity (center = all). */
+    if (donutHost) {
+      donutHost.addEventListener("click", function (event) {
+        var hit = event.target.closest ? event.target.closest("[data-sev]") : null;
+        var sev = hit ? hit.getAttribute("data-sev") : "";
+        if (typeof window.switchTab !== "function") return;
+        window.switchTab("inventory");
+        var btn = document.querySelector('[data-risk-filter="' + (sev ? sev.toUpperCase() : "ALL") + '"]');
+        if (btn) btn.click();
+      });
+    }
+
     function cssVar(name) {
       return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#4f46e5";
     }
@@ -591,7 +604,7 @@
         SEVS.forEach(function (sev) {
           if (!values[sev]) return;
           var frac = values[sev] / total;
-          segments += '<circle cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none" stroke="' + sevColor(sev) +
+          segments += '<circle data-sev="' + sev + '" cx="' + cx + '" cy="' + cy + '" r="' + R + '" fill="none" stroke="' + sevColor(sev) +
             '" stroke-width="14" stroke-dasharray="' + (frac * C - (frac * C > 3 ? 3 : 0)).toFixed(2) + " " + C.toFixed(2) +
             '" stroke-dashoffset="' + (-offset * C).toFixed(2) + '" transform="rotate(-90 ' + cx + " " + cy + ')"></circle>';
           offset += frac;
@@ -599,7 +612,7 @@
       }
       var legend = SEVS.map(function (sev) {
         var pct = total ? Math.round((values[sev] / total) * 100) : 0;
-        return '<div><i style="background:' + sevColor(sev) + '"></i>' +
+        return '<div data-sev="' + sev + '"><i style="background:' + sevColor(sev) + '"></i>' +
           sev.charAt(0).toUpperCase() + sev.slice(1) + "<b>" + (total ? pct + "%" : "0") + "</b></div>";
       }).join("");
       donutHost.innerHTML =

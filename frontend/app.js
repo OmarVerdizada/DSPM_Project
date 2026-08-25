@@ -7353,6 +7353,33 @@ document.querySelector("#endpoint-target-username")?.addEventListener("input", (
   updateEndpointCustomPathState();
 });
 
+// Risk-summary tiles are drill-downs: clicking one opens Findings, scrolls to
+// the Data inventory and applies the matching risk filter (Total -> All).
+const METRIC_FILTERS = { critical: "CRITICAL", high: "HIGH", medium: "MEDIUM", low: "LOW", protected: "PROTECTED", total: "ALL" };
+document.addEventListener("click", (event) => {
+  const tile = event.target.closest("#tab-overview .metrics .metric");
+  if (!tile) return;
+  const key = Object.keys(METRIC_FILTERS).find((k) => tile.classList.contains(k));
+  if (!key) return;
+  switchTab("inventory");
+  document.querySelector(`[data-risk-filter="${METRIC_FILTERS[key]}"]`)?.click();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const tile = event.target.closest?.("#tab-overview .metrics .metric");
+  if (!tile) return;
+  event.preventDefault();
+  tile.click();
+});
+const armMetricTiles = () => {
+  document.querySelectorAll("#tab-overview .metrics .metric").forEach((tile) => {
+    tile.setAttribute("role", "button");
+    tile.tabIndex = 0;
+  });
+};
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", armMetricTiles);
+else armMetricTiles();
+
 let lastInventoryQuery = "";
 filterInput.addEventListener("input", debounce(() => {
   const next = filterInput.value.trim();

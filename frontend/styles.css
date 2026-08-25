@@ -20304,3 +20304,115 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   margin: 2px 0 0 !important;
   font-size: 11px !important;
 }
+
+
+/* == Dashboard drill-down + fit pass (2026-08) ==================== */
+/* Recent scans / Activity: the generic `table { min-width:1180px }` rule
+   captured .fx-table and forced a 951px card to clip a 1180px table. These
+   tables are summaries - they fit their card and ellipsize long scan ids. */
+#fx-recent-scans .fx-table,
+#fx-activity .fx-table {
+  min-width: 0 !important;
+  width: 100% !important;
+  table-layout: fixed;
+}
+#fx-recent-scans .fx-table th,
+#fx-recent-scans .fx-table td,
+#fx-activity .fx-table th,
+#fx-activity .fx-table td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#fx-recent-scans .fx-table th:nth-child(1) { width: 38%; }
+#fx-recent-scans .fx-table th:nth-child(2) { width: 26%; }
+#fx-recent-scans .fx-table th:nth-child(3) { width: 16%; }
+#fx-recent-scans .fx-table th:nth-child(4) { width: 20%; }
+
+/* Risk-summary tiles and the severity mix are drill-downs into the Data
+   inventory - show it. */
+#tab-overview .metrics .metric {
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+#tab-overview .metrics .metric:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent);
+}
+#tab-overview .metrics .metric:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+#tab-overview .metrics .metric:active { transform: translateY(0); }
+#fx-severity-donut [data-sev] { cursor: pointer; }
+#fx-severity-donut .fx-legend [data-sev]:hover { border-color: var(--accent); }
+#fx-severity-donut svg [data-sev]:hover { opacity: .82; }
+
+/* == Findings facet row: expanded but narrow, never stacked ======== */
+/* The label text ("Source") must sit on the SAME line as its select, and a
+   framework pill is one line ("GDPR 3"), at every viewport width. The row
+   itself wraps between controls; the controls never wrap inside. */
+#inventory-workspace .inventory-facet-row {
+  display: flex !important;
+  flex-flow: row wrap !important;
+  align-items: center !important;
+  gap: 8px 14px !important;
+}
+#inventory-workspace .inventory-facet-row > label {
+  display: inline-flex !important;
+  flex-flow: row nowrap !important;
+  align-items: center !important;
+  gap: 8px !important;
+  white-space: nowrap !important;
+  width: auto !important;
+  min-width: 0 !important;
+  flex: 0 1 auto !important;
+  margin: 0 !important;
+}
+#inventory-workspace .inventory-facet-row .facet-shell {
+  display: inline-flex !important;
+  flex-flow: row nowrap !important;
+  align-items: center !important;
+  width: auto !important;
+  min-width: 0 !important;
+}
+#inventory-workspace .inventory-facet-row .facet-shell select {
+  width: auto !important;
+  min-width: 132px !important;
+  max-width: 220px !important;
+}
+#inventory-workspace .inventory-framework-filter {
+  display: inline-flex !important;
+  flex-flow: row wrap !important;
+  align-items: center !important;
+  gap: 6px 8px !important;
+  width: auto !important;
+  max-width: 100% !important;
+}
+#inventory-workspace .inventory-framework-filter > span {
+  display: inline-flex !important;
+  flex-flow: row nowrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  white-space: nowrap !important;
+}
+#inventory-workspace .inventory-framework-options {
+  display: inline-flex !important;
+  flex-flow: row wrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  width: auto !important;
+}
+#inventory-workspace .inventory-framework-option {
+  display: inline-flex !important;
+  flex-flow: row nowrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  white-space: nowrap !important;
+  width: auto !important;
+}
+#inventory-workspace .inventory-framework-option span,
+#inventory-workspace .inventory-framework-option b {
+  display: inline !important;
+  white-space: nowrap !important;
+}
