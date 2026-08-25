@@ -21606,6 +21606,16 @@ body.sidebar-collapsed .side-nav .tab .nav-ico {
   height: 20px !important;
   display: block !important;
 }
+/* JUST the icons: two older rail layers rendered text badges via ::before
+   (attr(data-tab) full names, then attr(data-nav-icon) two-letter codes like
+   "DB"/"FS") on top of the SVG icons. Killed for good. */
+body.sidebar-collapsed .side-nav .tab::before,
+body.sidebar-collapsed .side-nav .tab::after,
+body.sidebar-collapsed .side-nav .tab.active::before,
+body.sidebar-collapsed .side-nav .tab.active::after {
+  content: none !important;
+  display: none !important;
+}
 /* One responsive model at EVERY width: the sidebar stays in flow — expanded
    column or 68px icon rail. The old <=860 off-canvas slide-out is overridden. */
 .app-shell > .sidebar,
