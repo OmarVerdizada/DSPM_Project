@@ -2803,7 +2803,7 @@ function resolveTabName(tabName) {
 // Redesign P3: the sidebar shows 6 destinations while the tab panels keep their
 // original names (old data-tab-jump deep links stay valid). Merged destinations
 // own several member panels; navDestination() maps any panel to the sidebar
-// button that should light up for it. In-page .subnav strips switch between
+// button that should light up for it. Sidebar .nav-sub groups switch between
 // members via the existing data-tab-jump wiring.
 const NAV_DESTINATIONS = {
   overview: "overview",
