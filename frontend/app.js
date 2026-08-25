@@ -2674,6 +2674,9 @@ function renderInventoryFrameworkFilter(files = latestFiles) {
     `;
   }).join("");
 }
+// Without this the filter is invisible on a fresh install until the first scan:
+// only clearResultsFilter() and the scan-data pipeline call the renderer.
+renderInventoryFrameworkFilter();
 
 function getFileFrameworks(file = {}) {
   const frameworks = new Set();

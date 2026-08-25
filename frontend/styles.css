@@ -20416,3 +20416,29 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   display: inline !important;
   white-space: nowrap !important;
 }
+
+
+/* == Tidy pass: decorations must never overlap their text ========== */
+/* Posture intelligence cards: the compact-padding rule pulled text under
+   the absolutely-positioned 34px icon badge. Keep the card compact but
+   start text to the right of the badge. */
+:root:root #overview-insights .insight-card {
+  padding: 12px 14px 12px 58px !important;
+}
+/* Inventory context chips: same story with the 15px status dot at
+   left 14px - "Visible" rendered as "V●SIBLE". Clear the dot. */
+:root:root #inventory-context-metrics > div,
+:root:root #inventory-workspace #inventory-context-metrics > div {
+  padding-left: 36px !important;
+}
+/* Framework pills: the faux-checkbox glyph plus SHOUTING-CAPS labels made
+   the row noisy. The pill's active accent already carries the toggle
+   state; the label reads as authored ("Standard scan", "GDPR"). */
+:root:root #inventory-workspace .inventory-framework-option::before,
+:root:root #inventory-workspace .inventory-framework-option::after {
+  content: none !important;
+}
+:root:root #inventory-workspace .inventory-framework-option span {
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
