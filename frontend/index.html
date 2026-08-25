@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=183" />
+    <link rel="stylesheet" href="/static/styles.css?v=190" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -115,11 +115,11 @@
       <main>
         <section class="topbar">
           <div class="topbar-left">
-            <button type="button" id="fx-search" class="tb-search" aria-label="Search or type a command">
+            <div class="tb-search" role="search">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-              <span>Search or type command...</span>
+              <input id="fx-search" type="search" placeholder="Search files, findings, sources..." aria-label="Search data inventory" autocomplete="off" />
               <span class="tb-kbd" aria-hidden="true"><kbd>Ctrl</kbd><kbd>K</kbd></span>
-            </button>
+            </div>
           </div>
           <div class="topbar-actions">
             <div class="tb-newscan" id="fx-newscan">
@@ -1349,11 +1349,11 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=145"></script>
+    <script src="/static/app.js?v=146"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
-    <script src="/static/sentro-fx.js?v=7" defer></script>
+    <script src="/static/sentro-fx.js?v=8" defer></script>
   </body>
 </html>

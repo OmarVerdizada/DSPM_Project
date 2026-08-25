@@ -297,10 +297,8 @@
     new MutationObserver(decorate).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
   });
 
-  /* ── v3: search pill opens the command palette ─────────── */
-  document.getElementById("fx-search")?.addEventListener("click", function () {
-    openPalette();
-  });
+  /* The topbar search is a real input now (app.js routes it to the Findings
+     inventory search); the command palette stays on Ctrl/Cmd+K only. */
 
   /* ── v3: "+ New Scan" dropdown (buttons use data-tab-jump,
      handled by app.js's own delegated click listener) ────── */
