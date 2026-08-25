@@ -9,65 +9,11 @@
   "use strict";
 
   var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  var finePointer = window.matchMedia("(pointer: fine)").matches;
 
-  var lerp = function (a, b, t) { return a + (b - a) * t; };
-
-  /* ── Custom cursor (ring + dot) + ambient spotlight ────── */
-  if (finePointer && !reduced) {
-    document.documentElement.classList.add("sentro-fx");
-
-    var ring = document.createElement("div");
-    ring.className = "mc-cursor-ring";
-    ring.setAttribute("aria-hidden", "true");
-    var dot = document.createElement("div");
-    dot.className = "mc-cursor-dot";
-    dot.setAttribute("aria-hidden", "true");
-    var spot = document.createElement("div");
-    spot.className = "mc-spotlight";
-    spot.setAttribute("aria-hidden", "true");
-    document.body.appendChild(spot);
-    document.body.appendChild(ring);
-    document.body.appendChild(dot);
-
-    var mx = innerWidth / 2, my = innerHeight / 2;
-    var rx = mx, ry = my, sx = mx, sy = my;
-
-    addEventListener("mousemove", function (e) {
-      mx = e.clientX;
-      my = e.clientY;
-      dot.style.left = mx + "px";
-      dot.style.top = my + "px";
-    }, { passive: true });
-
-    var INTERACTIVE = "a, button, select, input, textarea, label, [data-cursor-hover], .tab, tbody tr";
-    addEventListener("mouseover", function (e) {
-      if (e.target && e.target.closest && e.target.closest(INTERACTIVE)) {
-        ring.classList.add("is-hover");
-      } else {
-        ring.classList.remove("is-hover");
-      }
-    }, { passive: true });
-
-    addEventListener("mousedown", function () {
-      ring.style.transform = "translate(-50%, -50%) scale(0.8)";
-    });
-    addEventListener("mouseup", function () {
-      ring.style.transform = "translate(-50%, -50%) scale(1)";
-    });
-
-    (function frame() {
-      rx = lerp(rx, mx, 0.16);
-      ry = lerp(ry, my, 0.16);
-      ring.style.left = rx + "px";
-      ring.style.top = ry + "px";
-      sx = lerp(sx, mx, 0.08);
-      sy = lerp(sy, my, 0.08);
-      spot.style.background =
-        "radial-gradient(420px circle at " + sx + "px " + sy + "px, rgba(0,217,255,0.03), transparent 65%)";
-      requestAnimationFrame(frame);
-    })();
-  }
+  /* P5 motion budget: the custom cursor + ambient mouse spotlight are removed.
+     The skin layers had already hidden them with display:none — the code was
+     burning a permanent rAF loop and three mousemove listeners for nothing.
+     A professional console keeps the native pointer. */
 
   /* ── API health dot: mirror the text app.js writes ─────── */
   var health = document.getElementById("health");

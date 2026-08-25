@@ -21665,3 +21665,37 @@ body.sidebar-collapsed .app-shell > .sidebar {
 }
 .finding-queue-table th[data-sort][aria-sort="ascending"]::after { content: "\25B4"; }
 .finding-queue-table th[data-sort][aria-sort="descending"]::after { content: "\25BE"; }
+
+/* ============================================================================
+   Redesign P5 — motion budget (Track U-D).
+
+   One hero motion: the scan-progress pulse. The KPI count-up stays. Everything
+   else is a capped, non-gating micro-interaction: entrances <=240ms, chart
+   draw-ins <=480ms, staggers compressed so no navigation waits half a second
+   for content to fade in. The global prefers-reduced-motion kill-switches
+   (earlier in this file) still zero all of it. The custom cursor + mouse
+   spotlight JS is deleted in sentro-fx.js.
+   ============================================================================ */
+/* Entrances: metric cards, workspace/command-bar rise, tab-switch cascade. */
+.metric { animation-duration: 240ms !important; }
+.workspace,
+.inventory-command-bar > * { animation-duration: 280ms !important; }
+.sidebar { animation-duration: 320ms !important; }
+.topbar { animation-duration: 320ms !important; animation-delay: .04s !important; }
+.tab-panel.active > * { animation-duration: 240ms !important; }
+.tab-panel.active > *:nth-child(1) { animation-delay: .02s !important; }
+.tab-panel.active > *:nth-child(2) { animation-delay: .05s !important; }
+.tab-panel.active > *:nth-child(3) { animation-delay: .08s !important; }
+.tab-panel.active > *:nth-child(4) { animation-delay: .11s !important; }
+.tab-panel.active > *:nth-child(5) { animation-delay: .14s !important; }
+.tab-panel.active > *:nth-child(n+6) { animation-delay: .17s !important; }
+.metrics .metric:nth-child(1) { animation-delay: .04s !important; }
+.metrics .metric:nth-child(2) { animation-delay: .07s !important; }
+.metrics .metric:nth-child(3) { animation-delay: .10s !important; }
+.metrics .metric:nth-child(4) { animation-delay: .13s !important; }
+/* Chart draw-ins: half the time reads the same. */
+.donut-segment { animation-duration: 480ms !important; }
+.meter-needle { animation-duration: 480ms !important; }
+.risk-stack span { animation-duration: 480ms !important; }
+/* Row-change flash: a decay signal, shortened. */
+tbody tr.row-flash { animation-duration: 800ms !important; }
