@@ -20,7 +20,6 @@ const endpointCustomExtensionInput = document.querySelector("#endpoint-custom-ex
 const endpointAddCustomExtensionBtn = document.querySelector("#endpoint-add-custom-extension-btn");
 const toastHost = document.querySelector("#toast-host");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
-const menuOpenToggle = document.querySelector("#menu-open-toggle");
 const protectedCount = document.querySelector("#protected-count");
 const health = document.querySelector("#health");
 const filterInput = document.querySelector("#filter");
@@ -7563,7 +7562,6 @@ function setSidebarCollapsed(collapsed) {
     btn.setAttribute("aria-expanded", String(!collapsed));
     btn.title = collapsed ? "Expand navigation" : "Collapse navigation";
   });
-  menuOpenToggle?.setAttribute("aria-expanded", String(!collapsed));
   safeSessionSet("dspm-sidebar-collapsed", collapsed ? "1" : "");
 }
 
@@ -7572,7 +7570,6 @@ sidebarToggles.forEach((btn) => {
     setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
   });
 });
-menuOpenToggle?.addEventListener("click", () => setSidebarCollapsed(false));
 refreshExecutiveBtn.addEventListener("click", () => {
   loadHistory().catch((error) => setStatus(`Executive dashboard failed: ${error.message}`));
 });
