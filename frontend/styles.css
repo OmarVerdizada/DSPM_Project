@@ -20153,3 +20153,77 @@ body.sidebar-collapsed .rail-expand:focus-visible {
   min-height: 0 !important;
 }
 #inventory-workspace .inventory-framework-filter { order: 5; }
+
+/* ============================================================================
+   Sidebar parity + slide (operator direction, 2026-08):
+   - the brand row keeps ONE height in both states so menu items stay put
+     (they slid 24px up on collapse);
+   - expanded<->collapsed animates (width slide, 220ms);
+   - the caret is a pure expand toggle with its own hit area; rotation follows
+     the OPEN state, not the active page.
+   ============================================================================ */
+.brand.logo-lockup {
+  min-height: 56px !important;
+  align-items: center;
+  padding: 0 0 12px !important;
+  margin: 0 0 4px !important;
+}
+body.sidebar-collapsed .brand.logo-lockup {
+  min-height: 56px !important;
+  padding: 0 0 12px !important;
+  margin: 0 0 4px !important;
+}
+.side-nav { gap: 4px !important; }
+body.sidebar-collapsed .side-nav { gap: 4px !important; }
+.app-shell { transition: grid-template-columns 220ms ease; }
+.app-shell > .sidebar {
+  transition: width 220ms ease, min-width 220ms ease, max-width 220ms ease, padding 220ms ease;
+}
+.side-nav .tab .nav-caret {
+  width: 22px !important;
+  height: 22px !important;
+  padding: 4px;
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+.side-nav .tab .nav-caret:hover {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  opacity: 1;
+}
+.side-nav .tab.active .nav-caret { transform: none; }
+.side-nav .tab.expanded .nav-caret { transform: rotate(180deg); opacity: .85; }
+@media (prefers-reduced-motion: reduce) {
+  .app-shell, .app-shell > .sidebar { transition: none; }
+}
+
+/* Findings controls: distinct NARROW rows, nothing crammed together; the
+   results area takes the full width. */
+#inventory-workspace .inventory-command-bar {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  gap: 8px !important;
+}
+#inventory-workspace .risk-filter-group { display: flex !important; flex-wrap: wrap; }
+#inventory-workspace .inventory-facet-row { display: flex !important; flex-wrap: wrap; gap: 10px !important; }
+#inventory-workspace .inventory-context-metrics { justify-content: flex-start; }
+#inventory-workspace .inventory-table-wrap { width: 100% !important; max-width: none !important; }
+#inventory-workspace .inventory-table { width: 100% !important; }
+/* Brand-row parity at v113-polish specificity: one height, one rhythm,
+   in BOTH sidebar states, so the menu never slides vertically on collapse. */
+.app-shell > .sidebar { padding: 16px 14px !important; }
+body.sidebar-collapsed .app-shell > .sidebar { padding: 16px 10px !important; }
+.app-shell > .sidebar .brand.logo-lockup,
+body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
+  box-sizing: border-box !important;
+  height: 56px !important;
+  min-height: 56px !important;
+  padding: 0 0 12px !important;
+  margin: 0 0 8px !important;
+  align-items: center !important;
+  display: flex !important;
+}
+body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
+  justify-content: center !important;
+}
+:root:root .app-shell > .sidebar .brand.logo-lockup { margin: 0 0 8px !important; }

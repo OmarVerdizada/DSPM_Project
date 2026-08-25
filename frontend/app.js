@@ -2822,6 +2822,43 @@ function navDestination(tabName) {
   return NAV_DESTINATIONS[resolveTabName(tabName)] || "overview";
 }
 
+// Sidebar groups: the caret is a pure expand/collapse toggle (no navigation);
+// clicking the destination name/icon navigates and auto-opens its group.
+// Open state is independent of the active page, so an operator can peek into
+// another destination's members without leaving the current one.
+const navOpenGroups = new Set();
+let currentNavTab = "overview";
+
+function syncNavGroups() {
+  document.querySelectorAll(".side-nav .nav-sub").forEach((group) => {
+    const open = navOpenGroups.has(group.dataset.navSub);
+    group.classList.toggle("open", open);
+    group.setAttribute("aria-hidden", open ? "false" : "true");
+    group.querySelectorAll(".nav-sub-link").forEach((link) => {
+      const isCurrent = open && resolveTabName(link.dataset.tabJump) === currentNavTab;
+      link.classList.toggle("active", isCurrent);
+      link.setAttribute("aria-current", isCurrent ? "page" : "false");
+      link.tabIndex = open ? 0 : -1;
+    });
+  });
+  document.querySelectorAll(".side-nav .tab").forEach((tab) => {
+    tab.classList.toggle("expanded", navOpenGroups.has(tab.dataset.tab));
+  });
+}
+
+// Capture phase so the caret wins before the tab's own navigation handler.
+document.addEventListener("click", (event) => {
+  const caret = event.target.closest(".nav-caret");
+  if (!caret) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const dest = caret.closest(".tab")?.dataset.tab;
+  if (!dest) return;
+  if (navOpenGroups.has(dest)) navOpenGroups.delete(dest);
+  else navOpenGroups.add(dest);
+  syncNavGroups();
+}, true);
+
 function hydrateNavigation() {
   const icons = {
     overview: "DB",
@@ -2859,20 +2896,10 @@ function switchTab(tabName) {
     tab.classList.toggle("active", isActive);
     tab.setAttribute("aria-current", isActive ? "page" : "false");
   });
-  // Sidebar sub-navigation: the active destination expands its members as
-  // indented sub-links under its entry (animated via .open); every other
-  // group stays collapsed.
-  document.querySelectorAll(".side-nav .nav-sub").forEach((group) => {
-    const open = group.dataset.navSub === destination;
-    group.classList.toggle("open", open);
-    group.setAttribute("aria-hidden", open ? "false" : "true");
-    group.querySelectorAll(".nav-sub-link").forEach((link) => {
-      const isCurrent = open && resolveTabName(link.dataset.tabJump) === resolvedTab;
-      link.classList.toggle("active", isCurrent);
-      link.setAttribute("aria-current", isCurrent ? "page" : "false");
-      link.tabIndex = open ? 0 : -1;
-    });
-  });
+  // Navigating auto-opens the destination's group (caret can close it later).
+  navOpenGroups.add(destination);
+  currentNavTab = resolvedTab;
+  syncNavGroups();
   tabPanels.forEach((panel) => panel.classList.toggle("active", panel === activePanel));
 
   activePanel.animate(
