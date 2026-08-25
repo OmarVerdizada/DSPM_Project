@@ -23,9 +23,12 @@ class HardTimeoutTests(unittest.TestCase):
         self.assertLess(time.perf_counter() - start, 15.0)
 
     def test_catastrophic_regexes_flags_only_the_bad_pattern(self) -> None:
-        # Budgets sit above the ~1s spawn cost so the safe pattern completes.
+        # Budgets sit well above the ~1s spawn cost so the safe pattern
+        # completes even on a loaded machine: at 2.5s a full-suite run could
+        # starve the worker's spawn past the budget and flag the safe pattern
+        # too. The bad pattern burns the whole per-pattern budget either way.
         bad = preemptible.catastrophic_regexes(
-            [(r"(a+)+$", 0), (r"\bpayroll\b", 0)], batch_timeout=2.5, per_pattern_timeout=2.5
+            [(r"(a+)+$", 0), (r"\bpayroll\b", 0)], batch_timeout=6.0, per_pattern_timeout=4.0
         )
         self.assertIn(r"(a+)+$", bad)
         self.assertNotIn(r"\bpayroll\b", bad)
