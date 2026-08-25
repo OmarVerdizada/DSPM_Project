@@ -51,6 +51,28 @@ def pytest_configure(config: pytest.Config) -> None:
             returncode=2,
         )
 
+    # SQLite: give the whole session its own throwaway database so no test can
+    # ever write into the developer's real data/dspm.sqlite. Modules that
+    # manage their own temp DB still do; the ambient-relying modules (they
+    # create tenants like gf-*/rs-*/victim-* directly) land here instead -
+    # before this, every full-suite run leaked ~40 junk tenants into the dev
+    # store. Set DSPM_TEST_KEEP_DB=1 to opt out (e.g. to debug against a copy).
+    if not db.is_postgres() and not os.getenv("DSPM_TEST_KEEP_DB"):
+        import tempfile
+        from pathlib import Path as _Path
+        from backend import store as _store
+        from backend import security as _security
+        _session_db = _Path(tempfile.mkdtemp(prefix="sentro-test-session-")) / "suite.sqlite"
+        os.environ["DSPM_DB_PATH"] = str(_session_db)
+        _store.DB_PATH = _session_db
+        _store.init_db()
+        try:
+            _store.create_tenant("default", "Default")
+        except Exception:
+            pass
+        _security.ensure_default_admin()
+
+
 # Every application table (single TRUNCATE; there are no FK constraints between
 # them). RESTART IDENTITY resets the audit_events / alert_events IDENTITY
 # sequences so per-test id-ordering assertions are deterministic.
