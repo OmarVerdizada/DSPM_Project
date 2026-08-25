@@ -19910,3 +19910,22 @@ body.sidebar-collapsed .app-shell > .sidebar {
 .risk-stack span { animation-duration: 480ms !important; }
 /* Row-change flash: a decay signal, shortened. */
 tbody tr.row-flash { animation-duration: 800ms !important; }
+
+/* ============================================================================
+   Dashboard analytics layout — restored for the resurrected charts suite
+   (P6 removed these as dead when the hosts did not exist; they do now).
+   ============================================================================ */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.dash-grid .col-main { grid-column: span 8; min-width: 0; }
+.dash-grid .col-side { grid-column: span 4; min-width: 0; }
+.dash-grid .col-scans { grid-column: span 7; min-width: 0; }
+.dash-grid .col-activity { grid-column: span 5; min-width: 0; }
+@media (max-width: 1280px) {
+  .dash-grid .col-main, .dash-grid .col-side,
+  .dash-grid .col-scans, .dash-grid .col-activity { grid-column: span 12; }
+}

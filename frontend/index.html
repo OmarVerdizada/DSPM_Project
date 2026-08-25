@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=181" />
+    <link rel="stylesheet" href="/static/styles.css?v=182" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -450,18 +450,22 @@
             <div class="metric critical">
               <span>Critical</span>
               <strong id="critical-count">0</strong>
+              <i class="kpi-spark" data-spark="critical" aria-hidden="true"></i>
             </div>
             <div class="metric high">
               <span>High</span>
               <strong id="high-count">0</strong>
+              <i class="kpi-spark" data-spark="high" aria-hidden="true"></i>
             </div>
             <div class="metric medium">
               <span>Medium</span>
               <strong id="medium-count">0</strong>
+              <i class="kpi-spark" data-spark="medium" aria-hidden="true"></i>
             </div>
             <div class="metric low">
               <span>Low</span>
               <strong id="low-count">0</strong>
+              <i class="kpi-spark" data-spark="low" aria-hidden="true"></i>
             </div>
             <div class="metric protected">
               <span>Protected / Locked</span>
@@ -472,6 +476,31 @@
               <strong id="total-count">0</strong>
             </div>
           </section>
+
+          <!-- Dashboard analytics: hosts for the sentro-fx charts suite
+               (posture trend, severity mix, recent scans, activity feed).
+               The suite reads /api/history + /api/audit read-only. -->
+          <div class="dash-grid" aria-label="Posture analytics">
+            <section class="visual-panel col-main">
+              <div class="panel-title">
+                <h4>Posture trend</h4>
+                <div class="chart-pills" id="fx-posture-pills"></div>
+              </div>
+              <div id="fx-posture-chart" class="fx-chart"></div>
+            </section>
+            <section class="visual-panel col-side">
+              <div class="panel-title"><h4>Severity mix</h4></div>
+              <div id="fx-severity-donut"></div>
+            </section>
+            <section class="visual-panel col-scans">
+              <div class="panel-title"><h4>Recent scans</h4></div>
+              <div id="fx-recent-scans"></div>
+            </section>
+            <section class="visual-panel col-activity">
+              <div class="panel-title"><h4>Activity</h4></div>
+              <div id="fx-activity"></div>
+            </section>
+          </div>
 
           <section id="overview-insights" class="insights-grid"></section>
 
@@ -1326,6 +1355,6 @@
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
-    <script src="/static/sentro-fx.js?v=5" defer></script>
+    <script src="/static/sentro-fx.js?v=6" defer></script>
   </body>
 </html>
