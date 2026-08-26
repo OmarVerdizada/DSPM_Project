@@ -1546,9 +1546,10 @@ function changedHashKeys() {
 function renderProfile() {
   profileName.textContent = currentUser || "User";
   profileTenant.textContent = `${currentTenant || "default"} tenant`;
-  profileRole.textContent = currentRole || "viewer";
-  profilePanelName.textContent = currentUser || "User";
-  profilePanelTenant.textContent = currentTenant || "default";
+  // The dock panel is actions-only now; these render only if the elements exist.
+  if (profileRole) profileRole.textContent = currentRole || "viewer";
+  if (profilePanelName) profilePanelName.textContent = currentUser || "User";
+  if (profilePanelTenant) profilePanelTenant.textContent = currentTenant || "default";
   tenantSwitcher.value = currentTenant;
   const initial = (currentUser || "U").trim().charAt(0).toUpperCase();
   const avatarImage = safeStorageGet(profileAvatarStorageKey());

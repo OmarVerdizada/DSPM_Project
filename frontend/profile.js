@@ -8,8 +8,6 @@ const profileStatus = document.querySelector("#profile-status");
 const passwordStatus = document.querySelector("#password-status");
 const featuresStatus = document.querySelector("#features-status");
 const logoutBtn = document.querySelector("#profile-logout-btn");
-const themeLightBtn = document.querySelector("#theme-light-btn");
-const themeDarkBtn = document.querySelector("#theme-dark-btn");
 const identityAvatar = document.querySelector("#settings-avatar");
 const identityName = document.querySelector("#settings-identity-name");
 const identityRole = document.querySelector("#settings-identity-role");
@@ -148,13 +146,12 @@ const themeQuickToggle = document.querySelector("#settings-theme-toggle");
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   storageSet("dspm-theme", theme);
-  themeLightBtn.classList.toggle("active", theme !== "dark");
-  themeDarkBtn.classList.toggle("active", theme === "dark");
-  themeLightBtn.setAttribute("aria-checked", String(theme !== "dark"));
-  themeDarkBtn.setAttribute("aria-checked", String(theme === "dark"));
   if (themeQuickToggle) {
-    themeQuickToggle.querySelector(".theme-icon").innerHTML = theme === "dark" ? "&#9788;" : "&#9790;";
-    themeQuickToggle.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+    // Same control as the console topbar: sun in dark mode, moon in light.
+    const nextLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+    themeQuickToggle.querySelector(".theme-icon").innerHTML = theme === "dark" ? "&#9728;" : "&#9790;";
+    themeQuickToggle.setAttribute("aria-label", nextLabel);
+    themeQuickToggle.title = nextLabel;
   }
 }
 
@@ -181,9 +178,6 @@ if (railToggle && settingsShell) {
   });
   applyRailState(storageGet("dspm-settings-rail") === "collapsed");
 }
-
-themeLightBtn.addEventListener("click", () => applyTheme("light"));
-themeDarkBtn.addEventListener("click", () => applyTheme("dark"));
 
 /* ── Avatar ───────────────────────────────────────────────────── */
 function avatarStorageKey(user = activeAvatarUser) {

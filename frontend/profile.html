@@ -11,7 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=201" />
+    <link rel="stylesheet" href="/static/styles.css?v=202" />
   </head>
   <body class="profile-page settings-page">
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -38,23 +38,12 @@
           </button>
         </div>
 
-        <div class="settings-identity">
-          <div id="settings-avatar" class="profile-avatar settings-identity-avatar">U</div>
-          <div class="settings-identity-copy">
-            <strong id="settings-identity-name">Account</strong>
-            <span class="settings-identity-sub"><span id="settings-identity-role">viewer</span><i aria-hidden="true"></i><span id="settings-identity-tenant">default</span></span>
-          </div>
-        </div>
-
-        <nav class="settings-nav">
+                <nav class="settings-nav">
           <button type="button" class="settings-nav-item active" data-section="profile">
             <svg class="s-ico" aria-hidden="true"><use href="#st-user"/></svg><span class="s-label">Profile</span>
           </button>
           <button type="button" class="settings-nav-item" data-section="security">
             <svg class="s-ico" aria-hidden="true"><use href="#st-shield"/></svg><span class="s-label">Security</span>
-          </button>
-          <button type="button" class="settings-nav-item" data-section="appearance">
-            <svg class="s-ico" aria-hidden="true"><use href="#st-palette"/></svg><span class="s-label">Appearance</span>
           </button>
           <button type="button" class="settings-nav-item" data-section="features">
             <svg class="s-ico" aria-hidden="true"><use href="#st-sliders"/></svg><span class="s-label">Features</span>
@@ -63,6 +52,14 @@
             <svg class="s-ico" aria-hidden="true"><use href="#st-clock"/></svg><span class="s-label">Session</span>
           </button>
         </nav>
+
+        <div class="settings-identity">
+          <div id="settings-avatar" class="profile-avatar settings-identity-avatar">U</div>
+          <div class="settings-identity-copy">
+            <strong id="settings-identity-name">Account</strong>
+            <span class="settings-identity-sub"><span id="settings-identity-role">viewer</span><i aria-hidden="true"></i><span id="settings-identity-tenant">default</span></span>
+          </div>
+        </div>
       </aside>
 
       <main class="settings-main">
@@ -73,7 +70,7 @@
           </div>
           <div class="settings-head-actions">
             <span id="settings-protection-badge" class="settings-badge" hidden>Protected account</span>
-            <button type="button" id="settings-theme-toggle" class="settings-theme-quick" aria-label="Switch theme" title="Switch theme">
+            <button type="button" id="settings-theme-toggle" class="theme-toggle tb-icon-btn" aria-label="Switch theme" title="Switch theme">
               <span class="theme-icon" aria-hidden="true">&#9790;</span>
             </button>
           </div>
@@ -154,25 +151,7 @@
           </article>
         </section>
 
-        <!-- ── Appearance ──────────────────────────────────────── -->
-        <section class="settings-section" data-panel="appearance" aria-label="Appearance">
-          <article class="settings-card">
-            <div class="settings-card-copy">
-              <h2>Theme</h2>
-              <p>Applies immediately on every console page in this browser.</p>
-            </div>
-            <div class="settings-theme-row" role="radiogroup" aria-label="Theme">
-              <button type="button" id="theme-light-btn" class="settings-theme-tile" role="radio" aria-checked="false">
-                <span class="theme-swatch light" aria-hidden="true"><i></i><i></i><i></i></span>
-                Light
-              </button>
-              <button type="button" id="theme-dark-btn" class="settings-theme-tile" role="radio" aria-checked="false">
-                <span class="theme-swatch dark" aria-hidden="true"><i></i><i></i><i></i></span>
-                Dark
-              </button>
-            </div>
-          </article>
-        </section>
+        
 
         <!-- ── Features ────────────────────────────────────────── -->
         <section class="settings-section" data-panel="features" aria-label="Features">
@@ -243,6 +222,6 @@
       </div>
     </div>
 
-    <script src="/static/profile.js?v=96"></script>
+    <script src="/static/profile.js?v=97"></script>
   </body>
 </html>

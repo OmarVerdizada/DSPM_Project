@@ -21066,3 +21066,29 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   .rail-collapsed .s-label { display: inline; }
   .rail-collapsed .settings-identity-copy { display: flex; }
 }
+
+
+/* == Dock panel: actions-only, flush with the sidebar =============== */
+/* The trigger row already says who you are; the panel is just the two
+   actions, spanning exactly the sidebar's content width so the divider
+   between sidebar and content stays fully visible. */
+:root:root .side-profile .profile-panel {
+  left: 0 !important;
+  right: 0 !important;
+  width: auto !important;
+  bottom: calc(100% + 8px) !important;
+}
+:root:root .side-profile .profile-panel-actions {
+  border-top: 0 !important;
+  padding-top: 0 !important;
+}
+:root:root body.sidebar-collapsed .side-profile .profile-panel {
+  left: 56px !important;
+  right: auto !important;
+  width: 190px !important;
+  bottom: 0 !important;
+}
+
+/* == Settings: full-width content, identity at the rail foot ======== */
+:root:root .settings-page .settings-main { max-width: none !important; }
+:root:root .settings-page .settings-identity { margin-top: auto; }
