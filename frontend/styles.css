@@ -21092,3 +21092,55 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 /* == Settings: full-width content, identity at the rail foot ======== */
 :root:root .settings-page .settings-main { max-width: none !important; }
 :root:root .settings-page .settings-identity { margin-top: auto; }
+
+
+/* == Console-parity + rhythm pass ================================== */
+/* The Settings theme toggle is the dashboard control, pixel for pixel:
+   muted glyph on a quiet round button (the generic painter made it white,
+   and a lingering focus ring read as a blue button after clicking). */
+:root:root .settings-page .theme-toggle.tb-icon-btn {
+  color: var(--muted) !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+}
+:root:root .settings-page .theme-toggle.tb-icon-btn:hover {
+  color: var(--text) !important;
+  background: var(--card-2, var(--card)) !important;
+}
+:root:root .settings-page .theme-toggle.tb-icon-btn:focus:not(:focus-visible) { outline: none !important; }
+
+/* Settings rail text matches the console sidebar exactly: 14px, weight
+   500, body text color (it ran 600/muted before). */
+:root:root .settings-page .settings-nav-item {
+  font-size: 14px !important;
+  font-weight: 500 !important;
+  color: var(--text) !important;
+}
+:root:root .settings-page .settings-nav-item.active {
+  color: var(--accent) !important;
+  font-weight: 600 !important;
+}
+
+/* Stacked panels breathe: queue and insights sat flush against the
+   analytics grid and each other; same for the Tenants workspace. */
+#tab-risk .risk-analytics + .remediation-queue-panel { margin-top: 16px !important; }
+#tab-risk .remediation-queue-panel + .exposure-insights { margin-top: 16px !important; }
+#tab-admin .visual-panel + .workspace { margin-top: 16px !important; }
+:root:root .tab-panel > .visual-panel + .visual-panel { margin-top: 16px; }
+
+/* The account flyout must never lose to a sticky toolbar or chart layer
+   in the content column: the sidebar's stacking context now sits above
+   all in-page layers, below real overlays (modals, copilot at 9999+). */
+:root:root .app-shell > .sidebar { z-index: 1200 !important; }
+
+
+/* Half-screen: the topbar sheds its passive chips so the working
+   controls (search, New Scan, theme, tenant) stay on one usable row. */
+@media (max-width: 960px) {
+  :root:root .topbar .health { display: none !important; }
+  :root:root .topbar .tb-kbd { display: none !important; }
+  :root:root .topbar-left { flex: 1 1 auto; min-width: 0; }
+  :root:root .tb-search { width: 100%; min-width: 150px; }
+  :root:root .tenant-switcher { max-width: 130px; }
+}
