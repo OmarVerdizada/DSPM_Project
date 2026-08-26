@@ -11,7 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=200" />
+    <link rel="stylesheet" href="/static/styles.css?v=201" />
   </head>
   <body class="profile-page settings-page">
     <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -28,10 +28,15 @@
 
     <div class="settings-shell">
       <aside class="settings-rail" aria-label="Settings navigation">
-        <a class="settings-back" href="/dashboard">
-          <svg class="s-ico" aria-hidden="true"><use href="#st-back"/></svg>
-          Back to console
-        </a>
+        <div class="settings-rail-head">
+          <a class="settings-back" href="/dashboard">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-back"/></svg>
+            <span class="s-label">Back to console</span>
+          </a>
+          <button type="button" id="settings-rail-toggle" class="settings-rail-burger" aria-label="Collapse navigation" title="Collapse navigation">
+            <svg class="s-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+        </div>
 
         <div class="settings-identity">
           <div id="settings-avatar" class="profile-avatar settings-identity-avatar">U</div>
@@ -43,19 +48,19 @@
 
         <nav class="settings-nav">
           <button type="button" class="settings-nav-item active" data-section="profile">
-            <svg class="s-ico" aria-hidden="true"><use href="#st-user"/></svg>Profile
+            <svg class="s-ico" aria-hidden="true"><use href="#st-user"/></svg><span class="s-label">Profile</span>
           </button>
           <button type="button" class="settings-nav-item" data-section="security">
-            <svg class="s-ico" aria-hidden="true"><use href="#st-shield"/></svg>Security
+            <svg class="s-ico" aria-hidden="true"><use href="#st-shield"/></svg><span class="s-label">Security</span>
           </button>
           <button type="button" class="settings-nav-item" data-section="appearance">
-            <svg class="s-ico" aria-hidden="true"><use href="#st-palette"/></svg>Appearance
+            <svg class="s-ico" aria-hidden="true"><use href="#st-palette"/></svg><span class="s-label">Appearance</span>
           </button>
           <button type="button" class="settings-nav-item" data-section="features">
-            <svg class="s-ico" aria-hidden="true"><use href="#st-sliders"/></svg>Features
+            <svg class="s-ico" aria-hidden="true"><use href="#st-sliders"/></svg><span class="s-label">Features</span>
           </button>
           <button type="button" class="settings-nav-item" data-section="session">
-            <svg class="s-ico" aria-hidden="true"><use href="#st-clock"/></svg>Session
+            <svg class="s-ico" aria-hidden="true"><use href="#st-clock"/></svg><span class="s-label">Session</span>
           </button>
         </nav>
       </aside>
@@ -66,7 +71,12 @@
             <p class="eyebrow">SENTRO account</p>
             <h1 id="settings-title">Settings</h1>
           </div>
-          <span id="settings-protection-badge" class="settings-badge" hidden>Protected account</span>
+          <div class="settings-head-actions">
+            <span id="settings-protection-badge" class="settings-badge" hidden>Protected account</span>
+            <button type="button" id="settings-theme-toggle" class="settings-theme-quick" aria-label="Switch theme" title="Switch theme">
+              <span class="theme-icon" aria-hidden="true">&#9790;</span>
+            </button>
+          </div>
         </header>
 
         <!-- ── Profile ─────────────────────────────────────────── -->
@@ -233,6 +243,6 @@
       </div>
     </div>
 
-    <script src="/static/profile.js?v=95"></script>
+    <script src="/static/profile.js?v=96"></script>
   </body>
 </html>

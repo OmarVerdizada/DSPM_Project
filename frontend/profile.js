@@ -143,6 +143,8 @@ navItems.forEach((item) => {
 window.addEventListener("hashchange", () => activateSection(location.hash.slice(1), false));
 
 /* ── Theme ────────────────────────────────────────────────────── */
+const themeQuickToggle = document.querySelector("#settings-theme-toggle");
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   storageSet("dspm-theme", theme);
@@ -150,6 +152,34 @@ function applyTheme(theme) {
   themeDarkBtn.classList.toggle("active", theme === "dark");
   themeLightBtn.setAttribute("aria-checked", String(theme !== "dark"));
   themeDarkBtn.setAttribute("aria-checked", String(theme === "dark"));
+  if (themeQuickToggle) {
+    themeQuickToggle.querySelector(".theme-icon").innerHTML = theme === "dark" ? "&#9788;" : "&#9790;";
+    themeQuickToggle.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
+  }
+}
+
+if (themeQuickToggle) {
+  themeQuickToggle.addEventListener("click", () => {
+    applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+  });
+}
+
+/* Collapsible rail, remembered per browser like the console sidebar. */
+const railToggle = document.querySelector("#settings-rail-toggle");
+const settingsShell = document.querySelector(".settings-shell");
+
+function applyRailState(collapsed) {
+  settingsShell.classList.toggle("rail-collapsed", collapsed);
+  railToggle.setAttribute("aria-label", collapsed ? "Expand navigation" : "Collapse navigation");
+  railToggle.title = collapsed ? "Expand navigation" : "Collapse navigation";
+  storageSet("dspm-settings-rail", collapsed ? "collapsed" : "expanded");
+}
+
+if (railToggle && settingsShell) {
+  railToggle.addEventListener("click", () => {
+    applyRailState(!settingsShell.classList.contains("rail-collapsed"));
+  });
+  applyRailState(storageGet("dspm-settings-rail") === "collapsed");
 }
 
 themeLightBtn.addEventListener("click", () => applyTheme("light"));

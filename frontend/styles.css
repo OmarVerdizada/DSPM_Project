@@ -20901,3 +20901,168 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   .settings-main { padding: 20px 16px 40px; }
   .settings-form-row { flex-direction: column; align-items: stretch; }
 }
+
+
+/* == Account dock + Settings repair pass ============================ */
+/* Avatars are perfect circles with a centered glyph - everywhere. Old
+   layers variously set display:grid, pill radii, and mismatched sizes,
+   which squashed them into ovals with drifting letters. */
+:root:root .profile-avatar {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  border-radius: 50% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  line-height: 1 !important;
+  text-align: center !important;
+  overflow: hidden !important;
+  background-size: cover !important;
+  background-position: center !important;
+}
+:root:root .profile-avatar::before,
+:root:root .profile-avatar::after { content: none !important; }
+:root:root .side-profile .profile-toggle .profile-avatar { width: 34px !important; height: 34px !important; flex: 0 0 34px !important; font-size: 14px !important; }
+:root:root .side-profile .panel-avatar { width: 40px !important; height: 40px !important; flex: 0 0 40px !important; font-size: 16px !important; }
+:root:root .settings-identity-avatar { width: 44px !important; height: 44px !important; flex: 0 0 44px !important; font-size: 17px !important; }
+:root:root .settings-avatar-preview { width: 76px !important; height: 76px !important; flex: 0 0 76px !important; font-size: 28px !important; }
+
+/* Dock trigger: a quiet row - the old pill border and caret are gone. */
+:root:root .side-profile .profile-toggle {
+  border: 0 !important;
+  border-radius: 12px !important;
+  min-width: 0 !important;
+}
+:root:root .side-profile .profile-toggle::before,
+:root:root .side-profile .profile-toggle::after { content: none !important; }
+
+/* Dock panel: compact, fully readable. The legacy "Role"/"Tenant" prefix
+   decorations and the green presence dot came from the old topbar panel. */
+:root:root .side-profile .profile-panel { padding: 6px !important; }
+:root:root .side-profile #profile-role::before,
+:root:root .side-profile #profile-panel-tenant::before,
+:root:root .side-profile #profile-role::after,
+:root:root .side-profile #profile-panel-tenant::after { content: none !important; }
+:root:root .side-profile #profile-role,
+:root:root .side-profile #profile-panel-tenant {
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  font-size: 11.5px !important;
+  color: var(--muted) !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+:root:root .side-profile .profile-panel-head { padding: 8px 8px 10px !important; margin: 0 !important; border: 0 !important; background: transparent !important; }
+:root:root .side-profile .profile-action { padding: 8px 10px !important; font-size: 13px !important; }
+
+/* == Settings page repairs ========================================== */
+/* Old profile-page rules zeroed the main padding and painted every
+   button's text white (invisible in light). Pin the layout down. */
+:root:root .settings-page .settings-shell { transition: grid-template-columns 200ms ease; }
+:root:root .settings-page .settings-main {
+  padding: 28px 38px 56px !important;
+  max-width: 940px !important;
+  margin: 0 !important;
+  width: auto !important;
+}
+:root:root .settings-page .settings-head { margin: 0 0 22px !important; padding: 0 !important; }
+.settings-head-actions { display: flex; align-items: center; gap: 10px; }
+:root:root .settings-page .settings-theme-quick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px !important;
+  background: var(--card) !important;
+  color: var(--text) !important;
+  font-size: 15px;
+  cursor: pointer;
+  box-shadow: none !important;
+}
+:root:root .settings-page .settings-theme-quick:hover { border-color: var(--accent) !important; }
+:root:root .settings-page .settings-section.active { display: flex !important; gap: 18px !important; }
+:root:root .settings-page .settings-card { margin: 0 !important; }
+:root:root .settings-page .settings-nav-item { color: var(--muted) !important; }
+:root:root .settings-page .settings-nav-item:hover { color: var(--text) !important; }
+:root:root .settings-page .settings-nav-item.active { color: var(--accent) !important; }
+:root:root .settings-page .settings-theme-tile { color: var(--text) !important; }
+:root:root .settings-page .settings-back { color: var(--muted) !important; }
+:root:root .settings-page .settings-back:hover { color: var(--text) !important; }
+:root:root .settings-page .settings-hint {
+  border: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+  margin: 10px 0 0 !important;
+  box-shadow: none !important;
+  font-size: 12px !important;
+  color: var(--muted) !important;
+  min-height: 1em;
+}
+:root:root .settings-page .settings-hint.error { color: var(--status-critical) !important; }
+/* Old #profile-status box styling outranks any class stack - counter by id. */
+:root:root .settings-page #profile-status,
+:root:root .settings-page #password-status,
+:root:root .settings-page #features-status,
+:root:root .settings-page #avatar-help,
+:root:root .settings-page #feature-ocr-state {
+  border: 0 !important;
+  background: transparent !important;
+  padding: 0 !important;
+  margin: 10px 0 0 !important;
+  box-shadow: none !important;
+  font-size: 12px !important;
+  color: var(--muted) !important;
+  font-weight: 400 !important;
+}
+:root:root .settings-page #avatar-help.error { color: var(--status-critical) !important; }
+:root:root .settings-page .settings-nav-item:focus-visible,
+:root:root .settings-page .settings-theme-tile:focus-visible,
+:root:root .settings-page .settings-rail-burger:focus-visible,
+:root:root .settings-page .settings-theme-quick:focus-visible {
+  outline: 2px solid var(--accent) !important;
+  outline-offset: 2px !important;
+}
+
+/* Rail head: back link left, burger right. */
+.settings-rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+:root:root .settings-page .settings-rail-burger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px !important;
+  height: 34px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 9px !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  cursor: pointer;
+  box-shadow: none !important;
+}
+:root:root .settings-page .settings-rail-burger:hover {
+  color: var(--text) !important;
+  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+}
+
+/* Collapsed rail: icons only, identity shrinks to the avatar. */
+:root:root .settings-shell.rail-collapsed { grid-template-columns: 74px minmax(0, 1fr); }
+.rail-collapsed .settings-rail { padding: 18px 12px; }
+.rail-collapsed .settings-rail-head { flex-direction: column; gap: 6px; }
+.rail-collapsed .s-label { display: none; }
+.rail-collapsed .settings-identity { padding: 6px; justify-content: center; }
+.rail-collapsed .settings-identity-copy { display: none; }
+:root:root .rail-collapsed .settings-nav-item { justify-content: center !important; padding: 10px 0 !important; }
+:root:root .rail-collapsed .settings-back { justify-content: center; padding: 8px !important; }
+@media (max-width: 860px) {
+  .settings-rail-burger { display: none !important; }
+  :root:root .settings-shell.rail-collapsed { grid-template-columns: 1fr; }
+  .rail-collapsed .s-label { display: inline; }
+  .rail-collapsed .settings-identity-copy { display: flex; }
+}
