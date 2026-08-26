@@ -2877,6 +2877,9 @@ window.addEventListener("popstate", () => {
 // Open state is independent of the active page, so an operator can peek into
 // another destination's members without leaving the current one.
 const navOpenGroups = new Set();
+// Groups the user opened with the caret stay open across navigation until the
+// caret closes them; groups that auto-opened on entry close again on leaving.
+const navPinnedGroups = new Set();
 let currentNavTab = "overview";
 
 function syncNavGroups() {
@@ -2904,8 +2907,13 @@ document.addEventListener("click", (event) => {
   event.stopPropagation();
   const dest = caret.closest(".tab")?.dataset.tab;
   if (!dest) return;
-  if (navOpenGroups.has(dest)) navOpenGroups.delete(dest);
-  else navOpenGroups.add(dest);
+  if (navOpenGroups.has(dest)) {
+    navOpenGroups.delete(dest);
+    navPinnedGroups.delete(dest);
+  } else {
+    navOpenGroups.add(dest);
+    navPinnedGroups.add(dest);
+  }
   syncNavGroups();
 }, true);
 
@@ -2946,10 +2954,11 @@ function switchTab(tabName) {
     tab.classList.toggle("active", isActive);
     tab.setAttribute("aria-current", isActive ? "page" : "false");
   });
-  // Only the active destination's group stays open: entering a section
-  // expands it, moving to another collapses it (caret toggles last until
-  // the next navigation).
+  // Auto-expanded groups follow the active section: entering a section
+  // opens its group, leaving closes it again - but groups the user opened
+  // with the caret are pinned and stay open until the caret closes them.
   navOpenGroups.clear();
+  navPinnedGroups.forEach((group) => navOpenGroups.add(group));
   navOpenGroups.add(destination);
   currentNavTab = resolvedTab;
   syncNavGroups();
