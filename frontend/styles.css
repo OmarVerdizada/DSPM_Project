@@ -21198,3 +21198,172 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 /* Related groups sit closer than unrelated ones. */
 :root:root .settings-card-copy p { margin-bottom: 12px !important; }
 :root:root #tab-overview .dash-grid { gap: 16px !important; }
+
+
+/* == Data round: queue, inventory density, remediation, reports ===== */
+/* Priority finding queue: ONE scroller (the queue itself), headers on a
+   single line - "Data Element" wrapped the whole header to 100px. */
+:root:root #findings-priority-summary { max-height: none !important; overflow: visible !important; }
+:root:root .finding-queue-wrap { max-height: 480px; }
+:root:root .finding-queue-wrap th { white-space: nowrap !important; }
+:root:root .finding-queue-wrap td { padding-top: 10px !important; padding-bottom: 10px !important; }
+
+/* Data inventory: compact, scannable rows - small paddings, 12.5px data
+   type, long Reasons/DLP text clamped to two lines. Many rows at once. */
+:root:root #results-body td {
+  padding: 8px 12px !important;
+  font-size: 12.5px !important;
+  line-height: 1.45 !important;
+  vertical-align: top;
+}
+:root:root #inventory-workspace .inventory-table td:nth-child(6) > *,
+:root:root #inventory-workspace .inventory-table td:nth-child(7) > * {
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Inventory scrollbar: wide thumb with a minimum grab size plus real
+   click arrows at both ends. */
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar { width: 14px; height: 12px; }
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-track { background: color-mix(in srgb, var(--line) 30%, transparent); border-radius: 8px; }
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  min-height: 56px;
+}
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted) 65%, transparent); background-clip: content-box; }
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-button:single-button {
+  display: block;
+  height: 14px;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-color: transparent;
+}
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-button:single-button:vertical:decrement { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><path d='M5 3l3.5 4h-7z' fill='%2394a3b8'/></svg>"); }
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-button:single-button:vertical:increment { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><path d='M5 7L1.5 3h7z' fill='%2394a3b8'/></svg>"); }
+
+/* Remediation hero: slimmer band; 11 carries the weight, /100 and the
+   verdict step back. */
+:root:root #executive-hero { padding: 14px 20px !important; min-height: 0 !important; }
+:root:root .remediation-score { display: flex !important; align-items: baseline !important; gap: 6px !important; }
+:root:root .remediation-score strong { font-size: 34px !important; line-height: 1 !important; }
+:root:root .remediation-score span,
+:root:root .remediation-score small { font-size: 12px !important; color: var(--muted) !important; font-weight: 500 !important; }
+:root:root .remediation-summary-copy h3 { font-size: 17px !important; margin: 2px 0 !important; }
+:root:root .remediation-summary-copy p { font-size: 12.5px !important; margin: 0 !important; }
+
+/* Posture trend (Remediation side rail): no sideways scrollbar - the
+   chart fits its card. */
+:root:root .risk-analytics-side .posture-trend { overflow-x: hidden !important; }
+:root:root .risk-analytics-side .posture-trend > *,
+:root:root .risk-analytics-side .posture-trend svg,
+:root:root .risk-analytics-side .posture-trend canvas { max-width: 100% !important; }
+
+:root:root .remediation-item .badge { white-space: nowrap; align-self: center; }
+:root:root .remediation-file { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+:root:root .remediation-file > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:root:root .remediation-assignment { display: flex; flex-direction: column; gap: 2px; text-align: right; }
+
+/* Exposure insights: category labels share one type treatment, and the
+   panel only shows a scrollbar when there is actually more to scroll. */
+:root:root .insight-tab-bar label {
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+}
+:root:root .insight-tab-panels { overflow-y: auto !important; scrollbar-gutter: auto !important; }
+
+/* Reporting center: the preview grows with its content - the page is the
+   only scrollbar. */
+:root:root #report-preview { max-height: none !important; overflow: visible !important; }
+
+
+/* Inventory rows read as one line each: chips stay on a single clipped
+   row, paths and risk notes ellipsize instead of wrapping. Expanding a
+   row (existing toggle) still shows everything. */
+:root:root #results-body .finding-chip-wrap {
+  display: flex !important;
+  flex-wrap: nowrap !important;
+  gap: 4px !important;
+  max-height: 26px;
+  overflow: hidden;
+}
+:root:root #results-body .finding-chip { white-space: nowrap; flex: 0 0 auto; }
+:root:root #results-body .path-subtext,
+:root:root #results-body td:nth-child(4) .subtext {
+  display: block !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  max-width: 100%;
+}
+:root:root #results-body td { padding: 7px 12px !important; }
+
+
+/* Round follow-ups: the stubborn five. */
+:root:root #results-body td:first-child > * { margin: 0 0 3px !important; }
+:root:root #results-body .file-title { margin: 0 !important; }
+:root:root #results-body .path-subtext { max-width: 340px; }
+
+:root:root .remediation-summary-copy { display: flex; flex-direction: column; gap: 2px; }
+
+
+/* Scan comparison now lives as a full-width row under the analytics grid. */
+:root:root #tab-risk > section.visual-panel { width: auto !important; max-width: none !important; }
+
+:root:root #tab-risk .remediation-file small { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+
+/* == Owner-level counters (the (2,1,0) hammer tier) ================= */
+/* Inventory path: one ellipsized line - the wrap-everything rule at
+   .inventory-table level forced visible multi-line paths. */
+:root:root #inventory-workspace #results-body .path-subtext {
+  display: flex !important;
+  flex-flow: row nowrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  overflow: hidden !important;
+  max-width: 340px !important;
+  white-space: nowrap !important;
+}
+:root:root #inventory-workspace #results-body .path-subtext span {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  overflow-wrap: normal !important;
+}
+
+/* Posture trend in the Remediation side rail: the rich-chart min-width
+   (760px) forced a sideways scroll in a 418px card. In this context the
+   eight columns share the card width. */
+:root:root .risk-analytics-side #posture-trend .trend-bars,
+:root:root .risk-analytics-side #posture-trend .trend-caption {
+  min-width: 0 !important;
+  grid-template-columns: repeat(8, minmax(0, 1fr)) !important;
+  gap: 6px !important;
+  padding-left: 2px !important;
+  padding-right: 2px !important;
+}
+:root:root .risk-analytics-side #posture-trend { overflow-x: hidden !important; }
+
+/* Inline row controls stay row-height: the copy-path and preview toggles
+   were 30px tall and set the rhythm of every row. */
+:root:root #inventory-workspace #results-body .path-subtext button {
+  height: 20px !important;
+  padding: 1px 6px !important;
+  font-size: 10.5px !important;
+  flex: 0 0 auto !important;
+}
+:root:root #inventory-workspace #results-body .file-title { min-height: 0 !important; }
+:root:root #inventory-workspace #results-body .file-title .preview-toggle {
+  padding: 2px 8px !important;
+  min-height: 0 !important;
+  height: 22px !important;
+  font-size: 11px !important;
+}

@@ -526,19 +526,7 @@
       pillsHost.querySelectorAll("button").forEach(function (b) {
         b.addEventListener("click", function () {
           postureMode = b.dataset.mode;
-          /* Skeletons paint instantly; real data (or the empty state) replaces
-       them when the first fetch settles. */
-    function sklRows(n, h) {
-      var rows = "";
-      for (var i = 0; i < n; i++) rows += '<div class="skl" style="height:' + h + 'px;margin:10px 0;width:' + (92 - i * 9) + '%"></div>';
-      return rows;
-    }
-    if (scansHost) scansHost.innerHTML = sklRows(4, 16);
-    if (feedHost) feedHost.innerHTML = sklRows(4, 16);
-    if (postureHost) postureHost.innerHTML = '<div class="skl" style="height:150px"></div>';
-    if (donutHost) donutHost.innerHTML = '<div class="skl skl-circle"></div>';
-
-    renderPills();
+          renderPills();
           renderPosture();
         });
       });
@@ -708,6 +696,20 @@
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(refresh, 500);
     }
+
+    /* Skeletons paint instantly on load; the first fetch (or its empty
+       state) replaces them. Init-only - never on pill clicks. */
+    (function paintSkeletons() {
+      function sklRows(n, h) {
+        var rows = "";
+        for (var i = 0; i < n; i++) rows += '<div class="skl" style="height:' + h + 'px;margin:10px 0;width:' + (92 - i * 9) + '%"></div>';
+        return rows;
+      }
+      if (scansHost) scansHost.innerHTML = sklRows(4, 16);
+      if (feedHost) feedHost.innerHTML = sklRows(4, 16);
+      if (postureHost) postureHost.innerHTML = '<div class="skl" style="height:150px"></div>';
+      if (donutHost) donutHost.innerHTML = '<div class="skl skl-circle"></div>';
+    })();
 
     renderPills();
     refresh();

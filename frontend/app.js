@@ -1669,8 +1669,12 @@ async function hydrateWorkspaceSlice() {
   const requestId = ++workspaceSliceRequest;
   const resultsBody = document.getElementById("results-body");
   if (resultsBody && resultsBody.querySelector("td.empty")) {
-    resultsBody.innerHTML = Array.from({ length: 4 }, () =>
-      '<tr class="skl-tr"><td colspan="7"><div class="skl" style="height:15px"></div></td></tr>').join("");
+    // Table-shaped skeleton: one shimmer per column so the load state looks
+    // like the data it becomes, not a banner over an empty-state CTA.
+    const widths = [86, 62, 48, 40, 46, 78, 78];
+    resultsBody.innerHTML = Array.from({ length: 6 }, () =>
+      "<tr class=\"skl-tr\">" + widths.map((w) =>
+        `<td><div class="skl" style="height:12px;width:${w}%"></div></td>`).join("") + "</tr>").join("");
   }
   try {
     const data = await api("/api/inventory?sort=risk_score&limit=200", null, "GET");
@@ -7871,6 +7875,22 @@ renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
 renderComplianceSelectors();
 initSimpleExtensionPolicies();
 applyDefaultSimpleExtensionPolicies();
+// When an Exposure-insights category swaps in taller content, keep the panel
+// where the user is looking instead of letting the page appear to jump.
+document.querySelectorAll(".insight-tab-radio").forEach((radio) => {
+  radio.addEventListener("change", () => {
+    const panel = document.querySelector(".exposure-insights");
+    if (!panel) return;
+    const before = panel.getBoundingClientRect().top;
+    requestAnimationFrame(() => {
+      const delta = panel.getBoundingClientRect().top - before;
+      if (Math.abs(delta) > 2) window.scrollBy(0, delta);
+      const rect = panel.getBoundingClientRect();
+      if (rect.top < 0) panel.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+  });
+});
+
 renderProfile();
 {
   const bootTab = tabFromLocation();
