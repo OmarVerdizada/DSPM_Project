@@ -713,7 +713,14 @@ def profile_page() -> FileResponse:
 
 
 @app.get("/dashboard")
+@app.get("/findings")
+@app.get("/remediation")
+@app.get("/scan")
+@app.get("/evidence")
+@app.get("/administration")
 def dashboard() -> FileResponse:
+    # Every sidebar destination is a real, reloadable path. The console is one
+    # page; app.js reads location.pathname (+#member) to open the right view.
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
