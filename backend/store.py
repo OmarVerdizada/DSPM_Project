@@ -575,12 +575,23 @@ def init_db() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_scan_jobs_tenant
                     ON scan_jobs (tenant_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             now = datetime.now(timezone.utc).isoformat()
             columns = db.table_columns(conn, "tenants")
             if "registration_code" not in columns:
                 conn.execute("ALTER TABLE tenants ADD COLUMN registration_code TEXT NOT NULL DEFAULT ''")
+            user_columns = db.table_columns(conn, "users")
+            if "avatar" not in user_columns:
+                # Profile photo as a bounded data URL (~300 KB cap enforced at the
+                # API); kept off _public_user so /api/users listings stay small.
+                conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''")
             # F2: bring pre-version-stamp finding_index rows up to the current
             # schema. They land with index_version='' (i.e. "unknown logic"), so
             # the read-switch treats them as stale and serves the blob until a
@@ -2973,7 +2984,7 @@ def get_user(username: str) -> dict | None:
         row = conn.execute(
             """
             SELECT username, password_hash, role, tenant_id, full_name, is_active,
-                   created_at, updated_at, last_login_at
+                   created_at, updated_at, last_login_at, avatar
             FROM users
             WHERE username = ?
             """,
@@ -2991,6 +3002,7 @@ def get_user(username: str) -> dict | None:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "last_login_at": row["last_login_at"],
+        "avatar": row["avatar"] or "",
     }
 
 
@@ -3066,6 +3078,37 @@ def update_user_profile(username: str, full_name: str) -> dict | None:
             if result.rowcount == 0:
                 return None
     return get_user(username)
+
+
+def update_user_avatar(username: str, avatar: str) -> dict | None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute(
+                "UPDATE users SET avatar = ?, updated_at = ? WHERE username = ?",
+                (avatar, now, username),
+            )
+            if result.rowcount == 0:
+                return None
+    return get_user(username)
+
+
+def get_app_setting(key: str) -> str | None:
+    """Install-wide key/value settings (runtime feature flags and the like)."""
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return None if row is None else row["value"]
+
+
+def set_app_setting(key: str, value: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (key, value, now),
+            )
 
 
 def delete_user(username: str) -> dict | None:

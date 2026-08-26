@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import ipaddress
@@ -87,6 +88,9 @@ from backend.store import (
     update_finding_workflow,
     update_user_password,
     update_user_profile,
+    update_user_avatar,
+    get_app_setting,
+    set_app_setting,
     update_user_role,
     update_user_active,
 )
@@ -183,6 +187,13 @@ async def app_lifespan(_: FastAPI):
         from backend.search import start_search_reconciler
 
         start_search_reconciler()
+    # Runtime feature flags: a persisted admin toggle overrides the env default
+    # so the setting survives restarts, and flipping it at runtime needs no
+    # restart at all (collectors read the env per call).
+    try:
+        _apply_persisted_feature_flags()
+    except Exception:
+        pass
     # Make the OCR posture observable: opt-in OCR was silently off before, so a
     # user who enabled it had no way to confirm. Log it once at startup.
     try:
@@ -654,6 +665,15 @@ class ProfileUpdateRequest(BaseModel):
     full_name: str = Field(default="", max_length=120)
 
 
+class AvatarUpdateRequest(BaseModel):
+    # A cropped 256px data URL from the settings page; empty string removes it.
+    avatar: str = Field(default="", max_length=400_000)
+
+
+class FeatureSettingsRequest(BaseModel):
+    ocr_enabled: bool
+
+
 class CredentialRequest(BaseModel):
     username: str = Field(min_length=1, max_length=160)
     password: str = Field(min_length=1, max_length=512)
@@ -1060,7 +1080,7 @@ def profile(principal: Principal = Depends(require_role("viewer"))) -> dict:
     user = get_user(principal.subject)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"user": _public_user(user), "protected": principal.subject in PROTECTED_USERS}
+    return {"user": _public_user(user), "protected": principal.subject in PROTECTED_USERS, "avatar": user.get("avatar", "")}
 
 
 @app.put("/api/profile")
@@ -1072,6 +1092,72 @@ def update_profile(payload: ProfileUpdateRequest, principal: Principal = Depends
         raise HTTPException(status_code=404, detail="User not found")
     audit(principal.tenant_id, principal.subject, "user.profile_updated")
     return {"user": _public_user(user)}
+
+
+_AVATAR_DATA_PREFIXES = ("data:image/png;base64,", "data:image/jpeg;base64,", "data:image/webp;base64,")
+
+
+@app.put("/api/profile/avatar")
+def update_profile_avatar(payload: AvatarUpdateRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
+    """Set or clear the account's profile photo. Allowed for every account,
+    including the protected built-in admin - the photo is cosmetic and cannot
+    change identity, role, or credentials."""
+    avatar = (payload.avatar or "").strip()
+    if avatar:
+        if not avatar.startswith(_AVATAR_DATA_PREFIXES):
+            raise HTTPException(status_code=400, detail="Avatar must be a PNG, JPEG, or WebP data URL")
+        encoded = avatar.split(",", 1)[1]
+        try:
+            base64.b64decode(encoded, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Avatar image data is not valid base64")
+    user = update_user_avatar(principal.subject, avatar)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    audit(principal.tenant_id, principal.subject, "user.avatar_updated", {"removed": not avatar})
+    return {"user": _public_user(user), "avatar": user.get("avatar", "")}
+
+
+# Runtime feature flags. Stored install-wide, applied to this process's env on
+# write, and re-applied at startup - the collectors read the env per call, so a
+# toggle takes effect on the next scan with no restart.
+_FEATURE_OCR_SETTING = "feature.ocr_enabled"
+
+
+def _apply_persisted_feature_flags() -> None:
+    value = get_app_setting(_FEATURE_OCR_SETTING)
+    if value is not None:
+        os.environ["DSPM_OCR_ENABLED"] = "1" if value == "1" else "0"
+
+
+def _feature_settings_payload(principal: Principal) -> dict:
+    from collectors.ocr import ocr_status
+
+    status = ocr_status()
+    return {
+        "features": {
+            "ocr": {
+                "enabled": status["enabled"],
+                "dependency_installed": status["dependency_installed"],
+                "state": status["state"],
+                "editable": principal.role == "admin",
+            }
+        }
+    }
+
+
+@app.get("/api/settings/features")
+def get_feature_settings(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    return _feature_settings_payload(principal)
+
+
+@app.put("/api/settings/features")
+def update_feature_settings(payload: FeatureSettingsRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+    value = "1" if payload.ocr_enabled else "0"
+    set_app_setting(_FEATURE_OCR_SETTING, value)
+    os.environ["DSPM_OCR_ENABLED"] = value
+    audit(principal.tenant_id, principal.subject, "settings.feature_toggled", {"feature": "ocr", "enabled": payload.ocr_enabled})
+    return _feature_settings_payload(principal)
 
 
 @app.get("/api/users")
