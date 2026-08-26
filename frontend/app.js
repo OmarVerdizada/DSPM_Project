@@ -2982,8 +2982,10 @@ function switchTab(tabName) {
 
   if (requestedTab === "inventory") {
     document.querySelector("#inventory-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  } else if (window.matchMedia("(max-width: 860px)").matches) {
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  } else {
+    // A new page starts at its top - carrying the old scroll position over
+    // meant landing mid-page after every switch.
+    window.scrollTo({ top: 0, behavior: "auto" });
   }
 }
 
@@ -7593,6 +7595,8 @@ resultsBody.addEventListener("click", (event) => {
       const isHidden = panel.classList.toggle("hidden");
       infoButton.classList.toggle("info-open", !isHidden);
       infoButton.setAttribute("aria-expanded", String(!isHidden));
+      // The compact row clamps chips/paths/notes; expanding lifts them all.
+      infoButton.closest("tr")?.classList.toggle("row-open", !isHidden);
     }
     return;
   }
@@ -7877,18 +7881,15 @@ initSimpleExtensionPolicies();
 applyDefaultSimpleExtensionPolicies();
 // When an Exposure-insights category swaps in taller content, keep the panel
 // where the user is looking instead of letting the page appear to jump.
-document.querySelectorAll(".insight-tab-radio").forEach((radio) => {
-  radio.addEventListener("change", () => {
-    const panel = document.querySelector(".exposure-insights");
-    if (!panel) return;
-    const before = panel.getBoundingClientRect().top;
-    requestAnimationFrame(() => {
-      const delta = panel.getBoundingClientRect().top - before;
-      if (Math.abs(delta) > 2) window.scrollBy(0, delta);
-      const rect = panel.getBoundingClientRect();
-      if (rect.top < 0) panel.scrollIntoView({ block: "start", behavior: "smooth" });
-    });
-  });
+document.addEventListener("change", (event) => {
+  if (!event.target.matches?.(".insight-tab-radio")) return;
+  // Bring the freshly expanded category into view - its content grows
+  // downward, so anchor the panel's head at the top of the viewport. The
+  // scroll runs after the swapped-in panel has laid out, instantly, so a
+  // competing render can't cancel it mid-glide.
+  setTimeout(() => {
+    document.querySelector(".exposure-insights")?.scrollIntoView({ block: "start" });
+  }, 120);
 });
 
 renderProfile();
