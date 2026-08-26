@@ -21144,3 +21144,57 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   :root:root .tb-search { width: 100%; min-width: 150px; }
   :root:root .tenant-switcher { max-width: 130px; }
 }
+
+
+/* == Routing, rail pinning, search, skeletons, emphasis ============= */
+/* Settings rail pins to the viewport: on long sections the identity card
+   at the rail foot stays visible instead of scrolling away. */
+:root:root .settings-page .settings-rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+/* Topbar search: long enough to feel like the primary way in, capped so
+   the bar keeps its calm. */
+:root:root .topbar-left { flex: 1 1 auto; min-width: 0; }
+:root:root .tb-search { width: 100%; max-width: 480px; }
+
+/* Skeleton loading: a quiet block with a soft gradient sweep. */
+.skl {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--line) 55%, transparent);
+}
+.skl::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--text) 8%, transparent), transparent);
+  animation: skl-sweep 1.4s ease-in-out infinite;
+}
+.skl-circle { width: 150px; height: 150px; border-radius: 50%; margin: 0 auto; }
+.skl-tr td { padding: 12px 16px !important; }
+@keyframes skl-sweep { to { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .skl::after { animation: none; } }
+
+/* The one important action: New Scan carries the only gradient in the
+   chrome and reads as the door into everything else. */
+:root:root button.tb-primary {
+  background: linear-gradient(135deg, #6366f1, #4f46e5 55%, #4338ca) !important;
+  color: #fff !important;
+  border: 0 !important;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 30%, transparent) !important;
+}
+:root:root button.tb-primary:hover {
+  filter: brightness(1.07);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--accent) 40%, transparent) !important;
+}
+:root:root button.tb-primary:active { filter: brightness(.98); }
+
+/* Related groups sit closer than unrelated ones. */
+:root:root .settings-card-copy p { margin-bottom: 12px !important; }
+:root:root #tab-overview .dash-grid { gap: 16px !important; }

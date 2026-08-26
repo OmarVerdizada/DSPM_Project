@@ -1667,6 +1667,11 @@ let workspaceSliceRequest = 0;
 async function hydrateWorkspaceSlice() {
   if (!latestReport?.files_omitted) return;
   const requestId = ++workspaceSliceRequest;
+  const resultsBody = document.getElementById("results-body");
+  if (resultsBody && resultsBody.querySelector("td.empty")) {
+    resultsBody.innerHTML = Array.from({ length: 4 }, () =>
+      '<tr class="skl-tr"><td colspan="7"><div class="skl" style="height:15px"></div></td></tr>').join("");
+  }
   try {
     const data = await api("/api/inventory?sort=risk_score&limit=200", null, "GET");
     if (requestId !== workspaceSliceRequest || !latestReport?.files_omitted) return;
@@ -2828,6 +2833,45 @@ function navDestination(tabName) {
   return NAV_DESTINATIONS[resolveTabName(tabName)] || "overview";
 }
 
+// Every destination is a real path (reload keeps you on the page); member
+// panels of merged destinations deep-link with a #hash on that path.
+const DESTINATION_PATHS = {
+  overview: "/dashboard",
+  findings: "/findings",
+  risk: "/remediation",
+  "file-servers": "/scan",
+  reports: "/evidence",
+  security: "/administration",
+};
+const PATH_DEFAULT_TAB = {
+  "/dashboard": "overview",
+  "/findings": "findings",
+  "/remediation": "risk",
+  "/scan": "file-servers",
+  "/evidence": "reports",
+  "/administration": "security",
+};
+
+function tabUrl(resolvedTab) {
+  const base = DESTINATION_PATHS[navDestination(resolvedTab)] || "/dashboard";
+  return resolvedTab === PATH_DEFAULT_TAB[base] ? base : `${base}#${resolvedTab}`;
+}
+
+function tabFromLocation() {
+  const base = PATH_DEFAULT_TAB[location.pathname];
+  if (!base) return null;
+  const member = resolveTabName(location.hash.slice(1));
+  if (member && document.getElementById(`tab-${member}`) && navDestination(member) === navDestination(base)) {
+    return member;
+  }
+  return base;
+}
+
+window.addEventListener("popstate", () => {
+  const tab = tabFromLocation();
+  if (tab) switchTab(tab);
+});
+
 // Sidebar groups: the caret is a pure expand/collapse toggle (no navigation);
 // clicking the destination name/icon navigates and auto-opens its group.
 // Open state is independent of the active page, so an operator can peek into
@@ -2902,10 +2946,17 @@ function switchTab(tabName) {
     tab.classList.toggle("active", isActive);
     tab.setAttribute("aria-current", isActive ? "page" : "false");
   });
-  // Navigating auto-opens the destination's group (caret can close it later).
+  // Only the active destination's group stays open: entering a section
+  // expands it, moving to another collapses it (caret toggles last until
+  // the next navigation).
+  navOpenGroups.clear();
   navOpenGroups.add(destination);
   currentNavTab = resolvedTab;
   syncNavGroups();
+  const targetUrl = tabUrl(resolvedTab);
+  if (location.pathname + location.hash !== targetUrl && PATH_DEFAULT_TAB[location.pathname]) {
+    history.pushState({ tab: resolvedTab }, "", targetUrl);
+  }
   tabPanels.forEach((panel) => panel.classList.toggle("active", panel === activePanel));
 
   activePanel.animate(
@@ -7812,6 +7863,10 @@ renderComplianceSelectors();
 initSimpleExtensionPolicies();
 applyDefaultSimpleExtensionPolicies();
 renderProfile();
+{
+  const bootTab = tabFromLocation();
+  if (bootTab && resolveTabName(bootTab) !== "overview") switchTab(bootTab);
+}
 // The avatar's source of truth is the account record; localStorage is only a
 // per-browser cache for instant paint. Pull the server copy once per load.
 (async function syncProfileFromServer() {
