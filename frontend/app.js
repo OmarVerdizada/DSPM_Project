@@ -7811,6 +7811,22 @@ renderComplianceSelectors();
 initSimpleExtensionPolicies();
 applyDefaultSimpleExtensionPolicies();
 renderProfile();
+// The avatar's source of truth is the account record; localStorage is only a
+// per-browser cache for instant paint. Pull the server copy once per load.
+(async function syncProfileFromServer() {
+  try {
+    const response = await fetch("/api/profile", { headers: authHeaders() });
+    if (!response.ok) return;
+    const data = await response.json();
+    const serverAvatar = String(data.avatar || "");
+    const key = profileAvatarStorageKey();
+    if (serverAvatar) safeStorageSet(key, serverAvatar);
+    else if (safeStorageGet(key)) safeStorageSet(key, "");
+    renderProfile();
+  } catch {
+    /* offline or API unavailable - the cached avatar still paints */
+  }
+})();
 renderAssetRules();
 renderReportPreview();
 renderExecutiveExperience();

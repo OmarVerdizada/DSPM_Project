@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Profile | SENTRO</title>
+    <title>Settings | SENTRO</title>
     <script src="/static/auth-boot.js?v=1"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -11,128 +11,204 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=199" />
+    <link rel="stylesheet" href="/static/styles.css?v=200" />
   </head>
-  <body class="profile-page">
-    <main class="profile-shell">
-      <section class="profile-header">
-        <div>
-          <p class="eyebrow">DSPM account</p>
-          <h1>Profile settings</h1>
-        </div>
-        <div class="profile-header-actions">
-          <button type="button" id="profile-theme-btn" class="secondary-btn">Dark mode</button>
-          <a class="secondary-btn profile-link" href="/dashboard">Dashboard</a>
-          <button type="button" id="profile-logout-btn" class="secondary-btn">Sign out</button>
-        </div>
-      </section>
+  <body class="profile-page settings-page">
+    <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+      <defs>
+        <symbol id="st-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M5 21c0-3.5 3-6 7-6s7 2.5 7 6"/></symbol>
+        <symbol id="st-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9.5 12l2 2 3.5-3.5"/></symbol>
+        <symbol id="st-palette" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 12l6.4-6.4"/></symbol>
+        <symbol id="st-sliders" viewBox="0 0 24 24"><path d="M4 8h10M18 8h2M4 16h4M12 16h8"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></symbol>
+        <symbol id="st-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></symbol>
+        <symbol id="st-back" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+        <symbol id="st-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
+      </defs>
+    </svg>
 
-      <section class="profile-card">
-        <div class="profile-hero">
-          <div id="profile-avatar-large" class="profile-avatar large">U</div>
-          <div>
-            <p class="eyebrow">Account profile</p>
-            <h1 id="profile-title">Profile</h1>
-            <p id="profile-subtitle">Loading account details...</p>
+    <div class="settings-shell">
+      <aside class="settings-rail" aria-label="Settings navigation">
+        <a class="settings-back" href="/dashboard">
+          <svg class="s-ico" aria-hidden="true"><use href="#st-back"/></svg>
+          Back to console
+        </a>
+
+        <div class="settings-identity">
+          <div id="settings-avatar" class="profile-avatar settings-identity-avatar">U</div>
+          <div class="settings-identity-copy">
+            <strong id="settings-identity-name">Account</strong>
+            <span class="settings-identity-sub"><span id="settings-identity-role">viewer</span><i aria-hidden="true"></i><span id="settings-identity-tenant">default</span></span>
           </div>
-          <span id="profile-protection-badge" class="profile-state-badge">Loading</span>
         </div>
 
-        <div class="profile-main-grid">
-          <aside class="profile-side-panel">
-            <div class="profile-summary-grid">
-              <div>
-                <span>Username</span>
-                <strong id="profile-username">-</strong>
-              </div>
-              <div>
-                <span>Role</span>
-                <strong id="profile-role-label">-</strong>
-              </div>
-              <div>
-                <span>Tenant</span>
-                <strong id="profile-tenant-label">-</strong>
+        <nav class="settings-nav">
+          <button type="button" class="settings-nav-item active" data-section="profile">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-user"/></svg>Profile
+          </button>
+          <button type="button" class="settings-nav-item" data-section="security">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-shield"/></svg>Security
+          </button>
+          <button type="button" class="settings-nav-item" data-section="appearance">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-palette"/></svg>Appearance
+          </button>
+          <button type="button" class="settings-nav-item" data-section="features">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-sliders"/></svg>Features
+          </button>
+          <button type="button" class="settings-nav-item" data-section="session">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-clock"/></svg>Session
+          </button>
+        </nav>
+      </aside>
+
+      <main class="settings-main">
+        <header class="settings-head">
+          <div>
+            <p class="eyebrow">SENTRO account</p>
+            <h1 id="settings-title">Settings</h1>
+          </div>
+          <span id="settings-protection-badge" class="settings-badge" hidden>Protected account</span>
+        </header>
+
+        <!-- ── Profile ─────────────────────────────────────────── -->
+        <section class="settings-section active" data-panel="profile" aria-label="Profile">
+          <article class="settings-card settings-avatar-card">
+            <div class="settings-card-copy">
+              <h2>Profile photo</h2>
+              <p>Shown in the console sidebar and account menus. Stored with your account, so it follows you to any browser.</p>
+            </div>
+            <div class="settings-avatar-row">
+              <div id="profile-avatar-preview" class="profile-avatar settings-avatar-preview">U</div>
+              <div class="settings-avatar-actions">
+                <input id="avatar-file-input" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+                <button type="button" id="choose-avatar-btn">Choose image</button>
+                <button type="button" id="remove-avatar-btn" class="secondary-btn">Remove photo</button>
+                <p id="avatar-help" class="settings-hint">PNG, JPG, or WebP up to 2 MB. Minimum 160&times;160 px.</p>
               </div>
             </div>
+          </article>
 
-            <div class="profile-info-list">
-              <div>
-                <span>Session</span>
-                <strong id="profile-session-state">Authenticated</strong>
-              </div>
-              <div>
-                <span>Editable fields</span>
-                <strong id="profile-edit-state">Checking...</strong>
-              </div>
-              <div>
-                <span>Password policy</span>
-                <strong>8+ characters</strong>
-              </div>
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Name</h2>
+              <p>The display name shown across the console and in user management.</p>
             </div>
-          </aside>
-
-          <section class="profile-settings-stack">
-            <section class="profile-form profile-section-card avatar-settings-card" aria-label="Profile photo">
-              <div>
-                <h2>Profile photo</h2>
-                <p>Upload a square-friendly image, crop the visible area, and apply it to your account avatar.</p>
-              </div>
-              <div class="avatar-settings-grid">
-                <div class="avatar-preview-wrap">
-                  <div id="profile-avatar-preview" class="profile-avatar avatar-preview-large">U</div>
-                  <div>
-                    <strong>Avatar preview</strong>
-                    <span>PNG, JPG, or WebP. Max 2 MB.</span>
-                  </div>
-                </div>
-                <div class="avatar-actions">
-                  <input id="avatar-file-input" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" />
-                  <button type="button" id="choose-avatar-btn" class="secondary-btn">Choose image</button>
-                  <button type="button" id="remove-avatar-btn" class="secondary-btn danger">Remove photo</button>
-                </div>
-              </div>
-              <p id="avatar-help" class="avatar-help">Minimum 160x160 px. Maximum 4096x4096 px.</p>
-            </section>
-
-            <form id="profile-form" class="profile-form profile-section-card">
-              <div>
-                <h2>Personal details</h2>
-                <p>Update the display name shown in account and user management views.</p>
-              </div>
-              <label>
+            <form id="profile-form" class="settings-form-row">
+              <label class="settings-field">
                 Full name
-                <input id="profile-full-name" name="full_name" autocomplete="name" />
+                <input id="profile-full-name" name="full_name" autocomplete="name" placeholder="Your name" />
               </label>
-              <button type="submit" id="save-profile-btn">Save profile</button>
+              <button type="submit" id="save-profile-btn">Save name</button>
             </form>
+            <p id="profile-status" class="settings-hint" role="status">&nbsp;</p>
+          </article>
 
-            <form id="password-form" class="profile-form profile-section-card">
-              <div>
-                <h2>Password</h2>
-                <p>Change your local account password after confirming the current one.</p>
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Account</h2>
+              <p>Identity is managed by your administrator.</p>
+            </div>
+            <div class="settings-kv">
+              <div><span>Username</span><strong id="profile-username">-</strong></div>
+              <div><span>Role</span><strong id="profile-role-label">-</strong></div>
+              <div><span>Tenant</span><strong id="profile-tenant-label" class="mono">-</strong></div>
+            </div>
+          </article>
+        </section>
+
+        <!-- ── Security ────────────────────────────────────────── -->
+        <section class="settings-section" data-panel="security" aria-label="Security">
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Password</h2>
+              <p>Change your local account password. You stay signed in on this device.</p>
+            </div>
+            <form id="password-form" class="settings-form-grid">
+              <label class="settings-field">
+                Current password
+                <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+              </label>
+              <label class="settings-field">
+                New password
+                <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+              </label>
+              <label class="settings-field">
+                Confirm new password
+                <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+              </label>
+              <div class="settings-form-foot">
+                <span class="settings-hint">At least 8 characters with letters and digits.</span>
+                <button type="submit" id="save-password-btn">Change password</button>
               </div>
-              <div class="profile-password-grid">
-                <label>
-                  Current password
-                  <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
-                </label>
-                <label>
-                  New password
-                  <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
-                </label>
-                <label>
-                  Confirm new password
-                  <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
-                </label>
-              </div>
-              <button type="submit" id="save-password-btn" class="secondary-btn">Change password</button>
             </form>
-          </section>
-        </div>
+            <p id="password-status" class="settings-hint" role="status">&nbsp;</p>
+          </article>
+        </section>
 
-        <p id="profile-status" class="save-status">Loading profile...</p>
-      </section>
-    </main>
+        <!-- ── Appearance ──────────────────────────────────────── -->
+        <section class="settings-section" data-panel="appearance" aria-label="Appearance">
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Theme</h2>
+              <p>Applies immediately on every console page in this browser.</p>
+            </div>
+            <div class="settings-theme-row" role="radiogroup" aria-label="Theme">
+              <button type="button" id="theme-light-btn" class="settings-theme-tile" role="radio" aria-checked="false">
+                <span class="theme-swatch light" aria-hidden="true"><i></i><i></i><i></i></span>
+                Light
+              </button>
+              <button type="button" id="theme-dark-btn" class="settings-theme-tile" role="radio" aria-checked="false">
+                <span class="theme-swatch dark" aria-hidden="true"><i></i><i></i><i></i></span>
+                Dark
+              </button>
+            </div>
+          </article>
+        </section>
+
+        <!-- ── Features ────────────────────────────────────────── -->
+        <section class="settings-section" data-panel="features" aria-label="Features">
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Install features</h2>
+              <p>Optional capabilities of this SENTRO install. Changes apply from the next scan &mdash; no restart needed.</p>
+            </div>
+            <div class="settings-feature-row" id="feature-ocr-row">
+              <div class="settings-feature-copy">
+                <strong>Image OCR</strong>
+                <span id="feature-ocr-desc">Extract text from images and scanned documents during scans.</span>
+                <span id="feature-ocr-state" class="settings-hint">Checking&hellip;</span>
+              </div>
+              <label class="settings-switch" for="feature-ocr-toggle">
+                <input type="checkbox" id="feature-ocr-toggle" disabled />
+                <span class="settings-switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+            <p id="features-status" class="settings-hint" role="status">&nbsp;</p>
+          </article>
+        </section>
+
+        <!-- ── Session ─────────────────────────────────────────── -->
+        <section class="settings-section" data-panel="session" aria-label="Session">
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>This session</h2>
+              <p>Signing out revokes this browser&rsquo;s access token.</p>
+            </div>
+            <div class="settings-kv">
+              <div><span>Signed in as</span><strong id="session-user">-</strong></div>
+              <div><span>Role</span><strong id="session-role">-</strong></div>
+              <div><span>Tenant</span><strong id="session-tenant" class="mono">-</strong></div>
+              <div><span>Token expires</span><strong id="session-expires">-</strong></div>
+            </div>
+            <div class="settings-form-foot">
+              <span></span>
+              <button type="button" id="profile-logout-btn" class="settings-danger-btn">
+                <svg class="s-ico" aria-hidden="true"><use href="#st-logout"/></svg>Sign out
+              </button>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
 
     <div id="avatar-crop-modal" class="avatar-crop-modal hidden" role="dialog" aria-modal="true" aria-labelledby="avatar-crop-title">
       <div class="avatar-crop-panel">
@@ -157,6 +233,6 @@
       </div>
     </div>
 
-    <script src="/static/profile.js?v=94"></script>
+    <script src="/static/profile.js?v=95"></script>
   </body>
 </html>

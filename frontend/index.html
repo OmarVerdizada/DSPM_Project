@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=199" />
+    <link rel="stylesheet" href="/static/styles.css?v=200" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -110,6 +110,35 @@
             </div>
           </div>
         </nav>
+
+        <section class="profile-menu side-profile" aria-label="Account">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+              <symbol id="li-log-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
+            </defs>
+          </svg>
+          <div class="profile-panel" id="profile-panel">
+            <div class="profile-panel-head">
+              <span class="profile-avatar panel-avatar">A</span>
+              <div>
+                <strong id="profile-panel-name">admin</strong>
+                <span class="profile-panel-sub"><span id="profile-role">admin</span><i aria-hidden="true"></i><span id="profile-panel-tenant">default</span></span>
+              </div>
+            </div>
+            <div class="profile-panel-actions">
+              <a class="profile-action" href="/static/profile.html"><svg class="p-ico" aria-hidden="true"><use href="#li-settings"/></svg>Settings</a>
+              <button type="button" id="logout-btn" class="profile-action danger"><svg class="p-ico" aria-hidden="true"><use href="#li-log-out"/></svg>Sign out</button>
+            </div>
+          </div>
+          <button type="button" id="profile-toggle" class="profile-toggle" aria-expanded="false" aria-controls="profile-panel">
+            <span class="profile-avatar">A</span>
+            <span class="side-profile-copy">
+              <strong id="profile-name">MSSP Admin</strong>
+              <small id="profile-tenant">default tenant</small>
+            </span>
+          </button>
+        </section>
       </aside>
 
       <main>
@@ -146,38 +175,6 @@
             <select id="tenant-switcher" class="tenant-switcher" title="Switch MSSP customer">
               <option value="default">default</option>
             </select>
-            <section class="profile-menu" aria-label="Profile">
-              <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
-                <defs>
-                  <symbol id="li-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
-                  <symbol id="li-log-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
-                </defs>
-              </svg>
-              <button type="button" id="profile-toggle" class="profile-toggle" aria-expanded="false" aria-controls="profile-panel">
-                <span class="profile-avatar">A</span>
-                <span>
-                  <strong id="profile-name">MSSP Admin</strong>
-                  <small id="profile-tenant">default tenant</small>
-                </span>
-              </button>
-              <div class="profile-panel" id="profile-panel">
-                <div class="profile-panel-head">
-                  <span class="profile-avatar panel-avatar">A</span>
-                  <div>
-                    <span>Signed in as</span>
-                    <strong id="profile-panel-name">admin</strong>
-                  </div>
-                </div>
-                <div class="profile-panel-meta">
-                  <span id="profile-role">admin</span>
-                  <span id="profile-panel-tenant">default</span>
-                </div>
-                <div class="profile-panel-actions">
-                  <a class="profile-action" href="/static/profile.html"><svg class="p-ico" aria-hidden="true"><use href="#li-settings"/></svg>Profile settings</a>
-                  <button type="button" id="logout-btn" class="profile-action danger"><svg class="p-ico" aria-hidden="true"><use href="#li-log-out"/></svg>Sign out</button>
-                </div>
-              </div>
-            </section>
           </div>
         </section>
 
@@ -1354,7 +1351,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=151"></script>
+    <script src="/static/app.js?v=152"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

@@ -1,19 +1,25 @@
+/* Settings page: profile, security, appearance, install features, session.
+   The avatar's source of truth is the account record (/api/profile/avatar);
+   localStorage only caches it per browser for instant paint. */
+
 const profileForm = document.querySelector("#profile-form");
 const passwordForm = document.querySelector("#password-form");
 const profileStatus = document.querySelector("#profile-status");
+const passwordStatus = document.querySelector("#password-status");
+const featuresStatus = document.querySelector("#features-status");
 const logoutBtn = document.querySelector("#profile-logout-btn");
-const themeBtn = document.querySelector("#profile-theme-btn");
-const avatar = document.querySelector("#profile-avatar-large");
-const title = document.querySelector("#profile-title");
-const subtitle = document.querySelector("#profile-subtitle");
+const themeLightBtn = document.querySelector("#theme-light-btn");
+const themeDarkBtn = document.querySelector("#theme-dark-btn");
+const identityAvatar = document.querySelector("#settings-avatar");
+const identityName = document.querySelector("#settings-identity-name");
+const identityRole = document.querySelector("#settings-identity-role");
+const identityTenant = document.querySelector("#settings-identity-tenant");
+const protectionBadge = document.querySelector("#settings-protection-badge");
 const usernameLabel = document.querySelector("#profile-username");
 const roleLabel = document.querySelector("#profile-role-label");
 const tenantLabel = document.querySelector("#profile-tenant-label");
-const protectionBadge = document.querySelector("#profile-protection-badge");
-const editState = document.querySelector("#profile-edit-state");
 const fullNameInput = document.querySelector("#profile-full-name");
 const saveProfileBtn = document.querySelector("#save-profile-btn");
-const savePasswordBtn = document.querySelector("#save-password-btn");
 const avatarPreview = document.querySelector("#profile-avatar-preview");
 const avatarFileInput = document.querySelector("#avatar-file-input");
 const chooseAvatarBtn = document.querySelector("#choose-avatar-btn");
@@ -25,10 +31,15 @@ const avatarZoom = document.querySelector("#avatar-zoom");
 const avatarApplyBtn = document.querySelector("#avatar-apply-btn");
 const avatarCropClose = document.querySelector("#avatar-crop-close");
 const avatarCropCancel = document.querySelector("#avatar-crop-cancel");
+const ocrToggle = document.querySelector("#feature-ocr-toggle");
+const ocrState = document.querySelector("#feature-ocr-state");
+const sessionUserLabel = document.querySelector("#session-user");
+const sessionRoleLabel = document.querySelector("#session-role");
+const sessionTenantLabel = document.querySelector("#session-tenant");
+const sessionExpiresLabel = document.querySelector("#session-expires");
 
 let protectedAccount = false;
-let profileApiAvailable = true;
-let activeAvatarUser = sessionUser();
+let activeAvatarUser = null;
 let cropImage = null;
 let cropState = { scale: 1, offsetX: 0, offsetY: 0, dragging: false, startX: 0, startY: 0 };
 let cropBase = { width: 0, height: 0 };
@@ -48,11 +59,8 @@ function sessionGet(key) {
 
 function sessionSet(key, value) {
   try {
-    if (value) {
-      window.sessionStorage.setItem(key, value);
-    } else {
-      window.sessionStorage.removeItem(key);
-    }
+    if (value) window.sessionStorage.setItem(key, value);
+    else window.sessionStorage.removeItem(key);
   } catch {
     return false;
   }
@@ -85,25 +93,69 @@ function storageRemove(key) {
   return true;
 }
 
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  themeBtn.textContent = theme === "dark" ? "Light mode" : "Dark mode";
-  storageSet("dspm-theme", theme);
-}
-
 function authHeaders() {
-  const token = sessionGet("dspm-access-token");
   return {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${token}`,
+    "Authorization": `Bearer ${sessionGet("dspm-access-token")}`,
     "X-Tenant-ID": sessionGet("dspm-tenant-id") || "default",
   };
 }
 
-function setStatus(message) {
-  profileStatus.textContent = message;
+async function readErrorMessage(response) {
+  const message = await response.text();
+  try {
+    const data = JSON.parse(message);
+    return typeof data.detail === "string" ? data.detail : "Request failed.";
+  } catch {
+    return message || "Request failed.";
+  }
 }
 
+async function api(path, payload, method = "GET") {
+  const response = await fetch(path, {
+    method,
+    headers: authHeaders(),
+    body: payload ? JSON.stringify(payload) : undefined,
+  });
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return response.json();
+}
+
+function setStatus(element, message) {
+  if (element) element.textContent = message || " ";
+}
+
+/* ── Section routing ──────────────────────────────────────────── */
+const navItems = [...document.querySelectorAll(".settings-nav-item")];
+const sections = [...document.querySelectorAll(".settings-section")];
+
+function activateSection(name, updateHash = true) {
+  const known = sections.some((section) => section.dataset.panel === name);
+  const target = known ? name : "profile";
+  navItems.forEach((item) => item.classList.toggle("active", item.dataset.section === target));
+  sections.forEach((section) => section.classList.toggle("active", section.dataset.panel === target));
+  if (updateHash) history.replaceState(null, "", `#${target}`);
+}
+
+navItems.forEach((item) => {
+  item.addEventListener("click", () => activateSection(item.dataset.section));
+});
+window.addEventListener("hashchange", () => activateSection(location.hash.slice(1), false));
+
+/* ── Theme ────────────────────────────────────────────────────── */
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  storageSet("dspm-theme", theme);
+  themeLightBtn.classList.toggle("active", theme !== "dark");
+  themeDarkBtn.classList.toggle("active", theme === "dark");
+  themeLightBtn.setAttribute("aria-checked", String(theme !== "dark"));
+  themeDarkBtn.setAttribute("aria-checked", String(theme === "dark"));
+}
+
+themeLightBtn.addEventListener("click", () => applyTheme("light"));
+themeDarkBtn.addEventListener("click", () => applyTheme("dark"));
+
+/* ── Avatar ───────────────────────────────────────────────────── */
 function avatarStorageKey(user = activeAvatarUser) {
   const username = String(user?.username || sessionGet("dspm-user") || "user").toLowerCase();
   const tenant = String(user?.tenant_id || sessionGet("dspm-tenant-id") || "default").toLowerCase();
@@ -125,91 +177,10 @@ function setAvatarElement(element, imageData, fallbackInitial) {
   }
 }
 
-function applyStoredAvatar(user = activeAvatarUser) {
-  const initial = (user?.username || "U").trim().charAt(0).toUpperCase() || "U";
-  const imageData = storageGet(avatarStorageKey(user));
-  setAvatarElement(avatar, imageData, initial);
+function paintAvatar(imageData) {
+  const initial = (activeAvatarUser?.username || "U").trim().charAt(0).toUpperCase() || "U";
+  setAvatarElement(identityAvatar, imageData, initial);
   setAvatarElement(avatarPreview, imageData, initial);
-}
-
-async function readErrorMessage(response) {
-  const message = await response.text();
-  try {
-    const data = JSON.parse(message);
-    return typeof data.detail === "string" ? data.detail : "Request failed.";
-  } catch {
-    return message || "Request failed.";
-  }
-}
-
-async function api(path, payload, method = "GET") {
-  const response = await fetch(path, {
-    method,
-    headers: authHeaders(),
-    body: payload ? JSON.stringify(payload) : undefined,
-  });
-  if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
-  }
-  return response.json();
-}
-
-function sessionUser() {
-  const username = sessionGet("dspm-user") || "user";
-  return {
-    username,
-    role: sessionGet("dspm-role") || "viewer",
-    tenant_id: sessionGet("dspm-tenant-id") || "default",
-    full_name: username,
-  };
-}
-
-async function logout() {
-  const tokenToRevoke = sessionGet("dspm-access-token");
-  try {
-    if (tokenToRevoke) {
-      await fetch("/api/logout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenToRevoke}` },
-      });
-    }
-  } catch {
-    // Local session clearing must still happen if the revoke request cannot reach the API.
-  }
-  sessionSet("dspm-access-token", "");
-  sessionSet("dspm-tenant-id", "");
-  sessionSet("dspm-role", "");
-  sessionSet("dspm-user", "");
-  window.location.replace("/login");
-}
-
-function renderProfile(user, isProtected) {
-  protectedAccount = Boolean(isProtected);
-  activeAvatarUser = user;
-  const name = user.full_name || user.username;
-  title.textContent = name || "Profile";
-  subtitle.textContent = protectedAccount
-    ? "Built-in admin account is protected and cannot be edited."
-    : "Manage your display name and local password.";
-  usernameLabel.textContent = user.username || "-";
-  roleLabel.textContent = user.role || "-";
-  tenantLabel.textContent = user.tenant_id || "-";
-  protectionBadge.textContent = protectedAccount ? "Protected" : "Editable";
-  if (!profileApiAvailable) {
-    protectionBadge.textContent = "Session";
-  }
-  protectionBadge.classList.toggle("protected", protectedAccount);
-  editState.textContent = !profileApiAvailable ? "Password only" : protectedAccount ? "Read-only" : "Profile and password";
-  fullNameInput.value = user.full_name || "";
-  fullNameInput.disabled = protectedAccount || !profileApiAvailable;
-  saveProfileBtn.disabled = protectedAccount || !profileApiAvailable;
-  passwordForm.querySelectorAll("input, button").forEach((item) => {
-    item.disabled = protectedAccount;
-  });
-  sessionSet("dspm-user", user.username || "");
-  sessionSet("dspm-role", user.role || "");
-  sessionSet("dspm-tenant-id", user.tenant_id || "default");
-  applyStoredAvatar(user);
 }
 
 function updateAvatarHelp(message, isError = false) {
@@ -234,10 +205,8 @@ function drawCropCanvas() {
 
   const drawWidth = cropBase.width * cropState.scale;
   const drawHeight = cropBase.height * cropState.scale;
-  const minX = size - drawWidth;
-  const minY = size - drawHeight;
-  cropState.offsetX = Math.min(0, Math.max(minX, cropState.offsetX));
-  cropState.offsetY = Math.min(0, Math.max(minY, cropState.offsetY));
+  cropState.offsetX = Math.min(0, Math.max(size - drawWidth, cropState.offsetX));
+  cropState.offsetY = Math.min(0, Math.max(size - drawHeight, cropState.offsetY));
 
   ctx.drawImage(cropImage, cropState.offsetX, cropState.offsetY, drawWidth, drawHeight);
   ctx.save();
@@ -258,10 +227,7 @@ function openAvatarCrop(image) {
   cropImage = image;
   const size = avatarCropCanvas.width;
   const baseScale = Math.max(size / image.naturalWidth, size / image.naturalHeight);
-  cropBase = {
-    width: image.naturalWidth * baseScale,
-    height: image.naturalHeight * baseScale,
-  };
+  cropBase = { width: image.naturalWidth * baseScale, height: image.naturalHeight * baseScale };
   cropState = {
     scale: 1,
     offsetX: (size - cropBase.width) / 2,
@@ -312,9 +278,7 @@ function validateAvatarFile(file) {
   if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
     return "Only PNG, JPG, and WebP images are supported.";
   }
-  if (file.size > AVATAR_MAX_BYTES) {
-    return "Image must be 2 MB or smaller.";
-  }
+  if (file.size > AVATAR_MAX_BYTES) return "Image must be 2 MB or smaller.";
   return "";
 }
 
@@ -329,11 +293,11 @@ function loadAvatarFile(file) {
     const image = new Image();
     image.addEventListener("load", () => {
       if (image.naturalWidth < AVATAR_MIN_SIZE || image.naturalHeight < AVATAR_MIN_SIZE) {
-        updateAvatarHelp(`Image must be at least ${AVATAR_MIN_SIZE}x${AVATAR_MIN_SIZE} px.`, true);
+        updateAvatarHelp(`Image must be at least ${AVATAR_MIN_SIZE}×${AVATAR_MIN_SIZE} px.`, true);
         return;
       }
       if (image.naturalWidth > AVATAR_MAX_SIZE || image.naturalHeight > AVATAR_MAX_SIZE) {
-        updateAvatarHelp(`Image must be no larger than ${AVATAR_MAX_SIZE}x${AVATAR_MAX_SIZE} px.`, true);
+        updateAvatarHelp(`Image must be no larger than ${AVATAR_MAX_SIZE}×${AVATAR_MAX_SIZE} px.`, true);
         return;
       }
       updateAvatarHelp("Drag the image inside the circle and adjust zoom.");
@@ -346,6 +310,65 @@ function loadAvatarFile(file) {
   reader.readAsDataURL(file);
 }
 
+async function saveAvatar(avatarData) {
+  const data = await api("/api/profile/avatar", { avatar: avatarData || "" }, "PUT");
+  const saved = String(data.avatar || "");
+  if (saved) storageSet(avatarStorageKey(), saved);
+  else storageRemove(avatarStorageKey());
+  paintAvatar(saved);
+  return saved;
+}
+
+/* ── Profile ──────────────────────────────────────────────────── */
+function renderProfile(user, isProtected, serverAvatar) {
+  protectedAccount = Boolean(isProtected);
+  activeAvatarUser = user;
+  const name = user.full_name || user.username || "Account";
+  identityName.textContent = name;
+  identityRole.textContent = user.role || "viewer";
+  identityTenant.textContent = user.tenant_id || "default";
+  usernameLabel.textContent = user.username || "-";
+  roleLabel.textContent = user.role || "-";
+  tenantLabel.textContent = user.tenant_id || "-";
+  protectionBadge.hidden = !protectedAccount;
+  fullNameInput.value = user.full_name || "";
+  fullNameInput.disabled = protectedAccount;
+  saveProfileBtn.disabled = protectedAccount;
+  passwordForm.querySelectorAll("input, button").forEach((item) => {
+    item.disabled = protectedAccount;
+  });
+  if (protectedAccount) {
+    setStatus(profileStatus, "The built-in admin identity is fixed; only the photo can change.");
+    setStatus(passwordStatus, "The built-in admin password is managed at install level.");
+  }
+  sessionSet("dspm-user", user.username || "");
+  sessionSet("dspm-role", user.role || "");
+  sessionSet("dspm-tenant-id", user.tenant_id || "default");
+  sessionUserLabel.textContent = user.username || "-";
+  sessionRoleLabel.textContent = user.role || "-";
+  sessionTenantLabel.textContent = user.tenant_id || "-";
+  const avatarData = serverAvatar || storageGet(avatarStorageKey(user)) || "";
+  if (serverAvatar) storageSet(avatarStorageKey(user), serverAvatar);
+  paintAvatar(avatarData);
+}
+
+function renderSessionExpiry() {
+  const token = sessionGet("dspm-access-token") || "";
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    if (payload.exp) {
+      sessionExpiresLabel.textContent = new Date(payload.exp * 1000).toLocaleString([], {
+        dateStyle: "medium",
+        timeStyle: "short",
+      });
+      return;
+    }
+  } catch {
+    /* fall through to the placeholder */
+  }
+  sessionExpiresLabel.textContent = "-";
+}
+
 async function loadProfile() {
   if (!sessionGet("dspm-access-token")) {
     window.location.replace("/login");
@@ -353,61 +376,111 @@ async function loadProfile() {
   }
   try {
     const data = await api("/api/profile");
-    profileApiAvailable = true;
-    renderProfile(data.user || {}, data.protected);
-    setStatus(data.protected ? "This protected account is read-only." : "Profile loaded.");
+    renderProfile(data.user || {}, data.protected, String(data.avatar || ""));
   } catch (error) {
-    profileApiAvailable = false;
-    const fallbackUser = sessionUser();
-    renderProfile(fallbackUser, fallbackUser.username === "admin");
-    setStatus("Profile API is not active yet. Password change can still be used; restart the server to edit profile details.");
+    const username = sessionGet("dspm-user") || "user";
+    renderProfile(
+      {
+        username,
+        role: sessionGet("dspm-role") || "viewer",
+        tenant_id: sessionGet("dspm-tenant-id") || "default",
+        full_name: username,
+      },
+      username === "admin",
+      "",
+    );
+    setStatus(profileStatus, `Could not load the account record: ${error.message}`);
   }
 }
 
+/* ── Install features ─────────────────────────────────────────── */
+const OCR_STATE_LINES = {
+  enabled: "On — images and scanned documents are text-extracted during scans.",
+  enabled_but_dependency_missing:
+    "On, but the OCR engine is not installed on the server (pip install -r requirements-ocr.txt).",
+  disabled_dependency_present: "Off — the OCR engine is installed and ready.",
+  disabled: "Off — install the OCR engine on the server to use this.",
+};
+
+function renderFeatures(features) {
+  const ocr = features?.ocr;
+  if (!ocr) return;
+  ocrToggle.checked = Boolean(ocr.enabled);
+  ocrToggle.disabled = !ocr.editable;
+  ocrState.textContent = OCR_STATE_LINES[ocr.state] || (ocr.enabled ? "On." : "Off.");
+  setStatus(
+    featuresStatus,
+    ocr.editable ? "" : "Only administrators can change install features.",
+  );
+}
+
+async function loadFeatures() {
+  try {
+    const data = await api("/api/settings/features");
+    renderFeatures(data.features);
+  } catch (error) {
+    ocrState.textContent = "Unavailable.";
+    setStatus(featuresStatus, `Could not load features: ${error.message}`);
+  }
+}
+
+ocrToggle.addEventListener("change", async () => {
+  const wanted = ocrToggle.checked;
+  ocrToggle.disabled = true;
+  setStatus(featuresStatus, wanted ? "Turning OCR on…" : "Turning OCR off…");
+  try {
+    const data = await api("/api/settings/features", { ocr_enabled: wanted }, "PUT");
+    renderFeatures(data.features);
+    setStatus(featuresStatus, wanted
+      ? "OCR is on. It applies from the next scan — no restart needed."
+      : "OCR is off. It applies from the next scan — no restart needed.");
+  } catch (error) {
+    ocrToggle.checked = !wanted;
+    ocrToggle.disabled = false;
+    setStatus(featuresStatus, `Change failed: ${error.message}`);
+  }
+});
+
+/* ── Forms ────────────────────────────────────────────────────── */
 profileForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (protectedAccount) {
-    setStatus("Built-in admin account is protected.");
-    return;
-  }
-  setStatus("Saving profile...");
+  if (protectedAccount) return;
+  setStatus(profileStatus, "Saving…");
   try {
     const data = await api("/api/profile", { full_name: fullNameInput.value.trim() }, "PUT");
-    renderProfile(data.user || {}, false);
-    setStatus("Profile updated.");
+    renderProfile(data.user || {}, false, "");
+    setStatus(profileStatus, "Name saved.");
   } catch (error) {
-    setStatus(`Profile update failed: ${error.message}`);
+    setStatus(profileStatus, `Save failed: ${error.message}`);
   }
 });
 
 passwordForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (protectedAccount) {
-    setStatus("Built-in admin account is protected.");
-    return;
-  }
+  if (protectedAccount) return;
   const data = new FormData(passwordForm);
   const currentPassword = String(data.get("current_password") || "");
   const newPassword = String(data.get("new_password") || "");
   const confirmPassword = String(data.get("confirm_password") || "");
   if (newPassword.length < 8) {
-    setStatus("Password must be at least 8 characters.");
+    setStatus(passwordStatus, "Password must be at least 8 characters.");
     return;
   }
   if (newPassword !== confirmPassword) {
-    setStatus("New passwords do not match.");
+    setStatus(passwordStatus, "New passwords do not match.");
     return;
   }
-  setStatus("Changing password...");
+  setStatus(passwordStatus, "Changing password…");
   try {
     await api("/api/auth/change-password", { current_password: currentPassword, new_password: newPassword }, "POST");
     passwordForm.reset();
-    setStatus("Password changed.");
+    setStatus(passwordStatus, "Password changed.");
   } catch (error) {
-    setStatus(`Password change failed: ${error.message}`);
+    setStatus(passwordStatus, `Password change failed: ${error.message}`);
   }
 });
 
+/* ── Avatar events ────────────────────────────────────────────── */
 chooseAvatarBtn.addEventListener("click", () => avatarFileInput.click());
 
 avatarFileInput.addEventListener("change", () => {
@@ -416,11 +489,14 @@ avatarFileInput.addEventListener("change", () => {
   loadAvatarFile(file);
 });
 
-removeAvatarBtn.addEventListener("click", () => {
-  storageRemove(avatarStorageKey());
-  applyStoredAvatar();
-  updateAvatarHelp("Profile photo removed.");
-  setStatus("Profile photo removed.");
+removeAvatarBtn.addEventListener("click", async () => {
+  updateAvatarHelp("Removing photo…");
+  try {
+    await saveAvatar("");
+    updateAvatarHelp("Profile photo removed.");
+  } catch (error) {
+    updateAvatarHelp(`Remove failed: ${error.message}`, true);
+  }
 });
 
 avatarZoom.addEventListener("input", () => {
@@ -461,21 +537,20 @@ avatarCropCanvas.addEventListener("pointercancel", () => {
   cropState.dragging = false;
 });
 
-avatarApplyBtn.addEventListener("click", () => {
+avatarApplyBtn.addEventListener("click", async () => {
   const avatarData = exportAvatarImage();
   if (!avatarData) {
     updateAvatarHelp("Choose an image before applying.", true);
     return;
   }
-  const saved = storageSet(avatarStorageKey(), avatarData);
-  if (!saved) {
-    updateAvatarHelp("Browser storage is full or unavailable.", true);
-    return;
+  updateAvatarHelp("Saving photo…");
+  try {
+    await saveAvatar(avatarData);
+    updateAvatarHelp("Profile photo saved to your account.");
+    closeAvatarCrop();
+  } catch (error) {
+    updateAvatarHelp(`Save failed: ${error.message}`, true);
   }
-  applyStoredAvatar();
-  updateAvatarHelp("Profile photo applied.");
-  setStatus("Profile photo updated.");
-  closeAvatarCrop();
 });
 
 avatarCropClose.addEventListener("click", closeAvatarCrop);
@@ -484,12 +559,31 @@ avatarCropModal.addEventListener("click", (event) => {
   if (event.target === avatarCropModal) closeAvatarCrop();
 });
 
-logoutBtn.addEventListener("click", logout);
-themeBtn.addEventListener("click", () => {
-  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
-});
+/* ── Session ──────────────────────────────────────────────────── */
+async function logout() {
+  const tokenToRevoke = sessionGet("dspm-access-token");
+  try {
+    if (tokenToRevoke) {
+      await fetch("/api/logout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenToRevoke}` },
+      });
+    }
+  } catch {
+    /* local session clearing must still happen */
+  }
+  sessionSet("dspm-access-token", "");
+  sessionSet("dspm-tenant-id", "");
+  sessionSet("dspm-role", "");
+  sessionSet("dspm-user", "");
+  window.location.replace("/login");
+}
 
+logoutBtn.addEventListener("click", logout);
+
+/* ── Boot ─────────────────────────────────────────────────────── */
 applyTheme(storageGet("dspm-theme") || "light");
-loadProfile().catch((error) => {
-  setStatus(`Profile failed: ${error.message}`);
-});
+activateSection(location.hash.slice(1) || "profile", false);
+renderSessionExpiry();
+loadProfile();
+loadFeatures();
