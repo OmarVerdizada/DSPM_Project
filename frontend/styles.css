@@ -21499,3 +21499,562 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   font-size: 11.5px !important;
   line-height: 1.3 !important;
 }
+
+/* == Findings / Data Inventory: compact command bar + complete disclosure == */
+/* Keep the title, search, export actions, severity rail, facets, context, and
+   table in one deliberate rhythm. The old command-bar margin alone inserted
+   32px of dead vertical space around these controls. */
+:root:root #inventory-workspace .inventory-toolbar {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 8px 18px !important;
+  padding: 9px 16px 6px !important;
+}
+:root:root #inventory-workspace .inventory-toolbar > div:first-child {
+  flex: 0 0 auto;
+  min-width: 150px;
+}
+:root:root #inventory-workspace .inventory-toolbar .eyebrow { display: none !important; }
+:root:root #inventory-workspace .inventory-toolbar h3 { font-size: 16px !important; line-height: 1.2; }
+:root:root #inventory-workspace .inventory-toolbar-actions {
+  flex: 1 1 660px !important;
+  width: auto !important;
+  gap: 8px !important;
+  justify-content: flex-end !important;
+}
+:root:root #inventory-workspace .inventory-search-box {
+  height: 36px !important;
+  min-width: 260px !important;
+  flex: 1 1 360px !important;
+  padding: 0 12px !important;
+}
+:root:root #inventory-workspace .inventory-search-box input { min-height: 34px !important; }
+:root:root #inventory-workspace .inventory-command-bar {
+  margin: 0 !important;
+  padding: 4px 16px 6px !important;
+  gap: 5px !important;
+}
+:root:root #inventory-workspace .risk-filter-group { gap: 5px !important; }
+:root:root #inventory-workspace .risk-filter {
+  height: 27px !important;
+  min-height: 27px !important;
+  padding: 2px 9px !important;
+}
+
+/* Four explicit group tracks prevent Source/Finding/Framework/Clear from
+   collapsing into a left-packed knot while keeping each label close to its
+   own control. */
+:root:root #inventory-workspace .inventory-facet-row {
+  display: grid !important;
+  grid-template-columns: minmax(190px, .8fr) minmax(220px, 1fr) minmax(390px, 2fr) auto !important;
+  align-items: center !important;
+  gap: 6px 22px !important;
+  padding: 3px 0 !important;
+  overflow: visible !important;
+}
+:root:root #inventory-workspace .inventory-facet-row > label {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+:root:root #inventory-workspace .inventory-facet-row .facet-shell,
+:root:root #inventory-workspace .inventory-facet-row .facet-shell select {
+  width: 100% !important;
+  max-width: none !important;
+}
+:root:root #inventory-workspace .inventory-framework-filter {
+  display: grid !important;
+  grid-template-columns: auto minmax(0, 1fr) !important;
+  align-items: center !important;
+  gap: 6px 10px !important;
+  min-width: 0 !important;
+  order: 0 !important;
+}
+:root:root #inventory-workspace .inventory-framework-options {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(max-content, 1fr)) !important;
+  gap: 5px !important;
+}
+:root:root #inventory-workspace .inventory-framework-option {
+  justify-content: center !important;
+  padding: 2px 7px !important;
+}
+:root:root #inventory-workspace #clear-inventory-filters { justify-self: end; }
+:root:root #inventory-workspace #clear-inventory-filters { order: 0 !important; }
+
+/* One equal-width summary strip directly above the table. */
+:root:root #inventory-workspace #inventory-context-metrics {
+  display: grid !important;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  gap: 0 !important;
+  margin: 1px 0 0 !important;
+  border-radius: 9px !important;
+}
+:root:root #inventory-workspace #inventory-context-metrics > div {
+  display: flex !important;
+  align-items: baseline !important;
+  justify-content: center !important;
+  gap: 5px !important;
+  padding: 5px 10px 5px 32px !important;
+  min-height: 30px !important;
+  border-radius: 0 !important;
+}
+:root:root #inventory-workspace #inventory-context-metrics > div::before { left: 11px !important; }
+:root:root #inventory-workspace #inventory-context-metrics > div strong { margin-left: 0 !important; }
+:root:root #inventory-workspace #inventory-context-metrics > div small { margin-left: 0 !important; }
+:root:root #inventory-workspace .inventory-table-wrap { margin-top: 0 !important; }
+
+/* The row arrow and file name are one disclosure control. Collapsed rows stay
+   dense; the following colspan row owns all verbose evidence. */
+:root:root #results-body .inventory-row-expand { align-self: center; }
+:root:root #results-body .file-info-toggle { cursor: pointer; text-align: left; }
+:root:root #results-body tr.row-open > td {
+  background: color-mix(in srgb, var(--accent) 4%, var(--card)) !important;
+  border-bottom-color: transparent !important;
+}
+:root:root #inventory-workspace #results-body tr.inventory-detail-row > td,
+:root:root .finding-queue-table tr.finding-detail-row > td {
+  position: static !important;
+  left: auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  padding: 0 !important;
+  border-left: 0 !important;
+  border-right: 0 !important;
+  background: var(--card-2) !important;
+  white-space: normal !important;
+}
+:root:root #inventory-workspace #results-body tr.inventory-detail-row:hover > td,
+:root:root .finding-queue-table tr.finding-detail-row:hover > td { background: var(--card-2) !important; }
+
+.inventory-expanded-panel,
+.finding-expanded-shell {
+  padding: 14px;
+  color: var(--text);
+  border-top: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
+  border-bottom: 1px solid var(--line);
+}
+.inventory-expanded-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.inventory-expanded-title { min-width: 0; }
+.inventory-expanded-title > span,
+.inventory-detail-section-head > div > span {
+  display: block;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+.inventory-expanded-title > strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 15px;
+  line-height: 1.25;
+}
+.inventory-expanded-title > p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-family: JetBrains Mono, Consolas, monospace;
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+.inventory-expanded-frameworks { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.inventory-expanded-facts,
+.finding-expanded-facts {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(90px, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--line);
+}
+.inventory-expanded-facts > div,
+.finding-expanded-facts > div {
+  min-width: 0;
+  padding: 7px 9px;
+  background: var(--card);
+}
+.inventory-expanded-facts span,
+.finding-expanded-facts span {
+  display: block;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .045em;
+  text-transform: uppercase;
+}
+.inventory-expanded-facts strong,
+.finding-expanded-facts strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+}
+.inventory-expanded-grid,
+.finding-expanded-support {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.inventory-detail-section {
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card);
+}
+.inventory-detail-wide { grid-column: 1 / -1; }
+.inventory-detail-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--line);
+}
+.inventory-detail-section-head h5 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.25;
+}
+.inventory-detail-section-head > b {
+  display: inline-grid;
+  min-width: 22px;
+  height: 20px;
+  place-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 10px;
+}
+.inventory-property-grid,
+.inventory-data-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+}
+.inventory-property-grid > div,
+.inventory-data-list > div {
+  min-width: 0;
+  padding: 6px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+}
+.inventory-property-grid dt,
+.inventory-data-list dt {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 650;
+}
+.inventory-property-grid dd,
+.inventory-data-list dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.inventory-findings-list,
+.inventory-recommendation-list,
+.inventory-detail-section > .detail-list {
+  margin: 0 !important;
+  padding: 0 !important;
+  list-style: none;
+}
+.inventory-findings-list > li {
+  margin: 0 0 8px !important;
+  padding: 10px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px !important;
+  background: var(--card-2) !important;
+}
+.inventory-findings-list > li:last-child { margin-bottom: 0 !important; }
+.inventory-findings-list .detail-meta-line { display: block; margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+.inventory-findings-list .finding-metadata-grid { display: flex; flex-wrap: wrap; gap: 4px; margin: 7px 0; }
+.inventory-findings-list .finding-metadata-grid > span { padding: 3px 6px; font-size: 10px; }
+.inventory-findings-list .detail-evidence,
+.child-finding-evidence {
+  margin-top: 7px;
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 7px;
+  background: var(--card);
+}
+.inventory-findings-list .detail-evidence > span,
+.child-finding-evidence > span { display: block; margin-bottom: 3px; color: var(--muted); font-size: 9.5px; font-weight: 700; text-transform: uppercase; }
+.inventory-findings-list .detail-evidence code { display: block; padding: 0; background: transparent; color: var(--text); font-size: 10.5px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
+.inventory-findings-list .detail-section dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin: 0; }
+.inventory-findings-list .detail-section dl > div { min-width: 0; }
+.inventory-findings-list .detail-section dt { color: var(--muted); font-size: 9px; }
+.inventory-findings-list .detail-section dd { margin: 1px 0 0; font-size: 10.5px; overflow-wrap: anywhere; }
+.child-finding-evidence article { margin-top: 6px; padding: 8px; border-left: 2px solid var(--accent); background: var(--card-2); }
+.child-finding-evidence article > small { display: block; margin-top: 2px; color: var(--muted); }
+.inventory-expanded-preview.preview-panel {
+  display: block !important;
+  max-height: 260px;
+  overflow: auto;
+  margin: 0 !important;
+  padding: 8px !important;
+}
+.inventory-expanded-preview.preview-panel code { border-radius: 0; }
+.inventory-detail-empty { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.inventory-detail-state {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 22px;
+  text-align: center;
+}
+.inventory-detail-state small { color: var(--muted); }
+.inventory-detail-state.error strong { color: var(--status-critical); }
+.inventory-detail-spinner {
+  width: 18px;
+  height: 18px;
+  margin-bottom: 3px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: inventoryDetailSpin .7s linear infinite;
+}
+@keyframes inventoryDetailSpin { to { transform: rotate(360deg); } }
+
+/* Priority queue disclosure uses the same evidence language at a smaller
+   footprint and no longer stops at seven terse labels. */
+:root:root .finding-queue-table .finding-row-expand {
+  display: inline-grid !important;
+  width: 27px !important;
+  height: 27px !important;
+  min-width: 27px !important;
+  min-height: 27px !important;
+  place-items: center;
+  padding: 0 !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 7px !important;
+  background: var(--card-2) !important;
+  color: var(--muted) !important;
+}
+:root:root .finding-queue-table .finding-row-expand:hover,
+:root:root .finding-queue-table .finding-row-expand.open {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line)) !important;
+  background: var(--accent-soft) !important;
+  color: var(--accent-strong) !important;
+}
+.finding-expanded-content { min-width: 0; }
+.finding-expanded-shell { padding: 11px; }
+.finding-expanded-facts { grid-template-columns: repeat(4, minmax(100px, 1fr)); }
+.finding-evidence-section { margin-bottom: 9px; }
+
+/* The queue gets the larger share of the overview row. Its disclosure column
+   stays pinned at the right edge, so complete evidence is always reachable
+   even while the eight primary columns remain horizontally scrollable. */
+:root:root #tab-findings .executive-grid {
+  grid-template-columns: minmax(330px, .72fr) minmax(0, 1.28fr) !important;
+}
+:root:root #tab-findings .finding-queue-table {
+  min-width: 900px !important;
+  font-size: 11px !important;
+}
+:root:root #tab-findings .finding-queue-table th,
+:root:root #tab-findings .finding-queue-table td {
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
+:root:root #tab-findings .finding-queue-table th.finding-expand-col,
+:root:root #tab-findings .finding-queue-table td.finding-expand-col {
+  position: sticky !important;
+  right: 0 !important;
+  z-index: 4;
+  width: 38px !important;
+  min-width: 38px !important;
+  background: var(--card) !important;
+  box-shadow: -8px 0 12px color-mix(in srgb, var(--bg) 65%, transparent);
+}
+:root:root #tab-findings .finding-queue-table th.finding-expand-col { background: var(--surface-strong, var(--card-2)) !important; }
+
+@media (max-width: 1250px) {
+  :root:root #inventory-workspace .inventory-facet-row {
+    grid-template-columns: repeat(2, minmax(240px, 1fr)) !important;
+  }
+  :root:root #inventory-workspace .inventory-framework-filter { grid-column: 1; }
+  :root:root #inventory-workspace #clear-inventory-filters { grid-column: 2; grid-row: 2; align-self: center; }
+  .inventory-expanded-facts { grid-template-columns: repeat(4, minmax(90px, 1fr)); }
+}
+@media (max-width: 1100px) {
+  :root:root #tab-findings .executive-grid { grid-template-columns: 1fr !important; }
+}
+@media (max-width: 760px) {
+  :root:root #inventory-workspace .inventory-toolbar-actions { display: grid !important; }
+  :root:root #inventory-workspace .inventory-export-actions { margin-left: 0 !important; }
+  :root:root #inventory-workspace .inventory-facet-row { grid-template-columns: 1fr !important; }
+  :root:root #inventory-workspace .inventory-framework-filter,
+  :root:root #inventory-workspace #clear-inventory-filters { grid-column: 1; grid-row: auto; justify-self: stretch; }
+  :root:root #inventory-workspace .inventory-framework-options { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  :root:root #inventory-workspace #inventory-context-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .inventory-expanded-head { display: grid; }
+  .inventory-expanded-frameworks { justify-content: flex-start; }
+  .inventory-expanded-facts,
+  .finding-expanded-facts,
+  .inventory-expanded-grid,
+  .finding-expanded-support,
+  .inventory-property-grid,
+  .inventory-data-list { grid-template-columns: 1fr; }
+  .inventory-detail-wide { grid-column: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inventory-detail-spinner { animation: none; }
+}
+
+
+/* == Finding evidence drawer: console-grade chrome + grouped dossier == */
+:root:root .detail-drawer-panel {
+  background: var(--card) !important;
+  border-left: 1px solid var(--line) !important;
+  box-shadow: -24px 0 60px rgba(2, 6, 23, .30) !important;
+  width: min(580px, 94vw) !important;
+}
+:root:root .detail-drawer-header {
+  display: flex !important;
+  align-items: flex-start !important;
+  justify-content: space-between !important;
+  gap: 14px !important;
+  padding: 18px 20px 14px !important;
+  border-bottom: 1px solid var(--line) !important;
+  background: var(--card) !important;
+}
+:root:root .detail-drawer-header #detail-drawer-eyebrow {
+  display: block;
+  font-size: 10.5px !important;
+  font-weight: 600 !important;
+  letter-spacing: .06em !important;
+  text-transform: uppercase !important;
+  color: var(--muted) !important;
+  margin: 0 0 3px !important;
+}
+:root:root .detail-drawer-header h3 {
+  margin: 0 !important;
+  font-size: 16.5px !important;
+  line-height: 1.3 !important;
+}
+:root:root .detail-drawer-header #detail-drawer-meta {
+  margin: 3px 0 0 !important;
+  font-family: "JetBrains Mono", monospace !important;
+  font-size: 11px !important;
+  color: var(--muted) !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
+}
+:root:root .detail-drawer-close {
+  flex: 0 0 auto !important;
+  width: 34px !important;
+  height: 34px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border: 1px solid transparent !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  box-shadow: none !important;
+}
+:root:root .detail-drawer-close:hover {
+  color: var(--text) !important;
+  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+}
+:root:root .detail-drawer-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+:root:root .detail-drawer-body { padding: 14px 20px 26px !important; }
+
+/* Summary strip: the dossier's one-line index. */
+.drawer-summary-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card) 82%, transparent);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.drawer-summary-strip i { width: 3px; height: 3px; border-radius: 50%; background: var(--muted); opacity: .7; }
+
+/* Groups: closed by default, one per finding type. */
+.drawer-group {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card) 90%, transparent);
+  margin: 0 0 8px;
+  overflow: hidden;
+}
+.drawer-group summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.drawer-group summary::-webkit-details-marker { display: none; }
+.drawer-group summary:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.drawer-group summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.drawer-group-sev { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; }
+.drawer-group-sev.CRITICAL { background: var(--status-critical); }
+.drawer-group-sev.HIGH { background: var(--status-high, #b45309); }
+.drawer-group-sev.MEDIUM { background: var(--status-warning, #b45309); }
+.drawer-group-sev.LOW { background: var(--status-low, #15803d); }
+.drawer-group-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drawer-group-count {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.drawer-group-count small { font-weight: 500; font-size: 10.5px; }
+.drawer-group-caret {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 160ms ease;
+}
+.drawer-group[open] > summary .drawer-group-caret { transform: rotate(180deg); }
+.drawer-group[open] > summary { border-bottom: 1px solid var(--line); }
+.drawer-group-body { padding: 4px 14px 12px; }
+.drawer-group-body .detail-list { margin: 0 !important; padding: 0 !important; }
+.drawer-group-body .detail-list > li { border: 0 !important; padding-left: 0 !important; }
+@media (prefers-reduced-motion: reduce) {
+  .drawer-group-caret { transition: none; }
+}

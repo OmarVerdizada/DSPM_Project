@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=206" />
+    <link rel="stylesheet" href="/static/styles.css?v=208" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -1300,7 +1300,9 @@
             <h3 id="detail-drawer-title">Details</h3>
             <p id="detail-drawer-meta"></p>
           </div>
-          <button type="button" class="icon-btn" data-close-detail title="Close detail">x</button>
+          <button type="button" class="tb-icon-btn detail-drawer-close" data-close-detail title="Close" aria-label="Close detail">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
         </div>
         <div id="detail-drawer-body" class="detail-drawer-body"></div>
       </aside>
@@ -1346,7 +1348,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=159"></script>
+    <script src="/static/app.js?v=161"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

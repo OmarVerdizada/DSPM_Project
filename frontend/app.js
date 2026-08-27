@@ -495,6 +495,9 @@ let inventoryPageRequest = 0;
 let inventoryPageAbortController = null;
 let inventoryFacets = null;
 let inventoryFacetRequest = 0;
+const expandedInventoryKeys = new Set();
+// Inventory details use the authenticated on-demand asset endpoint.
+const inventoryDetailRequests = new Map();
 let activeScanJobId = "";
 let activeEndpointJobId = "";
 let scanProgressValue = 0;
@@ -1898,8 +1901,12 @@ function renderFindingQueueTable(rows) {
           <tr>${findingQueueHeader("Severity", "score")}${findingQueueHeader("Finding", "finding")}${findingQueueHeader("Framework", "framework")}${findingQueueHeader("Data Element", "dataElement")}${findingQueueHeader("Asset", "asset")}${findingQueueHeader("Exact Location", "location")}${findingQueueHeader("Status", "status")}${findingQueueHeader("SLA", "sla")}<th class="finding-expand-col" aria-label="More detail"></th></tr>
         </thead>
         <tbody>
-          ${rows.map(({ file, finding, severity, confidence, framework, dataElement, asset, location, exposure, occurrences, uniqueRecords, status, owner, sla, lastSeen }) => `
-            <tr>
+          ${rows.map(({ file, finding, severity, confidence, framework, dataElement, asset, location, exposure, occurrences, uniqueRecords, status, owner, sla, lastSeen }) => {
+            const fileKeyValue = fileKey(file);
+            const identity = findingIdentity(finding);
+            const detailId = `finding-detail-${Math.abs(hashString(`${fileKeyValue}|${identity}`))}`;
+            return `
+            <tr class="finding-summary-row">
               <td><span class="badge ${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
               <td><strong>${escapeHtml(findingDisplayName(finding))}</strong></td>
               <td><div class="framework-pill-row">${findingFrameworkBadges(finding)}</div></td>
@@ -1908,38 +1915,115 @@ function renderFindingQueueTable(rows) {
               <td>${escapeHtml(location)}</td>
               <td>${escapeHtml(status)}</td>
               <td>${escapeHtml(sla)}</td>
-              <td class="finding-expand-col"><button type="button" class="finding-row-expand" aria-expanded="false" aria-label="Show more finding detail" title="More detail">&#8943;</button></td>
+              <td class="finding-expand-col"><button type="button" class="finding-row-expand" data-finding-file-key="${escapeHtml(fileKeyValue)}" data-finding-identity="${escapeHtml(identity)}" aria-controls="${escapeHtml(detailId)}" aria-expanded="false" aria-label="Show complete evidence for ${escapeHtml(findingDisplayName(finding))}" title="Show complete finding evidence"><span aria-hidden="true">&#8964;</span></button></td>
             </tr>
-            <tr class="finding-detail-row hidden">
+            <tr id="${escapeHtml(detailId)}" class="finding-detail-row hidden" data-finding-detail-key="${escapeHtml(fileKeyValue)}">
               <td colspan="9">
-                <div class="finding-detail-grid">
-                  <span><label>Confidence</label>${escapeHtml(confidence)}</span>
-                  <span><label>Protection state</label>${escapeHtml(finding.protection_state || finding.encryption_state || "unknown")}</span>
-                  <span><label>Exposure</label>${escapeHtml(exposure)}</span>
-                  <span><label>Occurrences</label>${escapeHtml(occurrences)}</span>
-                  <span><label>Unique records</label>${escapeHtml(uniqueRecords)}</span>
-                  <span><label>Owner</label>${escapeHtml(owner)}</span>
-                  <span><label>Last seen</label>${escapeHtml(lastSeen || "unknown")}</span>
-                </div>
+                <div class="finding-expanded-content" data-finding-expanded-content></div>
               </td>
             </tr>
-          `).join("")}
+          `}).join("")}
         </tbody>
       </table>
     </div>
   `;
 }
 
+function findingIdentity(finding = {}) {
+  return [
+    finding.rule_id,
+    finding.type,
+    finding.display_name,
+    finding.label,
+    finding.data_element,
+    finding.category_id || finding.category,
+  ].map((value) => String(value || "").trim().toLowerCase()).join("|");
+}
+
+function findInventoryFileByKey(key) {
+  return latestFiles.find((item) => fileKey(item) === key)
+    || currentInventoryPage()?.items.find((item) => fileKey(item) === key)
+    || null;
+}
+
+function findFindingByIdentity(file, identity, fallback = null) {
+  const findings = primaryFindingsForFile(file);
+  return findings.find((item) => findingIdentity(item) === identity)
+    || findings.find((item) => findingDisplayName(item).toLowerCase() === findingDisplayName(fallback || {}).toLowerCase())
+    || fallback
+    || findings[0]
+    || {};
+}
+
+function renderFindingQueueExpandedDetail(file, finding) {
+  const level = String(finding.risk || finding.severity || getEffectiveRisk(file).level || "LOW").toUpperCase();
+  const reasons = file?.risk?.reasons || [];
+  const recommendations = file?.risk?.dlp_recommendations || [];
+  const facts = [
+    ["Confidence", findingConfidenceLabel(finding)],
+    ["Protection", finding.protection_state || finding.encryption_state || (isProtectedFile(file) ? getProtectionLabel(file) : "Not reported")],
+    ["Exposure", findingExposureText(file, finding)],
+    ["Occurrences", findingOccurrenceCount(finding)],
+    ["Unique records", findingUniqueRecordCount(finding)],
+    ["Owner", finding.data_owner || file?.owner || file?.department || "Unassigned"],
+    ["Last seen", getFriendlyTimestamp(finding.last_seen || file?.last_scanned_at || file?.modified_at || file?.modified) || "Not reported"],
+    ["SLA", finding.sla || file?.risk?.remediation?.sla || slaForSeverity(level)],
+  ];
+  return `
+    <div class="finding-expanded-shell">
+      <div class="finding-expanded-facts">
+        ${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
+      </div>
+      <section class="inventory-detail-section finding-evidence-section">
+        <div class="inventory-detail-section-head"><div><span>Detection record</span><h5>Complete finding evidence</h5></div><span class="badge ${escapeHtml(level)}">${escapeHtml(level)} ${escapeHtml(getEffectiveRisk(file).score || severityScore(level))}</span></div>
+        <ol class="detail-list findings inventory-findings-list">${renderFindingDetails(file, finding)}</ol>
+      </section>
+      <div class="finding-expanded-support">
+        <section class="inventory-detail-section">
+          <div class="inventory-detail-section-head"><div><span>Why it matters</span><h5>Risk rationale</h5></div><b>${escapeHtml(reasons.length)}</b></div>
+          ${renderReasonDetailList(file)}
+        </section>
+        <section class="inventory-detail-section">
+          <div class="inventory-detail-section-head"><div><span>What to do</span><h5>DLP recommendations</h5></div><b>${escapeHtml(recommendations.length)}</b></div>
+          ${renderInventoryRecommendations(file)}
+        </section>
+      </div>
+    </div>
+  `;
+}
+
 // Delegated toggle for the finding-queue per-row detail expander (the detail
 // <tr> is the immediate next sibling of the row that holds the button).
-document.addEventListener("click", (event) => {
+document.addEventListener("click", async (event) => {
   const btn = event.target.closest(".finding-row-expand");
   if (!btn) return;
   const detail = btn.closest("tr")?.nextElementSibling;
   if (!detail || !detail.classList.contains("finding-detail-row")) return;
   const open = !detail.classList.toggle("hidden");
   btn.setAttribute("aria-expanded", open ? "true" : "false");
-  btn.innerHTML = open ? "&#10005;" : "&#8943;";
+  btn.setAttribute("aria-label", open ? "Hide complete finding evidence" : "Show complete finding evidence");
+  btn.title = open ? "Hide complete finding evidence" : "Show complete finding evidence";
+  btn.classList.toggle("open", open);
+  btn.querySelector("span").innerHTML = open ? "&#8963;" : "&#8964;";
+  if (!open) return;
+
+  const content = detail.querySelector("[data-finding-expanded-content]");
+  if (!content) return;
+  content.innerHTML = renderInventoryDetailLoading("Loading complete finding evidence...");
+  detail.setAttribute("aria-busy", "true");
+  try {
+    let file = findInventoryFileByKey(btn.dataset.findingFileKey || "");
+    if (!file) throw new Error("The source asset is no longer in the current inventory window.");
+    const fallback = primaryFindingsForFile(file).find((item) => findingIdentity(item) === btn.dataset.findingIdentity);
+    file = await ensureInventoryAssetDetail(file);
+    if (detail.classList.contains("hidden")) return;
+    const finding = findFindingByIdentity(file, btn.dataset.findingIdentity || "", fallback);
+    content.innerHTML = renderFindingQueueExpandedDetail(file, finding);
+  } catch (error) {
+    content.innerHTML = renderInventoryDetailError(error.message);
+  } finally {
+    detail.setAttribute("aria-busy", "false");
+  }
 });
 
 // P4: delegated sort for the finding-queue headers. Clicking the active column
@@ -2474,7 +2558,6 @@ function renderRows(files, options = {}) {
       const key = fileKey(file);
       const hashChanged = hashChangedKeys.has(hashComparisonKey(file));
       const duplicateHashPath = duplicateHashPathKeys.has(hashComparisonKey(file));
-      const preview = renderPreview(file.preview);
       const flash = !serverPage && hasRenderedScanRows && !lastRenderedFileKeys.has(key) ? " row-flash" : "";
       const fileFlags = [
         file.is_hidden ? "Hidden" : "",
@@ -2501,26 +2584,21 @@ function renderRows(files, options = {}) {
       const sourceName = file.source || file.share || "workspace";
       const path = file.path || file.name || "";
       const sha256 = fileHashValue(file);
-      const fileInfoId = `file-info-${Math.abs(hashString(key))}`;
+      const rowDetailId = `inventory-detail-${Math.abs(hashString(key))}`;
+      const expanded = expandedInventoryKeys.has(key);
       const rowFrameworkClass = "";
       const copyPathButton = path
         ? `<button type="button" class="icon-mini-btn copy-path-btn" data-copy-text="${escapeHtml(path)}" title="Copy full path" aria-label="Copy full file path"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg><span>Copy path</span></button>`
         : "";
 
       return `
-        <tr class="${flash} severity-row ${level} ${escapeHtml(rowFrameworkClass)}" data-file-key="${escapeHtml(key)}">
+        <tr class="${flash} severity-row ${level} ${escapeHtml(rowFrameworkClass)}${expanded ? " row-open" : ""}" data-file-key="${escapeHtml(key)}">
           <td>
             <div class="file-title polished-file-title">
-              <button type="button" class="preview-toggle" data-preview="${escapeHtml(key)}" title="Show file preview" aria-label="Show file preview" aria-expanded="false"><svg class="preview-toggle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9.5 5 5 5-5"></path></svg></button>
-              <button type="button" class="file-info-toggle" aria-expanded="false" aria-controls="${escapeHtml(fileInfoId)}" title="Show file metadata">
+              <button type="button" class="preview-toggle inventory-row-expand${expanded ? " preview-open" : ""}" data-inventory-expand="${escapeHtml(key)}" title="${expanded ? "Collapse complete asset detail" : "Expand complete asset detail"}" aria-label="${expanded ? "Collapse" : "Expand"} complete asset detail for ${escapeHtml(file.name || file.path || "file")}" aria-controls="${escapeHtml(rowDetailId)}" aria-expanded="${expanded}"><svg class="preview-toggle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9.5 5 5 5-5"></path></svg></button>
+              <button type="button" class="file-info-toggle${expanded ? " info-open" : ""}" data-inventory-expand="${escapeHtml(key)}" aria-expanded="${expanded}" aria-controls="${escapeHtml(rowDetailId)}" title="${expanded ? "Collapse complete asset detail" : "Expand complete asset detail"}">
                 <span class="file-path">${escapeHtml(file.name || file.path || "Unknown file")}</span>
               </button>
-            </div>
-            <div id="${escapeHtml(fileInfoId)}" class="file-inline-info hidden" role="region" aria-label="File properties">
-              <div class="file-inline-info-title">Properties</div>
-              <dl>
-                ${renderFilePropertyRows(file, sha256, hashChanged, duplicateHashPath)}
-              </dl>
             </div>
             <div class="file-meta-line">
               ${file.extension ? `<span>${escapeHtml(file.extension)}</span>` : ""}
@@ -2531,7 +2609,6 @@ function renderRows(files, options = {}) {
             </div>
             ${fileFlags.length ? `<div class="file-flags polished-flags">${fileFlags.map((flag) => `<span>${escapeHtml(flag)}</span>`).join("")}</div>` : ""}
             <div class="subtext path-subtext"><span>${escapeHtml(path)}</span>${copyPathButton}</div>
-            ${preview}
           </td>
           <td>
             <div class="source-pill">${escapeHtml(sourceName)}</div>
@@ -2555,6 +2632,13 @@ function renderRows(files, options = {}) {
           <td>${detailButton(reasons, file, "reasons", "Reasons", "No reasons")}</td>
           <td>${detailButton(recommendations, file, "recommendations", "DLP actions", "No actions")}</td>
         </tr>
+        <tr id="${escapeHtml(rowDetailId)}" class="inventory-detail-row ${expanded ? "" : "hidden"}" data-inventory-detail-key="${escapeHtml(key)}">
+          <td colspan="7">
+            <div class="inventory-expanded-content" data-inventory-expanded-content>
+              ${expanded ? (file.__inventory_detail_loaded || !file.__inventory_page_item ? renderInventoryExpandedDetails(file) : renderInventoryDetailLoading("Loading complete asset evidence...")) : ""}
+            </div>
+          </td>
+        </tr>
       `;
     })
     .join("");
@@ -2564,6 +2648,7 @@ function renderRows(files, options = {}) {
       ? `<tr><td colspan="7" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
       : "";
   resultsBody.innerHTML = rows + moreRow;
+  hydrateExpandedInventoryRows();
   lastRenderedFileKeys = currentKeys;
   hasRenderedScanRows = true;
 }
@@ -3054,9 +3139,199 @@ function hashString(value) {
   return hash;
 }
 
+async function ensureInventoryAssetDetail(file) {
+  if (!file?.__inventory_page_item || file.__inventory_detail_loaded || !file.id) return file;
+  const requestKey = String(file.id);
+  if (!inventoryDetailRequests.has(requestKey)) {
+    const request = api(`/api/inventory/${encodeURIComponent(file.id)}`, null, "GET")
+      .then((data) => {
+        const asset = data.asset || {};
+        const cachedItems = [...inventoryPageWindow.pages.values()].flatMap((page) => page.items || []);
+        const targets = [...new Set([file, ...latestFiles, ...cachedItems])]
+          .filter((item) => item && (item === file || String(item.id || "") === requestKey || fileKey(item) === fileKey(file)));
+        targets.forEach((item) => Object.assign(item, asset, {
+          __inventory_page_item: true,
+          __inventory_detail_loaded: true,
+        }));
+        return file;
+      })
+      .finally(() => inventoryDetailRequests.delete(requestKey));
+    inventoryDetailRequests.set(requestKey, request);
+  }
+  return inventoryDetailRequests.get(requestKey);
+}
+
+function renderInventoryDetailLoading(message = "Loading complete asset evidence...") {
+  return `<div class="inventory-detail-state" role="status"><span class="inventory-detail-spinner" aria-hidden="true"></span><strong>${escapeHtml(message)}</strong><small>Findings, redacted evidence, risk context, permissions, and file metadata are loaded on demand.</small></div>`;
+}
+
+function renderInventoryDetailError(message) {
+  return `<div class="inventory-detail-state error" role="alert"><strong>Complete detail could not be loaded.</strong><small>${escapeHtml(message || "The inventory detail endpoint is temporarily unavailable.")}</small></div>`;
+}
+
+function renderInventoryRecommendations(file) {
+  const recommendations = file?.risk?.dlp_recommendations || [];
+  return recommendations.length
+    ? `<ol class="detail-list recommendations inventory-recommendation-list">${recommendations.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`
+    : '<p class="inventory-detail-empty">No DLP recommendations were generated for this asset.</p>';
+}
+
+function humanizeDetailKey(key) {
+  return String(key || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function renderInventoryObjectSection(title, eyebrow, value, className = "") {
+  const entries = Array.isArray(value)
+    ? [["Entries", value]]
+    : value && typeof value === "object"
+      ? Object.entries(value)
+      : hasDisplayValue(value) ? [["Value", value]] : [];
+  const visible = entries.filter(([key, item]) => !String(key).startsWith("__") && hasDisplayValue(item));
+  if (!visible.length) return "";
+  return `
+    <section class="inventory-detail-section ${escapeHtml(className)}">
+      <div class="inventory-detail-section-head"><div><span>${escapeHtml(eyebrow)}</span><h5>${escapeHtml(title)}</h5></div><b>${escapeHtml(visible.length)}</b></div>
+      <dl class="inventory-data-list">
+        ${visible.map(([key, item]) => `<div><dt>${escapeHtml(humanizeDetailKey(key))}</dt><dd>${escapeHtml(formatDetailValue(item))}</dd></div>`).join("")}
+      </dl>
+    </section>
+  `;
+}
+
+function renderInventorySupplementalDetails(file) {
+  const excluded = new Set([
+    "id", "source", "path", "full_path", "name", "extension", "share", "host", "server",
+    "risk", "risk_level", "risk_score", "findings", "finding_count", "finding_types", "top_frameworks", "framework_keys",
+    "preview", "permissions", "acl", "metadata", "compliance", "scan_diagnostics", "size", "owner", "owner_name", "file_owner",
+    "modified", "modified_at", "created", "created_at", "accessed_at", "sha256", "file_hash", "attributes",
+    "is_hidden", "is_system", "is_protected", "protected", "content_status", "scan_error", "scan_mode", "protection_type",
+    "search_text", "detail_json", "baseline_result",
+  ]);
+  const additional = Object.fromEntries(Object.entries(file || {}).filter(([key, value]) => {
+    const normalized = String(key).toLowerCase();
+    if (excluded.has(key) || normalized.startsWith("__")) return false;
+    if (/raw|unmasked|secret_value|full_value|fingerprint|content$|search_text/.test(normalized)) return false;
+    return hasDisplayValue(value);
+  }));
+  return renderInventoryObjectSection("Additional scan context", "Collector output", additional, "inventory-detail-wide");
+}
+
+function renderInventoryExpandedDetails(file) {
+  const findings = primaryFindingsForFile(file);
+  const allFindings = file?.findings || [];
+  const childCount = Math.max(0, allFindings.length - findings.length);
+  const occurrences = findings.reduce((total, finding) => total + findingOccurrenceCount(finding), 0);
+  const effectiveRisk = getEffectiveRisk(file);
+  const sourceName = file.source || file.share || "workspace";
+  const frameworks = findingFrameworkStrip(findings);
+  const properties = renderFilePropertyRows(file, fileHashValue(file), hasHashChanged(file), hasDuplicateHashPath(file));
+  const preview = renderPreview(file.preview).replace("preview-panel hidden", "preview-panel inventory-expanded-preview");
+  const facts = [
+    ["Risk", `${effectiveRisk.level} ${effectiveRisk.score}`],
+    ["Findings", `${findings.length} primary${childCount ? ` + ${childCount} supporting` : ""}`],
+    ["Occurrences", occurrences],
+    ["Source", sourceName],
+    ["Owner", filePropertyOwner(file) || "Unassigned"],
+    ["Protection", isProtectedFile(file) ? getProtectionLabel(file) : "No lock reported"],
+    ["Modified", getFriendlyTimestamp(file.modified_at || file.modified) || "Not reported"],
+    ["Content", file.content_status || file.scan_mode || "Scanned"],
+  ];
+  return `
+    <div class="inventory-expanded-panel">
+      <header class="inventory-expanded-head">
+        <div class="inventory-expanded-title">
+          <span>Complete asset evidence</span>
+          <strong>${escapeHtml(file.name || file.path || "Unknown asset")}</strong>
+          <p>${escapeHtml(file.path || "Path unavailable")}</p>
+        </div>
+        <div class="inventory-expanded-frameworks">${frameworks || '<span class="subtext">No framework mapping</span>'}</div>
+      </header>
+      <div class="inventory-expanded-facts">
+        ${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
+      </div>
+      <div class="inventory-expanded-grid">
+        <section class="inventory-detail-section inventory-findings-section inventory-detail-wide">
+          <div class="inventory-detail-section-head"><div><span>What Sentro detected</span><h5>Findings and redacted evidence</h5></div><b>${escapeHtml(findings.length)}</b></div>
+          ${findings.length
+            ? `<ol class="detail-list findings inventory-findings-list">${findings.map((finding) => renderFindingDetails(file, finding)).join("")}</ol>`
+            : '<p class="inventory-detail-empty">No sensitive findings were generated for this asset.</p>'}
+        </section>
+        <section class="inventory-detail-section">
+          <div class="inventory-detail-section-head"><div><span>Why it was scored</span><h5>Risk rationale</h5></div><span class="badge ${escapeHtml(effectiveRisk.level)}">${escapeHtml(effectiveRisk.level)} ${escapeHtml(effectiveRisk.score)}</span></div>
+          ${renderReasonDetailList(file)}
+        </section>
+        <section class="inventory-detail-section">
+          <div class="inventory-detail-section-head"><div><span>Recommended response</span><h5>DLP actions</h5></div><b>${escapeHtml((file?.risk?.dlp_recommendations || []).length)}</b></div>
+          ${renderInventoryRecommendations(file)}
+        </section>
+        <section class="inventory-detail-section inventory-detail-wide">
+          <div class="inventory-detail-section-head"><div><span>Filesystem and document context</span><h5>Asset properties</h5></div></div>
+          <dl class="inventory-property-grid">${properties}</dl>
+        </section>
+        ${renderInventoryObjectSection("Access and permissions", "Exposure context", file.permissions || file.acl)}
+        ${renderInventoryObjectSection("Document metadata", "Extracted properties", file.metadata)}
+        ${renderInventoryObjectSection("Compliance context", "Framework assessment", file.compliance, "inventory-detail-wide")}
+        ${renderInventoryObjectSection("Scan diagnostics", "Collection quality", file.scan_diagnostics, "inventory-detail-wide")}
+        <section class="inventory-detail-section inventory-detail-wide">
+          <div class="inventory-detail-section-head"><div><span>Sanitized content only</span><h5>File preview</h5></div></div>
+          ${preview}
+        </section>
+        ${renderInventorySupplementalDetails(file)}
+      </div>
+    </div>
+  `;
+}
+
+async function hydrateInventoryExpandedRow(detailRow) {
+  if (!detailRow || detailRow.classList.contains("hidden")) return;
+  const content = detailRow.querySelector("[data-inventory-expanded-content]");
+  let file = findInventoryFileByKey(detailRow.dataset.inventoryDetailKey || "");
+  if (!content || !file) return;
+  detailRow.setAttribute("aria-busy", "true");
+  if (file.__inventory_page_item && !file.__inventory_detail_loaded && file.id) {
+    content.innerHTML = renderInventoryDetailLoading();
+  }
+  try {
+    file = await ensureInventoryAssetDetail(file);
+    if (!detailRow.classList.contains("hidden")) content.innerHTML = renderInventoryExpandedDetails(file);
+  } catch (error) {
+    if (!detailRow.classList.contains("hidden")) content.innerHTML = renderInventoryDetailError(error.message);
+  } finally {
+    detailRow.setAttribute("aria-busy", "false");
+  }
+}
+
+function hydrateExpandedInventoryRows() {
+  resultsBody?.querySelectorAll(".inventory-detail-row:not(.hidden)").forEach((row) => {
+    hydrateInventoryExpandedRow(row);
+  });
+}
+
+function toggleInventoryRowExpansion(control) {
+  const summaryRow = control.closest("tr");
+  const detailRow = summaryRow?.nextElementSibling;
+  if (!summaryRow || !detailRow?.classList.contains("inventory-detail-row")) return;
+  const key = control.dataset.inventoryExpand || summaryRow.dataset.fileKey || "";
+  const open = detailRow.classList.contains("hidden");
+  detailRow.classList.toggle("hidden", !open);
+  summaryRow.classList.toggle("row-open", open);
+  if (open) expandedInventoryKeys.add(key);
+  else expandedInventoryKeys.delete(key);
+  summaryRow.querySelectorAll("[data-inventory-expand]").forEach((button) => {
+    button.setAttribute("aria-expanded", String(open));
+    button.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} complete asset detail`);
+    button.classList.toggle("preview-open", open && button.classList.contains("preview-toggle"));
+    button.classList.toggle("info-open", open && button.classList.contains("file-info-toggle"));
+    button.title = open ? "Collapse complete asset detail" : "Expand complete asset detail";
+  });
+  if (open) hydrateInventoryExpandedRow(detailRow);
+}
+
 async function openDetailDrawer(key, type) {
-  let file = latestFiles.find((item) => fileKey(item) === key)
-    || currentInventoryPage()?.items.find((item) => fileKey(item) === key);
+  let file = findInventoryFileByKey(key);
   if (file?.__inventory_page_item && !file.__inventory_detail_loaded && file.id) {
     detailDrawerEyebrow.textContent = "Inventory detail";
     detailDrawerTitle.textContent = file.name || "Loading asset";
@@ -3065,12 +3340,7 @@ async function openDetailDrawer(key, type) {
     detailDrawer.classList.remove("hidden");
     detailDrawer.getBoundingClientRect();
     detailDrawer.classList.add("open");
-    const data = await api(`/api/inventory/${encodeURIComponent(file.id)}`, null, "GET");
-    Object.assign(file, data.asset || {}, {
-      __inventory_page_item: true,
-      __inventory_detail_loaded: true,
-    });
-    file = hydrateInventoryPageItem(file);
+    file = await ensureInventoryAssetDetail(file);
   }
   const isRecommendation = type === "recommendations";
   const isFindings = type === "findings";
@@ -3079,7 +3349,7 @@ async function openDetailDrawer(key, type) {
   detailDrawerTitle.textContent = file?.name || (isRecommendation ? "DLP recommendations" : isFindings ? "Findings" : "Reasons");
   detailDrawerMeta.textContent = file?.path || "";
   if (isFindings) {
-    detailDrawerBody.innerHTML = renderFindingDetailList(file);
+    detailDrawerBody.innerHTML = renderFindingDrawerGroups(file);
   } else if (isRecommendation) {
     detailDrawerBody.innerHTML = items.length
       ? `<ol class="detail-list recommendations">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`
@@ -3090,6 +3360,52 @@ async function openDetailDrawer(key, type) {
   detailDrawer.classList.remove("hidden");
   detailDrawer.getBoundingClientRect();
   detailDrawer.classList.add("open");
+}
+
+const DRAWER_SEVERITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+
+// The +N chip opens the evidence dossier: one collapsible group per finding
+// type, every group closed at first so the reader scans the index and opens
+// only what they came for. The row expansion stays the flat "everything at
+// once" view; this drawer is the organized deep-dive.
+function renderFindingDrawerGroups(file) {
+  const findings = primaryFindingsForFile(file);
+  if (!findings.length) {
+    return '<p class="subtext">No findings were generated for this file.</p>';
+  }
+  const groups = findings
+    .map((finding) => ({
+      finding,
+      level: String(finding.risk || finding.severity || "LOW").toUpperCase(),
+      occurrences: findingOccurrenceCount(finding),
+      supporting: childFindingsFor(file, finding).length,
+    }))
+    .sort((a, b) =>
+      (DRAWER_SEVERITY_ORDER[a.level] ?? 9) - (DRAWER_SEVERITY_ORDER[b.level] ?? 9)
+      || b.occurrences - a.occurrences);
+  const totalOccurrences = groups.reduce((sum, group) => sum + group.occurrences, 0);
+  const effectiveRisk = getEffectiveRisk(file);
+  return `
+    <div class="drawer-summary-strip">
+      <span class="badge ${escapeHtml(effectiveRisk.level)}">${escapeHtml(effectiveRisk.level)} ${escapeHtml(effectiveRisk.score)}</span>
+      <span>${escapeHtml(groups.length)} finding type${groups.length === 1 ? "" : "s"}</span>
+      <i aria-hidden="true"></i>
+      <span>${escapeHtml(totalOccurrences)} occurrence${totalOccurrences === 1 ? "" : "s"}</span>
+    </div>
+    ${groups.map(({ finding, level, occurrences, supporting }) => `
+      <details class="drawer-group">
+        <summary>
+          <span class="drawer-group-sev ${escapeHtml(level)}" aria-hidden="true"></span>
+          <span class="drawer-group-name">${escapeHtml(findingDisplayName(finding))}</span>
+          <span class="drawer-group-count">${escapeHtml(occurrences)}${supporting ? ` <small>+${escapeHtml(supporting)} supporting</small>` : ""}</span>
+          <svg class="drawer-group-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
+        </summary>
+        <div class="drawer-group-body">
+          <ol class="detail-list findings">${renderFindingDetails(file, finding)}</ol>
+        </div>
+      </details>
+    `).join("")}
+  `;
 }
 
 function renderFindingDetailList(file) {
@@ -3127,9 +3443,55 @@ function renderGenericFindingDetails(file, finding) {
       ${renderFindingEvidenceSections(finding)}
       ${finding.severity_rationale ? `<div class="detail-evidence"><span>Severity rationale</span><code>${escapeHtml(finding.severity_rationale)}</code></div>` : ""}
       ${finding.remediation ? `<div class="detail-evidence"><span>Remediation</span><code>${escapeHtml(finding.remediation)}</code></div>` : ""}
-      ${children.length ? `<div class="detail-evidence"><span>Child evidence suppressed from primary queue</span><code>${escapeHtml(children.map((child) => `${findingDisplayName(child)} (${child.risk || "Signal"})`).join(", "))}</code></div>` : ""}
+      ${renderAdditionalFindingAttributes(finding)}
+      ${renderChildFindingEvidence(file, children)}
     </li>
   `;
+}
+
+function renderChildFindingEvidence(file, children = []) {
+  if (!children.length) return "";
+  return `
+    <div class="child-finding-evidence">
+      <span>Supporting detections (${escapeHtml(children.length)})</span>
+      ${children.map((child) => `
+        <article>
+          <strong>${escapeHtml(findingDisplayName(child))}</strong>
+          <small>${escapeHtml(child.risk || child.severity || "Signal")} &middot; ${escapeHtml(findingConfidenceLabel(child))} confidence &middot; ${escapeHtml(findingOccurrenceCount(child))} occurrence${findingOccurrenceCount(child) === 1 ? "" : "s"}</small>
+          <div class="framework-pill-row detail-framework-row">${findingFrameworkBadges(child)}</div>
+          ${renderFindingMetadataGrid(file, child)}
+          ${child.description ? `<p>${escapeHtml(child.description)}</p>` : ""}
+          ${renderFindingEvidenceSections(child)}
+          ${renderAdditionalFindingAttributes(child)}
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderAdditionalFindingAttributes(finding = {}) {
+  const excluded = new Set([
+    "type", "technical_type", "rule_id", "display_name", "display_name_az", "label", "data_type", "service",
+    "risk", "severity", "description", "framework", "frameworks", "framework_mappings", "requirement_mappings", "compliance_mappings", "mapped_controls",
+    "data_element", "data_category", "personal_data_type", "category", "category_id", "finding_category", "classification_domain", "pci_category", "pci_requirements",
+    "confidence", "detection_confidence", "mapping_confidence", "confidence_basis", "count", "occurrence_count", "unique_value_count", "occurrences",
+    "samples", "matched_keywords", "keywords", "matched_signal_groups", "contributing_signals", "negative_signals", "threshold",
+    "validation_status", "luhn_valid", "card_brand", "emv_tag", "pin_block_format", "correlated_elements", "logical_boundary", "parent_finding_type", "child_finding_types",
+    "catalog_version", "catalog_hash", "confidentiality_impact", "integrity_impact", "availability_impact", "overall_impact", "impact_basis", "official_definition_en",
+    "source_kind", "source_status", "governance_status", "handling_tier", "detection_mode", "protection_state", "claimed_protection_state", "verified_protection_state",
+    "encryption_state", "encryption_algorithm", "key_id", "token_provider", "hash_algorithm", "masking_format", "storage_state", "authorization_state", "entity_role", "environment",
+    "scope_impact", "display_state", "suppressed_by", "review_status", "workflow_status", "status", "exception_status", "exception_required", "data_owner", "last_seen", "sla", "remediation", "severity_rationale",
+    "secure_value_fingerprints", "secure_fingerprints",
+  ]);
+  const additional = Object.fromEntries(Object.entries(finding).filter(([key, value]) => {
+    const normalized = String(key).toLowerCase();
+    if (excluded.has(key) || normalized.startsWith("__")) return false;
+    if (/raw|unmasked|secret_value|full_value|fingerprint/.test(normalized)) return false;
+    return hasDisplayValue(value);
+  }));
+  const entries = Object.entries(additional);
+  if (!entries.length) return "";
+  return `<div class="detail-evidence detail-section additional-finding-attributes"><span>Additional detector attributes</span><dl>${entries.map(([key, value]) => `<div><dt>${escapeHtml(humanizeDetailKey(key))}</dt><dd>${escapeHtml(formatDetailValue(value))}</dd></div>`).join("")}</dl></div>`;
 }
 
 function renderDetailSection(title, rows = {}) {
@@ -3217,12 +3579,25 @@ function renderFindingEvidenceSections(finding) {
   const sections = [
     ["Matched schema/context keywords", finding.matched_keywords || finding.keywords || []],
     ["Redacted value samples", finding.samples || []],
+    ["Exact occurrence locations", (Array.isArray(finding.occurrences) ? finding.occurrences : []).map((occurrence) => formatObject(occurrence))],
+    ["Framework and control mappings", compactEvidence([
+      formatSignals(finding.framework_mappings),
+      formatSignals(finding.requirement_mappings),
+      formatSignals(finding.compliance_mappings),
+      formatSignals(finding.mapped_controls),
+    ])],
     ["Structural evidence", compactEvidence([
       finding.validation_status && `Validation: ${finding.validation_status}`,
       finding.luhn_valid !== undefined && `Luhn: ${finding.luhn_valid}`,
       finding.card_brand && `Brand: ${finding.card_brand}`,
       finding.emv_tag && `EMV tag: ${finding.emv_tag}`,
       finding.pin_block_format && `PIN block: ${finding.pin_block_format}`,
+    ])],
+    ["Detection quality", compactEvidence([
+      finding.confidence_basis && `Confidence basis: ${formatDetailValue(finding.confidence_basis)}`,
+      finding.scan_completeness && `Scan completeness: ${formatDetailValue(finding.scan_completeness)}`,
+      finding.truncated !== undefined && `Truncated: ${finding.truncated}`,
+      finding.partial !== undefined && `Partial: ${finding.partial}`,
     ])],
     ["Correlation evidence", compactEvidence([
       ...(finding.correlated_elements || []),
@@ -3257,7 +3632,7 @@ function renderFindingEvidenceSections(finding) {
     .filter(([, values]) => Array.isArray(values) ? values.length : values)
     .map(([label, values]) => {
       const listValues = Array.isArray(values) ? values : [values];
-      return `<div class="detail-evidence"><span>${escapeHtml(label)}</span><code>${escapeHtml(listValues.slice(0, 10).join(", "))}</code></div>`;
+      return `<div class="detail-evidence"><span>${escapeHtml(label)}</span><code>${escapeHtml(listValues.join(", "))}</code></div>`;
     })
     .join("");
 }
@@ -7588,16 +7963,9 @@ assetRuleList.addEventListener("click", (event) => {
 });
 
 resultsBody.addEventListener("click", (event) => {
-  const infoButton = event.target.closest(".file-info-toggle");
-  if (infoButton) {
-    const panel = infoButton.closest("td")?.querySelector(".file-inline-info");
-    if (panel) {
-      const isHidden = panel.classList.toggle("hidden");
-      infoButton.classList.toggle("info-open", !isHidden);
-      infoButton.setAttribute("aria-expanded", String(!isHidden));
-      // The compact row clamps chips/paths/notes; expanding lifts them all.
-      infoButton.closest("tr")?.classList.toggle("row-open", !isHidden);
-    }
+  const expandControl = event.target.closest("[data-inventory-expand]");
+  if (expandControl) {
+    toggleInventoryRowExpansion(expandControl);
     return;
   }
 
@@ -7608,21 +7976,6 @@ resultsBody.addEventListener("click", (event) => {
     return;
   }
 
-  const button = event.target.closest(".preview-toggle");
-  if (!button) {
-    return;
-  }
-
-  const panel = button.closest("td").querySelector(".preview-panel");
-  if (!panel) {
-    return;
-  }
-
-  const isHidden = panel.classList.toggle("hidden");
-  button.classList.toggle("preview-open", !isHidden);
-  button.setAttribute("aria-expanded", String(!isHidden));
-  button.setAttribute("aria-label", isHidden ? "Show file preview" : "Hide file preview");
-  button.title = isHidden ? "Show file preview" : "Hide file preview";
 });
 
 detailDrawer.addEventListener("click", (event) => {

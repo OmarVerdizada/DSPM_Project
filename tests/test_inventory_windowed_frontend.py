@@ -78,6 +78,34 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         self.assertIn("button.disabled = false", self.script)
         self.assertIn('id="inventory-export-status"', Path("frontend/index.html").read_text(encoding="utf-8"))
 
+    def test_inventory_disclosure_loads_and_renders_complete_asset_evidence(self) -> None:
+        self.assertIn('data-inventory-expand=', self.script)
+        self.assertIn('class="inventory-detail-row', self.script)
+        self.assertIn("ensureInventoryAssetDetail(file)", self.script)
+        self.assertIn("renderInventoryExpandedDetails(file)", self.script)
+        self.assertIn("Findings and redacted evidence", self.script)
+        self.assertIn("Risk rationale", self.script)
+        self.assertIn("DLP actions", self.script)
+        self.assertIn("Asset properties", self.script)
+        self.assertIn("Access and permissions", self.script)
+        self.assertIn("Scan diagnostics", self.script)
+        self.assertIn("Sanitized content only", self.script)
+
+    def test_priority_finding_expander_uses_full_on_demand_detail(self) -> None:
+        self.assertIn("data-finding-identity", self.script)
+        self.assertIn("renderFindingQueueExpandedDetail", self.script)
+        self.assertIn("Loading complete finding evidence", self.script)
+        self.assertIn("renderChildFindingEvidence", self.script)
+        self.assertIn("Exact occurrence locations", self.script)
+        self.assertIn("Framework and control mappings", self.script)
+
+    def test_inventory_command_surface_has_compact_even_group_rhythm(self) -> None:
+        self.assertIn("complete disclosure", self.styles)
+        self.assertIn("margin: 0 !important", self.styles)
+        self.assertIn("grid-template-columns: minmax(190px, .8fr) minmax(220px, 1fr) minmax(390px, 2fr) auto", self.styles)
+        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", self.styles)
+        self.assertIn(".inventory-expanded-grid", self.styles)
+
 
 if __name__ == "__main__":
     unittest.main()
