@@ -96,10 +96,12 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         # The dossier keeps the grouped evidence.
         self.assertIn("renderFindingDrawerGroups", self.script)
 
-    def test_priority_finding_expander_uses_full_on_demand_detail(self) -> None:
-        self.assertIn("data-finding-identity", self.script)
-        self.assertIn("renderFindingQueueExpandedDetail", self.script)
-        self.assertIn("Loading complete finding evidence", self.script)
+    def test_priority_finding_rows_open_the_asset_popup(self) -> None:
+        # Queue rows open the shared asset pop-up on the Findings tab; the
+        # deep evidence renderers stay shared with the dossier.
+        self.assertIn("finding-open-btn", self.script)
+        self.assertIn('openAssetDetailModal(btn.dataset.findingFileKey || "", "findings")', self.script)
+        self.assertNotIn("finding-detail-row", self.script)
         self.assertIn("renderChildFindingEvidence", self.script)
         self.assertIn("Exact occurrence locations", self.script)
         self.assertIn("Framework and control mappings", self.script)

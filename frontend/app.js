@@ -1899,23 +1899,17 @@ function renderFindingQueueTable(rows) {
           ${rows.map(({ file, finding, severity, confidence, framework, dataElement, asset, location, exposure, occurrences, uniqueRecords, status, owner, sla, lastSeen }) => {
             const fileKeyValue = fileKey(file);
             const identity = findingIdentity(finding);
-            const detailId = `finding-detail-${Math.abs(hashString(`${fileKeyValue}|${identity}`))}`;
             return `
             <tr class="finding-summary-row">
               <td><span class="badge ${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
-              <td><strong>${escapeHtml(findingDisplayName(finding))}</strong></td>
-              <td><div class="framework-pill-row">${findingFrameworkBadges(finding)}</div></td>
-              <td>${escapeHtml(dataElement)}</td>
-              <td>${escapeHtml(asset)}</td>
-              <td>${escapeHtml(location)}</td>
+              <td class="fq-name" title="${escapeHtml(findingDisplayName(finding))}"><strong>${escapeHtml(findingDisplayName(finding))}</strong></td>
+              <td><div class="framework-pill-row fq-frameworks">${findingFrameworkBadges(finding)}</div></td>
+              <td class="fq-clip" title="${escapeHtml(dataElement)}">${escapeHtml(dataElement)}</td>
+              <td class="fq-clip" title="${escapeHtml(asset)}">${escapeHtml(asset)}</td>
+              <td class="fq-clip fq-mono" title="${escapeHtml(location)}">${escapeHtml(location)}</td>
               <td>${escapeHtml(status)}</td>
-              <td>${escapeHtml(sla)}</td>
-              <td class="finding-expand-col"><button type="button" class="finding-row-expand" data-finding-file-key="${escapeHtml(fileKeyValue)}" data-finding-identity="${escapeHtml(identity)}" aria-controls="${escapeHtml(detailId)}" aria-expanded="false" aria-label="Show complete evidence for ${escapeHtml(findingDisplayName(finding))}" title="Show complete finding evidence"><span aria-hidden="true">&#8964;</span></button></td>
-            </tr>
-            <tr id="${escapeHtml(detailId)}" class="finding-detail-row hidden" data-finding-detail-key="${escapeHtml(fileKeyValue)}">
-              <td colspan="9">
-                <div class="finding-expanded-content" data-finding-expanded-content></div>
-              </td>
+              <td class="fq-clip">${escapeHtml(sla)}</td>
+              <td class="finding-expand-col"><button type="button" class="finding-open-btn" data-finding-file-key="${escapeHtml(fileKeyValue)}" data-finding-identity="${escapeHtml(identity)}" aria-haspopup="dialog" aria-label="Open finding evidence for ${escapeHtml(findingDisplayName(finding))}" title="Open finding evidence"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6"></path><path d="M20 4 11.5 12.5"></path><path d="M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"></path></svg></button></td>
             </tr>
           `}).join("")}
         </tbody>
@@ -1950,75 +1944,12 @@ function findFindingByIdentity(file, identity, fallback = null) {
     || {};
 }
 
-function renderFindingQueueExpandedDetail(file, finding) {
-  const level = String(finding.risk || finding.severity || getEffectiveRisk(file).level || "LOW").toUpperCase();
-  const reasons = file?.risk?.reasons || [];
-  const recommendations = file?.risk?.dlp_recommendations || [];
-  const facts = [
-    ["Confidence", findingConfidenceLabel(finding)],
-    ["Protection", finding.protection_state || finding.encryption_state || (isProtectedFile(file) ? getProtectionLabel(file) : "Not reported")],
-    ["Exposure", findingExposureText(file, finding)],
-    ["Occurrences", findingOccurrenceCount(finding)],
-    ["Unique records", findingUniqueRecordCount(finding)],
-    ["Owner", finding.data_owner || file?.owner || file?.department || "Unassigned"],
-    ["Last seen", getFriendlyTimestamp(finding.last_seen || file?.last_scanned_at || file?.modified_at || file?.modified) || "Not reported"],
-    ["SLA", finding.sla || file?.risk?.remediation?.sla || slaForSeverity(level)],
-  ];
-  return `
-    <div class="finding-expanded-shell">
-      <div class="finding-expanded-facts">
-        ${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
-      </div>
-      <section class="inventory-detail-section finding-evidence-section">
-        <div class="inventory-detail-section-head"><div><span>Detection record</span><h5>Complete finding evidence</h5></div><span class="badge ${escapeHtml(level)}">${escapeHtml(level)} ${escapeHtml(getEffectiveRisk(file).score || severityScore(level))}</span></div>
-        <ol class="detail-list findings inventory-findings-list">${renderFindingDetails(file, finding)}</ol>
-      </section>
-      <div class="finding-expanded-support">
-        <section class="inventory-detail-section">
-          <div class="inventory-detail-section-head"><div><span>Why it matters</span><h5>Risk rationale</h5></div><b>${escapeHtml(reasons.length)}</b></div>
-          ${renderReasonDetailList(file)}
-        </section>
-        <section class="inventory-detail-section">
-          <div class="inventory-detail-section-head"><div><span>What to do</span><h5>DLP recommendations</h5></div><b>${escapeHtml(recommendations.length)}</b></div>
-          ${renderInventoryRecommendations(file)}
-        </section>
-      </div>
-    </div>
-  `;
-}
-
-// Delegated toggle for the finding-queue per-row detail expander (the detail
-// <tr> is the immediate next sibling of the row that holds the button).
-document.addEventListener("click", async (event) => {
-  const btn = event.target.closest(".finding-row-expand");
+// A queue row opens the same pop-up as the Data inventory, landed on the
+// Findings tab (the dossier that holds this finding's group).
+document.addEventListener("click", (event) => {
+  const btn = event.target.closest(".finding-open-btn");
   if (!btn) return;
-  const detail = btn.closest("tr")?.nextElementSibling;
-  if (!detail || !detail.classList.contains("finding-detail-row")) return;
-  const open = !detail.classList.toggle("hidden");
-  btn.setAttribute("aria-expanded", open ? "true" : "false");
-  btn.setAttribute("aria-label", open ? "Hide complete finding evidence" : "Show complete finding evidence");
-  btn.title = open ? "Hide complete finding evidence" : "Show complete finding evidence";
-  btn.classList.toggle("open", open);
-  btn.querySelector("span").innerHTML = open ? "&#8963;" : "&#8964;";
-  if (!open) return;
-
-  const content = detail.querySelector("[data-finding-expanded-content]");
-  if (!content) return;
-  content.innerHTML = renderInventoryDetailLoading("Loading complete finding evidence...");
-  detail.setAttribute("aria-busy", "true");
-  try {
-    let file = findInventoryFileByKey(btn.dataset.findingFileKey || "");
-    if (!file) throw new Error("The source asset is no longer in the current inventory window.");
-    const fallback = primaryFindingsForFile(file).find((item) => findingIdentity(item) === btn.dataset.findingIdentity);
-    file = await ensureInventoryAssetDetail(file);
-    if (detail.classList.contains("hidden")) return;
-    const finding = findFindingByIdentity(file, btn.dataset.findingIdentity || "", fallback);
-    content.innerHTML = renderFindingQueueExpandedDetail(file, finding);
-  } catch (error) {
-    content.innerHTML = renderInventoryDetailError(error.message);
-  } finally {
-    detail.setAttribute("aria-busy", "false");
-  }
+  openAssetDetailModal(btn.dataset.findingFileKey || "", "findings");
 });
 
 // P4: delegated sort for the finding-queue headers. Clicking the active column

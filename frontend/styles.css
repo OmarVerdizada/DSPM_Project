@@ -22325,3 +22325,62 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   background-position: center;
   opacity: .7;
 }
+
+
+/* == Priority finding queue remake ================================= */
+/* The table fits its panel at every width: fixed proportional columns,
+   one line per row, long values ellipsize with full-text tooltips. */
+:root:root #findings-priority-summary .finding-queue-wrap table,
+:root:root .finding-queue-wrap .report-register-table {
+  table-layout: fixed !important;
+  width: 100% !important;
+  min-width: 0 !important;
+}
+:root:root .finding-queue-wrap th:nth-child(1) { width: 96px; }
+:root:root .finding-queue-wrap th:nth-child(2) { width: 13%; }
+:root:root .finding-queue-wrap th:nth-child(3) { width: 11%; }
+:root:root .finding-queue-wrap th:nth-child(4) { width: 11%; }
+:root:root .finding-queue-wrap th:nth-child(5) { width: 20%; }
+:root:root .finding-queue-wrap th:nth-child(6) { width: 26%; }
+:root:root .finding-queue-wrap th:nth-child(7) { width: 62px; }
+:root:root .finding-queue-wrap th:nth-child(8) { width: 72px; }
+:root:root .finding-queue-wrap th:nth-child(9) { width: 44px; }
+:root:root .finding-queue-wrap td {
+  padding: 8px 10px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  vertical-align: middle !important;
+  font-size: 12.5px !important;
+}
+:root:root .finding-queue-wrap td .badge { white-space: nowrap; }
+:root:root .finding-queue-wrap .fq-mono { font-family: "JetBrains Mono", monospace; font-size: 11px !important; color: var(--muted); }
+:root:root .finding-queue-wrap .fq-name strong { font-weight: 600; }
+:root:root .finding-queue-wrap .fq-frameworks {
+  display: flex !important;
+  flex-flow: row nowrap !important;
+  gap: 4px !important;
+  overflow: hidden !important;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+}
+:root:root .finding-queue-wrap .fq-frameworks > * { flex: 0 0 auto; }
+:root:root .finding-queue-wrap tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+
+:root:root .finding-open-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  cursor: pointer;
+  box-shadow: none !important;
+}
+:root:root .finding-open-btn:hover { color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 9%, transparent) !important; }
+:root:root .finding-open-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
