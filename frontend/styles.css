@@ -22058,3 +22058,42 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 @media (prefers-reduced-motion: reduce) {
   .drawer-group-caret { transition: none; }
 }
+
+
+/* == Findings cell: the clip moves to an inner set ================== */
+/* The wrap now holds [clipped chip set][+N opener]; collapsed shows one
+   faded row of real chips with +N always reachable, and an expanded row
+   shows every chip and hides +N - the data itself, not a button. */
+:root:root #inventory-workspace #results-body .finding-chip-wrap {
+  display: flex !important;
+  flex-flow: row nowrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  max-height: none !important;
+  overflow: visible !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+}
+:root:root #inventory-workspace #results-body .finding-chip-set {
+  display: flex;
+  flex-flow: row nowrap;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 26px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 26px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 26px), transparent);
+}
+:root:root #inventory-workspace #results-body .finding-chip-wrap > .detail-toggle { flex: 0 0 auto; }
+:root:root #inventory-workspace #results-body tr.row-open .finding-chip-set {
+  flex-wrap: wrap;
+  max-height: none;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+:root:root #inventory-workspace #results-body tr.row-open .finding-chip-wrap > .detail-toggle {
+  display: none !important;
+}
+/* Lazy indicator: an ellipsis count until the on-demand detail arrives. */
+:root:root #results-body .detail-toggle-lazy .detail-count { opacity: .7; }

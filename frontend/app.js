@@ -2244,6 +2244,25 @@ function list(items) {
   return `<ul class="list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
+function lazyDetailButton(file, type, label) {
+  return `
+    <button type="button" class="detail-toggle detail-toggle-lazy" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(label)} load on demand">
+        <span class="detail-chevron" aria-hidden="true"></span>
+        <span class="detail-toggle-label">${escapeHtml(label)}</span>
+        <span class="detail-count">&hellip;</span>
+    </button>
+  `;
+}
+
+function refreshInventorySummaryCells(file) {
+  const row = resultsBody?.querySelector(`tr[data-file-key="${CSS.escape(fileKey(file))}"]`);
+  if (!row) return;
+  const cells = row.querySelectorAll("td");
+  if (cells.length < 7) return;
+  cells[5].innerHTML = detailButton(file.risk?.reasons || [], file, "reasons", "Reasons", "No reasons");
+  cells[6].innerHTML = detailButton(file.risk?.dlp_recommendations || [], file, "recommendations", "DLP actions", "No actions");
+}
+
 function detailButton(items, file, type, label, emptyText) {
   if (!items || items.length === 0) {
     return `<span class="subtext">${escapeHtml(emptyText)}</span>`;
@@ -2552,6 +2571,9 @@ function renderRows(files, options = {}) {
       const rawFindings = primaryFindingsForFile(file);
       const recommendations = file.risk?.dlp_recommendations || [];
       const reasons = file.risk?.reasons || [];
+      // Windowed page items carry no reasons/actions until the on-demand
+      // detail loads - the collapsed cell must say "view", never "none".
+      const lazyDetail = Boolean(file.__inventory_page_item && !file.__inventory_detail_loaded && file.id);
       const effectiveRisk = getEffectiveRisk(file);
       const level = effectiveRisk.level;
       const score = effectiveRisk.score;
@@ -2574,7 +2596,7 @@ function renderRows(files, options = {}) {
       const displayFindings = integrityFindings.length ? [...rawFindings, ...integrityFindings] : rawFindings;
       const visibleFindingChips = displayFindings.filter((finding) => !isNistFinding(finding));
       const findingChips = visibleFindingChips.length
-        ? visibleFindingChips.slice(0, 4).map((finding) => `<span class="finding-chip ${escapeHtml(frameworkClass(findingVisualFramework(finding)))}">${escapeHtml(findingDisplayName(finding))} <b>${escapeHtml(finding.count || 1)}</b></span>`).join("")
+        ? visibleFindingChips.map((finding) => `<span class="finding-chip ${escapeHtml(frameworkClass(findingVisualFramework(finding)))}">${escapeHtml(findingDisplayName(finding))} <b>${escapeHtml(finding.count || 1)}</b></span>`).join("")
         : displayFindings.length ? "" : '<span class="subtext">No sensitive signals</span>';
       const frameworkStrip = displayFindings.length ? `<div class="finding-framework-strip">${findingFrameworkStrip(displayFindings)}</div>` : "";
       const hiddenFindingCount = Math.max(0, displayFindings.length - Math.min(visibleFindingChips.length, 4));
@@ -2614,7 +2636,7 @@ function renderRows(files, options = {}) {
             <div class="source-pill">${escapeHtml(sourceName)}</div>
             <div class="subtext">${escapeHtml(file.share || file.content_status || "scanned")}</div>
           </td>
-          <td><div class="finding-chip-wrap">${findingChips}${moreFindings}${frameworkStrip}</div></td>
+          <td><div class="finding-chip-wrap"><div class="finding-chip-set">${findingChips}</div>${moreFindings}</div>${frameworkStrip}</td>
           <td>
             <span class="badge ${level}">${escapeHtml(level)} ${escapeHtml(score)}</span>
             <div class="risk-mini-meter" style="--risk-score:${Math.max(0, Math.min(100, Number(score) || 0))}%"><span></span></div>
@@ -2629,8 +2651,8 @@ function renderRows(files, options = {}) {
               ${riskOption("LOW", "Low", rowOverrides[key] || "")}
             </select>
           </td>
-          <td>${detailButton(reasons, file, "reasons", "Reasons", "No reasons")}</td>
-          <td>${detailButton(recommendations, file, "recommendations", "DLP actions", "No actions")}</td>
+          <td>${lazyDetail ? lazyDetailButton(file, "reasons", "Reasons") : detailButton(reasons, file, "reasons", "Reasons", "No reasons")}</td>
+          <td>${lazyDetail ? lazyDetailButton(file, "recommendations", "DLP actions") : detailButton(recommendations, file, "recommendations", "DLP actions", "No actions")}</td>
         </tr>
         <tr id="${escapeHtml(rowDetailId)}" class="inventory-detail-row ${expanded ? "" : "hidden"}" data-inventory-detail-key="${escapeHtml(key)}">
           <td colspan="7">
@@ -3153,6 +3175,7 @@ async function ensureInventoryAssetDetail(file) {
           __inventory_page_item: true,
           __inventory_detail_loaded: true,
         }));
+        refreshInventorySummaryCells(file);
         return file;
       })
       .finally(() => inventoryDetailRequests.delete(requestKey));
