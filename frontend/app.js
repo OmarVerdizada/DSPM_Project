@@ -2270,11 +2270,11 @@ function countDetailButton(count, file, type, label, emptyText) {
 }
 
 function lazyDetailButton(file, type, label) {
+  const meta = DETAIL_CELL_META[type] || DETAIL_CELL_META.reasons;
   return `
-    <button type="button" class="detail-toggle detail-toggle-lazy" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(label)} load on demand">
-        <span class="detail-chevron" aria-hidden="true"></span>
-        <span class="detail-toggle-label">${escapeHtml(label)}</span>
-        <span class="detail-count">&hellip;</span>
+    <button type="button" class="detail-toggle detail-cell-btn detail-toggle-lazy" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(meta.title)}">
+        <span class="detail-cell-ico" aria-hidden="true">${meta.icon}</span>
+        <span class="detail-toggle-label">&hellip;</span>
     </button>
   `;
 }
@@ -2705,21 +2705,42 @@ function renderRows(files, options = {}) {
 // path without the per-page attachment), one batched request fills them all
 // in - the cells never sit on an ellipsis.
 function resolveLazyDetailCounts(files = []) {
-  const pending = files.filter((file) =>
-    file?.__inventory_page_item && !file.__inventory_detail_loaded && file.id
-    && !(Number.isInteger(file.reason_count) && Number.isInteger(file.dlp_count)));
+  const pendingByKey = new Map();
+  files.forEach((file) => {
+    if (file?.__inventory_page_item && !file.__inventory_detail_loaded && file.id
+        && !(Number.isInteger(file.reason_count) && Number.isInteger(file.dlp_count))) {
+      pendingByKey.set(fileKey(file), file);
+    }
+  });
+  // Trust the DOM over the data flags: any lazy button still on screen names
+  // a row that owes the operator numbers.
+  resultsBody?.querySelectorAll(".detail-toggle-lazy[data-detail-key]").forEach((button) => {
+    const key = button.dataset.detailKey || "";
+    if (!pendingByKey.has(key)) {
+      const file = findInventoryFileByKey(key);
+      if (file?.id) pendingByKey.set(key, file);
+    }
+  });
+  const pending = [...pendingByKey.values()];
   if (!pending.length) return;
   const ids = [...new Set(pending.map((file) => String(file.id)))].slice(0, 500);
   api(`/api/inventory-detail-counts?ids=${encodeURIComponent(ids.join(","))}`, null, "GET")
     .then((data) => {
       const counts = data?.counts || {};
+      let unpatched = 0;
       pending.forEach((file) => {
         const pair = counts[String(file.id)];
         if (!pair) return;
         file.reason_count = pair.reasons;
         file.dlp_count = pair.fixes;
-        refreshInventorySummaryCells(file);
+        const row = resultsBody?.querySelector(`tr[data-file-key="${CSS.escape(fileKey(file))}"]`);
+        if (row) refreshInventorySummaryCells(file);
+        else unpatched += 1;
       });
+      // A row the patcher could not find still renders right on the next
+      // paint because the counts now live on the items.
+      if (unpatched && !resultsBody?.querySelector(".detail-toggle-lazy")) return;
+      if (resultsBody?.querySelector(".detail-toggle-lazy")) renderFindingsWorkspace?.();
     })
     .catch(() => { /* the on-open refresh still corrects the cells */ });
 }
