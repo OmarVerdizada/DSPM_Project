@@ -126,11 +126,6 @@ const endpointScanProgressPercent = document.querySelector("#endpoint-scan-progr
 const complianceEnabledInput = document.querySelector("#compliance-enabled");
 const endpointComplianceEnabledInput = document.querySelector("#endpoint-compliance-enabled");
 const complianceFrameworkHosts = document.querySelectorAll("[data-compliance-frameworks]");
-const detailDrawer = document.querySelector("#detail-drawer");
-const detailDrawerEyebrow = detailDrawer.querySelector("#detail-drawer-eyebrow");
-const detailDrawerTitle = detailDrawer.querySelector("#detail-drawer-title");
-const detailDrawerMeta = detailDrawer.querySelector("#detail-drawer-meta");
-const detailDrawerBody = detailDrawer.querySelector("#detail-drawer-body");
 
 const DEFAULT_ASSETS = [
   { pattern: "password", level: "CRITICAL", reason: "Credential files are crown-jewel assets" },
@@ -2244,15 +2239,34 @@ function list(items) {
   return `<ul class="list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
-function countDetailButton(count, file, type, label, emptyText) {
-  if (!count) return `<span class="subtext">${escapeHtml(emptyText)}</span>`;
+const DETAIL_CELL_META = {
+  reasons: {
+    icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>',
+    noun: "reason",
+    plural: "reasons",
+    title: "Why this file is risky - opens the Reasons tab",
+  },
+  recommendations: {
+    icon: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4.5 4.5 0 0 0-6 6L3 18l3 3 5.7-5.7a4.5 4.5 0 0 0 6-6l-2.8 2.8-2.2-2.2z"/></svg>',
+    noun: "fix",
+    plural: "fixes",
+    title: "Recommended fixes - opens the Actions tab",
+  },
+};
+
+function detailCellMarkup(count, file, type) {
+  const meta = DETAIL_CELL_META[type] || DETAIL_CELL_META.reasons;
+  if (!count) return `<span class="subtext">No ${escapeHtml(meta.plural)} yet</span>`;
   return `
-    <button type="button" class="detail-toggle" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(label)}">
-        <span class="detail-chevron" aria-hidden="true"></span>
-        <span class="detail-toggle-label">${escapeHtml(label)}</span>
-        <span class="detail-count">${escapeHtml(count)}</span>
+    <button type="button" class="detail-toggle detail-cell-btn" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(meta.title)}">
+        <span class="detail-cell-ico" aria-hidden="true">${meta.icon}</span>
+        <span class="detail-toggle-label">${escapeHtml(count)} ${escapeHtml(count === 1 ? meta.noun : meta.plural)}</span>
     </button>
   `;
+}
+
+function countDetailButton(count, file, type, label, emptyText) {
+  return detailCellMarkup(count, file, type);
 }
 
 function lazyDetailButton(file, type, label) {
@@ -2275,10 +2289,10 @@ function refreshInventorySummaryCells(file) {
 }
 
 function detailButton(items, file, type, label, emptyText) {
+  if (DETAIL_CELL_META[type]) return detailCellMarkup((items || []).length, file, type);
   if (!items || items.length === 0) {
     return `<span class="subtext">${escapeHtml(emptyText)}</span>`;
   }
-
   return `
     <button type="button" class="detail-toggle" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(label)}">
         <span class="detail-chevron" aria-hidden="true"></span>
@@ -3300,12 +3314,48 @@ function renderInventoryExpandedDetails(file) {
   `;
 }
 
-async function openAssetDetailModal(control) {
-  const key = control.dataset.inventoryExpand || control.closest("tr")?.dataset.fileKey || "";
+let assetModalFile = null;
+let assetModalTab = "essential";
+
+const ASSET_MODAL_TABS = {
+  essential: (file) => renderInventoryExpandedDetails(file),
+  findings: (file) => renderFindingDrawerGroups(file),
+  reasons: (file) => `
+    <section class="inventory-detail-section asset-tab-single">
+      <div class="inventory-detail-section-head"><div><span>Why this file is scored</span><h5>Risk reasons</h5></div><b>${escapeHtml((file?.risk?.reasons || []).length)}</b></div>
+      ${renderReasonDetailList(file)}
+    </section>`,
+  actions: (file) => `
+    <section class="inventory-detail-section asset-tab-single">
+      <div class="inventory-detail-section-head"><div><span>Recommended response</span><h5>Fixes</h5></div><b>${escapeHtml((file?.risk?.dlp_recommendations || []).length)}</b></div>
+      ${renderInventoryRecommendations(file)}
+    </section>`,
+};
+
+function setAssetModalTab(tab) {
+  assetModalTab = ASSET_MODAL_TABS[tab] ? tab : "essential";
+  document.querySelectorAll("#asset-detail-modal .asset-tab").forEach((button) => {
+    const active = button.dataset.assetTab === assetModalTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  const body = document.getElementById("asset-modal-body");
+  if (assetModalFile) {
+    body.innerHTML = ASSET_MODAL_TABS[assetModalTab](assetModalFile);
+    body.scrollTop = 0;
+  }
+}
+
+async function openAssetDetailModal(keyOrControl, tab = "essential") {
+  const key = typeof keyOrControl === "string"
+    ? keyOrControl
+    : keyOrControl.dataset.inventoryExpand || keyOrControl.closest("tr")?.dataset.fileKey || "";
   let file = findInventoryFileByKey(key);
   if (!file) return;
   const modal = document.getElementById("asset-detail-modal");
   if (!modal) return;
+  assetModalFile = null;
   document.getElementById("asset-modal-title").textContent = file.name || file.path || "Asset";
   document.getElementById("asset-modal-path").textContent = file.path || "";
   const body = document.getElementById("asset-modal-body");
@@ -3313,15 +3363,21 @@ async function openAssetDetailModal(control) {
   modal.classList.remove("hidden");
   modal.getBoundingClientRect();
   modal.classList.add("open");
-  body.scrollTop = 0;
+  setAssetModalTab(tab);
   try {
     file = await ensureInventoryAssetDetail(file);
     if (modal.classList.contains("hidden")) return;
-    body.innerHTML = renderInventoryExpandedDetails(file);
+    assetModalFile = file;
+    setAssetModalTab(tab);
   } catch (error) {
     body.innerHTML = renderInventoryDetailError(error.message);
   }
 }
+
+document.addEventListener("click", (event) => {
+  const tabButton = event.target.closest("#asset-detail-modal .asset-tab");
+  if (tabButton) setAssetModalTab(tabButton.dataset.assetTab);
+});
 
 function closeAssetDetailModal() {
   const modal = document.getElementById("asset-detail-modal");
@@ -3336,38 +3392,6 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeAssetDetailModal();
 });
-
-async function openDetailDrawer(key, type) {
-  let file = findInventoryFileByKey(key);
-  if (file?.__inventory_page_item && !file.__inventory_detail_loaded && file.id) {
-    detailDrawerEyebrow.textContent = "Inventory detail";
-    detailDrawerTitle.textContent = file.name || "Loading asset";
-    detailDrawerMeta.textContent = file.path || "";
-    detailDrawerBody.innerHTML = '<p class="subtext">Loading full detail for this asset...</p>';
-    detailDrawer.classList.remove("hidden");
-    detailDrawer.getBoundingClientRect();
-    detailDrawer.classList.add("open");
-    file = await ensureInventoryAssetDetail(file);
-  }
-  const isRecommendation = type === "recommendations";
-  const isFindings = type === "findings";
-  const items = isRecommendation ? file?.risk?.dlp_recommendations || [] : isFindings ? file?.findings || [] : file?.risk?.reasons || [];
-  detailDrawerEyebrow.textContent = isRecommendation ? "DLP recommendations" : isFindings ? "Finding evidence" : "Risk context";
-  detailDrawerTitle.textContent = file?.name || (isRecommendation ? "DLP recommendations" : isFindings ? "Findings" : "Reasons");
-  detailDrawerMeta.textContent = file?.path || "";
-  if (isFindings) {
-    detailDrawerBody.innerHTML = renderFindingDrawerGroups(file);
-  } else if (isRecommendation) {
-    detailDrawerBody.innerHTML = items.length
-      ? `<ol class="detail-list recommendations">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`
-      : '<p class="subtext">No DLP recommendations were generated for this file.</p>';
-  } else {
-    detailDrawerBody.innerHTML = renderReasonDetailList(file);
-  }
-  detailDrawer.classList.remove("hidden");
-  detailDrawer.getBoundingClientRect();
-  detailDrawer.classList.add("open");
-}
 
 const DRAWER_SEVERITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 
@@ -3729,14 +3753,6 @@ function inferReasonCategory(reason = "") {
   return "Risk context";
 }
 
-function closeDetailDrawer() {
-  detailDrawer.classList.remove("open");
-  window.setTimeout(() => {
-    if (!detailDrawer.classList.contains("open")) {
-      detailDrawer.classList.add("hidden");
-    }
-  }, 180);
-}
 
 function renderRiskRules(rules) {
   latestRiskRules = rules || [];
@@ -7978,24 +7994,13 @@ resultsBody.addEventListener("click", (event) => {
 
   const detailButton = event.target.closest(".detail-toggle");
   if (detailButton) {
-    openDetailDrawer(detailButton.dataset.detailKey || "", detailButton.dataset.detailType || "reasons")
-      .catch((error) => showToast("Asset detail failed", error.message, "danger"));
+    const tab = { findings: "findings", recommendations: "actions" }[detailButton.dataset.detailType] || "reasons";
+    openAssetDetailModal(detailButton.dataset.detailKey || "", tab);
     return;
   }
 
 });
 
-detailDrawer.addEventListener("click", (event) => {
-  if (event.target.closest("[data-close-detail]")) {
-    closeDetailDrawer();
-  }
-});
-
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    closeDetailDrawer();
-  }
-});
 
 resultsBody.addEventListener("change", (event) => {
   const select = event.target.closest("[data-override]");

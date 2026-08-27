@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=211" />
+    <link rel="stylesheet" href="/static/styles.css?v=212" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -1304,26 +1304,16 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
           </button>
         </div>
-        <div id="asset-modal-body" class="asset-detail-body"></div>
+        <div class="asset-detail-tabs" role="tablist" aria-label="Asset detail sections">
+          <button type="button" class="asset-tab active" data-asset-tab="essential" role="tab" aria-selected="true">Essential</button>
+          <button type="button" class="asset-tab" data-asset-tab="findings" role="tab" aria-selected="false">Findings</button>
+          <button type="button" class="asset-tab" data-asset-tab="reasons" role="tab" aria-selected="false">Reasons</button>
+          <button type="button" class="asset-tab" data-asset-tab="actions" role="tab" aria-selected="false">Actions</button>
+        </div>
+        <div id="asset-modal-body" class="asset-detail-body" role="tabpanel"></div>
       </div>
     </div>
 
-    <div id="detail-drawer" class="detail-drawer hidden">
-      <div class="detail-drawer-backdrop" data-close-detail></div>
-      <aside class="detail-drawer-panel" aria-label="File detail">
-        <div class="detail-drawer-header">
-          <div>
-            <span id="detail-drawer-eyebrow">Risk context</span>
-            <h3 id="detail-drawer-title">Details</h3>
-            <p id="detail-drawer-meta"></p>
-          </div>
-          <button type="button" class="tb-icon-btn detail-drawer-close" data-close-detail title="Close" aria-label="Close detail">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-          </button>
-        </div>
-        <div id="detail-drawer-body" class="detail-drawer-body"></div>
-      </aside>
-    </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
     <section id="copilot-widget" class="copilot-widget" aria-label="DSPM AI Copilot">
@@ -1365,7 +1355,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=164"></script>
+    <script src="/static/app.js?v=166"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

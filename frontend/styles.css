@@ -22216,3 +22216,70 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   color: var(--muted);
 }
 .asset-detail-body .inventory-expanded-facts > div strong { font-size: 13.5px; line-height: 1.25; }
+
+
+/* == Asset pop-up grows into a tabbed workspace ==================== */
+:root:root .asset-detail-panel {
+  width: min(1120px, 96vw) !important;
+  height: 92vh !important;
+  max-height: 92vh !important;
+}
+.asset-detail-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+:root:root .asset-tab {
+  position: relative;
+  padding: 10px 14px 11px !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  box-shadow: none !important;
+  border-radius: 8px 8px 0 0 !important;
+  min-width: 0 !important;
+}
+:root:root .asset-tab:hover { color: var(--text) !important; background: color-mix(in srgb, var(--accent) 6%, transparent) !important; }
+:root:root .asset-tab.active { color: var(--accent) !important; }
+.asset-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+}
+:root:root .asset-tab:focus-visible { outline: 2px solid var(--accent) !important; outline-offset: -2px !important; }
+.asset-detail-body { flex: 1 1 auto; }
+.asset-tab-single { max-width: 860px; }
+
+/* Reasons / Actions cells: an icon and plain words, not a label+badge. */
+:root:root #results-body .detail-cell-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  padding: 5px 10px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  color: var(--text) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  box-shadow: none !important;
+  min-width: 0 !important;
+  white-space: nowrap;
+}
+:root:root #results-body .detail-cell-btn:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+  background: color-mix(in srgb, var(--accent) 7%, transparent) !important;
+}
+.detail-cell-ico { display: inline-flex; }
+.detail-cell-ico svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
