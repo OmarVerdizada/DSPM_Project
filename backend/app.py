@@ -1666,11 +1666,26 @@ def inventory_index(
 ) -> dict:
     """S-C: keyset-paginated file inventory. The DB filters/sorts/searches so the
     browser fetches one page instead of the whole file list."""
-    return list_inventory(
+    result = list_inventory(
         principal.tenant_id, risk=risk, source=source, framework=framework,
         finding_type=finding_type, protected=protected, q=q, extension=extension,
         sort=sort, cursor=after, limit=limit,
     )
+    # The collapsed table shows real reason/action numbers without a detail
+    # fetch per row.
+    try:
+        from backend.store import inventory_reason_action_counts
+
+        counts = inventory_reason_action_counts(
+            principal.tenant_id, [item.get("id") for item in result.get("items", [])]
+        )
+        for item in result.get("items", []):
+            pair = counts.get(str(item.get("id") or ""))
+            if pair is not None:
+                item["reason_count"], item["dlp_count"] = pair
+    except Exception:
+        pass
+    return result
 
 
 @app.get("/api/inventory/export")

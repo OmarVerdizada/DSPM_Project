@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=210" />
+    <link rel="stylesheet" href="/static/styles.css?v=211" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -1291,6 +1291,23 @@
       </main>
     </div>
 
+    <div id="asset-detail-modal" class="asset-detail-modal hidden" role="dialog" aria-modal="true" aria-labelledby="asset-modal-title">
+      <div class="asset-detail-backdrop" data-close-asset-modal></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Asset &amp; scan detail</span>
+            <h3 id="asset-modal-title">Asset</h3>
+            <p id="asset-modal-path" class="asset-detail-path"></p>
+          </div>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-asset-modal title="Close" aria-label="Close asset detail">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div id="asset-modal-body" class="asset-detail-body"></div>
+      </div>
+    </div>
+
     <div id="detail-drawer" class="detail-drawer hidden">
       <div class="detail-drawer-backdrop" data-close-detail></div>
       <aside class="detail-drawer-panel" aria-label="File detail">
@@ -1348,7 +1365,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=163"></script>
+    <script src="/static/app.js?v=164"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

@@ -82,7 +82,8 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         # The +N dossier owns finding evidence; the row expansion is only
         # about the asset and its scan. No duplicated findings sections.
         self.assertIn('data-inventory-expand=', self.script)
-        self.assertIn('class="inventory-detail-row', self.script)
+        self.assertIn("openAssetDetailModal", self.script)
+        self.assertIn('id="asset-detail-modal"', Path("frontend/index.html").read_text(encoding="utf-8"))
         self.assertIn("ensureInventoryAssetDetail(file)", self.script)
         self.assertIn("renderInventoryExpandedDetails(file)", self.script)
         expansion = self.script.split("function renderInventoryExpandedDetails", 1)[1].split(chr(10) + "async function", 1)[0]

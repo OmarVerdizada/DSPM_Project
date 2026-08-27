@@ -22090,3 +22090,129 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
    opener is the constant home of finding detail. */
 /* Lazy indicator: an ellipsis count until the on-demand detail arrives. */
 :root:root #results-body .detail-toggle-lazy .detail-count { opacity: .7; }
+
+
+/* == Asset & scan detail pop-up ==================================== */
+.asset-detail-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4vh 18px;
+}
+.asset-detail-modal.hidden { display: none; }
+.asset-detail-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 6, 23, .55);
+  backdrop-filter: blur(3px);
+}
+.asset-detail-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(940px, 96vw);
+  max-height: 90vh;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 30px 80px rgba(2, 6, 23, .45);
+  overflow: hidden;
+}
+.asset-detail-modal.open .asset-detail-panel { animation: asset-modal-rise 170ms ease; }
+@keyframes asset-modal-rise {
+  from { opacity: 0; transform: translateY(10px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .asset-detail-modal.open .asset-detail-panel { animation: none; }
+}
+.asset-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 20px 13px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.asset-detail-eyebrow {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+.asset-detail-header h3 {
+  margin: 0;
+  font-size: 16.5px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 720px;
+}
+.asset-detail-path {
+  margin: 3px 0 0;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 720px;
+}
+:root:root .asset-modal-close {
+  flex: 0 0 auto !important;
+  width: 34px !important;
+  height: 34px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border: 1px solid transparent !important;
+  border-radius: 999px !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  box-shadow: none !important;
+}
+:root:root .asset-modal-close:hover {
+  color: var(--text) !important;
+  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+}
+.asset-modal-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.asset-detail-body {
+  padding: 16px 20px 26px;
+  overflow-y: auto;
+  min-height: 140px;
+}
+/* The modal header already names the asset - the content's own title
+   would repeat it; keep only the framework strip from that head. */
+.asset-detail-body .inventory-expanded-title { display: none !important; }
+.asset-detail-body .inventory-expanded-head { padding: 0 0 10px !important; margin: 0 !important; border: 0 !important; }
+/* Facts read as a quiet chip grid. */
+.asset-detail-body .inventory-expanded-facts {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)) !important;
+  gap: 8px !important;
+  margin: 0 0 14px !important;
+}
+.asset-detail-body .inventory-expanded-facts > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card) 84%, transparent);
+}
+.asset-detail-body .inventory-expanded-facts > div span {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.asset-detail-body .inventory-expanded-facts > div strong { font-size: 13.5px; line-height: 1.25; }

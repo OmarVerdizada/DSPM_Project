@@ -1971,6 +1971,33 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
     )
 
 
+def inventory_reason_action_counts(tenant_id: str, ids: list) -> dict:
+    """Reason/DLP-action counts for one inventory page, keyed by asset id.
+
+    The windowed list projection deliberately excludes detail_json; the
+    collapsed table still owes the operator real numbers, so this fetches just
+    the page's blobs and counts in Python (backend-agnostic, page <= 500)."""
+    wanted = [str(i) for i in ids if i]
+    counts: dict = {}
+    if not wanted:
+        return counts
+    with _connect() as conn:
+        for start in range(0, len(wanted), 100):
+            chunk = wanted[start:start + 100]
+            placeholders = ",".join("?" * len(chunk))
+            rows = conn.execute(
+                f"SELECT id, detail_json FROM assets WHERE tenant_id = ? AND id IN ({placeholders})",
+                (tenant_id, *chunk),
+            ).fetchall()
+            for row in rows:
+                try:
+                    risk = (json.loads(row["detail_json"] or "{}") or {}).get("risk") or {}
+                    counts[row["id"]] = (len(risk.get("reasons") or []), len(risk.get("dlp_recommendations") or []))
+                except Exception:
+                    counts[row["id"]] = (0, 0)
+    return counts
+
+
 def iter_inventory_export_rows(
     tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
     q: str = "", extension: str = "", protected: bool | None = None,

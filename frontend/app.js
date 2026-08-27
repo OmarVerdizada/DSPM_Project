@@ -2244,6 +2244,17 @@ function list(items) {
   return `<ul class="list">${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
 }
 
+function countDetailButton(count, file, type, label, emptyText) {
+  if (!count) return `<span class="subtext">${escapeHtml(emptyText)}</span>`;
+  return `
+    <button type="button" class="detail-toggle" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(label)}">
+        <span class="detail-chevron" aria-hidden="true"></span>
+        <span class="detail-toggle-label">${escapeHtml(label)}</span>
+        <span class="detail-count">${escapeHtml(count)}</span>
+    </button>
+  `;
+}
+
 function lazyDetailButton(file, type, label) {
   return `
     <button type="button" class="detail-toggle detail-toggle-lazy" data-detail-type="${escapeHtml(type)}" data-detail-key="${escapeHtml(fileKey(file))}" title="${escapeHtml(label)} load on demand">
@@ -2606,19 +2617,18 @@ function renderRows(files, options = {}) {
       const sourceName = file.source || file.share || "workspace";
       const path = file.path || file.name || "";
       const sha256 = fileHashValue(file);
-      const rowDetailId = `inventory-detail-${Math.abs(hashString(key))}`;
-      const expanded = expandedInventoryKeys.has(key);
+
       const rowFrameworkClass = "";
       const copyPathButton = path
         ? `<button type="button" class="icon-mini-btn copy-path-btn" data-copy-text="${escapeHtml(path)}" title="Copy full path" aria-label="Copy full file path"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg><span>Copy path</span></button>`
         : "";
 
       return `
-        <tr class="${flash} severity-row ${level} ${escapeHtml(rowFrameworkClass)}${expanded ? " row-open" : ""}" data-file-key="${escapeHtml(key)}">
+        <tr class="${flash} severity-row ${level} ${escapeHtml(rowFrameworkClass)}" data-file-key="${escapeHtml(key)}">
           <td>
             <div class="file-title polished-file-title">
-              <button type="button" class="preview-toggle inventory-row-expand${expanded ? " preview-open" : ""}" data-inventory-expand="${escapeHtml(key)}" title="${expanded ? "Collapse complete asset detail" : "Expand complete asset detail"}" aria-label="${expanded ? "Collapse" : "Expand"} complete asset detail for ${escapeHtml(file.name || file.path || "file")}" aria-controls="${escapeHtml(rowDetailId)}" aria-expanded="${expanded}"><svg class="preview-toggle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9.5 5 5 5-5"></path></svg></button>
-              <button type="button" class="file-info-toggle${expanded ? " info-open" : ""}" data-inventory-expand="${escapeHtml(key)}" aria-expanded="${expanded}" aria-controls="${escapeHtml(rowDetailId)}" title="${expanded ? "Collapse complete asset detail" : "Expand complete asset detail"}">
+              <button type="button" class="preview-toggle inventory-row-expand" data-inventory-expand="${escapeHtml(key)}" title="Open asset &amp; scan detail" aria-label="Open asset and scan detail for ${escapeHtml(file.name || file.path || "file")}" aria-haspopup="dialog"><svg class="preview-toggle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6"></path><path d="M20 4 11.5 12.5"></path><path d="M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"></path></svg></button>
+              <button type="button" class="file-info-toggle" data-inventory-expand="${escapeHtml(key)}" aria-haspopup="dialog" title="Open asset &amp; scan detail">
                 <span class="file-path">${escapeHtml(file.name || file.path || "Unknown file")}</span>
               </button>
             </div>
@@ -2651,15 +2661,12 @@ function renderRows(files, options = {}) {
               ${riskOption("LOW", "Low", rowOverrides[key] || "")}
             </select>
           </td>
-          <td>${lazyDetail ? lazyDetailButton(file, "reasons", "Reasons") : detailButton(reasons, file, "reasons", "Reasons", "No reasons")}</td>
-          <td>${lazyDetail ? lazyDetailButton(file, "recommendations", "DLP actions") : detailButton(recommendations, file, "recommendations", "DLP actions", "No actions")}</td>
-        </tr>
-        <tr id="${escapeHtml(rowDetailId)}" class="inventory-detail-row ${expanded ? "" : "hidden"}" data-inventory-detail-key="${escapeHtml(key)}">
-          <td colspan="7">
-            <div class="inventory-expanded-content" data-inventory-expanded-content>
-              ${expanded ? (file.__inventory_detail_loaded || !file.__inventory_page_item ? renderInventoryExpandedDetails(file) : renderInventoryDetailLoading("Loading asset and scan detail...")) : ""}
-            </div>
-          </td>
+          <td>${!lazyDetail ? detailButton(reasons, file, "reasons", "Reasons", "No reasons")
+            : Number.isInteger(file.reason_count) ? countDetailButton(file.reason_count, file, "reasons", "Reasons", "No reasons")
+            : lazyDetailButton(file, "reasons", "Reasons")}</td>
+          <td>${!lazyDetail ? detailButton(recommendations, file, "recommendations", "DLP actions", "No actions")
+            : Number.isInteger(file.dlp_count) ? countDetailButton(file.dlp_count, file, "recommendations", "DLP actions", "No actions")
+            : lazyDetailButton(file, "recommendations", "DLP actions")}</td>
         </tr>
       `;
     })
@@ -2670,7 +2677,6 @@ function renderRows(files, options = {}) {
       ? `<tr><td colspan="7" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
       : "";
   resultsBody.innerHTML = rows + moreRow;
-  hydrateExpandedInventoryRows();
   lastRenderedFileKeys = currentKeys;
   hasRenderedScanRows = true;
 }
@@ -3294,50 +3300,42 @@ function renderInventoryExpandedDetails(file) {
   `;
 }
 
-async function hydrateInventoryExpandedRow(detailRow) {
-  if (!detailRow || detailRow.classList.contains("hidden")) return;
-  const content = detailRow.querySelector("[data-inventory-expanded-content]");
-  let file = findInventoryFileByKey(detailRow.dataset.inventoryDetailKey || "");
-  if (!content || !file) return;
-  detailRow.setAttribute("aria-busy", "true");
-  if (file.__inventory_page_item && !file.__inventory_detail_loaded && file.id) {
-    content.innerHTML = renderInventoryDetailLoading();
-  }
+async function openAssetDetailModal(control) {
+  const key = control.dataset.inventoryExpand || control.closest("tr")?.dataset.fileKey || "";
+  let file = findInventoryFileByKey(key);
+  if (!file) return;
+  const modal = document.getElementById("asset-detail-modal");
+  if (!modal) return;
+  document.getElementById("asset-modal-title").textContent = file.name || file.path || "Asset";
+  document.getElementById("asset-modal-path").textContent = file.path || "";
+  const body = document.getElementById("asset-modal-body");
+  body.innerHTML = renderInventoryDetailLoading();
+  modal.classList.remove("hidden");
+  modal.getBoundingClientRect();
+  modal.classList.add("open");
+  body.scrollTop = 0;
   try {
     file = await ensureInventoryAssetDetail(file);
-    if (!detailRow.classList.contains("hidden")) content.innerHTML = renderInventoryExpandedDetails(file);
+    if (modal.classList.contains("hidden")) return;
+    body.innerHTML = renderInventoryExpandedDetails(file);
   } catch (error) {
-    if (!detailRow.classList.contains("hidden")) content.innerHTML = renderInventoryDetailError(error.message);
-  } finally {
-    detailRow.setAttribute("aria-busy", "false");
+    body.innerHTML = renderInventoryDetailError(error.message);
   }
 }
 
-function hydrateExpandedInventoryRows() {
-  resultsBody?.querySelectorAll(".inventory-detail-row:not(.hidden)").forEach((row) => {
-    hydrateInventoryExpandedRow(row);
-  });
+function closeAssetDetailModal() {
+  const modal = document.getElementById("asset-detail-modal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.remove("open");
+  modal.classList.add("hidden");
 }
 
-function toggleInventoryRowExpansion(control) {
-  const summaryRow = control.closest("tr");
-  const detailRow = summaryRow?.nextElementSibling;
-  if (!summaryRow || !detailRow?.classList.contains("inventory-detail-row")) return;
-  const key = control.dataset.inventoryExpand || summaryRow.dataset.fileKey || "";
-  const open = detailRow.classList.contains("hidden");
-  detailRow.classList.toggle("hidden", !open);
-  summaryRow.classList.toggle("row-open", open);
-  if (open) expandedInventoryKeys.add(key);
-  else expandedInventoryKeys.delete(key);
-  summaryRow.querySelectorAll("[data-inventory-expand]").forEach((button) => {
-    button.setAttribute("aria-expanded", String(open));
-    button.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} complete asset detail`);
-    button.classList.toggle("preview-open", open && button.classList.contains("preview-toggle"));
-    button.classList.toggle("info-open", open && button.classList.contains("file-info-toggle"));
-    button.title = open ? "Collapse complete asset detail" : "Expand complete asset detail";
-  });
-  if (open) hydrateInventoryExpandedRow(detailRow);
-}
+document.addEventListener("click", (event) => {
+  if (event.target.closest("[data-close-asset-modal]")) closeAssetDetailModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeAssetDetailModal();
+});
 
 async function openDetailDrawer(key, type) {
   let file = findInventoryFileByKey(key);
@@ -7974,7 +7972,7 @@ assetRuleList.addEventListener("click", (event) => {
 resultsBody.addEventListener("click", (event) => {
   const expandControl = event.target.closest("[data-inventory-expand]");
   if (expandControl) {
-    toggleInventoryRowExpansion(expandControl);
+    openAssetDetailModal(expandControl);
     return;
   }
 
