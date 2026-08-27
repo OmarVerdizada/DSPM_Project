@@ -22086,14 +22086,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   mask-image: linear-gradient(90deg, #000 calc(100% - 26px), transparent);
 }
 :root:root #inventory-workspace #results-body .finding-chip-wrap > .detail-toggle { flex: 0 0 auto; }
-:root:root #inventory-workspace #results-body tr.row-open .finding-chip-set {
-  flex-wrap: wrap;
-  max-height: none;
-  -webkit-mask-image: none;
-  mask-image: none;
-}
-:root:root #inventory-workspace #results-body tr.row-open .finding-chip-wrap > .detail-toggle {
-  display: none !important;
-}
+/* The chips cell stays identical in both row states: the +N dossier
+   opener is the constant home of finding detail. */
 /* Lazy indicator: an ellipsis count until the on-demand detail arrives. */
 :root:root #results-body .detail-toggle-lazy .detail-count { opacity: .7; }

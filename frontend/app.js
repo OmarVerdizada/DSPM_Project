@@ -2657,7 +2657,7 @@ function renderRows(files, options = {}) {
         <tr id="${escapeHtml(rowDetailId)}" class="inventory-detail-row ${expanded ? "" : "hidden"}" data-inventory-detail-key="${escapeHtml(key)}">
           <td colspan="7">
             <div class="inventory-expanded-content" data-inventory-expanded-content>
-              ${expanded ? (file.__inventory_detail_loaded || !file.__inventory_page_item ? renderInventoryExpandedDetails(file) : renderInventoryDetailLoading("Loading complete asset evidence...")) : ""}
+              ${expanded ? (file.__inventory_detail_loaded || !file.__inventory_page_item ? renderInventoryExpandedDetails(file) : renderInventoryDetailLoading("Loading asset and scan detail...")) : ""}
             </div>
           </td>
         </tr>
@@ -3184,8 +3184,8 @@ async function ensureInventoryAssetDetail(file) {
   return inventoryDetailRequests.get(requestKey);
 }
 
-function renderInventoryDetailLoading(message = "Loading complete asset evidence...") {
-  return `<div class="inventory-detail-state" role="status"><span class="inventory-detail-spinner" aria-hidden="true"></span><strong>${escapeHtml(message)}</strong><small>Findings, redacted evidence, risk context, permissions, and file metadata are loaded on demand.</small></div>`;
+function renderInventoryDetailLoading(message = "Loading asset and scan detail...") {
+  return `<div class="inventory-detail-state" role="status"><span class="inventory-detail-spinner" aria-hidden="true"></span><strong>${escapeHtml(message)}</strong><small>File properties, permissions, document metadata, and scan diagnostics are loaded on demand.</small></div>`;
 }
 
 function renderInventoryDetailError(message) {
@@ -3266,7 +3266,7 @@ function renderInventoryExpandedDetails(file) {
     <div class="inventory-expanded-panel">
       <header class="inventory-expanded-head">
         <div class="inventory-expanded-title">
-          <span>Complete asset evidence</span>
+          <span>Asset &amp; scan detail</span>
           <strong>${escapeHtml(file.name || file.path || "Unknown asset")}</strong>
           <p>${escapeHtml(file.path || "Path unavailable")}</p>
         </div>
@@ -3276,20 +3276,6 @@ function renderInventoryExpandedDetails(file) {
         ${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
       </div>
       <div class="inventory-expanded-grid">
-        <section class="inventory-detail-section inventory-findings-section inventory-detail-wide">
-          <div class="inventory-detail-section-head"><div><span>What Sentro detected</span><h5>Findings and redacted evidence</h5></div><b>${escapeHtml(findings.length)}</b></div>
-          ${findings.length
-            ? `<ol class="detail-list findings inventory-findings-list">${findings.map((finding) => renderFindingDetails(file, finding)).join("")}</ol>`
-            : '<p class="inventory-detail-empty">No sensitive findings were generated for this asset.</p>'}
-        </section>
-        <section class="inventory-detail-section">
-          <div class="inventory-detail-section-head"><div><span>Why it was scored</span><h5>Risk rationale</h5></div><span class="badge ${escapeHtml(effectiveRisk.level)}">${escapeHtml(effectiveRisk.level)} ${escapeHtml(effectiveRisk.score)}</span></div>
-          ${renderReasonDetailList(file)}
-        </section>
-        <section class="inventory-detail-section">
-          <div class="inventory-detail-section-head"><div><span>Recommended response</span><h5>DLP actions</h5></div><b>${escapeHtml((file?.risk?.dlp_recommendations || []).length)}</b></div>
-          ${renderInventoryRecommendations(file)}
-        </section>
         <section class="inventory-detail-section inventory-detail-wide">
           <div class="inventory-detail-section-head"><div><span>Filesystem and document context</span><h5>Asset properties</h5></div></div>
           <dl class="inventory-property-grid">${properties}</dl>
