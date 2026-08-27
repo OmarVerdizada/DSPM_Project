@@ -78,18 +78,22 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         self.assertIn("button.disabled = false", self.script)
         self.assertIn('id="inventory-export-status"', Path("frontend/index.html").read_text(encoding="utf-8"))
 
-    def test_inventory_disclosure_loads_and_renders_complete_asset_evidence(self) -> None:
+    def test_inventory_disclosure_is_scan_and_data_only(self) -> None:
+        # The +N dossier owns finding evidence; the row expansion is only
+        # about the asset and its scan. No duplicated findings sections.
         self.assertIn('data-inventory-expand=', self.script)
         self.assertIn('class="inventory-detail-row', self.script)
         self.assertIn("ensureInventoryAssetDetail(file)", self.script)
         self.assertIn("renderInventoryExpandedDetails(file)", self.script)
-        self.assertIn("Findings and redacted evidence", self.script)
-        self.assertIn("Risk rationale", self.script)
-        self.assertIn("DLP actions", self.script)
-        self.assertIn("Asset properties", self.script)
-        self.assertIn("Access and permissions", self.script)
-        self.assertIn("Scan diagnostics", self.script)
-        self.assertIn("Sanitized content only", self.script)
+        expansion = self.script.split("function renderInventoryExpandedDetails", 1)[1].split(chr(10) + "async function", 1)[0]
+        self.assertNotIn("Findings and redacted evidence", expansion)
+        self.assertNotIn("Risk rationale", expansion)
+        self.assertIn("Asset properties", expansion)
+        self.assertIn("Access and permissions", expansion)
+        self.assertIn("Scan diagnostics", expansion)
+        self.assertIn("Sanitized content only", expansion)
+        # The dossier keeps the grouped evidence.
+        self.assertIn("renderFindingDrawerGroups", self.script)
 
     def test_priority_finding_expander_uses_full_on_demand_detail(self) -> None:
         self.assertIn("data-finding-identity", self.script)
