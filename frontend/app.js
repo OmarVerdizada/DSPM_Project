@@ -8307,6 +8307,28 @@ document.addEventListener("change", (event) => {
   }, 120);
 });
 
+// The inventory results height is user-adjustable (native vertical resize);
+// remember the chosen height per browser and restore it on load.
+{
+  const invWrap = document.querySelector("#inventory-workspace .inventory-table-wrap");
+  if (invWrap) {
+    invWrap.title = "Drag the bottom-right corner to resize the results area";
+    const savedHeight = safeStorageGet("dspm-inventory-height");
+    if (savedHeight) invWrap.style.height = savedHeight;
+    const saveInventoryHeight = () => {
+      if (invWrap.style.height) safeStorageSet("dspm-inventory-height", invWrap.style.height);
+    };
+    let resizeSaveTimer = 0;
+    new ResizeObserver(() => {
+      clearTimeout(resizeSaveTimer);
+      resizeSaveTimer = setTimeout(saveInventoryHeight, 250);
+    }).observe(invWrap);
+    // The drag ends with a pointerup on the wrap - save immediately, frames
+    // or not.
+    invWrap.addEventListener("pointerup", saveInventoryHeight);
+  }
+}
+
 renderProfile();
 {
   const bootTab = tabFromLocation();

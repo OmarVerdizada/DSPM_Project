@@ -22283,3 +22283,45 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 .detail-cell-ico { display: inline-flex; }
 .detail-cell-ico svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+
+
+/* == Findings: parallel memo panels + adjustable inventory height == */
+/* The two summary panels stretch to one shared height; the shorter one's
+   body fills the difference instead of leaving a ragged bottom edge. */
+:root:root #tab-findings .executive-grid { align-items: stretch !important; }
+:root:root #tab-findings .executive-grid > .visual-panel {
+  height: auto !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+:root:root #tab-findings .executive-grid > .visual-panel > :last-child {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+/* The summary contributes nothing to the row height (flex-basis 0): the
+   queue panel anchors the shared height and the summary fills + scrolls. */
+:root:root #findings-signal-summary {
+  flex: 1 1 0 !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+}
+
+/* The results area is the operator's to size: drag the bottom-right grip.
+   The chosen height is remembered per browser. */
+:root:root #inventory-workspace .inventory-table-wrap {
+  resize: vertical;
+  height: calc(100vh - 230px);
+  max-height: none !important;
+  min-height: 240px !important;
+}
+:root:root #inventory-workspace .inventory-table-wrap::-webkit-resizer {
+  background:
+    linear-gradient(135deg, transparent 45%, var(--muted) 45%, var(--muted) 55%, transparent 55%),
+    linear-gradient(135deg, transparent 70%, var(--muted) 70%, var(--muted) 80%, transparent 80%);
+  background-size: 12px 12px;
+  background-repeat: no-repeat;
+  background-position: center;
+  opacity: .7;
+}
