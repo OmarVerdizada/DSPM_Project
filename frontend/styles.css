@@ -22054,7 +22054,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 .drawer-group[open] > summary { border-bottom: 1px solid var(--line); }
 .drawer-group-body { padding: 4px 14px 12px; }
 .drawer-group-body .detail-list { margin: 0 !important; padding: 0 !important; }
-.drawer-group-body .detail-list > li { border: 0 !important; padding-left: 0 !important; }
+.drawer-group-body .detail-list > li { border: 0 !important; padding: 2px 0 6px !important; }
 @media (prefers-reduced-motion: reduce) {
   .drawer-group-caret { transition: none; }
 }
@@ -22384,3 +22384,64 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root .finding-open-btn:hover { color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 9%, transparent) !important; }
 :root:root .finding-open-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+
+
+/* == Finding dossier body overhaul ================================= */
+/* The group header already numbers and names the finding: inside the
+   group no ordinal circle (it was overlapping the title) and no
+   duplicated title line - the body starts at the quiet meta row. */
+:root:root .drawer-group-body .detail-list > li::before { content: none !important; }
+:root:root .drawer-group-body .detail-list > li > strong:first-child { display: none !important; }
+:root:root .drawer-group-body .detail-list > li > .detail-meta-line {
+  display: block;
+  margin: 2px 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+/* Rhythm: chip rows breathe, labels read as labels, evidence wraps. */
+:root:root .drawer-group-body .detail-chip-row,
+:root:root .drawer-group-body .detail-framework-row {
+  display: flex !important;
+  flex-flow: row wrap !important;
+  gap: 6px !important;
+  margin: 0 0 10px !important;
+}
+:root:root .drawer-group-body .detail-evidence { margin: 0 0 10px !important; }
+:root:root .drawer-group-body .detail-evidence > span {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+:root:root .drawer-group-body .detail-evidence code,
+:root:root .drawer-group-body .detail-evidence pre {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--card) 80%, transparent);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+:root:root .drawer-group-body .detail-list > li > p {
+  margin: 0 0 10px !important;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+:root:root .drawer-group-body .child-finding-evidence { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+:root:root .drawer-group-body .child-finding-evidence > span {
+  display: block;
+  margin: 0 0 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
