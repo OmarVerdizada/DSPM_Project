@@ -1739,6 +1739,21 @@ def inventory_facet_index(principal: Principal = Depends(require_role("viewer"))
     return inventory_facets(principal.tenant_id)
 
 
+@app.get("/api/inventory-detail-counts")
+def inventory_detail_counts(
+    principal: Principal = Depends(require_role("viewer")),
+    ids: str = Query(default="", max_length=20_000),
+) -> dict:
+    """Batch reason/fix counts for specific assets. The row cells must show
+    real numbers the moment a page renders; this backstops any data path
+    whose payload predates (or misses) the per-page count attachment."""
+    from backend.store import inventory_reason_action_counts
+
+    wanted = [item.strip() for item in ids.split(",") if item.strip()][:500]
+    counts = inventory_reason_action_counts(principal.tenant_id, wanted)
+    return {"counts": {key: {"reasons": pair[0], "fixes": pair[1]} for key, pair in counts.items()}}
+
+
 @app.get("/api/inventory/{asset_id}")
 def inventory_asset_detail(asset_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
     asset = get_inventory_asset(principal.tenant_id, asset_id)

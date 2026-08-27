@@ -109,5 +109,20 @@ class AvatarTests(unittest.TestCase):
         self.assertEqual(bad_body.status_code, 400)
 
 
+class InventoryDetailCountsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.client = TestClient(app)
+
+    def test_batch_counts_requires_auth_and_handles_empty(self) -> None:
+        denied = self.client.get("/api/inventory-detail-counts?ids=a,b")
+        self.assertIn(denied.status_code, (401, 403))
+        ok = self.client.get("/api/inventory-detail-counts?ids=", headers=_headers())
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json(), {"counts": {}})
+        unknown = self.client.get("/api/inventory-detail-counts?ids=deadbeef", headers=_headers())
+        self.assertEqual(unknown.status_code, 200)
+        self.assertEqual(unknown.json()["counts"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

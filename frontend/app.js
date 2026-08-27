@@ -2284,8 +2284,13 @@ function refreshInventorySummaryCells(file) {
   if (!row) return;
   const cells = row.querySelectorAll("td");
   if (cells.length < 7) return;
-  cells[5].innerHTML = detailButton(file.risk?.reasons || [], file, "reasons", "Reasons", "No reasons");
-  cells[6].innerHTML = detailButton(file.risk?.dlp_recommendations || [], file, "recommendations", "DLP actions", "No actions");
+  const loaded = !file.__inventory_page_item || file.__inventory_detail_loaded;
+  cells[5].innerHTML = loaded
+    ? detailButton(file.risk?.reasons || [], file, "reasons", "Reasons", "No reasons")
+    : detailCellMarkup(file.reason_count || 0, file, "reasons");
+  cells[6].innerHTML = loaded
+    ? detailButton(file.risk?.dlp_recommendations || [], file, "recommendations", "DLP actions", "No actions")
+    : detailCellMarkup(file.dlp_count || 0, file, "recommendations");
 }
 
 function detailButton(items, file, type, label, emptyText) {
@@ -2691,8 +2696,32 @@ function renderRows(files, options = {}) {
       ? `<tr><td colspan="7" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
       : "";
   resultsBody.innerHTML = rows + moreRow;
+  resolveLazyDetailCounts(page);
   lastRenderedFileKeys = currentKeys;
   hasRenderedScanRows = true;
+}
+
+// Backstop: if a rendered row is still waiting on reason/fix counts (a data
+// path without the per-page attachment), one batched request fills them all
+// in - the cells never sit on an ellipsis.
+function resolveLazyDetailCounts(files = []) {
+  const pending = files.filter((file) =>
+    file?.__inventory_page_item && !file.__inventory_detail_loaded && file.id
+    && !(Number.isInteger(file.reason_count) && Number.isInteger(file.dlp_count)));
+  if (!pending.length) return;
+  const ids = [...new Set(pending.map((file) => String(file.id)))].slice(0, 500);
+  api(`/api/inventory-detail-counts?ids=${encodeURIComponent(ids.join(","))}`, null, "GET")
+    .then((data) => {
+      const counts = data?.counts || {};
+      pending.forEach((file) => {
+        const pair = counts[String(file.id)];
+        if (!pair) return;
+        file.reason_count = pair.reasons;
+        file.dlp_count = pair.fixes;
+        refreshInventorySummaryCells(file);
+      });
+    })
+    .catch(() => { /* the on-open refresh still corrects the cells */ });
 }
 
 function getVisibleInventoryFiles(files = latestFiles) {
