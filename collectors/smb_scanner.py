@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import zipfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from discovery.parallelism import host_admission_budget, resolve_parallelism
 
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
 from collectors.net_guard import TargetNotAllowed, resolve_and_pin
+from collectors import win_security
 from collectors.ocr import extract_text_from_image, is_ocr_scannable
 from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
 from collectors.file_scanner import (
@@ -96,6 +98,51 @@ def _is_connection_error(exc: Exception) -> bool:
 
 
 @dataclass(slots=True)
+class _SMBFileWork:
+    """Metadata-only placeholder filled during P1's acquisition phase.
+
+    No live pysmb objects cross the phase/thread boundary. That keeps the
+    stateful connection thread-local while preserving deterministic order.
+    """
+
+    share_name: str
+    remote_path: str
+    name: str
+    file_size: int
+    extension: str
+    is_hidden: bool
+    is_system: bool
+    created_at: str
+    modified_at: str
+    attributes: str
+    reuse_key: str
+    include_top: bool
+    inspect_archive_entries: bool
+
+
+@dataclass(slots=True)
+class _SMBSharePlan:
+    share_name: str
+    # Each slot becomes one or more output records. Cached records are already
+    # materialized; fresh records carry a metadata-only work placeholder.
+    slots: list[list[dict] | _SMBFileWork]
+
+
+@dataclass(slots=True)
+class _SMBFileData:
+    """One coherent remote-file acquisition used by P2.
+
+    ``archive_bytes`` is bounded to ``MAX_ARCHIVE_TOTAL_BYTES``; the digest is
+    still calculated over the complete file. Keeping these results together
+    prevents the preview, archive inspector, and hasher from reopening byte 0.
+    """
+
+    content: str
+    sha256: str
+    archive_bytes: bytes | None = None
+
+
+@dataclass(slots=True)
 class SMBConfig:
     server: str
     username: str = ""
@@ -144,6 +191,7 @@ class SMBScanner:
         self.server_used = ""
         self._owner_cache: dict[str, str] = {}
         self._acl_cache: dict[str, dict] = {}
+        self._acl_lock = threading.RLock()
         self.last_scan_diagnostics: dict = {}
         self._progress_counters = {"visited": 0, "matched": 0, "reused": 0}
         # P-B.2 share-parallelism coordination (shared across workers).
@@ -343,12 +391,14 @@ class SMBScanner:
                     continue
                 scanned_shares.append(share_name)
 
-            # P-B.2: walk shares in parallel (each on its OWN isolated connection +
-            # a process-wide admission slot) when there is more than one, else the
-            # serial single-connection path. Both share _scan_one_share's retry-once
-            # + reset circuit-breaker and emit only successfully-walked shares.
+            # P1: the real collector uses a metadata-first, globally bounded
+            # per-file pipeline. Instance-overridden walkers (the compatibility
+            # seam used by integrations/tests) retain the proven P-B.2 path.
             budget = host_admission_budget()
-            if self._should_parallelize(len(scanned_shares)):
+            if self._should_use_file_pipeline():
+                self.close()  # the listing connection is no longer needed
+                records, reset_shares, aborted_reason = self._scan_shares_two_phase(scanned_shares, budget)
+            elif self._should_parallelize(len(scanned_shares)):
                 self._io_parallel_active = True
                 records, reset_shares, aborted_reason = self._scan_shares_parallel(scanned_shares, budget)
             else:
@@ -405,6 +455,637 @@ class SMBScanner:
     # ------------------------------------------------------------------
     # P-B.2: per-share acquisition strategy (serial vs parallel).
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _env_enabled(name: str, default: bool = True) -> bool:
+        fallback = "1" if default else "0"
+        return os.getenv(name, fallback).strip().lower() not in {"0", "false", "no", "off"}
+
+    def _file_parallel_enabled(self) -> bool:
+        return (
+            self._env_enabled("DSPM_SMB_PARALLEL", True)
+            and self._env_enabled("DSPM_SMB_FILE_PARALLEL", True)
+            and self._io_worker_count() > 1
+        )
+
+    def _acl_batch_enabled(self) -> bool:
+        return self._env_enabled("DSPM_SMB_ACL_BATCH", True)
+
+    def _single_pass_enabled(self) -> bool:
+        return self._env_enabled("DSPM_SMB_SINGLE_PASS", True)
+
+    @staticmethod
+    def _acl_batch_size() -> int:
+        configured = os.getenv("DSPM_SMB_ACL_BATCH_SIZE", "32").strip()
+        try:
+            return max(1, min(int(configured), 512))
+        except ValueError:
+            return 32
+
+    def _should_use_file_pipeline(self) -> bool:
+        """Use P1 for the real walker while retaining the instance override seam.
+
+        DSPM_SMB_PARALLEL=0 is deliberately the full legacy escape hatch: it
+        restores one connection, the original recursive walk and per-file ACLs.
+        """
+        if "_walk_share" in self.__dict__:
+            return False
+        if not self._env_enabled("DSPM_SMB_PARALLEL", True):
+            return False
+        return self._file_parallel_enabled() or self._acl_batch_enabled()
+
+    def _scan_shares_two_phase(self, shares: list[str], budget) -> tuple[list[dict], list[str], str]:
+        """Enumerate metadata first, then acquire expensive file data globally.
+
+        Enumeration workers release their host-admission slots before acquisition
+        workers start. This avoids nested-semaphore deadlocks across concurrent
+        jobs and makes the budget an exact cap on live target connections.
+        """
+        enum_started = time.perf_counter()
+        enum_workers = max(1, min(self._io_worker_count(), len(shares) or 1))
+        plans_by_share: dict[str, _SMBSharePlan] = {}
+        reset_shares: list[str] = []
+
+        if enum_workers <= 1:
+            for share_name in shares:
+                plan, status = self._enumerate_one_share(share_name, budget)
+                if status == "done" and plan is not None:
+                    plans_by_share[share_name] = plan
+                elif status == "reset":
+                    reset_shares.append(share_name)
+                if self._abort_event.is_set():
+                    break
+        else:
+            with ThreadPoolExecutor(max_workers=enum_workers, thread_name_prefix="dspm-smb-enum") as executor:
+                futures = {
+                    executor.submit(self._enumerate_one_share, share_name, budget): share_name
+                    for share_name in shares
+                }
+                for future in as_completed(futures):
+                    share_name = futures[future]
+                    plan, status = future.result()
+                    if status == "done" and plan is not None:
+                        plans_by_share[share_name] = plan
+                    elif status == "reset":
+                        reset_shares.append(share_name)
+
+        ordered_plans = [plans_by_share[name] for name in shares if name in plans_by_share]
+        enum_elapsed_ms = round((time.perf_counter() - enum_started) * 1000, 3)
+        acquire_started = time.perf_counter()
+        records, acquired_resets, file_workers, chunk_count = self._acquire_share_plans(ordered_plans, budget)
+        acquire_elapsed_ms = round((time.perf_counter() - acquire_started) * 1000, 3)
+        reset_shares.extend(acquired_resets)
+
+        self._io_parallel_active = enum_workers > 1 or file_workers > 1
+        with self._walk_lock:
+            self.last_scan_diagnostics["smb_phases"] = {
+                "mode": "metadata_then_acquire",
+                "enumeration_workers": enum_workers,
+                "enumeration_elapsed_ms": enum_elapsed_ms,
+                "share_plans": len(ordered_plans),
+                "file_work_items": sum(
+                    1 for plan in ordered_plans for slot in plan.slots if isinstance(slot, _SMBFileWork)
+                ),
+                "file_workers": file_workers,
+                "file_parallel_active": file_workers > 1,
+                "acquisition_chunks": chunk_count,
+                "acl_batch_size": self._acl_batch_size() if self._acl_batch_enabled() else 1,
+                "acquisition_elapsed_ms": acquire_elapsed_ms,
+                "acl_strategy": "batched_powershell_with_per_file_fallback" if self._acl_batch_enabled() else "per_file",
+                "content_hash_strategy": "single_pass_with_exact_fallback" if self._single_pass_enabled() else "separate_preview_and_hash",
+            }
+        aborted_reason = "smb_connection_reset" if self._abort_event.is_set() else ""
+        return records, reset_shares, aborted_reason
+
+    def _note_connection_reset(self, share_name: str, detail: str, attempt: int) -> bool:
+        with self._reset_lock:
+            self._consecutive_resets += 1
+            tripped = self._consecutive_resets >= 5
+        logger.warning(
+            "Connection reset scanning share %s (%s); %s",
+            share_name,
+            detail,
+            "aborting remaining work" if tripped else "retrying" if attempt == 0 else "retry exhausted",
+        )
+        if tripped:
+            self._abort_event.set()
+        return tripped
+
+    def _enumerate_one_share(self, share_name: str, budget) -> tuple[_SMBSharePlan | None, str]:
+        for attempt in range(2):
+            if self._abort_event.is_set() or self._cancelled():
+                return None, "skipped"
+            detail = ""
+            with budget.slot():
+                if self._abort_event.is_set() or self._cancelled():
+                    return None, "skipped"
+                if not self.connect():
+                    detail = "could not establish an SMB enumeration connection"
+                else:
+                    try:
+                        plan = self._enumerate_share_plan(share_name, "/", depth=0)
+                    except _SmbConnectionLost as lost:
+                        detail = lost.detail
+                    else:
+                        with self._reset_lock:
+                            self._consecutive_resets = 0
+                        return plan, "done"
+                    finally:
+                        self.close()
+            if self._note_connection_reset(share_name, detail or "connection lost", attempt):
+                return None, "reset"
+        return None, "reset"
+
+    def _enumerate_share_plan(
+        self,
+        share_name: str,
+        folder: str,
+        depth: int,
+        plan: _SMBSharePlan | None = None,
+    ) -> _SMBSharePlan:
+        if plan is None:
+            plan = _SMBSharePlan(share_name=share_name, slots=[])
+        if self._cancelled():
+            raise RuntimeError("Scan cancelled")
+        if self.connection is None or depth > self.config.max_depth or self._skip_path(folder):
+            return plan
+
+        try:
+            entries = self.connection.listPath(share_name, folder)
+        except Exception as exc:
+            brief = str(exc).splitlines()[0][:200] if str(exc) else exc.__class__.__name__
+            if _is_connection_error(exc):
+                raise _SmbConnectionLost(share_name, brief) from exc
+            logger.warning("Could not list %s:%s: %s", share_name, folder, brief)
+            with self._walk_lock:
+                errors = self.last_scan_diagnostics.setdefault("list_errors", [])
+                if isinstance(errors, list) and len(errors) < 20:
+                    errors.append({"share": share_name, "path": folder, "error": brief})
+            return plan
+
+        for entry in entries:
+            if self._cancelled():
+                raise RuntimeError("Scan cancelled")
+            if entry.filename in {".", ".."}:
+                continue
+
+            remote_path = str(PurePosixPath(folder) / entry.filename)
+            if self._skip_path(remote_path):
+                continue
+            is_dir = bool(entry.isDirectory)
+            is_hidden = bool(getattr(entry, "isHidden", False))
+            is_system = bool(getattr(entry, "isSystem", False))
+            if is_dir:
+                if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
+                    continue
+                self._enumerate_share_plan(share_name, remote_path, depth + 1, plan)
+                continue
+
+            extension = detect_extension(remote_path)
+            with self._walk_lock:
+                self._progress_counters["visited"] += 1
+            self._emit_collection_progress()
+            include_top = matches_scan_filters(
+                extension,
+                is_hidden,
+                is_system,
+                self.extension_filter,
+                self.config.extension_filter_enabled,
+                self.config.include_hidden,
+                self.config.include_system,
+                self.config.hidden_filter_enabled,
+                self.config.system_filter_enabled,
+            )
+            inspect_entries = self.config.inspect_archives and self._should_scan_archive_entries(extension)
+            if not include_top and not inspect_entries:
+                continue
+
+            file_size = int(getattr(entry, "file_size", 0) or 0)
+            modified_at = _format_smb_timestamp(getattr(entry, "last_write_time", None))
+            created_at = _format_smb_timestamp(getattr(entry, "create_time", None))
+            attributes = ", ".join(
+                [item for item in ["H" if is_hidden else "", "S" if is_system else ""] if item]
+            ) or "Normal"
+            reuse_key = self._reuse_key(share_name, remote_path)
+
+            snapshot = None
+            if include_top and self.config.reuse_probe is not None and modified_at:
+                try:
+                    snapshot = self.config.reuse_probe(reuse_key, file_size, modified_at)
+                except Exception:
+                    snapshot = None
+                if inspect_entries and not bool((snapshot or {}).get("archive_bundle_complete")):
+                    snapshot = None
+            if isinstance(snapshot, dict):
+                slot_records = [
+                    {
+                        "source": "smb",
+                        "share": share_name,
+                        "path": remote_path,
+                        "name": entry.filename,
+                        "size": file_size,
+                        "extension": extension,
+                        "is_dir": False,
+                        "is_hidden": is_hidden,
+                        "is_system": is_system,
+                        "content": "",
+                        "acl": snapshot.get("acl") or {},
+                        "scan_mode": scan_mode_for_extension(extension),
+                        "content_status": str(snapshot.get("content_status") or "reused_from_cache"),
+                        "content_scannable": bool(
+                            snapshot.get(
+                                "content_scannable",
+                                extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension),
+                            )
+                        ),
+                        "protected": bool(snapshot.get("protected", False)),
+                        "protection_type": str(snapshot.get("protection_type") or ""),
+                        "scan_error": str(snapshot.get("scan_error") or ""),
+                        "owner": str(snapshot.get("owner") or ""),
+                        "created_at": created_at,
+                        "modified_at": modified_at,
+                        "attributes": attributes,
+                        "sha256": str(snapshot.get("sha256") or ""),
+                        "file_hash": str(snapshot.get("sha256") or ""),
+                        "content_hash": str(snapshot.get("content_hash") or ""),
+                        "scan_completeness": str(snapshot.get("scan_completeness") or "UNKNOWN"),
+                        "bytes_scanned": int(snapshot.get("bytes_scanned") or 0),
+                        "total_bytes": int(snapshot.get("total_bytes") or file_size),
+                        "truncated": bool(snapshot.get("truncated", False)),
+                        "cache_reused": True,
+                        "incremental_reused": bool(snapshot.get("baseline_result")),
+                        "reused_preview": snapshot.get("preview") if isinstance(snapshot.get("preview"), dict) else None,
+                        "baseline_result": snapshot.get("baseline_result") if isinstance(snapshot.get("baseline_result"), dict) else None,
+                        "reuse_key": reuse_key,
+                    }
+                ]
+                archive_records = snapshot.get("archive_records") if isinstance(snapshot.get("archive_records"), list) else []
+                for prior in archive_records:
+                    if isinstance(prior, dict):
+                        child_key = str(prior.get("reuse_key") or prior.get("path") or "")
+                        slot_records.append(apply_reuse_snapshot(prior, reuse_snapshot_from_result(prior), child_key))
+                plan.slots.append(slot_records)
+                with self._walk_lock:
+                    self._progress_counters["matched"] += len(slot_records)
+                    self._progress_counters["reused"] += len(slot_records)
+                self._emit_collection_progress()
+                continue
+
+            plan.slots.append(
+                _SMBFileWork(
+                    share_name=share_name,
+                    remote_path=remote_path,
+                    name=entry.filename,
+                    file_size=file_size,
+                    extension=extension,
+                    is_hidden=is_hidden,
+                    is_system=is_system,
+                    created_at=created_at,
+                    modified_at=modified_at,
+                    attributes=attributes,
+                    reuse_key=reuse_key,
+                    include_top=include_top,
+                    inspect_archive_entries=inspect_entries,
+                )
+            )
+        return plan
+
+    def _acquire_share_plans(
+        self,
+        plans: list[_SMBSharePlan],
+        budget,
+    ) -> tuple[list[dict], list[str], int, int]:
+        refs_by_plan: list[list[tuple[int, int, _SMBFileWork]]] = []
+        total_work = 0
+        for plan_index, plan in enumerate(plans):
+            refs = [
+                (plan_index, slot_index, slot)
+                for slot_index, slot in enumerate(plan.slots)
+                if isinstance(slot, _SMBFileWork)
+            ]
+            refs_by_plan.append(refs)
+            total_work += len(refs)
+
+        if total_work == 0:
+            records: list[dict] = []
+            for plan in plans:
+                share_records = [row for slot in plan.slots if isinstance(slot, list) for row in slot]
+                if self.config.record_callback is not None:
+                    for record in share_records:
+                        self.config.record_callback(record)
+                records.extend(share_records)
+            return records, [], 1, 0
+
+        requested_workers = 1
+        if self._file_parallel_enabled():
+            requested_workers = max(1, min(self._io_worker_count(), int(budget.limit), total_work))
+        target_chunk = max(1, (total_work + requested_workers - 1) // requested_workers)
+        if self._acl_batch_enabled():
+            # Keep PowerShell process creation decisively sub-linear. File work
+            # stays parallel, but no task is smaller than one ACL batch.
+            target_chunk = max(target_chunk, self._acl_batch_size())
+        task_specs: list[tuple[int, list[tuple[int, int, _SMBFileWork]]]] = []
+        tasks_by_plan: dict[int, list[int]] = {}
+        for plan_index, refs in enumerate(refs_by_plan):
+            for offset in range(0, len(refs), target_chunk):
+                task_index = len(task_specs)
+                task_specs.append((plan_index, refs[offset:offset + target_chunk]))
+                tasks_by_plan.setdefault(plan_index, []).append(task_index)
+
+        slot_results: dict[tuple[int, int], list[dict]] = {}
+
+        file_workers = max(1, min(requested_workers, len(task_specs)))
+        failed_plans: set[int] = set()
+        reset_shares: list[str] = []
+        futures: dict[int, object] = {}
+        executor = None
+        try:
+            if file_workers > 1:
+                executor = ThreadPoolExecutor(max_workers=file_workers, thread_name_prefix="dspm-smb-file")
+                futures = {
+                    task_index: executor.submit(self._acquire_work_chunk, refs, budget)
+                    for task_index, (_plan_index, refs) in enumerate(task_specs)
+                }
+
+            records: list[dict] = []
+            for plan_index, plan in enumerate(plans):
+                for task_index in tasks_by_plan.get(plan_index, []):
+                    try:
+                        rows = (
+                            futures[task_index].result()
+                            if executor is not None
+                            else self._acquire_work_chunk(task_specs[task_index][1], budget)
+                        )
+                    except _SmbConnectionLost as lost:
+                        failed_plans.add(plan_index)
+                        if plan.share_name not in reset_shares:
+                            reset_shares.append(plan.share_name)
+                        self._note_connection_reset(plan.share_name, lost.detail, 1)
+                        continue
+                    for result_plan, slot_index, result_rows in rows:
+                        slot_results[(result_plan, slot_index)] = result_rows
+
+                if plan_index in failed_plans:
+                    continue
+                share_records: list[dict] = []
+                missing = False
+                for slot_index, slot in enumerate(plan.slots):
+                    if isinstance(slot, list):
+                        result_rows = slot
+                    else:
+                        result_rows = slot_results.get((plan_index, slot_index))
+                        if result_rows is None:
+                            missing = True
+                            break
+                        if slot.include_top:
+                            with self._walk_lock:
+                                self._progress_counters["matched"] += 1
+                    share_records.extend(result_rows)
+                if missing:
+                    reset_shares.append(plan.share_name)
+                    continue
+                if self.config.record_callback is not None:
+                    for record in share_records:
+                        self.config.record_callback(record)
+                records.extend(share_records)
+                self._emit_collection_progress()
+            return records, reset_shares, file_workers, len(task_specs)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=self._abort_event.is_set())
+
+    def _acquire_work_chunk(
+        self,
+        refs: list[tuple[int, int, _SMBFileWork]],
+        budget,
+    ) -> list[tuple[int, int, list[dict]]]:
+        if not refs:
+            return []
+        share_name = refs[0][2].share_name
+        with budget.slot():
+            if self._cancelled():
+                raise RuntimeError("Scan cancelled")
+            self._prefetch_acl_paths(share_name, [ref[2].remote_path for ref in refs])
+            last_detail = "could not establish an SMB acquisition connection"
+            for _attempt in range(2):
+                if not self.connect():
+                    continue
+                try:
+                    return [
+                        (plan_index, slot_index, self._build_work_records(work))
+                        for plan_index, slot_index, work in refs
+                    ]
+                except _SmbConnectionLost as lost:
+                    last_detail = lost.detail
+                finally:
+                    self.close()
+            raise _SmbConnectionLost(share_name, last_detail)
+
+    def _acquire_file_data(
+        self,
+        share_name: str,
+        path: str,
+        extension: str,
+        size: int,
+        *,
+        inspect_archive_entries: bool = False,
+        chunk_size: int = 1024 * 1024,
+    ) -> _SMBFileData:
+        """Hash a remote file while retaining its bounded preview/archive head.
+
+        The legacy collector independently fetched the preview, ZIP inspection
+        buffer(s), and full hash. P2 performs one forward read and derives all of
+        them from the same byte snapshot. Any transport/short-read failure falls
+        back to the original independent readers, so optimization cannot reduce
+        content or hash coverage.
+        """
+        if not self._single_pass_enabled() or self.connection is None:
+            return _SMBFileData(
+                content=self._read_file_preview(share_name, path, extension),
+                sha256=self._hash_file(share_name, path, size),
+            )
+
+        started = time.perf_counter()
+        file_size = max(0, int(size or 0))
+        preview_requested = bool(
+            self.config.read_content
+            and (
+                extension in TEXT_EXTENSIONS
+                or extension in BINARY_TEXT_EXTENSIONS
+                or is_ocr_scannable(extension)
+            )
+        )
+        preview_limit = max(0, int(self.config.max_read_bytes or 0)) if preview_requested else 0
+        capture_archive = extension == ".zip"
+        archive_limit = MAX_ARCHIVE_TOTAL_BYTES if capture_archive else 0
+        capture_limit = min(file_size, max(preview_limit, archive_limit))
+        captured = bytearray()
+        digest = hashlib.sha256()
+        offset = 0
+        requests = 0
+        failed = False
+
+        try:
+            while offset < file_size:
+                request_size = min(max(1, int(chunk_size)), file_size - offset)
+                buffer = io.BytesIO()
+                self.connection.retrieveFileFromOffset(
+                    share_name,
+                    path,
+                    buffer,
+                    offset=offset,
+                    max_length=request_size,
+                )
+                requests += 1
+                chunk = buffer.getvalue()
+                if not chunk:
+                    failed = True
+                    break
+                # A defensive cap keeps a misbehaving transport from hashing or
+                # retaining bytes beyond the enumerated file snapshot.
+                chunk = chunk[: file_size - offset]
+                digest.update(chunk)
+                if len(captured) < capture_limit:
+                    remaining = capture_limit - len(captured)
+                    captured.extend(chunk[:remaining])
+                offset += len(chunk)
+        except Exception as exc:
+            if _is_connection_error(exc):
+                # A reset kills the stateful pysmb session. Let the existing
+                # share/chunk retry establish a fresh connection instead of
+                # attempting legacy fallbacks on a known-dead socket.
+                raise _SmbConnectionLost(share_name, str(exc).splitlines()[0][:200]) from exc
+            failed = True
+            logger.debug("Could not single-pass acquire %s:%s: %s", share_name, path, exc)
+        finally:
+            self._bump_diag("single_pass_requests", requests)
+            self._bump_diag("single_pass_transferred_bytes", offset)
+            self._add_diag_ms("single_pass_elapsed_ms", (time.perf_counter() - started) * 1000)
+
+        if failed or offset != file_size:
+            self._bump_diag("single_pass_fallbacks")
+            return _SMBFileData(
+                content=self._read_file_preview(share_name, path, extension),
+                sha256=self._hash_file(share_name, path, file_size),
+            )
+
+        preview_bytes = bytes(captured[:preview_limit]) if preview_requested else b""
+        try:
+            content = self._preview_content_from_bytes(preview_bytes, extension)
+        except Exception as exc:
+            # Extraction failure historically produced empty content while the
+            # separate hash remained valid. Preserve that exact behavior.
+            logger.debug("Could not extract preview for %s:%s: %s", share_name, path, exc)
+            content = ""
+
+        archive_bytes = bytes(captured[:archive_limit]) if capture_archive else None
+        avoided_fetches = int(preview_requested)
+        avoided_bytes = len(preview_bytes)
+        if capture_archive:
+            # Every top-level ZIP is inspected for protection; entry inspection
+            # previously performed one additional fetch of the same prefix.
+            avoided_fetches += 1 + int(inspect_archive_entries)
+            avoided_bytes += len(archive_bytes or b"") * (1 + int(inspect_archive_entries))
+        self._bump_diag("single_pass_files")
+        self._bump_diag("single_pass_avoided_fetches", avoided_fetches)
+        self._bump_diag("single_pass_avoided_transfer_bytes", avoided_bytes)
+        return _SMBFileData(
+            content=content,
+            sha256=digest.hexdigest(),
+            archive_bytes=archive_bytes,
+        )
+
+    def _build_work_records(self, work: _SMBFileWork) -> list[dict]:
+        records: list[dict] = []
+        if not work.include_top:
+            if work.inspect_archive_entries:
+                records.extend(
+                    self._read_zip_entries(
+                        work.share_name,
+                        work.remote_path,
+                        work.is_hidden,
+                        work.is_system,
+                    )
+                )
+            return records
+
+        acquired = self._acquire_file_data(
+            work.share_name,
+            work.remote_path,
+            work.extension,
+            work.file_size,
+            inspect_archive_entries=work.inspect_archive_entries,
+        )
+        if work.inspect_archive_entries:
+            records.extend(
+                self._read_zip_entries(
+                    work.share_name,
+                    work.remote_path,
+                    work.is_hidden,
+                    work.is_system,
+                    archive_data=acquired.archive_bytes,
+                )
+            )
+        content = acquired.content
+        archive_metadata = archive_protection_metadata(work.extension)
+        zip_metadata = (
+            self._inspect_zip_protection(
+                work.share_name,
+                work.remote_path,
+                archive_data=acquired.archive_bytes,
+            )
+            if work.extension == ".zip"
+            else {}
+        )
+        protected_metadata = zip_metadata or archive_metadata
+        sha256 = acquired.sha256
+        acl = self._acl_for_path(work.share_name, work.remote_path)
+        owner = str(acl.get("owner") or "")
+        records.append(
+            {
+                "source": "smb",
+                "share": work.share_name,
+                "path": work.remote_path,
+                "name": work.name,
+                "size": work.file_size,
+                "extension": work.extension,
+                "is_dir": False,
+                "is_hidden": work.is_hidden,
+                "is_system": work.is_system,
+                "content": "" if protected_metadata else content,
+                "acl": acl,
+                "scan_mode": scan_mode_for_extension(work.extension),
+                "content_status": protected_metadata.get("content_status")
+                or content_status_for_extension(work.extension, content, self.config.read_content),
+                "content_scannable": bool(
+                    protected_metadata.get(
+                        "content_scannable",
+                        work.extension in CONTENT_EXTENSIONS or is_ocr_scannable(work.extension),
+                    )
+                ),
+                "protected": bool(protected_metadata.get("protected", False)),
+                "protection_type": protected_metadata.get("protection_type", ""),
+                "scan_error": protected_metadata.get("scan_error", ""),
+                "owner": owner,
+                "created_at": work.created_at,
+                "modified_at": work.modified_at,
+                "attributes": work.attributes,
+                "sha256": sha256,
+                "file_hash": sha256,
+                "scan_completeness": (
+                    "PARTIAL"
+                    if content and work.file_size > self.config.max_read_bytes
+                    else "FULL"
+                    if content or work.file_size == 0
+                    else "NONE"
+                ),
+                "bytes_scanned": min(work.file_size, self.config.max_read_bytes) if content else 0,
+                "total_bytes": work.file_size,
+                "truncated": bool(content and work.file_size > self.config.max_read_bytes),
+                "reuse_key": work.reuse_key,
+            }
+        )
+        return records
 
     def _io_worker_count(self) -> int:
         """Bounded parallel-share worker count. Falls back to the process
@@ -807,13 +1488,39 @@ class SMBScanner:
                     self._emit_collection_progress()
                     continue
 
-            if self.config.inspect_archives and self._should_scan_archive_entries(extension):
-                records.extend(self._read_zip_entries(share_name, remote_path, is_hidden, is_system))
-            content = self._read_file_preview(share_name, remote_path, extension)
+            inspect_archive_entries = bool(
+                self.config.inspect_archives and self._should_scan_archive_entries(extension)
+            )
+            acquired = self._acquire_file_data(
+                share_name,
+                remote_path,
+                extension,
+                file_size,
+                inspect_archive_entries=inspect_archive_entries,
+            )
+            if inspect_archive_entries:
+                records.extend(
+                    self._read_zip_entries(
+                        share_name,
+                        remote_path,
+                        is_hidden,
+                        is_system,
+                        archive_data=acquired.archive_bytes,
+                    )
+                )
+            content = acquired.content
             archive_metadata = archive_protection_metadata(extension)
-            zip_metadata = self._inspect_zip_protection(share_name, remote_path) if extension == ".zip" else {}
+            zip_metadata = (
+                self._inspect_zip_protection(
+                    share_name,
+                    remote_path,
+                    archive_data=acquired.archive_bytes,
+                )
+                if extension == ".zip"
+                else {}
+            )
             protected_metadata = zip_metadata or archive_metadata
-            sha256 = self._hash_file(share_name, remote_path, file_size)
+            sha256 = acquired.sha256
             acl = self._acl_for_path(share_name, remote_path)
             owner = str(acl.get("owner") or "")
             records.append(
@@ -857,14 +1564,28 @@ class SMBScanner:
     def _should_scan_archive_entries(self, extension: str) -> bool:
         return extension == ".zip" and self.config.inspect_archives
 
-    def _read_zip_entries(self, share_name: str, path: str, is_hidden: bool, is_system: bool) -> list[dict]:
-        if self.connection is None:
+    def _read_zip_entries(
+        self,
+        share_name: str,
+        path: str,
+        is_hidden: bool,
+        is_system: bool,
+        archive_data: bytes | None = None,
+    ) -> list[dict]:
+        if self.connection is None and archive_data is None:
             return []
         try:
             from io import BytesIO
 
-            buffer = BytesIO()
-            self.connection.retrieveFileFromOffset(share_name, path, buffer, offset=0, max_length=MAX_ARCHIVE_TOTAL_BYTES)
+            buffer = BytesIO(archive_data) if archive_data is not None else BytesIO()
+            if archive_data is None:
+                self.connection.retrieveFileFromOffset(
+                    share_name,
+                    path,
+                    buffer,
+                    offset=0,
+                    max_length=MAX_ARCHIVE_TOTAL_BYTES,
+                )
             buffer.seek(0)
             records: list[dict] = []
             with zipfile.ZipFile(buffer) as archive:
@@ -951,14 +1672,26 @@ class SMBScanner:
             logger.debug("Could not inspect archive entries for %s:%s: %s", share_name, path, exc)
             return []
 
-    def _inspect_zip_protection(self, share_name: str, path: str) -> dict[str, str | bool]:
-        if self.connection is None:
+    def _inspect_zip_protection(
+        self,
+        share_name: str,
+        path: str,
+        archive_data: bytes | None = None,
+    ) -> dict[str, str | bool]:
+        if self.connection is None and archive_data is None:
             return {}
         try:
             from io import BytesIO
 
-            buffer = BytesIO()
-            self.connection.retrieveFileFromOffset(share_name, path, buffer, offset=0, max_length=MAX_ARCHIVE_TOTAL_BYTES)
+            buffer = BytesIO(archive_data) if archive_data is not None else BytesIO()
+            if archive_data is None:
+                self.connection.retrieveFileFromOffset(
+                    share_name,
+                    path,
+                    buffer,
+                    offset=0,
+                    max_length=MAX_ARCHIVE_TOTAL_BYTES,
+                )
             buffer.seek(0)
             with zipfile.ZipFile(buffer) as archive:
                 encrypted = any(bool(entry.flag_bits & 0x1) for entry in archive.infolist()[:2000])
@@ -1032,11 +1765,285 @@ class SMBScanner:
     def _owner_for_path(self, share_name: str, path: str) -> str:
         return str(self._acl_for_path(share_name, path).get("owner") or "")
 
+    def _add_diag_ms(self, key: str, elapsed_ms: float) -> None:
+        with self._walk_lock:
+            current = float(self.last_scan_diagnostics.get(key) or 0.0)
+            self.last_scan_diagnostics[key] = round(current + max(0.0, elapsed_ms), 3)
+
+    def _prefetch_acl_paths(self, share_name: str, paths: list[str]) -> None:
+        """Populate the ACL cache with one PowerShell process for a path batch.
+
+        A batch-level launch/parse failure falls back to the original per-file
+        implementation. Item-level failures also fall back individually, keeping
+        the batch fast for accessible paths without losing a second chance at
+        full owner/principal/permission detail for a transient failure.
+        """
+        unique_paths = list(dict.fromkeys(str(path) for path in paths if str(path or "")))
+        with self._acl_lock:
+            pending = [
+                path
+                for path in unique_paths
+                if self._unc_path(share_name, path) not in self._acl_cache
+            ]
+        if not pending:
+            return
+
+        # In-process first: this usually clears the whole batch without
+        # launching anything.
+        if win_security.available():
+            still_pending = []
+            for path in pending:
+                # Only a resolved read counts as an attempt here; an unresolved
+                # one falls through to _acl_for_path, which counts it itself.
+                if self._acl_inproc(self._unc_path(share_name, path)) is None:
+                    still_pending.append(path)
+                else:
+                    self._bump_diag("owner_read_attempts")
+            pending = still_pending
+            if not pending:
+                return
+
+        if not self._acl_batch_enabled():
+            for path in pending:
+                self._acl_for_path(share_name, path)
+            return
+
+        batched = self._acl_batch_for_paths(share_name, pending)
+        if batched is None:
+            self._bump_diag("acl_batch_fallback_paths", len(pending))
+            for path in pending:
+                self._acl_for_path(share_name, path)
+            return
+
+        completed_paths = [path for path in pending if path in batched]
+        if completed_paths:
+            self._bump_diag("owner_read_attempts", len(completed_paths))
+            self._bump_diag("acl_batch_paths", len(completed_paths))
+        for path in completed_paths:
+            normalized_acl = batched[path]
+            if not normalized_acl.get("owner"):
+                self._bump_diag("owner_read_failed")
+            if normalized_acl.get("principals"):
+                self._bump_diag("acl_read_success")
+            unc_path = self._unc_path(share_name, path)
+            with self._acl_lock:
+                self._owner_cache[unc_path] = str(normalized_acl.get("owner") or "")
+                self._acl_cache[unc_path] = normalized_acl
+
+        missing = [path for path in pending if path not in batched]
+        if missing:
+            self._bump_diag("acl_batch_fallback_paths", len(missing))
+            for path in missing:
+                self._acl_for_path(share_name, path)
+
+    def _acl_batch_timeout_seconds(self, path_count: int) -> float:
+        configured = os.getenv("DSPM_SMB_ACL_BATCH_TIMEOUT_SECONDS", "").strip()
+        if configured:
+            try:
+                return max(12.0, min(float(configured), 1800.0))
+            except ValueError:
+                pass
+        return max(12.0, min(15.0 + max(1, path_count) * 3.0, 600.0))
+
+    def _acl_batch_for_paths(self, share_name: str, paths: list[str]) -> dict[str, dict] | None:
+        """Read full Windows ACL detail for many paths in one PowerShell session.
+
+        Credentials remain off argv: only the non-secret path/user payload is
+        encoded into the command, while the password travels in the child
+        environment exactly as in the legacy implementation.
+        """
+        if not paths:
+            return {}
+        username, _domain = self._windows_credential()
+        share_root = self._unc_path(share_name, "")
+        items = [
+            {
+                "path": path,
+                "unc_path": self._unc_path(share_name, path),
+                "relative": path.replace("/", "\\").lstrip("\\"),
+            }
+            for path in paths
+        ]
+        payload = {
+            "share_root": share_root,
+            "username": username,
+            "items": items,
+        }
+        encoded_payload = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+        script = r"""
+        $ErrorActionPreference = 'Stop'
+        $payload = [Text.Encoding]::UTF8.GetString(
+          [Convert]::FromBase64String('__DSPM_PAYLOAD__')
+        ) | ConvertFrom-Json
+        $username = [string]$payload.username
+        $password = [string]$env:DSPM_SMB_ACL_PW
+        $driveName = $null
+        if (-not [string]::IsNullOrWhiteSpace($username) -and
+            -not [string]::IsNullOrWhiteSpace($password)) {
+          try {
+            $secure = ConvertTo-SecureString $password -AsPlainText -Force
+            $credential = [pscredential]::new($username, $secure)
+            $driveName = 'DSPM' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-PSDrive -Name $driveName -PSProvider FileSystem -Root ([string]$payload.share_root) -Credential $credential -ErrorAction Stop | Out-Null
+          } catch {
+            $driveName = $null
+          }
+        }
+        $results = New-Object System.Collections.Generic.List[object]
+        try {
+          foreach ($item in @($payload.items)) {
+            $target = [string]$item.unc_path
+            if ($driveName) {
+              $relative = [string]$item.relative
+              $target = if ([string]::IsNullOrWhiteSpace($relative)) {
+                $driveName + ':\'
+              } else {
+                $driveName + ':\' + $relative
+              }
+            }
+            try {
+              $acl = Get-Acl -LiteralPath $target -ErrorAction Stop
+              $results.Add([PSCustomObject]@{
+                path = [string]$item.path
+                ok = $true
+                owner = [string]$acl.Owner
+                principals = @($acl.Access | ForEach-Object {
+                  $_.IdentityReference.Value
+                })
+                permissions = @($acl.Access | ForEach-Object {
+                  $_.FileSystemRights.ToString()
+                })
+                error = ''
+              }) | Out-Null
+            } catch {
+              $results.Add([PSCustomObject]@{
+                path = [string]$item.path
+                ok = $false
+                owner = ''
+                principals = @()
+                permissions = @()
+                error = [string]$_.Exception.GetType().Name
+              }) | Out-Null
+            }
+          }
+        } finally {
+          if ($driveName) {
+            Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
+          }
+        }
+        [PSCustomObject]@{ results = @($results) } |
+          ConvertTo-Json -Depth 5 -Compress
+        """.replace("__DSPM_PAYLOAD__", encoded_payload)
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        started = time.perf_counter()
+        self._bump_diag("acl_batch_processes")
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-EncodedCommand",
+                    encoded_script,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self._acl_batch_timeout_seconds(len(paths)),
+                env={**os.environ, "DSPM_SMB_ACL_PW": self.config.password or ""},
+            )
+        except (OSError, subprocess.SubprocessError):
+            self._bump_diag("acl_batch_failures")
+            return None
+        finally:
+            self._add_diag_ms(
+                "acl_batch_elapsed_ms",
+                (time.perf_counter() - started) * 1000,
+            )
+
+        if completed.returncode != 0:
+            self._bump_diag("acl_batch_failures")
+            logger.debug(
+                "Could not batch-read SMB ACLs for %s: %s",
+                share_root,
+                completed.stderr.strip() or completed.stdout.strip(),
+            )
+            return None
+        try:
+            parsed = json.loads(completed.stdout.strip()) if completed.stdout.strip() else {}
+        except json.JSONDecodeError:
+            self._bump_diag("acl_batch_failures")
+            return None
+        rows = parsed.get("results") if isinstance(parsed, dict) else None
+        if not isinstance(rows, list):
+            self._bump_diag("acl_batch_failures")
+            return None
+
+        normalized: dict[str, dict] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            path = str(row.get("path") or "")
+            if not path:
+                continue
+            principals = row.get("principals") or []
+            permissions = row.get("permissions") or []
+            if isinstance(principals, str):
+                principals = [principals]
+            if row.get("ok") is False:
+                self._bump_diag("acl_batch_item_failures")
+                continue
+            if isinstance(permissions, str):
+                permissions = [permissions]
+            normalized[path] = {
+                "owner": str(row.get("owner") or ""),
+                "principals": [
+                    str(item) for item in principals if str(item or "").strip()
+                ],
+                "permissions": [
+                    str(item) for item in permissions if str(item or "").strip()
+                ],
+            }
+        return normalized
+
+    def _acl_inproc(self, unc_path: str) -> dict | None:
+        """Security descriptor read in-process (GetNamedSecurityInfoW accepts
+        UNC paths). Replaces a 0.5-1.5 s PowerShell spawn per file with a
+        sub-millisecond call for a byte-identical result; returns None when the
+        share needs the credential-mapped PowerShell path below."""
+        if not win_security.available():
+            return None
+        acl = win_security.security_for_path(unc_path)
+        owner = str(acl.get("owner") or "")
+        if not owner:
+            return None
+        normalized = {
+            "owner": owner,
+            "principals": [str(item) for item in (acl.get("principals") or []) if str(item or "").strip()],
+            "permissions": [str(item) for item in (acl.get("permissions") or []) if str(item or "").strip()],
+        }
+        if normalized["principals"]:
+            self._bump_diag("acl_read_success")
+        self._bump_diag("acl_inproc_paths")
+        with self._acl_lock:
+            self._owner_cache[unc_path] = normalized["owner"]
+            self._acl_cache[unc_path] = normalized
+        return normalized
+
     def _acl_for_path(self, share_name: str, path: str) -> dict:
         unc_path = self._unc_path(share_name, path)
-        if unc_path in self._acl_cache:
-            return self._acl_cache[unc_path]
+        with self._acl_lock:
+            cached_acl = self._acl_cache.get(unc_path)
+        if cached_acl is not None:
+            return cached_acl
         self._bump_diag("owner_read_attempts")
+        fast = self._acl_inproc(unc_path)
+        if fast is not None:
+            return fast
         username, domain = self._windows_credential()
         # SC-6: the password is NOT embedded in the (base64) script/argv, which
         # is visible to any local process listing command lines. It is passed to
@@ -1133,8 +2140,9 @@ class SMBScanner:
             self._bump_diag("owner_read_failed")
         if normalized_acl["principals"]:
             self._bump_diag("acl_read_success")
-        self._owner_cache[unc_path] = normalized_acl["owner"]
-        self._acl_cache[unc_path] = normalized_acl
+        with self._acl_lock:
+            self._owner_cache[unc_path] = normalized_acl["owner"]
+            self._acl_cache[unc_path] = normalized_acl
         return normalized_acl
 
     def _windows_credential(self) -> tuple[str, str]:
@@ -1174,6 +2182,45 @@ class SMBScanner:
             logger.debug("Could not hash %s:%s: %s", share_name, path, exc)
             return ""
 
+    @staticmethod
+    def _preview_content_from_bytes(data: bytes, extension: str) -> str:
+        """Apply the existing text/document/OCR extraction to acquired bytes."""
+        if extension not in BINARY_TEXT_EXTENSIONS and not is_ocr_scannable(extension):
+            return data.decode("utf-8", errors="replace")
+
+        temp_path = None
+        try:
+            # SC-8: retrieved document bytes touch disk only briefly and under a
+            # restrictive mode. On Windows the host ACL remains authoritative.
+            with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+                temp_path = temp_file.name
+                try:
+                    os.chmod(temp_path, 0o600)
+                except OSError:
+                    pass
+                temp_file.write(data)
+            from pathlib import Path
+
+            if is_ocr_scannable(extension):
+                return extract_text_from_image(Path(temp_path))
+            return extract_binary_text(Path(temp_path))
+        finally:
+            if temp_path:
+                from pathlib import Path
+
+                # Best-effort secure delete: overwrite before unlinking so the
+                # raw document bytes are not left recoverable in free space.
+                try:
+                    with open(temp_path, "r+b") as handle:
+                        length = handle.seek(0, io.SEEK_END)
+                        handle.seek(0)
+                        handle.write(b"\x00" * length)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except OSError:
+                    pass
+                Path(temp_path).unlink(missing_ok=True)
+
     def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
         if self.connection is None or not self.config.read_content:
             return ""
@@ -1196,43 +2243,7 @@ class SMBScanner:
                 max_length=self.config.max_read_bytes,
             )
             data = buffer.getvalue()
-            if extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension):
-                temp_path = None
-                try:
-                    # SC-8: retrieved document bytes touch disk only briefly and
-                    # under a restrictive mode. On POSIX chmod 0600 keeps other
-                    # local users out; on Windows it is a best-effort no-op and
-                    # host ACLs govern access.
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
-                        temp_path = temp_file.name
-                        try:
-                            os.chmod(temp_path, 0o600)
-                        except OSError:
-                            pass
-                        temp_file.write(data)
-                    from pathlib import Path
-
-                    if is_ocr_scannable(extension):
-                        return extract_text_from_image(Path(temp_path))
-                    return extract_binary_text(Path(temp_path))
-                finally:
-                    if temp_path:
-                        from pathlib import Path
-
-                        # Best-effort secure delete: overwrite before unlinking so
-                        # the raw document bytes are not left recoverable in free
-                        # space.
-                        try:
-                            with open(temp_path, "r+b") as handle:
-                                length = handle.seek(0, io.SEEK_END)
-                                handle.seek(0)
-                                handle.write(b"\x00" * length)
-                                handle.flush()
-                                os.fsync(handle.fileno())
-                        except OSError:
-                            pass
-                        Path(temp_path).unlink(missing_ok=True)
-            return data.decode("utf-8", errors="replace")
+            return self._preview_content_from_bytes(data, extension)
         except Exception as exc:
             logger.debug("Could not read preview for %s:%s: %s", share_name, path, exc)
             return ""
