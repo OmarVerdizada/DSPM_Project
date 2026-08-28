@@ -33,7 +33,10 @@ class ParallelismPolicyTests(unittest.TestCase):
 
         self.assertEqual(plan.analysis_workers, 6)
         self.assertEqual(plan.analysis_source, "auto_cpu")
-        self.assertEqual(plan.io_workers, 12)
+        # I/O workers are latency-bound (an SMB file is ~3 network round trips),
+        # so the auto policy budgets 6x CPU rather than 2x: at 2x the link sat
+        # idle and collection was the wall-clock floor of every remote scan.
+        self.assertEqual(plan.io_workers, 36)
         self.assertEqual(plan.ocr_workers, 1)
         self.assertGreaterEqual(plan.pipeline_buffer, plan.analysis_workers * 2)
         self.assertTrue(plan.pipeline_enabled)

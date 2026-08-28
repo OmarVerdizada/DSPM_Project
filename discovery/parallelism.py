@@ -105,15 +105,21 @@ def resolve_parallelism(
         selected_io = env_io
         io_source = "environment"
     else:
-        selected_io = max(4, cpu_count * 2)
+        # I/O workers wait on network round-trips, not CPU. An SMB file costs
+        # ~3 RTTs, so 2x CPU (12 on a 6-core host) left the link mostly idle and
+        # made collection the wall-clock floor. 6x CPU keeps the pipe full; the
+        # process-wide admission budget below is still the real safety valve.
+        selected_io = max(16, cpu_count * 6)
         io_source = "auto_io"
 
     resolved_analysis = _bounded(selected_analysis, cpu_count, MAX_ANALYSIS_WORKERS)
-    resolved_io = _bounded(selected_io, max(4, cpu_count * 2), MAX_IO_WORKERS)
+    resolved_io = _bounded(selected_io, max(16, cpu_count * 6), MAX_IO_WORKERS)
     env_buffer = _env_int("DSPM_PIPELINE_BUFFER")
     selected_buffer = pipeline_buffer if pipeline_buffer > 0 else env_buffer
     if selected_buffer <= 0:
-        selected_buffer = max(resolved_analysis * 2, resolved_io)
+        # Deep enough that collectors never block waiting for an analysis slot
+        # (records are small; this is a RAM-for-throughput trade by design).
+        selected_buffer = max(resolved_analysis * 8, resolved_io * 2, 64)
 
     return ParallelismPlan(
         cpu_count=cpu_count,
@@ -201,7 +207,7 @@ class HostAdmissionBudget:
 def _resolve_host_io_budget() -> int:
     env = _env_int("DSPM_HOST_IO_BUDGET")
     cpu = max(1, int(os.cpu_count() or 1))
-    return _bounded(env, max(4, cpu * 2), MAX_HOST_IO_BUDGET)
+    return _bounded(env, max(16, cpu * 6), MAX_HOST_IO_BUDGET)
 
 
 _host_budget: HostAdmissionBudget | None = None
