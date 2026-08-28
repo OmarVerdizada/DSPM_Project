@@ -586,6 +586,20 @@ def scan_directory(
             continue
     records: list[FileRecord | dict] = []
     progress_counters = {"visited": 0, "matched": 0, "reused": 0}
+    # PERF: resolving every entry cost one _getfinalpathname syscall per file
+    # (5,696 calls / 0.48 s on the sample tree). Directories are resolved once
+    # and reused. This is NOT a weakening of the symlink-escape check: callers
+    # test `item.is_symlink()` first, and for a non-symlink entry the real path
+    # is exactly realpath(parent) / name.
+    _resolved_dirs: dict[Path, Path] = {}
+
+    def _resolved_entry(item: Path) -> Path:
+        parent = item.parent
+        resolved_parent = _resolved_dirs.get(parent)
+        if resolved_parent is None:
+            resolved_parent = parent.resolve()
+            _resolved_dirs[parent] = resolved_parent
+        return resolved_parent / item.name
 
     def _append_record(record: FileRecord | dict) -> None:
         records.append(record)
@@ -593,8 +607,10 @@ def scan_directory(
             record_callback(record.to_dict() if isinstance(record, FileRecord) else dict(record))
 
     def _excluded(item: Path) -> bool:
+        if not excluded_roots:
+            return False
         try:
-            resolved = item.resolve()
+            resolved = _resolved_entry(item)
         except OSError:
             return False
         return any(resolved == excluded or excluded in resolved.parents for excluded in excluded_roots)
@@ -632,7 +648,7 @@ def scan_directory(
         if _excluded(item):
             return
         try:
-            if item.is_symlink() or not item.resolve().is_relative_to(root_path):
+            if item.is_symlink() or not _resolved_entry(item).is_relative_to(root_path):
                 return
         except OSError:
             return
@@ -1031,7 +1047,7 @@ def scan_directory(
 
         for item in entries:
             try:
-                if item.is_symlink() or not item.resolve().is_relative_to(root_path):
+                if item.is_symlink() or not _resolved_entry(item).is_relative_to(root_path):
                     continue
                 is_dir = item.is_dir()
                 is_file = item.is_file()

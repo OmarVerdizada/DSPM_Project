@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 from collections import defaultdict, deque
 import copy
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -1462,6 +1463,19 @@ def sanitize_evidence_text(content: str) -> str:
         return content
     if os.getenv("DSPM_RAW_EVIDENCE_PREVIEW", "0") == "1":
         return content
+    return _sanitize_evidence_cached(content)
+
+
+@lru_cache(maxsize=512)
+def _sanitize_evidence_cached(content: str) -> str:
+    """The masking itself, memoized on the exact input.
+
+    PERF: every record is sanitized twice (once for the served preview, once
+    for the reuse snapshot) and each pass runs ~90 masking regexes, which made
+    this the single hottest project function. The function is pure, so the
+    second pass is now free. Head slices are bounded (<=16 KB), so the cache
+    is a few MB at most.
+    """
     masked = _redact_pci_preview(content)
     # Mask private-key blocks of ANY size first (the rule-based pass below caps
     # the body length and would otherwise leak large keys).

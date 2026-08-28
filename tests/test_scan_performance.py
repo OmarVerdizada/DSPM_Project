@@ -160,6 +160,90 @@ class ScanBudgetTests(unittest.TestCase):
             self.assertLess(second_elapsed, self.BUDGET_SECONDS)
 
 
+class RedactionCostTests(unittest.TestCase):
+    """Evidence masking must not rebuild its catalogs per call (P5).
+
+    redact_cvv/pin_fields escaped 189 keywords and recompiled a large
+    alternation on every invocation, and every record is sanitized twice, so
+    this was the hottest project function in the scan (1.8 s of 7.9 s).
+    """
+
+    def test_keyword_patterns_are_built_once(self) -> None:
+        from classification.compliance import pci_validators as pv
+        from classification.compliance.pci_keywords import CVV_KEYWORDS, PIN_KEYWORDS
+
+        pv._cvv_field_pattern.cache_clear()
+        pv._pin_field_pattern.cache_clear()
+        for _ in range(25):
+            pv.redact_cvv_fields("cvv: 123", CVV_KEYWORDS)
+            pv.redact_pin_fields("pin: ABCD1234", PIN_KEYWORDS)
+
+        self.assertEqual(pv._cvv_field_pattern.cache_info().misses, 1)
+        self.assertEqual(pv._pin_field_pattern.cache_info().misses, 1)
+
+    def test_masking_still_redacts_every_class(self) -> None:
+        from discovery.discovery_engine import sanitize_evidence_text
+
+        raw = (
+            "cvv: 123\n"
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEowIBAAKCAQEA\n"
+            "-----END RSA PRIVATE KEY-----\n"
+        )
+        masked = sanitize_evidence_text(raw)
+        self.assertNotIn("MIIEowIBAAKCAQEA", masked, "private key body must never survive")
+        self.assertIn("[redacted:private_key]", masked)
+        self.assertIn("***", masked, "CVV value must be masked")
+        # Memoized results must be identical on the repeat call.
+        self.assertEqual(sanitize_evidence_text(raw), masked)
+
+
+class SymlinkContainmentTests(unittest.TestCase):
+    """The directory-resolution cache must not weaken escape protection (P5)."""
+
+    @unittest.skipUnless(IS_WINDOWS, "junction/symlink creation")
+    def test_scan_never_follows_links_out_of_the_root(self) -> None:
+        import shutil
+        from collectors.file_scanner import scan_directory
+
+        base = Path("_perf_symlink_containment")
+        shutil.rmtree(base, ignore_errors=True)
+        outside, root = base / "outside", base / "root"
+        outside.mkdir(parents=True)
+        root.mkdir(parents=True)
+        try:
+            (outside / "SECRET_outside.txt").write_text("password: hunter2", encoding="utf-8")
+            (root / "inside_ok.txt").write_text("api_key=AKIA_INSIDE_1234567890", encoding="utf-8")
+            vectors = 0
+            for make in (
+                lambda: os.symlink((outside / "SECRET_outside.txt").resolve(), root / "link_file.txt"),
+                lambda: os.symlink(outside.resolve(), root / "link_dir", target_is_directory=True),
+            ):
+                try:
+                    make()
+                    vectors += 1
+                except OSError:
+                    pass
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(root / "junction_dir"), str(outside.resolve())],
+                capture_output=True, check=False,
+            )
+            if (root / "junction_dir").exists():
+                vectors += 1
+            if not vectors:
+                self.skipTest("no link type could be created on this host")
+
+            names = {
+                str(record.get("name") if isinstance(record, dict) else record.name)
+                for record in scan_directory(str(root))
+            }
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
+
+        self.assertNotIn("SECRET_outside.txt", names, "a link escaped the scan root")
+        self.assertIn("inside_ok.txt", names, "legitimate files must still be scanned")
+
+
 class ReportSerializationTests(unittest.TestCase):
     """The report is written compactly - the pretty-printer cost 4.1 s a scan."""
 
