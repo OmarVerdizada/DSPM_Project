@@ -1,6 +1,6 @@
 # Scan speed roadmap — cut 13 minutes to about one
 
-**Status:** IMPLEMENTED 2026-08-28 (P1-P4 landed; results in §6)
+**Status:** IMPLEMENTED 2026-08-28 (P1-P5 landed; results in §6-§8)
 **Date:** 2026-08-28 · **Target:** ≥90% faster with zero loss of accuracy or detail.
 **Evidence:** per-file telemetry mined from the real 13-minute SMB scan
 (`20260826070358374549`, 421 files, 9 shares) plus a sandboxed cProfile of the
@@ -237,3 +237,56 @@ reason was `MSSP asset override: Credential files are crown-jewel assets`.
 Re-running with the rules the console sends reproduced CRITICAL = 147 exactly.
 Any future API-level benchmarking must include `asset_overrides` or it will
 silently under-score every credential file.
+
+
+---
+
+## 8. P5 — what was actually left (and why it differed from the plan)
+
+P5 was written from the *original* profile. By the time P1-P4 landed, the
+profile had moved on completely, so P5 was re-derived from a fresh measurement
+rather than executed as written.
+
+**Planned vs. actual:**
+
+| Planned P5 item | Reality after P1-P4 |
+| --- | --- |
+| Binary extraction parallelism (1.9 s) | No longer in the top 20 - skipped |
+| `pathlib.resolve` caching (2.0 s) | Still real: 5,696 syscalls / 0.48 s - **done** |
+| Preview sanitize pooling (~2 s) | Understated. Masking was **the** hottest project function at 1.8 s - **done** |
+
+### What shipped (`acb3046`)
+
+1. **Redaction catalogs are built once.** `redact_cvv_fields` /
+   `redact_pin_fields` escaped 189 keywords and recompiled a large alternation
+   on *every call* - 132,678 `re.escape` calls per scan - and every record is
+   sanitized twice (served preview + reuse snapshot). Patterns are now
+   memoized per catalog, and the sanitizer is memoized on its bounded input.
+   `re.sub` left the profile entirely; the redaction helper is **14× faster**.
+2. **Containment checks resolve directories, not files.** The scan-root escape
+   check ran one `_getfinalpathname` per entry; directories are resolved once
+   and reused (5,696 → 2,846 calls). Not a weakening: `is_symlink()` is still
+   tested first, and a non-symlink entry's real path *is*
+   `realpath(parent)/name`.
+
+### Equivalence proven, not assumed
+
+- **816 differential comparisons** of old vs new redaction over generated
+  keyword/value inputs: **zero differences**.
+- **Live escape test**: file symlinks, directory symlinks, *and* junctions all
+  still fail to escape the scan root, while legitimate files still scan.
+- Cold and warm scans of the same tree produce identical level/score/findings/
+  reasons for **360/360** files.
+
+### Final numbers
+
+| Scenario | Original | Now |
+| --- | --- | --- |
+| Local engine, cold | 151.2 s | **4.21 s** |
+| Local engine, warm | 151.2 s | **2.00 s** |
+| **Real SMB share, full re-read (453 files)** | **780 s** | **30.4 s — 96.1% faster** |
+| **Real SMB share, incremental** | **780 s** | **10.8 s — 98.6% faster** |
+
+Both SMB runs report identical totals (CRITICAL 147, HIGH 207, MEDIUM 82,
+LOW 17). What remains is genuine work: file reads, JSON encoding, and the
+detectors themselves.
