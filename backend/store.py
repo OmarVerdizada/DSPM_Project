@@ -2142,6 +2142,9 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
     finding_counts: dict[str, int] = {}
     framework_counts: dict[str, int] = {}
     protected_count = 0
+    hidden_count = 0
+    sensitive_count = 0
+    score_total = 0.0
     for row in rows:
         risk = str(row.get("risk_level") or "").upper()
         asset_source = str(row.get("source") or "workspace")
@@ -2149,7 +2152,12 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
             risk_counts[risk] = risk_counts.get(risk, 0) + 1
         source_counts[asset_source] = source_counts.get(asset_source, 0) + 1
         protected_count += 1 if row.get("is_protected") else 0
-        for finding_type in set(_decode_string_list(row.get("finding_types"))):
+        hidden_count += 1 if row.get("is_hidden") else 0
+        score_total += float(row.get("risk_score") or 0)
+        row_finding_types = set(_decode_string_list(row.get("finding_types")))
+        if row_finding_types or row.get("finding_count"):
+            sensitive_count += 1
+        for finding_type in row_finding_types:
             finding_counts[finding_type] = finding_counts.get(finding_type, 0) + 1
         for framework in set(_decode_string_list(row.get("framework_keys"))):
             framework_counts[framework] = framework_counts.get(framework, 0) + 1
@@ -2158,7 +2166,10 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
     return {
         "total": len(rows), "risk_counts": risk_counts, "protected": protected_count,
         "sources": _facet_items(source_counts), "finding_types": _facet_items(finding_counts),
-        "frameworks": _facet_items(framework_counts), "source": source,
+        "frameworks": _facet_items(framework_counts),
+        "hidden": hidden_count, "sensitive": sensitive_count,
+        "avg_risk_score": (score_total / len(rows)) if rows else 0.0,
+        "source": source,
     }
 
 
@@ -2198,6 +2209,16 @@ def inventory_facets(tenant_id: str) -> dict:
                     "SELECT COUNT(*) AS n FROM assets WHERE tenant_id = ? AND is_protected = 1", (tenant_id,)
                 ).fetchone()
                 total_row = conn.execute("SELECT COUNT(*) AS n FROM assets WHERE tenant_id = ?", (tenant_id,)).fetchone()
+                # Estate aggregates for the dashboard: the tiles must describe the
+                # whole indexed inventory (all sources), not the latest scan alone.
+                estate_row = conn.execute(
+                    "SELECT "
+                    "SUM(CASE WHEN is_hidden = 1 THEN 1 ELSE 0 END) AS hidden_n, "
+                    "SUM(CASE WHEN finding_count > 0 THEN 1 ELSE 0 END) AS sensitive_n, "
+                    "AVG(COALESCE(risk_score, 0)) AS avg_score "
+                    "FROM assets WHERE tenant_id = ?",
+                    (tenant_id,),
+                ).fetchone()
                 finding_rows = _normalized_json_facet_rows(conn, tenant_id, "finding_types")
                 framework_rows = _normalized_json_facet_rows(conn, tenant_id, "framework_keys")
             finding_counts = {str(row["value"]): int(row["n"]) for row in finding_rows if row["value"]}
@@ -2212,6 +2233,9 @@ def inventory_facets(tenant_id: str) -> dict:
                 "sources": _facet_items({str(row["source"] or "workspace"): int(row["n"]) for row in source_rows}),
                 "finding_types": _facet_items(finding_counts),
                 "frameworks": _facet_items(framework_counts),
+                "hidden": int((estate_row["hidden_n"] if estate_row else 0) or 0),
+                "sensitive": int((estate_row["sensitive_n"] if estate_row else 0) or 0),
+                "avg_risk_score": float((estate_row["avg_score"] if estate_row else 0) or 0.0),
                 "source": "normalized",
             }
         except Exception as exc:  # pragma: no cover - operational failure path

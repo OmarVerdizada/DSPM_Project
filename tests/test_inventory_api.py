@@ -208,6 +208,33 @@ class InventoryFilterTests(_SeededStore):
         self.assertEqual(detail["path"], "/detail/secret.txt")
         self.assertEqual(detail["findings"][0]["samples"], ["masked"])
 
+    def test_facets_aggregate_the_whole_estate_across_sources(self) -> None:
+        """Dashboard regression: after a file-server scan (many files) followed by
+        an endpoint scan (few files), the dashboard hydrated itself from the
+        latest scan alone and reported 1 file while Data Inventory showed all of
+        them. The facets estate block is what the dashboard now renders, so it
+        must cover EVERY source and carry the estate aggregates on both the
+        normalized and blob read paths."""
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "1"}):
+            normalized = store.inventory_facets(self.tid)
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "0"}):
+            blob = store.inventory_facets(self.tid)
+
+        for label, facets in (("normalized", normalized), ("blob", blob)):
+            self.assertEqual(facets["total"], 25, f"{label}: both sources must be counted")
+            self.assertEqual(
+                {item["value"] for item in facets["sources"]}, {"local", "smb"},
+                f"{label}: the estate spans every scan source",
+            )
+            # Seeded files with i % 4 != 0 carry findings: 11 of 15 local + 7 of 10 smb.
+            self.assertEqual(facets["sensitive"], 18, f"{label}: sensitive estate count")
+            self.assertEqual(facets["hidden"], 0, f"{label}: hidden estate count")
+            self.assertGreater(facets["avg_risk_score"], 0, f"{label}: estate risk average")
+        self.assertAlmostEqual(
+            normalized["avg_risk_score"], blob["avg_risk_score"], places=6,
+            msg="both read paths must agree on the estate average",
+        )
+
     def test_search_is_case_insensitive_and_like_wildcards_are_literal(self) -> None:
         files = [
             {"path": "/Finance/Q4_100%.xlsx", "name": "Q4_100%.xlsx", "owner": "ACME\\Alice"},

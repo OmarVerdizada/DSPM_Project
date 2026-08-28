@@ -489,6 +489,11 @@ let inventoryPageWindow = createInventoryPageWindow();
 let inventoryPageRequest = 0;
 let inventoryPageAbortController = null;
 let inventoryFacets = null;
+// Estate-wide summary aggregated server-side across ALL scan sources (file
+// server + endpoint + local). The dashboard tiles must describe the whole
+// indexed inventory - the same data Data Inventory shows - not whichever
+// single scan happened to run last.
+let estateSummary = null;
 let inventoryFacetRequest = 0;
 const expandedInventoryKeys = new Set();
 // Inventory details use the authenticated on-demand asset endpoint.
@@ -1556,13 +1561,55 @@ function renderProfile() {
   });
 }
 
+function displaySummary(summary = {}) {
+  // The dashboard shows the whole indexed estate (every source), exactly like
+  // Data Inventory. A single scan's summary only wins while it covers MORE
+  // than the persisted inventory - e.g. a scan that has not been saved yet.
+  if (estateSummary && estateSummary.total_files > Number(summary.total_files || 0)) {
+    return estateSummary;
+  }
+  return summary;
+}
+
 function updateSummary(summary = {}) {
-  animateNumber(document.querySelector("#critical-count"), summary.critical || 0);
-  animateNumber(document.querySelector("#high-count"), summary.high || 0);
-  animateNumber(document.querySelector("#medium-count"), summary.medium || 0);
-  animateNumber(document.querySelector("#low-count"), summary.low || 0);
-  animateNumber(protectedCount, summary.protected_files || 0);
-  animateNumber(document.querySelector("#total-count"), summary.total_files || 0);
+  const view = displaySummary(summary);
+  animateNumber(document.querySelector("#critical-count"), view.critical || 0);
+  animateNumber(document.querySelector("#high-count"), view.high || 0);
+  animateNumber(document.querySelector("#medium-count"), view.medium || 0);
+  animateNumber(document.querySelector("#low-count"), view.low || 0);
+  animateNumber(protectedCount, view.protected_files || 0);
+  animateNumber(document.querySelector("#total-count"), view.total_files || 0);
+}
+
+function facetsToEstateSummary(facets = {}) {
+  const risk = facets.risk_counts || {};
+  const total = Number(facets.total || 0);
+  if (!total) return null;
+  return {
+    total_files: total,
+    critical: Number(risk.CRITICAL || 0),
+    high: Number(risk.HIGH || 0),
+    medium: Number(risk.MEDIUM || 0),
+    low: Number(risk.LOW || 0),
+    protected_files: Number(facets.protected || 0),
+    sensitive_files: Number(facets.sensitive || 0),
+    hidden_files: Number(facets.hidden || 0),
+    posture_score: clampScore(100 - Math.round(Number(facets.avg_risk_score || 0))),
+  };
+}
+
+async function refreshEstateSummary() {
+  if (!accessToken) return;
+  try {
+    const facets = await api("/api/inventory/facets", null, "GET");
+    estateSummary = facetsToEstateSummary(facets);
+  } catch {
+    estateSummary = null;
+  }
+  // Repaint the dashboard-facing views now that the estate numbers are known.
+  updateSummary(latestReport?.summary || buildCurrentSummary());
+  renderExecutiveExperience();
+  renderFindingsWorkspace();
 }
 
 function updateSummaryFromFiles(files = []) {
@@ -1650,6 +1697,9 @@ function applyScanReport(report, scanKind = "file-server") {
   }
   hasRenderedScanRows = true;
   renderRows(latestFiles);
+  // The scan just persisted new assets server-side; pull the fresh estate
+  // totals so the dashboard reflects every source, not only this scan.
+  refreshEstateSummary().catch(() => {});
   scanMeta.textContent = buildScanMetaText(report, scanKind);
   refreshInventoryPageWindow();
   hydrateWorkspaceSlice();
@@ -1760,7 +1810,7 @@ function renderFindingsWorkspace() {
   if (!findingsSignalSummary || !findingsPrioritySummary) return;
   const stats = buildFindingStats(Number.POSITIVE_INFINITY);
   if (!latestFiles.length) {
-    const summary = buildCurrentSummary();
+    const summary = displaySummary(buildCurrentSummary());
     if (summary.total_files) {
       findingsSignalSummary.className = "summary-list";
       findingsPrioritySummary.className = "summary-list";
@@ -5223,7 +5273,7 @@ function buildReportComparisonRows() {
 }
 
 function renderExecutiveExperience() {
-  const currentSummary = buildCurrentSummary();
+  const currentSummary = displaySummary(buildCurrentSummary());
   const dashboardSummary = latestDashboard?.latest?.summary || {};
   const summary = currentSummary.total_files ? currentSummary : dashboardSummary.total_files ? dashboardSummary : currentSummary;
   const score = getCurrentPostureScore(summary);
@@ -5249,15 +5299,15 @@ function renderExecutiveExperience() {
     </div>
     <div class="insight-card" title="Files with PII, secrets, PCI, health data, or ML context signals.">
       <span>Sensitive files</span>
-      <strong>${latestReport?.summary?.sensitive_files || countSensitiveFiles(latestFiles)}</strong>
+      <strong>${summary.sensitive_files ?? latestReport?.summary?.sensitive_files ?? countSensitiveFiles(latestFiles)}</strong>
     </div>
     <div class="insight-card" title="Hidden local and SMB entries are included in discovery scope.">
       <span>Hidden files</span>
-      <strong>${latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length}</strong>
+      <strong>${summary.hidden_files ?? latestReport?.summary?.hidden_files ?? latestFiles.filter((file) => file.is_hidden).length}</strong>
     </div>
     <div class="insight-card protected" title="Password-protected archives, encrypted vaults, and unreadable files needing owner review.">
       <span>Protected / locked</span>
-      <strong>${latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length}</strong>
+      <strong>${summary.protected_files ?? latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length}</strong>
     </div>
     <div class="insight-card" title="History, audit, and vault data are isolated by tenant.">
       <span>Tenant</span>
@@ -5299,6 +5349,11 @@ function renderExecutiveExperience() {
 }
 
 function getCurrentPostureScore(summary = buildCurrentSummary()) {
+  // An estate-wide summary carries its own posture, computed from the mean
+  // risk score of every indexed asset across all sources.
+  if (summary?.posture_score !== undefined && summary?.posture_score !== null) {
+    return clampScore(summary.posture_score);
+  }
   if (latestFiles.length || latestReport?.files_omitted) {
     return calculatePostureScore(summary, latestFiles);
   }
@@ -7060,13 +7115,15 @@ async function loadHistory() {
   if (!accessToken) {
     return;
   }
-  const [history, dashboard, hashComparison] = await Promise.all([
+  const [history, dashboard, hashComparison, estateFacets] = await Promise.all([
     api("/api/history", null, "GET"),
     api("/api/executive-dashboard", null, "GET"),
     loadHashComparison(),
+    api("/api/inventory/facets", null, "GET").catch(() => null),
   ]);
   latestDashboard = dashboard;
   latestHashComparison = hashComparison;
+  estateSummary = estateFacets ? facetsToEstateSummary(estateFacets) : null;
   renderHistory(history.history || []);
   await restoreLatestSavedReport(history.history || []);
   renderExecutiveExperience();
