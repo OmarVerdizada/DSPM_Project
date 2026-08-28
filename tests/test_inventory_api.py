@@ -235,6 +235,45 @@ class InventoryFilterTests(_SeededStore):
             msg="both read paths must agree on the estate average",
         )
 
+    def test_demo_sample_scans_never_enter_the_estate(self) -> None:
+        """Dashboard regression: demo-dataset scans (enterprise_test_data) were
+        persisted into `assets` like real scans, so the dashboard and Data
+        Inventory counted synthetic files alongside the customer's real estate
+        (490 "high" where the real file server had 207). Demo scans stay
+        viewable as reports but must never enter the durable estate."""
+        demo_files = [{
+            "path": f"C:\repo\enterprise_test_data\HR\f{i}.txt", "name": f"f{i}.txt",
+            "risk": {"level": "HIGH", "score": 80},
+            "findings": [{"type": "t", "framework": "GDPR"}],
+        } for i in range(10)]
+        before = store.inventory_facets(self.tid)["total"]
+        store.save_scan_history(self.tid, _report("s-demo", "local", demo_files))
+
+        self.assertEqual(
+            store.inventory_facets(self.tid)["total"], before,
+            "a demo-dataset scan must not add assets to the estate",
+        )
+        history_ids = {item["scan_id"] for item in store.read_scan_history(self.tid, limit=50)}
+        self.assertIn("s-demo", history_ids, "the demo scan report itself stays in history")
+
+    def test_purge_removes_legacy_demo_assets_only(self) -> None:
+        """Estates written before the demo exclusion carry synthetic rows; the
+        startup purge removes exactly those and nothing real."""
+        demo_files = [{
+            "path": f"/mnt/enterprise_test_data/Sales/g{i}.csv", "name": f"g{i}.csv",
+            "risk": {"level": "MEDIUM", "score": 50}, "findings": [],
+        } for i in range(4)]
+        with mock.patch.dict(os.environ, {"DSPM_DEMO_ASSETS_IN_INVENTORY": "1"}):
+            store.save_scan_history(self.tid, _report("s-legacy", "local", demo_files))
+        self.assertEqual(store.inventory_facets(self.tid)["total"], 29, "legacy path wrote demo rows")
+
+        removed = store.purge_demo_sample_assets(self.tid)
+
+        self.assertEqual(removed, 4)
+        facets = store.inventory_facets(self.tid)
+        self.assertEqual(facets["total"], 25, "every real asset must survive the purge")
+        self.assertEqual({item["value"] for item in facets["sources"]}, {"local", "smb"})
+
     def test_search_is_case_insensitive_and_like_wildcards_are_literal(self) -> None:
         files = [
             {"path": "/Finance/Q4_100%.xlsx", "name": "Q4_100%.xlsx", "owner": "ACME\\Alice"},

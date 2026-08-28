@@ -1121,6 +1121,78 @@ def probe_incremental_object(
     return {"state": "unchanged", "snapshot": snapshot}
 
 
+# Matches the bundled synthetic demo dataset. Kept in sync with the client-side
+# isSampleDataPath() and the compact-response detection in backend/app.py.
+_DEMO_SAMPLE_PATH_RE = re.compile(
+    r"(^|[\\/])enterprise_test_data([\\/]|$)|(^|[\\/])README_enterprise_dataset\.md$|(^|[\\/])_manifest\.json$",
+    re.IGNORECASE,
+)
+
+
+def _demo_assets_allowed_in_inventory() -> bool:
+    return os.getenv("DSPM_DEMO_ASSETS_IN_INVENTORY", "0") == "1"
+
+
+def is_demo_sample_report(report: dict) -> bool:
+    """True when a scan is of the bundled synthetic demo dataset.
+
+    Mirrors the client's isDemoSampleReport(): an explicit flag wins; otherwise
+    a majority of file paths under enterprise_test_data marks the scan as demo.
+    """
+    if not isinstance(report, dict):
+        return False
+    if report.get("is_demo_sample") is not None:
+        return bool(report.get("is_demo_sample"))
+    files = report.get("files")
+    if not isinstance(files, list) or not files:
+        return False
+    sample_count = sum(
+        1 for file_obj in files
+        if isinstance(file_obj, dict) and _DEMO_SAMPLE_PATH_RE.search(
+            str(file_obj.get("path") or file_obj.get("full_path") or file_obj.get("name") or "")
+        )
+    )
+    return sample_count / len(files) >= 0.5
+
+
+def purge_demo_sample_assets(tenant_id: str | None = None) -> int:
+    """Remove synthetic demo-dataset assets from the durable estate.
+
+    Legacy hygiene: demo scans used to be persisted into `assets` like real
+    scans, so the dashboard and Data Inventory counted synthetic files alongside
+    the customer's real estate. New demo scans skip the estate entirely; this
+    removes rows written before that rule existed. Scan reports/history are
+    untouched - only the estate tables (assets, asset_versions, findings).
+    """
+    if _demo_assets_allowed_in_inventory():
+        return 0
+    scope_sql = " AND tenant_id = ?" if tenant_id else ""
+    like_args = ("%enterprise_test_data%",) + ((tenant_id,) if tenant_id else ())
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"SELECT id, path FROM assets WHERE path LIKE ?{scope_sql}", like_args
+            ).fetchall()
+            demo_ids = [str(row["id"]) for row in rows if _DEMO_SAMPLE_PATH_RE.search(str(row["path"] or ""))]
+            for asset_id in demo_ids:
+                args = (asset_id,) + ((tenant_id,) if tenant_id else ())
+                conn.execute(f"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}", args)
+                conn.execute(f"DELETE FROM findings WHERE asset_id = ?{scope_sql}", args)
+                conn.execute(f"DELETE FROM assets WHERE id = ?{scope_sql}", args)
+    if demo_ids:
+        logger.info("Purged %d demo-sample assets from the estate%s", len(demo_ids), f" (tenant {tenant_id})" if tenant_id else "")
+    return len(demo_ids)
+
+
+# One-time hygiene migration at startup: estates written before the demo-scan
+# exclusion existed may still carry synthetic sample assets. Idempotent and a
+# no-op once clean (or when DSPM_DEMO_ASSETS_IN_INVENTORY=1 opts back in).
+try:
+    purge_demo_sample_assets()
+except Exception as exc:  # pragma: no cover - never block startup on hygiene
+    logger.warning("Demo-sample estate purge skipped: %s", type(exc).__name__)
+
+
 def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
     from backend.domain import normalize_scan_report
 
@@ -1128,6 +1200,11 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
     scan_id = scan.scan_run.id
     if not scan_id:
         return
+    # Demo-dataset scans stay per-scan records (report blob, scan_runs,
+    # occurrences, finding index) but never enter the durable estate: the
+    # dashboard and Data Inventory describe the customer's real data, and
+    # synthetic sample files inflating those numbers is a defect, not a demo.
+    write_estate = _demo_assets_allowed_in_inventory() or not is_demo_sample_report(report)
     # Refresh this scan's occurrences so a re-save (e.g. a lifecycle update) is
     # idempotent rather than duplicating rows.
     conn.execute("DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
@@ -1145,7 +1222,7 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
         """,
         (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at, run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
     )
-    for asset in scan.assets:
+    for asset in scan.assets if write_estate else []:
         conn.execute(
             "INSERT INTO assets "
             "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
@@ -1169,12 +1246,12 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
              asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
              asset.finding_types, asset.framework_keys, asset.detail_json),
         )
-    for version in scan.asset_versions:
+    for version in scan.asset_versions if write_estate else []:
         conn.execute(
             "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage),
         )
-    for finding in scan.findings:
+    for finding in scan.findings if write_estate else []:
         conn.execute(
             """
             INSERT OR REPLACE INTO findings
