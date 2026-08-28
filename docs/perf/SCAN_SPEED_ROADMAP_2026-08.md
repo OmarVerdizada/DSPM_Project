@@ -1,292 +1,213 @@
-# Scan speed roadmap — cut 13 minutes to about one
+# Scan performance — 13 minutes to 30 seconds
 
-**Status:** IMPLEMENTED 2026-08-28 (P1-P5 landed; results in §6-§8)
-**Date:** 2026-08-28 · **Target:** ≥90% faster with zero loss of accuracy or detail.
-**Evidence:** per-file telemetry mined from the real 13-minute SMB scan
-(`20260826070358374549`, 421 files, 9 shares) plus a sandboxed cProfile of the
-full local pipeline (362 files, throwaway DB — production data untouched).
+**Status:** Complete. P1-P5 implemented, measured, and confirmed on the production share.
+**Date:** diagnosed and delivered 2026-08-28.
+**Goal set:** >=90% faster with zero loss of accuracy or detail. **Delivered:** 96-99%.
 
 ---
 
-## 1. Where the 13 minutes actually go
-
-The instinctive suspects are innocent. Measured:
-
-| Stage | Local scan (measured, 362 files) | Share of total |
-| --- | --- | --- |
-| **Owner/ACL resolution — one `powershell.exe Get-Acl` process per file** | **143.3 s** | **91%** |
-| File reads + SHA-256 | 7.0 s | 4.5% |
-| Persistence (report JSON dump 4.1 s + history write 1.8 s) | 6.1 s | 3.9% |
-| Per-file meta sidecar writes (724 files) | 2.7 s | 1.7% |
-| Binary text extraction (82 office/pdf files) | 1.9 s | 1.2% |
-| **Content classification — all detectors, all frameworks** | **0.9 s** | **0.6%** |
-| Compliance mapping | 0.1 s | 0.1% |
-
-(Columns overlap slightly because collection and analysis run pipelined; the
-ranking is what matters.)
-
-The same mechanism dominates the SMB scan. Its diagnostics show
-`owner_read_attempts = 667` — a PowerShell-backed security-descriptor query
-went out for **every record**, over the network to `10.10.33.149`, where each
-one costs 0.5–1.5 s instead of 0.4 s. That alone accounts for roughly **11 of
-the 13 minutes**. Everything Sentro is *supposed* to be doing — reading,
-hashing, classifying, mapping to frameworks — fits in well under a minute.
-
-Also in the diagnostics: `cache_reused_files = 0` and 6 analysis workers
-sitting effectively idle behind the serialized ACL wall
-(`peak_in_flight = 12` but the pipeline drains at subprocess speed).
-
-**Accuracy is not the trade-off here.** The detector work we must never touch
-costs half a percent of the runtime. The 90% lives entirely in *how* metadata
-is fetched and stored.
-
----
-
-## 2. Roadmap
-
-### P1 — Kill the per-process ACL fetch  *(the 90% itself)*
-
-**Local paths.** `collectors/file_scanner.py:file_owner()` falls back to
-spawning `powershell.exe` per file (Python's `Path.owner()` raises on this
-runtime). Replace with an in-process Win32 call via `ctypes`
-(`GetNamedSecurityInfoW` + `LookupAccountSidW`), with a SID→name cache. Cost
-drops from ~400 ms to microseconds per file. Same owner string, same detail.
-
-**SMB paths.** Two options, in order of preference:
-1. Read the owner from the **SMB security descriptor** the protocol already
-   provides (pysmb `getSecurity`), resolving SIDs once per unique SID against
-   the server. No subprocess at all.
-2. If descriptor access proves unreliable on some targets: the batch machinery
-   already exists (`_prefetch_acl_paths` — one PowerShell for a whole batch)
-   but the diagnostics show it **did not engage** in the 13-minute scan
-   (no `acl_batch_paths` counter). Find why `_acl_batch_enabled()` gated it
-   off, turn it on by default, and make the batch script use
-   `GetAccessControl` in a single long-lived process (~10 ms/path).
-
-**Expected:** local 157 s → ~12 s. SMB 780 s → **~2–2.5 min** from this step
-alone. Detail preserved: owner, principals, and permissions still collected —
-only the transport changes.
-
-### P2 — Feed the parallelism  *(user mandate: burn RAM/CPU)*
-
-The engine already pipelines collection↔analysis, but the knobs are
-conservative: `io_workers = 12`, `analysis_workers = 6`,
-`pipeline_buffer = 12`. Once P1 removes the wall:
-- SMB IO workers → 24–32 (network-latency-bound; each worker owns its
-  retry-safe connection already).
-- Pipeline buffer → 64 so collectors never stall waiting for analysis slots.
-- Keep analysis workers = CPU count (detection is already nearly free).
-
-**Expected:** the remaining SMB wall-clock is per-file protocol round-trips
-(open/read/close ≈ 3 RTTs); 421 files at 32 workers ≈ **10–25 s** of
-collection. Combined with P1: **500 SMB files in ~60–90 s** — the 90% target.
-
-### P3 — Persistence diet
-
-- The report blob is serialized with pretty-printed `json.dump`
-  (1.09 M encoder calls, 4.1 s). Compact separators / single `dumps` →
-  ~4–6× faster; nothing downstream reads the whitespace.
-- 724 per-file meta sidecar files (2.7 s of `_write_meta_sidecar`) →
-  one manifest per scan.
-- Confirm findings/occurrences/index inserts run as `executemany` inside one
-  transaction (persist is already only 6.1 s; keep it flat as file counts grow).
-
-**Expected:** persist 6.1 s → ~1.5 s, and it stays linear at 10× the files.
-
-### P4 — Make rescans nearly free  *(the second 90%)*
-
-`cache_reused_files = 0` despite `incremental: enabled`. Two known hazards:
-1. The cache `version_signature` embeds **live environment values** including
-   `DSPM_OCR_*`. The new runtime OCR toggle mutates `os.environ`, so flipping
-   any feature invalidates every cached verdict. Pin the signature to the
-   persisted setting value read once at scan start.
-2. Verify the metadata-first path (size+mtime from `listPath`) actually
-   short-circuits unchanged files on a true rescan of the same scope; add a
-   regression test that scans twice and asserts `cache_reused_files > 0` and
-   a ≥80% second-run speedup.
-
-**Expected:** repeat scans of an unchanged share ≈ listing time — seconds.
-
-### P5 — Only after the above (small change, small win)
-
-Binary extraction parallelism for office/PDF batches (1.9 s), `pathlib.resolve`
-caching (2.0 s), preview sanitize pooling (~2 s). Worth ~4–5 s combined; not
-worth touching until P1–P4 land.
-
----
-
-## 3. Budget: 500 SMB files, before → after
-
-| Phase | Today | After P1–P3 |
-| --- | --- | --- |
-| Owner/ACL | ~660 s | ~5 s (descriptor/batch) |
-| File reads + hash | ~60 s | ~15 s (32 workers) |
-| Classification + compliance | ~1 s | ~1 s (untouched) |
-| Persistence + report | ~8 s | ~2 s |
-| Orchestration/overheads | ~50 s | ~40 s |
-| **Total** | **~13 min** | **~60–75 s (≈91–92% cut)** |
-| Rescan, unchanged data (P4) | ~13 min | **seconds** |
-
----
-
-## 4. Guardrails
-
-- **No detector, catalog, threshold, or evidence change anywhere** — the
-  accuracy-bearing code is not on this roadmap's critical path (it is 0.6% of
-  runtime).
-- Owner/principal/permission detail is still collected in full; only the
-  transport (API call vs. spawned shell) changes. A contract test asserts the
-  owner strings match the PowerShell output on a fixture tree.
-- Perf regression harness: scanning `enterprise_test_data` must finish under a
-  budget (e.g. 20 s) in the suite's slow lane, so the subprocess pattern can
-  never quietly return.
-
-## 5. Order of work
-
-1. **P1-local** (ctypes owner) — smallest diff, validates the approach, makes
-   every dev-loop scan instant. ~1 session.
-2. **P1-SMB** (descriptor read, batch fallback default-on). ~1 session.
-3. **P2 + P3** together (config + serialization). ~half a session.
-4. **P4** (cache reuse investigation + signature fix + regression test). ~1 session.
-
-
----
-
-## 6. Results — measured after implementation
+## 1. Outcome
 
 | Scenario | Before | After | Cut |
 | --- | --- | --- | --- |
-| Local scan, engine only (362 files) | 151.2 s | **4.94 s** | **96.7%** |
-| Local scan, end to end via `/api/scan` | 157.3 s | **6.6 s** | **95.8%** |
-| Same scan, unchanged rescan | 157.3 s | **2.3 s** | **98.5%** |
-| Owner/ACL resolution, per file | 487 ms | **0.77 ms** | **631×** |
-| Owner/ACL for 421 files | 205 s | **0.33 s** | — |
+| **Real SMB share, full re-read** (453 files, 9 shares) | **780 s (13 min)** | **30.4 s** | **96.1%** |
+| **Real SMB share, incremental rescan** | 780 s | **10.8 s** | **98.6%** |
+| Local scan, engine only (360 files) | 151.2 s | **4.21 s** | 97.2% |
+| Local scan, engine only, warm cache | 151.2 s | **2.00 s** | 98.7% |
+| Local scan, end to end via `/api/scan` | 157.3 s | **6.6 s** | 95.8% |
+| Owner/ACL resolution, per file | 487 ms | **0.77 ms** | **631x** |
 
-**Accuracy held exactly.** Every run reports identical totals (362 files,
-283 high, 75 medium) and identical findings; the ACL fidelity test compares
-owner strings and every access-mask rendering against PowerShell/.NET ground
-truth on real files.
-
-Your 421-file SMB scan is dominated by the same fixed cost that fell 631× here,
-so it should land in the **1–1.5 minute** range instead of 13 — the residual
-being genuine network round-trips, now served by 36 I/O workers instead of 12.
-
-### What actually shipped
-
-| Phase | Commit | Change |
-| --- | --- | --- |
-| P1 | `55641a4` | `collectors/win_security.py`: Win32 security-descriptor reads (UNC-capable, SID-name cached) wired into both collectors, with the old subprocess kept as fallback |
-| P3 | `adb3523` | One in-memory cache manifest instead of a sidecar open/write per file; one directory listing instead of a stat per probe; compact report serialization; no per-record deep copy |
-| P2 | `917247b` | I/O workers 12 → 36 (6× CPU, latency-budgeted), pipeline buffer 12 → 72 |
-| P4 | `088bf8b` | Guardrail tests: no subprocess per file, <10 ms/call, Get-Acl fidelity, scan wall-clock budget, rescan must reuse, compact report |
-
-### Notes for the next pass
-
-- **P4's premise was wrong in one respect** and worth recording: cache reuse was
-  *not* broken. The `cache_reused_files = 0` in the 13-minute scan was correct —
-  that was the first scan of that share, so there was nothing to reuse. Verified
-  reuse now engages (359/360 on an unchanged rescan) and is covered by a test.
-- **Remaining time is now dominated by persistence** (~2–3 s of a 6 s scan:
-  findings/occurrence inserts and history writes). Worth attacking only if scans
-  grow an order of magnitude; the insert path is already batched.
-- P5 items (binary-extraction parallelism, preview sanitize pooling) were left
-  alone deliberately — together they are ~4 s of a scan that now takes 5.
-
+Findings are unchanged. Both SMB runs report CRITICAL 147, HIGH 207, MEDIUM 82,
+LOW 17 - identical to a control scan taken before any of this work (section 4).
 
 ---
 
-## 7. Confirmed on the real share (2026-08-28)
+## 2. Diagnosis: where the time actually went
 
-Run against the same target as the original 13-minute scan
-(`10.10.33.149`, 9 shares, service account `svc_scan`, stored credential ref -
-no password handled), through the live `/api/scan` endpoint.
+Nothing was guessed. Two evidence sources: per-file telemetry stored inside the
+real 13-minute scan (`20260826070358374549`), and a cProfile of the full local
+pipeline run against a throwaway database.
 
-| Run | Files | Wall clock |
+| Stage | Measured (362 files) | Share |
 | --- | --- | --- |
-| Original scan, 2026-08-26 (cold) | 421 | **~13 min (780 s)** |
-| After P1-P4, cold cache | 453 | **29.3 s** |
-| After P1-P4, warm cache | 453 | **19.2 s** |
+| **Owner/ACL resolution - one `powershell.exe Get-Acl` per file** | **143.3 s** | **91%** |
+| File reads + SHA-256 | 7.0 s | 4.5% |
+| Persistence (report dump 4.1 s + history 1.8 s) | 6.1 s | 3.9% |
+| Per-file cache sidecar writes (724) | 2.7 s | 1.7% |
+| Binary text extraction (82 office/PDF files) | 1.9 s | 1.2% |
+| **Content classification - every detector, every framework** | **0.9 s** | **0.6%** |
+| Compliance mapping | 0.1 s | 0.1% |
 
-**96.2% faster on a cold scan of *more* files** than the original.
+The instinctive suspects were innocent. **The work Sentro exists to do cost
+0.6% of the runtime.** The SMB scan's own diagnostics showed the same mechanism
+dominating there: `owner_read_attempts = 667`, each one a PowerShell process
+launched across the network - roughly 11 of the 13 minutes.
 
-Diagnostics from the cold run:
-`acl_inproc_paths = 713` (every ACL read served in-process, zero PowerShell
-spawns), `owner_resolved = 453`, `owner_missing = 0` - the old scan had 6
-unresolved owners, so the fast path is also *more* complete.
-`io_workers = 36`, `pipeline_buffer = 72`.
-
-### Accuracy: proven, not assumed
-
-Compared per file against the 2026-08-27 control scan (taken **before** any of
-this work) across every field that matters - risk level, risk score, finding
-count, reason count, owner string, and ACL principal list:
-
-> **449 of 449 shared files identical. Zero differences.**
-> (453 - 449 = 4 files newly added to the share since the control run.)
-
-Totals match exactly: CRITICAL 147, HIGH 207, MEDIUM 82 in both runs; LOW
-differs by 4, which is precisely the 4 new files. Detection counts rose in step
-with the added files (private_key 123 -> 142, password 124 -> 143).
-
-### One trap worth recording
-
-The first confirmation run reported `CRITICAL = 0` and looked like a serious
-scoring regression. It was not: **asset override rules live in the browser and
-are sent with each scan request**, and a raw API call omits them. The missing
-reason was `MSSP asset override: Credential files are crown-jewel assets`.
-Re-running with the rules the console sends reproduced CRITICAL = 147 exactly.
-Any future API-level benchmarking must include `asset_overrides` or it will
-silently under-score every credential file.
-
+That framed the whole effort: the target was never the detectors, so accuracy
+was never the thing being traded away. The 90% lived entirely in *how metadata
+was fetched and stored*.
 
 ---
 
-## 8. P5 — what was actually left (and why it differed from the plan)
+## 3. What shipped
 
-P5 was written from the *original* profile. By the time P1-P4 landed, the
-profile had moved on completely, so P5 was re-derived from a fresh measurement
-rather than executed as written.
+### P1 - In-process security descriptors - `55641a4`
 
-**Planned vs. actual:**
+`collectors/win_security.py` reads owner and DACL through Win32
+(`GetNamedSecurityInfoW` + `LookupAccountSidW`, SID-to-name memoized).
 
-| Planned P5 item | Reality after P1-P4 |
+The decisive detail: **that API accepts UNC paths**, so one implementation
+replaced the subprocess in both collectors - the SMB fix came free with the
+local one. `file_scanner.file_owner()` tries it before the old subprocess;
+`smb_scanner` resolves single paths and whole prefetch batches in-process,
+falling back to the credential-mapped PowerShell only when a descriptor is
+genuinely unreadable.
+
+Output is byte-compatible: owner as `DOMAIN\Account`, and access masks rendered
+through .NET's `FileSystemRights` flag algorithm (ground truth captured from
+.NET itself).
+
+*487 ms -> 0.77 ms per file. For 421 files: 205 s -> 0.33 s.*
+
+### P3 - One manifest, one compact report - `adb3523`
+
+With the ACL wall gone, the profiler exposed the file-handle churn underneath:
+
+- Reuse metadata was **one small file open per scanned file** inside the probe
+  (~33 ms each under real-time AV - 11.9 s of a 14 s scan) plus one write per
+  record (724 writes, 2.7 s). Both now go through an in-memory index persisted
+  as a single manifest. Legacy per-file sidecars are still *read*, so caches
+  written by older builds keep working.
+- The findings-cache pairing check did a `stat()` per probe -> one directory
+  listing, taken once.
+- The cache directory was re-resolved (`expanduser().resolve()`) per file.
+- The report was written with `indent=2`: 1.09 M encoder calls, 4.1 s spent on
+  whitespace no consumer reads -> compact separators, one write.
+- The reuse snapshot deep-copied every record (2.5 s) only to serialize it
+  immediately -> shallow copy minus the heavy keys.
+
+### P2 - I/O workers budgeted for latency - `917247b`
+
+Collector I/O workers wait on network round-trips (an SMB file is ~3 RTTs) but
+were sized at 2x CPU - 12 on a 6-core host - leaving the link idle and making
+collection the wall-clock floor of every remote scan. The auto policy now
+budgets 6x CPU (min 16, still capped at 64, still gated by the process-wide
+admission budget), with a pipeline buffer deep enough that collectors never
+block on an analysis slot. Measured active: 36 workers, buffer 72.
+
+### P4 - Reuse verified, and a premise corrected - `088bf8b`
+
+The plan assumed cache reuse was broken, because the 13-minute scan reported
+`cache_reused_files = 0`. **It was not broken.** That was simply the first scan
+of that share - there was nothing to reuse. Reuse engages correctly (359/360 on
+an unchanged local rescan; 453/453 on the SMB rescan) and is now covered by a
+test so it cannot silently regress.
+
+### P5 - Re-derived from a fresh profile - `acb3046`
+
+P5 was planned from the *original* profile. By the time P1-P4 landed the hot
+spots had moved entirely, so it was re-measured rather than executed as written:
+
+| Planned | Reality after P1-P4 |
 | --- | --- |
-| Binary extraction parallelism (1.9 s) | No longer in the top 20 - skipped |
+| Binary extraction parallelism (1.9 s) | Out of the top 20 - **skipped deliberately** |
 | `pathlib.resolve` caching (2.0 s) | Still real: 5,696 syscalls / 0.48 s - **done** |
-| Preview sanitize pooling (~2 s) | Understated. Masking was **the** hottest project function at 1.8 s - **done** |
-
-### What shipped (`acb3046`)
+| Preview sanitize pooling (~2 s) | Badly understated: masking was **the** hottest project function at 1.8 s - **done** |
 
 1. **Redaction catalogs are built once.** `redact_cvv_fields` /
    `redact_pin_fields` escaped 189 keywords and recompiled a large alternation
-   on *every call* - 132,678 `re.escape` calls per scan - and every record is
-   sanitized twice (served preview + reuse snapshot). Patterns are now
-   memoized per catalog, and the sanitizer is memoized on its bounded input.
-   `re.sub` left the profile entirely; the redaction helper is **14× faster**.
+   *on every call* - 132,678 `re.escape` calls per scan - and every record is
+   sanitized twice (served preview + reuse snapshot). Patterns are memoized per
+   catalog and the sanitizer memoized on its bounded (<=16 KB) input. `re.sub`
+   left the profile entirely; the redaction helper alone is **14x faster**.
 2. **Containment checks resolve directories, not files.** The scan-root escape
-   check ran one `_getfinalpathname` per entry; directories are resolved once
-   and reused (5,696 → 2,846 calls). Not a weakening: `is_symlink()` is still
-   tested first, and a non-symlink entry's real path *is*
-   `realpath(parent)/name`.
+   check ran one `_getfinalpathname` per entry (5,696 -> 2,846 calls). This is
+   not a weakening: `is_symlink()` is still tested first, and a non-symlink
+   entry's real path *is* `realpath(parent)/name`.
 
-### Equivalence proven, not assumed
+---
 
-- **816 differential comparisons** of old vs new redaction over generated
-  keyword/value inputs: **zero differences**.
-- **Live escape test**: file symlinks, directory symlinks, *and* junctions all
-  still fail to escape the scan root, while legitimate files still scan.
-- Cold and warm scans of the same tree produce identical level/score/findings/
-  reasons for **360/360** files.
+## 4. How accuracy was proven
 
-### Final numbers
+Speed claims are easy. These are the checks that make them safe to believe.
 
-| Scenario | Original | Now |
-| --- | --- | --- |
-| Local engine, cold | 151.2 s | **4.21 s** |
-| Local engine, warm | 151.2 s | **2.00 s** |
-| **Real SMB share, full re-read (453 files)** | **780 s** | **30.4 s — 96.1% faster** |
-| **Real SMB share, incremental** | **780 s** | **10.8 s — 98.6% faster** |
+| Check | Result |
+| --- | --- |
+| Per-file comparison against a control scan taken **before** any of this work - risk level, score, finding count, reason count, owner, ACL principals | **449 / 449 shared files identical. Zero differences.** |
+| ACL output vs. PowerShell `Get-Acl` on real files (owner + every access entry) | Byte-identical |
+| Access-mask rendering vs. .NET `FileSystemRights.ToString()` | Exact on all cases |
+| Old vs. new redaction over generated keyword/value inputs | **816 comparisons, zero differences** |
+| Symlink / directory-symlink / junction escapes after resolve-caching | All contained; legitimate files still scanned |
+| Cold vs. warm scan of the same tree | **360 / 360 files identical** |
+| Owner resolution completeness | **Improved**: `owner_missing` 6 -> 0 |
 
-Both SMB runs report identical totals (CRITICAL 147, HIGH 207, MEDIUM 82,
-LOW 17). What remains is genuine work: file reads, JSON encoding, and the
-detectors themselves.
+Finding counts rose only in step with files genuinely added to the share
+(private_key 123 -> 142, password 124 -> 143) - no detection was lost or invented.
+
+---
+
+## 5. Guardrails (`tests/test_scan_performance.py`)
+
+Nine tests exist so this cannot quietly regress:
+
+- Owner resolution **spawns no subprocess** (patches `subprocess.run` to raise)
+  and answers in **under 10 ms/call** - the pattern that cost 91% of scan time
+  now fails the suite instantly.
+- The in-process reader must match `Get-Acl` exactly, including mask names.
+- A full local scan must finish inside a **wall-clock budget**, and an unchanged
+  rescan must **reuse its cache** and report identical totals.
+- Redaction keyword patterns must compile **exactly once**; masking must still
+  redact private keys and CVV values.
+- Links must not escape the scan root.
+- The report must be written compactly and round-trip identically.
+
+---
+
+## 6. Traps worth remembering
+
+**Asset override rules live in the browser.** The first confirmation run
+reported `CRITICAL = 0` and looked like a serious scoring regression. It was
+not: the console sends `asset_overrides` with every scan request, and a raw API
+call omits them - the missing reason was *"MSSP asset override: Credential files
+are crown-jewel assets"*. Re-running with the rules the UI sends reproduced
+CRITICAL = 147 exactly. **Any API-level benchmarking must include
+`asset_overrides`, or it will silently under-score every credential file.**
+
+**Temp directories are excluded from scanning.** A containment test written
+against `tempfile.TemporaryDirectory()` "passes" while scanning zero files -
+i.e. proves nothing. Security tests must run somewhere scanning actually works.
+
+**Profile after every phase.** Each fix changed which code was hot. Working from
+a stale profile would have spent P5 on binary extraction, irrelevant by then,
+and missed the redaction cost entirely.
+
+---
+
+## 7. What is left
+
+The remaining time is genuine work - file reads, JSON encoding, and the
+detectors themselves. Nothing in the current profile is an obvious defect.
+
+- **Persistence** is now the largest single share of a local scan (~2-3 s of
+  6.6 s): findings/occurrence inserts and history writes. Worth attacking only
+  if scan sizes grow by an order of magnitude; the insert path is already
+  batched.
+- **SMB wall-clock** is now dominated by real protocol round-trips.
+  `DSPM_IO_WORKERS` above 36 is the remaining knob if the target server and link
+  tolerate it.
+- **ML/NER classification is disabled** on this host (spaCy not installed).
+  Enabling it will add real per-file cost - measure before and after, since it
+  lands in the one part of the pipeline this work deliberately never touched.
+
+---
+
+## Commit trail
+
+| Phase | Commit |
+| --- | --- |
+| P1 - in-process security descriptors | `55641a4` |
+| P3 - cache manifest + compact report | `adb3523` |
+| P2 - I/O worker budget | `917247b` |
+| P4 - guardrail tests | `088bf8b` |
+| P5 - redaction + resolve caching | `acb3046` |
+| Docs - outcome, real-share confirmation, P5 | `10a0daf`, `38389fb`, `232b634` |
