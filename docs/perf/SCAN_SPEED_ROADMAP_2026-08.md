@@ -191,3 +191,49 @@ being genuine network round-trips, now served by 36 I/O workers instead of 12.
   grow an order of magnitude; the insert path is already batched.
 - P5 items (binary-extraction parallelism, preview sanitize pooling) were left
   alone deliberately — together they are ~4 s of a scan that now takes 5.
+
+
+---
+
+## 7. Confirmed on the real share (2026-08-28)
+
+Run against the same target as the original 13-minute scan
+(`10.10.33.149`, 9 shares, service account `svc_scan`, stored credential ref -
+no password handled), through the live `/api/scan` endpoint.
+
+| Run | Files | Wall clock |
+| --- | --- | --- |
+| Original scan, 2026-08-26 (cold) | 421 | **~13 min (780 s)** |
+| After P1-P4, cold cache | 453 | **29.3 s** |
+| After P1-P4, warm cache | 453 | **19.2 s** |
+
+**96.2% faster on a cold scan of *more* files** than the original.
+
+Diagnostics from the cold run:
+`acl_inproc_paths = 713` (every ACL read served in-process, zero PowerShell
+spawns), `owner_resolved = 453`, `owner_missing = 0` - the old scan had 6
+unresolved owners, so the fast path is also *more* complete.
+`io_workers = 36`, `pipeline_buffer = 72`.
+
+### Accuracy: proven, not assumed
+
+Compared per file against the 2026-08-27 control scan (taken **before** any of
+this work) across every field that matters - risk level, risk score, finding
+count, reason count, owner string, and ACL principal list:
+
+> **449 of 449 shared files identical. Zero differences.**
+> (453 - 449 = 4 files newly added to the share since the control run.)
+
+Totals match exactly: CRITICAL 147, HIGH 207, MEDIUM 82 in both runs; LOW
+differs by 4, which is precisely the 4 new files. Detection counts rose in step
+with the added files (private_key 123 -> 142, password 124 -> 143).
+
+### One trap worth recording
+
+The first confirmation run reported `CRITICAL = 0` and looked like a serious
+scoring regression. It was not: **asset override rules live in the browser and
+are sent with each scan request**, and a raw API call omits them. The missing
+reason was `MSSP asset override: Credential files are crown-jewel assets`.
+Re-running with the rules the console sends reproduced CRITICAL = 147 exactly.
+Any future API-level benchmarking must include `asset_overrides` or it will
+silently under-score every credential file.
