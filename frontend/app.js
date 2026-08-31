@@ -3016,8 +3016,15 @@ const PATH_DEFAULT_TAB = {
 };
 
 function tabUrl(resolvedTab) {
-  const base = DESTINATION_PATHS[navDestination(resolvedTab)] || "/dashboard";
-  return resolvedTab === PATH_DEFAULT_TAB[base] ? base : `${base}#${resolvedTab}`;
+  const destination = navDestination(resolvedTab);
+  const base = DESTINATION_PATHS[destination] || "/dashboard";
+  // Members of a multi-member destination ALWAYS carry their #member, so the
+  // default member is addressable too (/scan#file-servers, not a bare /scan).
+  const memberCount = document.querySelectorAll(`.nav-sub[data-nav-sub="${destination}"] .nav-sub-link`).length;
+  if (memberCount > 1 || resolvedTab !== PATH_DEFAULT_TAB[base]) {
+    return `${base}#${resolvedTab}`;
+  }
+  return base;
 }
 
 function tabFromLocation() {
@@ -3031,6 +3038,17 @@ function tabFromLocation() {
 }
 
 window.addEventListener("popstate", () => {
+  // Leaving a setup URL (back button) closes the wizard; a setup hash never
+  // OPENS one - resolveTabName does not know it, so direct entry lands on
+  // the deck. The temporary URL dies with the flow.
+  if (typeof closeScanWizard === "function") {
+    Object.keys(SCAN_WIZARD_KINDS || {}).forEach((kind) => {
+      const wizard = document.querySelector(SCAN_WIZARD_KINDS[kind].wizard);
+      if (wizard && !wizard.classList.contains("hidden") && !String(location.hash).endsWith("-setup")) {
+        closeScanWizard(kind, { skipUrl: true });
+      }
+    });
+  }
   const tab = tabFromLocation();
   if (tab) switchTab(tab);
 });
@@ -8733,13 +8751,22 @@ function setWizardStep(kind, step) {
   wizardEl(kind, "next").classList.toggle("hidden", step === 3);
   wizardEl(kind, "save").classList.toggle("hidden", step !== 3);
   setWizardHint(kind, "");
-  if (kind === "endpoint" && step === 3) syncWinrmActivationFields();
+  if (kind === "endpoint" && step === 3) {
+    syncWinrmActivationFields();
+    renderEndpointReview();
+  }
   wizard.scrollIntoView({ behavior: "auto", block: "start" });
 }
 
 function setWizardHint(kind, message) {
   const hint = wizardEl(kind, "hint");
   if (hint) hint.textContent = message || "";
+}
+
+const WIZARD_TAB_NAMES = { "file-server": "file-servers", endpoint: "endpoint" };
+
+function wizardContextStrip(kind) {
+  return document.querySelector(kind === "file-server" ? "#file-server-context" : "#endpoint-context");
 }
 
 function openScanWizard(kind, profileId = "") {
@@ -8751,14 +8778,27 @@ function openScanWizard(kind, profileId = "") {
   wizardEl(kind, "heading").textContent = profile ? `Edit — ${profile.name}` : SCAN_WIZARD_KINDS[kind].newTitle;
   wizardEl(kind, "del").classList.toggle("hidden", !profile);
   wizardEl(kind, "deck").classList.add("hidden");
+  wizardContextStrip(kind)?.classList.add("hidden");
   wizardEl(kind, "wizard").classList.remove("hidden");
+  // A temporary setup URL: back button leaves the wizard, and entering the
+  // URL directly lands on the deck (the router does not know the -setup hash).
+  if (!String(location.hash).endsWith("-setup")) {
+    history.pushState({ scanWizard: kind }, "", `/scan#${WIZARD_TAB_NAMES[kind]}-setup`);
+  }
   setWizardStep(kind, 1);
+  window.setTimeout(() => {
+    document.querySelector(kind === "file-server" ? "#fs-profile-name" : "#endpoint-profile-name")?.focus();
+  }, 60);
 }
 
-function closeScanWizard(kind) {
+function closeScanWizard(kind, options = {}) {
   wizardEl(kind, "wizard").classList.add("hidden");
   wizardEl(kind, "deck").classList.remove("hidden");
+  wizardContextStrip(kind)?.classList.remove("hidden");
   scanWizardState[kind].editingId = "";
+  if (!options.skipUrl && String(location.hash).endsWith("-setup")) {
+    history.replaceState({ tab: WIZARD_TAB_NAMES[kind] }, "", `/scan#${WIZARD_TAB_NAMES[kind]}`);
+  }
 }
 
 function validateWizardStep(kind, step) {
@@ -9029,6 +9069,59 @@ function mirrorWizardStatus() {
   });
 }
 
+function renderEndpointReview() {
+  const host = document.querySelector("#endpoint-review-rows");
+  if (!host) return;
+  const scope = document.querySelector("#endpoint-path-scope");
+  const scopeLabel = scope?.selectedOptions?.[0]?.textContent || "User profile quick scan";
+  const target = document.querySelector("#endpoint-host").value.trim() || "no host";
+  const user = document.querySelector("#endpoint-target-username").value.trim();
+  const admin = document.querySelector("#endpoint-username").value.trim();
+  const depth = document.querySelector("#endpoint-max-depth").value || "6";
+  const flags = [
+    ["Content preview", document.querySelector("#endpoint-read-content").checked],
+    ["ACL", document.querySelector("#endpoint-read-acl").checked],
+    ["Archives", document.querySelector("#endpoint-inspect-archives").checked],
+    ["Cancellable job", document.querySelector("#endpoint-async-scan").checked],
+    ["Incremental", document.querySelector("#endpoint-incremental-enabled").checked],
+  ];
+  host.innerHTML = `
+    <button type="button" class="review-row" data-wizard-goto="1">
+      <span class="review-label">Target</span>
+      <span class="review-value"><b>${escapeHtml(target)}</b><small>${escapeHtml(user ? `profile ${user}` : "no profile user")} · admin ${escapeHtml(admin || "—")}</small></span>
+      <span class="review-edit" aria-hidden="true">Edit</span>
+    </button>
+    <button type="button" class="review-row" data-wizard-goto="2">
+      <span class="review-label">Scope</span>
+      <span class="review-value"><b>${escapeHtml(scopeLabel)}</b><small>depth ${escapeHtml(depth)}</small></span>
+      <span class="review-edit" aria-hidden="true">Edit</span>
+    </button>
+    <div class="review-row review-row-static">
+      <span class="review-label">Options</span>
+      <ul class="review-option-chips">${flags.map(([label, on]) => `<li class="${on ? "on" : ""}">${escapeHtml(label)}</li>`).join("")}</ul>
+    </div>`;
+}
+
+// Idle boilerplate ("Ready", boot hints) has no value on the deck; the strip
+// appears only when a scan or test actually says something.
+const IDLE_STATUS_TEXTS = new Set([
+  "Ready",
+  "Ready. Saved endpoint scans start from their card.",
+  "Fill the endpoint scan details after WinRM is active on the workstation.",
+]);
+
+function hideIdleDeckStatus() {
+  [document.querySelector("#connection-status"), document.querySelector("#endpoint-status")].forEach((node) => {
+    if (!node) return;
+    const refresh = () => {
+      const text = node.textContent.trim();
+      node.classList.toggle("idle-hidden", !text || IDLE_STATUS_TEXTS.has(text) || text.startsWith("Enter Target Windows user"));
+    };
+    refresh();
+    new MutationObserver(refresh).observe(node, { childList: true, characterData: true, subtree: true });
+  });
+}
+
 function initScanProfileDecks() {
   document.addEventListener("click", (event) => {
     const opener = event.target.closest("[data-open-scan-wizard]");
@@ -9047,6 +9140,13 @@ function initScanProfileDecks() {
       const kind = editBtn.closest("#fs-profile-grid") ? "file-server" : "endpoint";
       openScanWizard(kind, editBtn.dataset.profileEdit);
     }
+  });
+
+  document.addEventListener("click", (event) => {
+    const gotoBtn = event.target.closest("[data-wizard-goto]");
+    if (!gotoBtn) return;
+    const kind = gotoBtn.closest("#fs-wizard") ? "file-server" : "endpoint";
+    setWizardStep(kind, Number(gotoBtn.dataset.wizardGoto) || 1);
   });
 
   Object.keys(SCAN_WIZARD_KINDS).forEach((kind) => {
@@ -9075,6 +9175,7 @@ function initScanProfileDecks() {
 
   watchScanRunState();
   mirrorWizardStatus();
+  hideIdleDeckStatus();
   renderScanDecks();
 }
 

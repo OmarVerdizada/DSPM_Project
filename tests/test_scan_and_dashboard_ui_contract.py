@@ -84,6 +84,23 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         for label in ("Visited:", "Matched:", "Filtered:", "Roots:"):
             self.assertIn(label, summary)
 
+    def test_scan_wizard_review_board_and_setup_urls(self) -> None:
+        # Review & launch is an interactive board: rows jump back to their step,
+        # and the wizard runs under a temporary #-setup URL that the router
+        # never resolves (direct entry lands on the deck).
+        self.assertIn('data-wizard-goto=', self.index_html)
+        self.assertIn('id="endpoint-review-rows"', self.index_html)
+        self.assertIn("WIZARD_TAB_NAMES[kind]}-setup", self.app_js)
+        self.assertIn('endsWith("-setup")', self.app_js)
+        self.assertIn("renderEndpointReview", self.app_js)
+        # The demo generator lives on the deck, not inside Configuration.
+        self.assertIn("deck-demo-utility", self.index_html)
+        fs_step2 = self.index_html[
+            self.index_html.index('data-wizard-step="2"'):self.index_html.index('data-wizard-step="3"')
+        ]
+        self.assertIn('aria-label="Compliance mapping"', fs_step2)
+        self.assertNotIn("demo-data-card", fs_step2)
+
     def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
         risk_panel = self.index_html[
             self.index_html.index('id="tab-risk"'):

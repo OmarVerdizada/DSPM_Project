@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -3197,3 +3197,13 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         hash_files=payload.read_content,
         read_owner=True,
     )
+
+
+# Registered LAST so every real route and the /static mount win first: an
+# unknown page URL redirects to the dashboard instead of leaking a raw JSON
+# 404, while unknown API/static paths keep failing loudly for clients.
+@app.get("/{unmatched_path:path}", include_in_schema=False)
+def unknown_page_redirect(unmatched_path: str):
+    if unmatched_path.startswith(("api/", "static/")) or "." in unmatched_path.rsplit("/", 1)[-1]:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return RedirectResponse("/dashboard", status_code=302)

@@ -22958,3 +22958,323 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 #fs-profile-grid .scan-socket strong,
 #endpoint-profile-grid .scan-socket strong { color: inherit; }
+
+/* ============================================================
+   Scan decks & wizards v2 — evaluation round
+   Deck is the hero; configuration is dense; review is a board.
+   ============================================================ */
+
+/* --- #4 The deck owns the page ----------------------------------- */
+#fs-scan-deck, #endpoint-scan-deck { gap: 14px; min-height: 46vh; align-content: start; }
+#fs-profile-grid .scan-socket-hero,
+#endpoint-profile-grid .scan-socket-hero { min-height: 340px !important; }
+#fs-profile-grid:not(:has(.scan-profile-card)) .scan-socket,
+#endpoint-profile-grid:not(:has(.scan-profile-card)) .scan-socket { min-height: 340px; }
+
+/* Idle boilerplate stays off the deck */
+#connection-status.idle-hidden, #endpoint-status.idle-hidden { display: none !important; }
+
+/* Context strip: one quiet line, not a second hero */
+#file-server-context.context-strip, #endpoint-context.context-strip {
+  padding: 10px 16px !important;
+  gap: 12px !important;
+  align-items: center !important;
+}
+#file-server-context.context-strip > div, #endpoint-context.context-strip > div {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+}
+#file-server-context.context-strip span, #endpoint-context.context-strip span {
+  font-size: 10px !important; letter-spacing: .07em;
+}
+#file-server-context.context-strip strong, #endpoint-context.context-strip strong {
+  font-size: 12.5px !important;
+}
+#file-server-context.context-strip p, #endpoint-context.context-strip p {
+  font-size: 11.5px !important; margin: 0 !important; color: var(--muted);
+  flex-basis: 100%;
+}
+#file-server-context.context-strip button, #endpoint-context.context-strip button {
+  padding: 6px 12px !important; font-size: 12px !important;
+}
+
+/* --- #9 Demo dataset: a quiet utility, not configuration ---------- */
+#fs-scan-deck .deck-demo-utility {
+  display: flex !important;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 14px !important;
+  border: 1px dashed var(--line) !important;
+  border-radius: 10px;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+#fs-scan-deck .deck-demo-utility .demo-data-ico { width: 26px; height: 26px; opacity: .55; }
+#fs-scan-deck .deck-demo-utility > div { display: flex; align-items: baseline; gap: 8px; flex: 1; min-width: 0; }
+#fs-scan-deck .deck-demo-utility span { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+#fs-scan-deck .deck-demo-utility strong { font-size: 12px; }
+#fs-scan-deck .deck-demo-utility small { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#fs-scan-deck .deck-demo-utility button { padding: 5px 12px !important; font-size: 11.5px !important; }
+
+/* --- #5 Wizard centered, fits every screen ------------------------ */
+#fs-wizard, #endpoint-wizard { max-width: 960px; width: 100%; margin-inline: auto; }
+
+/* --- #6 Back control reads as one -------------------------------- */
+#fs-wizard-close, #endpoint-wizard-close {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px !important; font-size: 12px !important;
+}
+.back-ico { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* --- #7 Configuration density ------------------------------------ */
+.wizard-behavior-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+#fs-wizard .wizard-behavior-grid .option-tile,
+#fs-wizard .scan-option-stack .option-tile {
+  padding: 8px 10px !important;
+  min-height: 0 !important;
+  gap: 8px !important;
+}
+#fs-wizard .wizard-behavior-grid .scan-option-copy { font-size: 12px !important; }
+.wizard-behavior-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px 14px;
+}
+.wizard-behavior-fields label { font-size: 12px; display: grid; gap: 5px; }
+.wizard-behavior-fields input { min-height: 34px; }
+
+/* Extension presets: four tight cards, one line each */
+#fs-wizard .ext-preset-grid, #endpoint-wizard .ext-preset-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) !important;
+  gap: 8px !important;
+}
+#fs-wizard .ext-preset-card, #endpoint-wizard .ext-preset-card {
+  padding: 9px 11px !important;
+  gap: 3px !important;
+  min-height: 0 !important;
+}
+#fs-wizard .ext-preset-title, #endpoint-wizard .ext-preset-title { font-size: 12px !important; }
+#fs-wizard .ext-preset-desc, #endpoint-wizard .ext-preset-desc {
+  font-size: 10.5px !important; line-height: 1.35 !important;
+}
+
+/* #7 Advanced extension picker: bounded, searchable, scannable */
+#fs-wizard #ext-advanced-mode, #endpoint-wizard #endpoint-ext-advanced-mode {
+  display: grid; gap: 8px;
+}
+#fs-wizard #ext-advanced-mode.hidden, #endpoint-wizard #endpoint-ext-advanced-mode.hidden { display: none; }
+#fs-wizard #extension-search, #endpoint-wizard #endpoint-extension-search {
+  min-height: 34px; font-size: 12.5px; width: 100%;
+}
+#fs-wizard .extension-selected, #endpoint-wizard .extension-selected {
+  font-size: 11px; color: var(--muted);
+}
+#fs-wizard .extension-list, #endpoint-wizard .extension-list {
+  max-height: 250px !important;
+  overflow-y: auto !important;
+  display: grid !important;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important;
+  gap: 3px 8px !important;
+  padding: 8px 10px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px !important;
+  background: color-mix(in srgb, var(--card) 55%, transparent) !important;
+  align-content: start;
+}
+#fs-wizard .extension-list label, #endpoint-wizard .extension-list label {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding: 3px 6px !important;
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 6px !important;
+  background: transparent !important;
+  font-size: 11.5px !important;
+  line-height: 1.3 !important;
+  min-height: 0 !important;
+  cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#fs-wizard .extension-list label:hover, #endpoint-wizard .extension-list label:hover {
+  background: color-mix(in srgb, var(--accent) 8%, transparent) !important;
+}
+#fs-wizard .extension-list input, #endpoint-wizard .extension-list input {
+  width: 13px; height: 13px; margin: 0; flex: 0 0 auto;
+}
+#fs-wizard .extension-list strong, #endpoint-wizard .extension-list strong,
+#fs-wizard .extension-list b, #endpoint-wizard .extension-list b {
+  grid-column: 1 / -1;
+  font-size: 10px !important;
+  letter-spacing: .07em; text-transform: uppercase;
+  color: var(--muted) !important;
+  padding: 7px 2px 1px !important;
+}
+#fs-wizard .extension-actions, #endpoint-wizard .extension-actions {
+  display: flex !important; gap: 6px !important; align-items: center;
+}
+#fs-wizard .extension-actions input, #endpoint-wizard .extension-actions input {
+  min-height: 30px; font-size: 12px; max-width: 140px;
+}
+
+/* #8 Compliance: a first-class, compact part of Configuration */
+#fs-wizard .compliance-framework-grid, #endpoint-wizard .compliance-framework-grid {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) !important;
+  gap: 8px !important;
+}
+#fs-wizard .compliance-framework-card, #endpoint-wizard .compliance-framework-card {
+  padding: 9px 11px !important; gap: 8px !important; min-height: 0 !important;
+}
+#fs-wizard .compliance-framework-card strong, #endpoint-wizard .compliance-framework-card strong { font-size: 12px !important; }
+#fs-wizard .compliance-framework-card small, #endpoint-wizard .compliance-framework-card small { font-size: 10.5px !important; line-height: 1.35 !important; }
+#fs-wizard .compliance-hint, #endpoint-wizard .compliance-hint { font-size: 11px !important; }
+
+/* Endpoint configuration: checkbox rows in a tight grid */
+#endpoint-wizard .endpoint-checkbox {
+  padding: 7px 10px !important;
+  font-size: 12px !important;
+  min-height: 0 !important;
+  gap: 8px !important;
+}
+#endpoint-wizard .endpoint-form { gap: 10px 14px !important; }
+#endpoint-wizard .endpoint-form label { font-size: 12px !important; }
+
+/* --- #11 Review board --------------------------------------------- */
+.wizard-review-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+.review-rows { display: grid; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.review-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.review-row:last-child { border-bottom: none; }
+button.review-row:hover, button.review-row:focus-visible {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+button.review-row:hover .review-edit { opacity: 1; transform: none; }
+.review-row-static { cursor: default; }
+.review-label {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted);
+}
+.review-value { display: grid; gap: 1px; min-width: 0; font-size: 13px; }
+.review-value b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-value small { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-value.scan-summary-mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+.review-edit {
+  font-size: 11px; font-weight: 600; color: var(--accent-strong);
+  opacity: 0; transform: translateX(-3px);
+  transition: opacity .15s ease, transform .15s ease;
+}
+.review-option-chips {
+  display: flex; flex-wrap: wrap; gap: 5px;
+  list-style: none; margin: 0; padding: 0;
+}
+.review-option-chips li {
+  font-size: 10.5px; line-height: 1; padding: 4px 8px;
+  border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+  text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+.review-option-chips li.on {
+  text-decoration: none;
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.wizard-save-note { font-size: 11.5px; color: var(--muted); margin: 0; }
+#endpoint-wizard .wizard-review-card .review-rows { margin-top: 2px; }
+
+@media (max-width: 900px) {
+  .wizard-review-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .review-row { grid-template-columns: 80px minmax(0, 1fr); }
+  .review-edit { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .review-row, .review-edit { transition: none; }
+}
+
+/* The advanced list is group DIVs (heading + labels), not bare labels:
+   the grid lives on each group, the outer list just stacks and scrolls. */
+#fs-wizard .extension-list, #endpoint-wizard .extension-list {
+  display: block !important;
+}
+#fs-wizard .extension-group, #endpoint-wizard .extension-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 2px 8px;
+  margin-bottom: 6px;
+}
+#fs-wizard .extension-group-heading, #endpoint-wizard .extension-group-heading {
+  grid-column: 1 / -1;
+  font-size: 10px !important;
+  font-weight: 650;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--muted) !important;
+  padding: 7px 2px 2px !important;
+  border: none !important;
+  background: transparent !important;
+}
+
+/* Selected-extension chips: a bounded shelf, not a flood */
+#fs-wizard .extension-selected, #endpoint-wizard .extension-selected {
+  max-height: 56px !important;
+  overflow-y: auto !important;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 3px !important;
+  padding: 4px !important;
+  align-content: flex-start;
+}
+#fs-wizard .extension-selected > *, #endpoint-wizard .extension-selected > * {
+  font-size: 10px !important;
+  padding: 2px 6px !important;
+  margin: 0 !important;
+  line-height: 1.4 !important;
+}
+
+/* Review rows are quiet rows, not primary buttons */
+#fs-wizard button.review-row, #endpoint-wizard button.review-row,
+#fs-wizard .review-row, #endpoint-wizard .review-row {
+  background: transparent !important;
+  color: inherit !important;
+  border: none !important;
+  border-bottom: 1px solid var(--line) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  font-weight: 400 !important;
+  min-height: 0 !important;
+  padding: 10px 14px !important;
+}
+#fs-wizard .review-row:last-child, #endpoint-wizard .review-row:last-child {
+  border-bottom: none !important;
+}
+#fs-wizard button.review-row:hover, #endpoint-wizard button.review-row:hover,
+#fs-wizard button.review-row:focus-visible, #endpoint-wizard button.review-row:focus-visible {
+  background: color-mix(in srgb, var(--accent) 7%, transparent) !important;
+}
+#fs-wizard .review-value, #endpoint-wizard .review-value { color: inherit !important; }
+#fs-wizard .review-value b, #endpoint-wizard .review-value b { font-weight: 600 !important; }

@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=217" />
+    <link rel="stylesheet" href="/static/styles.css?v=221" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -200,12 +200,23 @@
               </div>
               <button type="button" id="scan-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
             </div>
+<section class="demo-data-card deck-demo-utility" aria-label="Demo data generator">
+                <span class="scan-card-ico demo-data-ico" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="7" ry="2.5"/><path d="M5 5v14c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V5"/><path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/></svg>
+                </span>
+                <div>
+                  <span>Demo dataset</span>
+                  <strong id="demo-data-title">Enterprise test data</strong>
+                  <small id="demo-data-status">Generate local sample files for scans.</small>
+                </div>
+                <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
+              </section>
           </div>
 
           <div id="fs-wizard" class="scan-wizard hidden">
             <div class="scan-layout">
             <header class="scan-wizard-head">
-              <button type="button" id="fs-wizard-close" class="secondary-btn mini-btn wizard-back-link">&#8249; Scans</button>
+              <button type="button" id="fs-wizard-close" class="secondary-btn mini-btn wizard-back-link"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>Back to scans</button>
               <div class="scan-wizard-title">
                 <h4 id="fs-wizard-heading">New file server scan</h4>
                 <span>Three steps: identity, configuration, review.</span>
@@ -259,51 +270,39 @@
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="2">
-<section class="scan-card" aria-label="Scan options">
-                <div class="scan-card-head">
-                  <span class="scan-card-ico" aria-hidden="true">
-                    <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M16 3.5v5M4 12h4M12 12h8M8 9.5v5M4 18h12M16 15.5v5M20 18h0"/></svg>
-                  </span>
-                  <div class="scan-card-heading">
-                    <h4>Scan options</h4>
-                    <span>Queue behavior, archive inspection, and share coverage</span>
-                  </div>
-                </div>
-                <div class="scan-option-stack file-server-options scan-form-wide">
-                  <label class="checkbox-row option-tile">
-                    <input id="async_scan" name="async_scan" type="checkbox" checked />
-                    <span class="scan-option-copy">Run through async queue</span>
-                    <span class="scan-option-check" aria-hidden="true"></span>
-                  </label>
-                  <label class="checkbox-row option-tile">
-                    <input id="incremental_enabled" name="incremental_enabled" type="checkbox" checked />
-                    <span class="scan-option-copy">Incremental scan (read new/changed files only)</span>
-                    <span class="scan-option-check" aria-hidden="true"></span>
-                  </label>
-                  <label class="checkbox-row option-tile">
-                    <input id="inspect_archives" name="inspect_archives" type="checkbox" />
-                    <span class="scan-option-copy">Inspect ZIP archive entries</span>
-                    <span class="scan-option-check" aria-hidden="true"></span>
-                  </label>
-                  <label class="checkbox-row option-tile">
-                    <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
-                    <span class="scan-option-copy">Include SMB admin shares</span>
-                    <span class="scan-option-check" aria-hidden="true"></span>
-                  </label>
-                </div>
-              </section>
-
-                <section class="scan-card" aria-label="Scope">
+<section class="scan-card wizard-behavior-card" aria-label="Scan behavior">
                   <div class="scan-card-head">
                     <span class="scan-card-ico" aria-hidden="true">
-                      <svg viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+                      <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M16 3.5v5M4 12h4M12 12h8M8 9.5v5M4 18h12M16 15.5v5M20 18h0"/></svg>
                     </span>
                     <div class="scan-card-heading">
-                      <h4>Scope</h4>
-                      <span>How deep the walk goes, and the local fallback dataset</span>
+                      <h4>Behavior &amp; scope</h4>
+                      <span>How the scan runs and how deep it walks</span>
                     </div>
                   </div>
-                  <div class="scan-form-grid">
+                  <div class="wizard-behavior-grid">
+                    <label class="checkbox-row option-tile">
+                      <input id="async_scan" name="async_scan" type="checkbox" checked />
+                      <span class="scan-option-copy">Async queue</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                    <label class="checkbox-row option-tile">
+                      <input id="incremental_enabled" name="incremental_enabled" type="checkbox" checked />
+                      <span class="scan-option-copy">Incremental</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                    <label class="checkbox-row option-tile">
+                      <input id="inspect_archives" name="inspect_archives" type="checkbox" />
+                      <span class="scan-option-copy">ZIP archives</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                    <label class="checkbox-row option-tile">
+                      <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
+                      <span class="scan-option-copy">Admin shares</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                  <div class="wizard-behavior-fields">
                     <label>
                       Max folder depth
                       <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
@@ -366,10 +365,7 @@
                 </div>
               </section>
 
-<details class="scan-advanced">
-                <summary>Advanced options — compliance mapping &amp; demo data</summary>
-
-              <section class="scan-card" aria-label="Compliance mapping">
+<section class="scan-card" aria-label="Compliance mapping">
                 <div class="scan-card-head">
                   <span class="scan-card-ico" aria-hidden="true">
                     <svg viewBox="0 0 24 24"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
@@ -392,77 +388,69 @@
                 </div>
               </section>
 
-              <section class="demo-data-card scan-form-wide" aria-label="Demo data generator">
-                <span class="scan-card-ico demo-data-ico" aria-hidden="true">
-                  <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="7" ry="2.5"/><path d="M5 5v14c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V5"/><path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/></svg>
-                </span>
-                <div>
-                  <span>Demo dataset</span>
-                  <strong id="demo-data-title">Enterprise test data</strong>
-                  <small id="demo-data-status">Generate local sample files for scans.</small>
-                </div>
-                <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
-              </section>
-              </details>
-
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="3">
-<section class="scan-card scan-summary-card">
-                <div class="scan-summary-head">
-                  <div class="scan-card-heading">
-                    <h4>Scan summary</h4>
-                    <span>Mirrors the scan you are about to run</span>
-                  </div>
-                  <span class="scan-summary-live"><i aria-hidden="true"></i>Live</span>
-                </div>
-                <dl class="scan-summary-list">
-                  <div class="scan-summary-row">
-                    <dt>Target</dt>
-                    <dd id="scan-summary-target">Local dataset</dd>
-                  </div>
-                  <div class="scan-summary-row">
-                    <dt>Domain</dt>
-                    <dd id="scan-summary-domain">WORKGROUP</dd>
-                  </div>
-                  <div class="scan-summary-row">
-                    <dt>Path</dt>
-                    <dd id="scan-summary-path" class="scan-summary-mono">enterprise_test_data</dd>
-                  </div>
-                  <div class="scan-summary-row">
-                    <dt>Max depth</dt>
-                    <dd id="scan-summary-depth">4</dd>
-                  </div>
-                  <div class="scan-summary-row">
-                    <dt>Extension policy</dt>
-                    <dd id="scan-summary-policy">Recommended</dd>
-                  </div>
-                </dl>
-                <div class="scan-summary-options">
-                  <span>Enabled options</span>
-                  <ul id="scan-summary-options">
-                    <li data-summary-option="async" class="on">Async queue</li>
-                    <li data-summary-option="zip">ZIP inspection</li>
-                    <li data-summary-option="admin">Admin shares</li>
-                    <li data-summary-option="compliance">Compliance mapping</li>
-                  </ul>
-                </div>
-              </section>
-                <section class="scan-card" aria-label="Connection check">
-                  <div class="scan-card-head">
-                    <span class="scan-card-ico" aria-hidden="true">
-                      <svg viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>
-                    </span>
-                    <div class="scan-card-heading">
-                      <h4>Connection check</h4>
-                      <span>Verify access before saving - optional but recommended</span>
+                <div class="wizard-review-grid">
+                  <section class="scan-card wizard-review-card" aria-label="Review">
+                    <div class="scan-card-head">
+                      <span class="scan-card-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
+                      </span>
+                      <div class="scan-card-heading">
+                        <h4>Review</h4>
+                        <span>Everything this scan will do — select a row to change it</span>
+                      </div>
                     </div>
-                  </div>
-                  <div class="actions">
-                    <button type="button" id="test-btn" class="secondary-btn">Test connection</button>
-                  </div>
-                  <div id="fs-wizard-status" class="wizard-status-mirror muted">Ready</div>
-                </section>
+                    <div class="review-rows">
+                      <button type="button" class="review-row" data-wizard-goto="1">
+                        <span class="review-label">Target</span>
+                        <span class="review-value"><b id="scan-summary-target">Local dataset</b><small id="scan-summary-domain">WORKGROUP</small></span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Path</span>
+                        <span class="review-value scan-summary-mono" id="scan-summary-path">enterprise_test_data</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Depth</span>
+                        <span class="review-value" id="scan-summary-depth">4</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">File types</span>
+                        <span class="review-value" id="scan-summary-policy">Recommended</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <div class="review-row review-row-static">
+                        <span class="review-label">Options</span>
+                        <ul id="scan-summary-options" class="review-option-chips">
+                          <li data-summary-option="async" class="on">Async queue</li>
+                          <li data-summary-option="zip">ZIP inspection</li>
+                          <li data-summary-option="admin">Admin shares</li>
+                          <li data-summary-option="compliance">Compliance mapping</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </section>
+                  <section class="scan-card wizard-launch-card" aria-label="Connection check">
+                    <div class="scan-card-head">
+                      <span class="scan-card-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>
+                      </span>
+                      <div class="scan-card-heading">
+                        <h4>Connection check</h4>
+                        <span>Optional — verify access before saving</span>
+                      </div>
+                    </div>
+                    <div class="actions">
+                      <button type="button" id="test-btn" class="secondary-btn">Test connection</button>
+                    </div>
+                    <div id="fs-wizard-status" class="wizard-status-mirror muted">Ready</div>
+                    <p class="wizard-save-note">Saving stores this scan as a card on the deck. Run it any time with <b>Start</b>.</p>
+                  </section>
+                </div>
               </div>
 
               <footer class="scan-wizard-footer">
@@ -931,7 +919,7 @@
 
           <div id="endpoint-wizard" class="scan-wizard hidden">
             <header class="scan-wizard-head">
-              <button type="button" id="endpoint-wizard-close" class="secondary-btn mini-btn wizard-back-link">&#8249; Scans</button>
+              <button type="button" id="endpoint-wizard-close" class="secondary-btn mini-btn wizard-back-link"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>Back to scans</button>
               <div class="scan-wizard-title">
                 <h4 id="endpoint-wizard-heading">New endpoint scan</h4>
                 <span>Three steps: identity, configuration, connect &amp; launch.</span>
@@ -1102,6 +1090,13 @@
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="3">
+                <section class="visual-panel endpoint-panel endpoint-io-panel wizard-review-card" aria-label="Review">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Review</h4>
+                    <span>Select a row to change it</span>
+                  </div>
+                  <div class="review-rows" id="endpoint-review-rows"></div>
+                </section>
                 <section class="visual-panel endpoint-panel winrm-activation-panel endpoint-io-panel" aria-label="Target WinRM">
                   <div class="panel-title">
                     <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-plug-zap"/></svg></span>Prepare target WinRM</h4>
@@ -1461,7 +1456,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=174"></script>
+    <script src="/static/app.js?v=175"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

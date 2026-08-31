@@ -109,6 +109,20 @@ class ScanProfileApiTests(unittest.TestCase):
         still_there = self.client.get("/api/scan-profiles", headers=tenant_headers).json()["profiles"]
         self.assertIn(mine["profile_id"], [p["profile_id"] for p in still_there])
 
+    def test_unknown_urls_redirect_and_api_stays_strict(self) -> None:
+        """Professional URL behavior: an unknown page path redirects to the
+        dashboard instead of leaking a raw JSON 404; unknown API and asset
+        paths keep failing loudly so clients notice."""
+        page = self.client.get("/definitely-not-a-page", follow_redirects=False)
+        self.assertEqual(page.status_code, 302)
+        self.assertEqual(page.headers.get("location"), "/dashboard")
+        api = self.client.get("/api/definitely-not-a-route", follow_redirects=False)
+        self.assertEqual(api.status_code, 404)
+        asset = self.client.get("/missing-file.js", follow_redirects=False)
+        self.assertEqual(asset.status_code, 404)
+        real = self.client.get("/scan", follow_redirects=False)
+        self.assertEqual(real.status_code, 200)
+
     def test_validation_rejects_bad_kind_and_blank_name(self) -> None:
         bad_kind = self.client.post(
             "/api/scan-profiles",
