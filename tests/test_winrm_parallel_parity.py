@@ -10,7 +10,6 @@ synthetic corpus - no WinRM endpoint required. Windows + Windows PowerShell only
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -19,7 +18,7 @@ import tempfile
 import unittest
 
 from collectors.file_scanner import normalize_extension_filter
-from collectors.winrm_endpoint_scanner import _scan_script
+from collectors.winrm_endpoint_scanner import WINRM_GZIP_RESPONSE_PREFIX, _read_json, _scan_script
 
 _POWERSHELL = shutil.which("powershell.exe")
 # The scan script skips noise roots incl. %TEMP% (it is under \AppData\), so the
@@ -36,10 +35,11 @@ def _run(script: str) -> dict:
             [_POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path],
             capture_output=True, timeout=180,
         )
-        out = proc.stdout.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
             raise AssertionError(f"script rc={proc.returncode}: {proc.stderr.decode('utf-8', 'replace')[:500]}")
-        return json.loads(out) if out else {}
+        if not proc.stdout.strip().startswith(WINRM_GZIP_RESPONSE_PREFIX):
+            raise AssertionError("generated endpoint script did not emit the P3 compressed response frame")
+        return _read_json(proc.stdout) or {}
     finally:
         os.unlink(path)
 

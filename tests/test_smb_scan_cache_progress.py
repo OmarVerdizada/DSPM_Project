@@ -90,12 +90,21 @@ class SmbScanCacheProgressTests(unittest.TestCase):
             return True
 
         self.acl = MagicMock(return_value={"owner": "tester", "principals": [], "permissions": []})
+        self.batch_acl = MagicMock(
+            side_effect=lambda _share, paths: {
+                path: {"owner": "tester", "principals": [], "permissions": []}
+                for path in paths
+            }
+        )
         self.connect_patch = patch.object(SMBScanner, "connect", _connect)
         self.acl_patch = patch.object(SMBScanner, "_acl_for_path", self.acl)
+        self.batch_acl_patch = patch.object(SMBScanner, "_acl_batch_for_paths", self.batch_acl)
         self.connect_patch.start()
         self.acl_patch.start()
+        self.batch_acl_patch.start()
 
     def tearDown(self) -> None:
+        self.batch_acl_patch.stop()
         self.acl_patch.stop()
         self.connect_patch.stop()
         self.temp.cleanup()
@@ -131,13 +140,15 @@ class SmbScanCacheProgressTests(unittest.TestCase):
         retrieve_after_cold = self.fake.retrieve_calls
         self.assertGreater(retrieve_after_cold, 0)
         self.acl.reset_mock()
+        self.batch_acl.reset_mock()
 
         d2 = self._run()
-        # No remote content read / hash chunk fetch and no per-file ACL call
-        # happened for unchanged files.
+        # No remote content read / hash chunk fetch or ACL acquisition happened
+        # for unchanged files.
         self.assertEqual(self.fake.retrieve_calls, retrieve_after_cold)
         self.acl.assert_not_called()
         self.assertTrue(all(f.get("cache_reused") for f in d2["files"]))
+        self.batch_acl.assert_not_called()
         self.assertEqual(d2["scan_diagnostics"]["cache_reused_files"], FILE_COUNT)
         # Findings, risk, owner, and preview survive reuse unchanged.
         s1 = {f["path"]: (len(f.get("findings") or []), f.get("risk", {}).get("level"), f.get("owner")) for f in d1["files"]}

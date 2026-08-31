@@ -665,6 +665,13 @@ class DSPMDiscoveryEngine:
             diagnostics.get("incremental_fetch_errors"),
             diagnostics.get("archive_errors"),
             diagnostics.get("archive_timed_out"),
+            # A collector that stopped at its record cap, or whose remote workers
+            # errored, enumerated only part of the scope. Treating that as a
+            # complete scan lets the baseline pruner delete objects that were
+            # never looked at, so they read as deletions and vanish from the
+            # estate until a later full scan re-adds them.
+            diagnostics.get("record_limit_reached"),
+            diagnostics.get("worker_errors"),
         )
         complete = not any(incomplete_markers)
         diagnostics["incremental"] = {

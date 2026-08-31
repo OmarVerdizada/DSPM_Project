@@ -244,6 +244,50 @@ class SymlinkContainmentTests(unittest.TestCase):
         self.assertIn("inside_ok.txt", names, "legitimate files must still be scanned")
 
 
+class TruncatedScanCompletenessTests(unittest.TestCase):
+    """A partially-enumerated scan must never be marked complete.
+
+    `complete` gates baseline pruning (backend/store.py): a complete scan
+    deletes every baseline object the scan did not see. A collector that
+    stopped at its record cap, or whose remote workers errored, enumerated only
+    part of the scope - calling that complete deletes real assets that were
+    simply never looked at, and reports them as deletions.
+    """
+
+    def _incremental_for(self, diagnostics: dict) -> dict:
+        from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
+
+        engine = DSPMDiscoveryEngine(
+            ScanConfig(
+                tenant_id="completeness",
+                local_path=".",
+                incremental_enabled=True,
+                incremental_scope="scope-key",
+            )
+        )
+        engine.last_scan_diagnostics = dict(diagnostics)
+        engine._finalize_incremental_diagnostics([])
+        return engine.last_scan_diagnostics["incremental"]
+
+    def test_clean_scan_is_complete(self) -> None:
+        self.assertTrue(
+            self._incremental_for(
+                {"record_limit_reached": False, "worker_errors": [], "visited_files": 3}
+            )["complete"]
+        )
+
+    def test_record_limit_and_worker_errors_block_completeness(self) -> None:
+        for diagnostics in (
+            {"record_limit_reached": True},
+            {"worker_errors": ["ACCESS_DENIED on a profile folder"]},
+        ):
+            with self.subTest(diagnostics=sorted(diagnostics)):
+                self.assertFalse(
+                    self._incremental_for(diagnostics)["complete"],
+                    "a truncated enumeration must not authorise baseline pruning",
+                )
+
+
 class ReportSerializationTests(unittest.TestCase):
     """The report is written compactly - the pretty-printer cost 4.1 s a scan."""
 

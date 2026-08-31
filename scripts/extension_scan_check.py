@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
 from collectors.file_scanner import SCANNABLE_EXTENSIONS, TEXT_EXTENSIONS, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
-from collectors.winrm_endpoint_scanner import _scan_script
+from collectors.winrm_endpoint_scanner import _read_json, _scan_script
 
 
 FRONTEND_APP = ROOT / "frontend" / "app.js"
@@ -191,7 +191,7 @@ def run_endpoint_script(root: Path, extensions: list[str]) -> dict:
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr or result.stdout)
-        return json.loads(result.stdout)
+        return _read_json(result.stdout) or {}
     finally:
         ps1.unlink(missing_ok=True)
 

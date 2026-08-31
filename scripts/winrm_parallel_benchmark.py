@@ -16,7 +16,6 @@ so the per-file work parallelized is cheaper than over a real remote session.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -27,7 +26,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from collectors.file_scanner import normalize_extension_filter  # noqa: E402
-from collectors.winrm_endpoint_scanner import _scan_script  # noqa: E402
+from collectors.winrm_endpoint_scanner import _read_json, _scan_script  # noqa: E402
 
 _POWERSHELL = shutil.which("powershell.exe")
 
@@ -79,10 +78,9 @@ def run(script: str) -> tuple[dict, float]:
             capture_output=True, timeout=600,
         )
         elapsed = time.perf_counter() - t0
-        out = proc.stdout.decode("utf-8", errors="replace").strip()
         if proc.returncode != 0:
             raise SystemExit(f"script failed rc={proc.returncode}: {proc.stderr.decode('utf-8','replace')[:500]}")
-        return (json.loads(out) if out else {}), elapsed
+        return (_read_json(proc.stdout) or {}), elapsed
     finally:
         os.unlink(path)
 

@@ -1,6 +1,9 @@
 ﻿from __future__ import annotations
 
 import base64
+import binascii
+import gzip
+import io
 import ipaddress
 import json
 import os
@@ -9,6 +12,7 @@ import re
 import socket
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
@@ -38,6 +42,70 @@ DEFAULT_PROFILE_FOLDERS = {
 PROFILE_DATA_SCOPE_ALIASES = set(DEFAULT_PROFILE_FOLDERS) | {"all", "profile_standard", "onedrive"}
 GLOBAL_ENDPOINT_SCOPE_ALIASES = {"all_profiles", "c_drive", "all_fixed_drives"}
 ENDPOINT_PATH_ALIASES = PROFILE_DATA_SCOPE_ALIASES | GLOBAL_ENDPOINT_SCOPE_ALIASES
+WINRM_GZIP_RESPONSE_PREFIX = b"DSPM-GZIP-BASE64-V1:"
+DEFAULT_WINRM_RESPONSE_MAX_BYTES = 512 * 1024 * 1024
+# One stdin slice must stay well inside the target's WS-Man MaxEnvelopeSize
+# (default ~150 KB on older hosts) once SOAP/base64 framing is added.
+_WINRM_STDIN_CHUNK_BYTES = 48 * 1024
+
+
+def _is_stdin_capability_error(exc: BaseException) -> bool:
+    """True when a stdin-delivery failure might be fixed by the legacy path.
+
+    The legacy path re-dials the SAME session, so a dead socket, an expired
+    timeout, or rejected credentials will fail there identically - retrying only
+    doubles the time an unreachable endpoint takes to report failure. Only
+    WS-Man/protocol-level refusals (a target that will not accept command input)
+    are worth a second attempt; an unrecognised error is treated as capability
+    related so genuinely odd targets keep the compatible path.
+    """
+    try:
+        import requests.exceptions as request_errors
+
+        if isinstance(
+            exc,
+            (
+                request_errors.ConnectionError,
+                request_errors.ConnectTimeout,
+                request_errors.ReadTimeout,
+                request_errors.Timeout,
+                request_errors.SSLError,
+                request_errors.ProxyError,
+            ),
+        ):
+            return False
+    except Exception:  # pragma: no cover - requests is a hard dependency
+        pass
+    try:
+        from winrm import exceptions as winrm_errors
+
+        if isinstance(
+            exc,
+            (
+                winrm_errors.AuthenticationError,
+                winrm_errors.BasicAuthDisabledError,
+                winrm_errors.InvalidCredentialsError,
+            ),
+        ):
+            return False
+        if isinstance(exc, winrm_errors.WinRMTransportError):
+            # 401/403 are credential/authorisation problems; other HTTP codes can
+            # be a WS-Man configuration refusal that the legacy path survives.
+            return int(getattr(exc, "code", 0) or 0) not in {401, 403}
+    except Exception:  # pragma: no cover - pywinrm is a hard dependency
+        pass
+    if isinstance(exc, (OSError, TimeoutError)):
+        return False
+    return True
+
+
+def _winrm_response_max_bytes() -> int:
+    raw = os.getenv("DSPM_WINRM_RESPONSE_MAX_BYTES", "").strip()
+    try:
+        configured = int(raw) if raw else DEFAULT_WINRM_RESPONSE_MAX_BYTES
+    except ValueError:
+        configured = DEFAULT_WINRM_RESPONSE_MAX_BYTES
+    return max(1024, min(configured, 2 * 1024 * 1024 * 1024))
 
 
 def endpoint_connection_hosts(host: str) -> list[str]:
@@ -541,6 +609,11 @@ class WinRMEndpointScanner:
         self.config = config
         self.last_scan_diagnostics: dict = {}
         self.last_connection_host = ""
+        # How the last script reached the endpoint. Without this a silent demotion
+        # to the legacy path - the exact regression this work removes - is
+        # invisible in a saved report.
+        self.last_delivery_diagnostics: dict = {}
+        self._legacy_remote_commands = 0
 
     def activate_winrm(self) -> dict:
         if platform.system().lower() != "windows":
@@ -705,11 +778,19 @@ class WinRMEndpointScanner:
         if result.status_code != 0:
             raise ConnectionError(_clean_error(result.std_err) or f"WinRM scan failed on {self.config.host}")
 
-        raw_records = _read_json(result.std_out)
+        decoded_output, response_diagnostics = _decode_scan_response(result.std_out)
+        response_diagnostics.update(self.last_delivery_diagnostics or {})
+        # Already decoded above - parse the plain JSON directly rather than
+        # re-scanning (and re-copying) a possibly multi-megabyte payload.
+        raw_records = _parse_json_text(decoded_output)
         if raw_records is None:
             # No client-side parallelism (single remote session), but record the
             # admission posture for parity with the SMB collector's diagnostics.
-            self.last_scan_diagnostics = {"io_parallel_active": False, "host_admission": admission_stats}
+            self.last_scan_diagnostics = {
+                "io_parallel_active": False,
+                "host_admission": admission_stats,
+                **response_diagnostics,
+            }
             return []
         if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
             self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
@@ -774,6 +855,7 @@ class WinRMEndpointScanner:
             )
         if filtered_wrong_profile:
             self.last_scan_diagnostics["filtered_wrong_profile"] = filtered_wrong_profile
+        self.last_scan_diagnostics.update(response_diagnostics)
         self.last_scan_diagnostics.setdefault("io_parallel_active", False)
         self.last_scan_diagnostics["host_admission"] = admission_stats
         return normalize_records(records)
@@ -904,14 +986,118 @@ class WinRMEndpointScanner:
         raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
 
     def _run_ps_file_with_session(self, session, script: str):
+        started = time.perf_counter()
+        # Never let a previous candidate's outcome describe this attempt.
+        self.last_delivery_diagnostics = {}
+        try:
+            result = self._run_ps_file_over_stdin(session, script)
+        except Exception as exc:
+            if not _is_stdin_capability_error(exc):
+                # A dead socket, a timeout, or rejected credentials will fail the
+                # legacy path identically. Retrying it there doubled the wall
+                # clock of every unreachable-endpoint failure (measured: 2x the
+                # connect timeout per host/transport candidate), so those
+                # propagate immediately and let the caller try the next
+                # candidate.
+                self.last_delivery_diagnostics = {
+                    "delivery_mode": "failed",
+                    "delivery_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "delivery_fallback_reason": type(exc).__name__,
+                }
+                raise
+            # Some older/restricted WS-Man targets reject command input even
+            # though ordinary run_cmd calls work. Preserve compatibility without
+            # making the legacy 31-PowerShell-spawn path the common case.
+            fallback_reason = type(exc).__name__
+            result = self._run_ps_file_legacy(session, script)
+            self.last_delivery_diagnostics = {
+                "delivery_mode": "legacy_disk_chunks",
+                "delivery_ms": round((time.perf_counter() - started) * 1000, 3),
+                "delivery_remote_commands": self._legacy_remote_commands,
+                "delivery_fallback_reason": fallback_reason,
+            }
+            return result
+        self.last_delivery_diagnostics = {
+            "delivery_mode": "stdin_gzip",
+            "delivery_ms": round((time.perf_counter() - started) * 1000, 3),
+            "delivery_remote_commands": 1,
+            "delivery_fallback_reason": "",
+        }
+        return result
+
+    def _run_ps_file_over_stdin(self, session, script: str):
+        """Run one byte-identical script through a single WinRM command.
+
+        The script is compressed locally, base64-wrapped so stdin remains ASCII,
+        and expanded entirely in memory by a short PowerShell bootstrap. No
+        script artifact is written to the endpoint.
+        """
+        from winrm import Response
+
+        payload = base64.b64encode(gzip.compress(script.encode("utf-8"), mtime=0))
+        bootstrap = (
+            "$ErrorActionPreference='Stop';$exitCode=0;$memory=$null;$gzip=$null;$reader=$null;"
+            "try{$payload=[Console]::In.ReadToEnd();"
+            "$compressed=[Convert]::FromBase64String($payload);"
+            "$memory=New-Object IO.MemoryStream(,$compressed);"
+            "$gzip=New-Object IO.Compression.GZipStream($memory,[IO.Compression.CompressionMode]::Decompress);"
+            "$reader=New-Object IO.StreamReader($gzip,[Text.Encoding]::UTF8);"
+            "$scriptBlock=[ScriptBlock]::Create($reader.ReadToEnd());"
+            "& $scriptBlock;if($null-ne $LASTEXITCODE){$exitCode=$LASTEXITCODE}}"
+            "catch{Write-Error $_;$exitCode=1}finally{"
+            "if($null-ne $reader){$reader.Dispose()}elseif($null-ne $gzip){$gzip.Dispose()}"
+            "elseif($null-ne $memory){$memory.Dispose()}};exit $exitCode"
+        )
+        encoded_bootstrap = base64.b64encode(bootstrap.encode("utf-16le")).decode("ascii")
+        protocol = session.protocol
+        shell_id = ""
+        command_id = ""
+        try:
+            shell_id = protocol.open_shell(codepage=65001)
+            command_id = protocol.run_command(
+                shell_id,
+                "powershell.exe",
+                ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_bootstrap],
+            )
+            # Send in bounded slices: one oversized WS-Man envelope is refused by
+            # the target (default MaxEnvelopeSize is ~150-500 KB), which would
+            # silently demote a large scan - P2 batches up to 256 paths into one
+            # script - onto the slow legacy path.
+            for index in range(0, len(payload), _WINRM_STDIN_CHUNK_BYTES):
+                slice_ = payload[index : index + _WINRM_STDIN_CHUNK_BYTES]
+                protocol.send_command_input(
+                    shell_id,
+                    command_id,
+                    slice_,
+                    end=index + _WINRM_STDIN_CHUNK_BYTES >= len(payload),
+                )
+            return Response(protocol.get_command_output(shell_id, command_id))
+        finally:
+            # Preserve the delivery/output exception if cleanup also fails; the
+            # caller then takes the compatible disk-based path on this session.
+            if shell_id and command_id:
+                try:
+                    protocol.cleanup_command(shell_id, command_id)
+                except Exception:
+                    pass
+            if shell_id:
+                try:
+                    protocol.close_shell(shell_id)
+                except Exception:
+                    pass
+
+    def _run_ps_file_legacy(self, session, script: str):
+        """Compatible disk fallback with cheap cmd.exe chunk appends."""
 
         token = uuid4().hex
         b64_name = f"dspm_{token}.b64"
         encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
         chunk_size = 1800
+        self._legacy_remote_commands = 0
 
         def run_short(command: str):
             encoded_command = base64.b64encode(command.encode("utf-16le")).decode("ascii")
+            self._legacy_remote_commands += 1
             return session.run_cmd(
                 "powershell.exe",
                 ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_command],
@@ -924,38 +1110,46 @@ class WinRMEndpointScanner:
             "if (-not (Test-Path -LiteralPath $tempRoot)) { New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null; } "
             f"$p = Join-Path $tempRoot '{b64_name}'; "
         )
-        init = run_short(temp_path + "Set-Content -LiteralPath $p -Value '' -Encoding ASCII")
+        init = run_short(
+            temp_path
+            + "[IO.File]::WriteAllBytes($p, [byte[]]@()); "
+            "[Console]::Out.Write([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($p)))"
+        )
         if init.status_code != 0:
             return init
+        encoded_remote_temp_path = (
+            init.std_out.decode("ascii") if isinstance(init.std_out, bytes) else str(init.std_out)
+        )
+        remote_temp_path = base64.b64decode(
+            encoded_remote_temp_path.strip(), validate=True
+        ).decode("utf-8")
+        if not remote_temp_path or any(character in remote_temp_path for character in '\r\n"'):
+            raise RuntimeError("WinRM legacy delivery returned an invalid temporary path.")
+
+        def cleanup_temp_file() -> None:
+            try:
+                session.run_cmd(
+                    "cmd.exe",
+                    ["/d", "/q", "/c", f'del /f /q "{remote_temp_path}" >nul 2>nul'],
+                )
+            except Exception:
+                pass
 
         for index in range(0, len(encoded_script), chunk_size):
             chunk = encoded_script[index : index + chunk_size]
-            append = run_short(temp_path + f"Add-Content -LiteralPath $p -Value '{chunk}' -Encoding ASCII")
+            self._legacy_remote_commands += 1
+            append = session.run_cmd(
+                "cmd.exe",
+                ["/d", "/q", "/c", f'echo({chunk}>>"{remote_temp_path}"'],
+            )
             if append.status_code != 0:
-                run_short(temp_path + "try { if ($p -and (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } } catch { }")
+                cleanup_temp_file()
                 return append
 
-        materialize = (
-            "$ErrorActionPreference = 'Stop'; "
-            "$tempRoot = $env:TEMP; "
-            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = $env:TMP; } "
-            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = 'C:\\Windows\\Temp'; } "
-            f"$b64 = Join-Path $tempRoot '{b64_name}'; "
-            "$raw = (Get-Content -LiteralPath $b64 -Raw).Trim(); "
-            "$script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw)); "
-            "$null = [ScriptBlock]::Create($script)"
-        )
-        materialized = run_short(materialize)
-        if materialized.status_code != 0:
-            run_short(temp_path + "try { if ($p -and (Test-Path -LiteralPath $p -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } } catch { }")
-            return materialized
-
+        encoded_temp_path = base64.b64encode(remote_temp_path.encode("utf-8")).decode("ascii")
         execute = (
             "$ErrorActionPreference = 'Stop'; "
-            "$tempRoot = $env:TEMP; "
-            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = $env:TMP; } "
-            "if ([string]::IsNullOrWhiteSpace($tempRoot) -or -not (Test-Path -LiteralPath $tempRoot)) { $tempRoot = 'C:\\Windows\\Temp'; } "
-            f"$b64 = Join-Path $tempRoot '{b64_name}'; "
+            f"$b64 = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_temp_path}')); "
             "$raw = (Get-Content -LiteralPath $b64 -Raw).Trim(); "
             "$script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw)); "
             "$scriptBlock = [ScriptBlock]::Create($script); "
@@ -971,7 +1165,11 @@ class WinRMEndpointScanner:
             "} "
             "exit $exitCode"
         )
-        return run_short(execute)
+        try:
+            return run_short(execute)
+        except Exception:
+            cleanup_temp_file()
+            raise
 
 
 def _scan_script(
@@ -1871,10 +2069,34 @@ if (-not (Test-Path Function:\\Build-DspmFileRecord)) {{ . ([scriptblock]::Creat
     }}
     $diagnostics.parallel_workers = $dspmMaxWorkers
     $diagnostics.extension_histogram = $extensionHistogram
-    [PSCustomObject]@{{
+    $dspmJson = [PSCustomObject]@{{
       records = @($records.ToArray() | Where-Object {{ $null -ne $_ }})
       diagnostics = $diagnostics
     }} | ConvertTo-Json -Depth 6 -Compress
+    $dspmResponse = $dspmJson
+    $dspmResponseStream = $null
+    $dspmResponseGzip = $null
+    try {{
+      $dspmResponseBytes = [Text.Encoding]::UTF8.GetBytes($dspmJson)
+      $dspmResponseStream = New-Object IO.MemoryStream
+      $dspmResponseGzip = New-Object IO.Compression.GZipStream(
+        $dspmResponseStream,
+        [IO.Compression.CompressionMode]::Compress,
+        $true
+      )
+      $dspmResponseGzip.Write($dspmResponseBytes, 0, $dspmResponseBytes.Length)
+      $dspmResponseGzip.Dispose()
+      $dspmResponseGzip = $null
+      $dspmResponse = "DSPM-GZIP-BASE64-V1:" + [Convert]::ToBase64String($dspmResponseStream.ToArray())
+    }} catch {{
+      # Compatibility fallback: a target that cannot create the compressor still
+      # returns the exact legacy JSON rather than failing an otherwise-good scan.
+      $dspmResponse = $dspmJson
+    }} finally {{
+      if ($dspmResponseGzip) {{ $dspmResponseGzip.Dispose() }}
+      if ($dspmResponseStream) {{ $dspmResponseStream.Dispose() }}
+    }}
+    [Console]::Out.Write($dspmResponse)
     """
 
 
@@ -2009,7 +2231,56 @@ def _activation_script(payload: dict, collector_ip: str = "") -> str:
     """
 
 
+def _decode_scan_response(output: bytes | str) -> tuple[bytes, dict]:
+    """Decode the P3 scan frame while retaining legacy plain-JSON support."""
+
+    raw = output.encode("utf-8") if isinstance(output, str) else bytes(output)
+    framed = raw.strip()
+    wire_bytes = len(framed)
+    if not framed.startswith(WINRM_GZIP_RESPONSE_PREFIX):
+        return raw, {
+            "response_encoding": "json",
+            "response_wire_bytes": wire_bytes,
+            "response_json_bytes": wire_bytes,
+            "response_compressed_bytes": 0,
+            "response_compression_ratio": 1.0,
+        }
+
+    encoded = framed[len(WINRM_GZIP_RESPONSE_PREFIX):]
+    limit = _winrm_response_max_bytes()
+    compressed_overhead = max(1024 * 1024, limit // 100)
+    max_encoded = ((limit + compressed_overhead) * 4 + 2) // 3
+    if not encoded or len(encoded) > max_encoded:
+        raise ValueError("Compressed WinRM scan response exceeds the configured size limit")
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as archive:
+            decoded = archive.read(limit + 1)
+    except (binascii.Error, EOFError, OSError) as exc:
+        raise ValueError("Invalid compressed WinRM scan response") from exc
+    if len(decoded) > limit:
+        raise ValueError("Decompressed WinRM scan response exceeds the configured size limit")
+    try:
+        decoded.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Compressed WinRM scan response is not valid UTF-8 JSON") from exc
+    return decoded, {
+        "response_encoding": "gzip+base64",
+        "response_wire_bytes": wire_bytes,
+        "response_json_bytes": len(decoded),
+        "response_compressed_bytes": len(compressed),
+        "response_compression_ratio": round(len(decoded) / max(wire_bytes, 1), 3),
+    }
+
+
 def _read_json(output: bytes | str) -> object | None:
+    """Decode a possibly-compressed response frame, then parse it."""
+    output, _ = _decode_scan_response(output)
+    return _parse_json_text(output)
+
+
+def _parse_json_text(output: bytes | str) -> object | None:
+    """Parse already-decoded (plain JSON) collector output."""
     text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
     text = text.strip()
     if not text:

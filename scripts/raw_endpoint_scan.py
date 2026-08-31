@@ -8,7 +8,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner, _scan_script
+from collectors.winrm_endpoint_scanner import (
+    WinRMEndpointConfig,
+    WinRMEndpointScanner,
+    _decode_scan_response,
+    _read_json,
+    _scan_script,
+)
 
 
 def main() -> int:
@@ -52,13 +58,18 @@ def main() -> int:
         inspect_archives=args.inspect_archives,
     )
     result = scanner._run_ps_file(script)
-    stdout = result.std_out.decode("utf-8", errors="replace") if isinstance(result.std_out, bytes) else str(result.std_out)
+    wire_stdout = result.std_out.decode("utf-8", errors="replace") if isinstance(result.std_out, bytes) else str(result.std_out)
     stderr = result.std_err.decode("utf-8", errors="replace") if isinstance(result.std_err, bytes) else str(result.std_err)
     print(f"STATUS={result.status_code}")
-    print(f"STDOUT_LEN={len(stdout)}")
+    print(f"WIRE_STDOUT_LEN={len(wire_stdout)}")
     print(f"STDERR_LEN={len(stderr)}")
+    stdout = wire_stdout
     try:
-        parsed = json.loads(stdout.strip())
+        decoded, response_diagnostics = _decode_scan_response(result.std_out)
+        stdout = decoded.decode("utf-8", errors="replace")
+        print(f"RESPONSE={json.dumps(response_diagnostics, sort_keys=True)}")
+        print(f"JSON_STDOUT_LEN={len(stdout)}")
+        parsed = _read_json(decoded)
         records = parsed.get("records") if isinstance(parsed, dict) else []
         print(f"JSON_PARSE=ok records={len(records) if isinstance(records, list) else 'not-list'}")
     except json.JSONDecodeError as exc:
