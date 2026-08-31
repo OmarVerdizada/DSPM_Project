@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=224" />
+    <link rel="stylesheet" href="/static/styles.css?v=226" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -216,7 +216,7 @@
           <div id="fs-wizard" class="scan-wizard hidden">
             <div class="scan-layout">
             <header class="scan-wizard-head">
-              <button type="button" id="fs-wizard-close" class="secondary-btn mini-btn wizard-back-link"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>Back to scans</button>
+              <button type="button" id="fs-wizard-close" class="secondary-btn mini-btn wizard-back-link" title="Back to scans" aria-label="Back to scans"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg></button>
               <div class="scan-wizard-title">
                 <h4 id="fs-wizard-heading">New file server scan</h4>
               </div>
@@ -918,7 +918,7 @@
 
           <div id="endpoint-wizard" class="scan-wizard hidden">
             <header class="scan-wizard-head">
-              <button type="button" id="endpoint-wizard-close" class="secondary-btn mini-btn wizard-back-link"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>Back to scans</button>
+              <button type="button" id="endpoint-wizard-close" class="secondary-btn mini-btn wizard-back-link" title="Back to scans" aria-label="Back to scans"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg></button>
               <div class="scan-wizard-title">
                 <h4 id="endpoint-wizard-heading">New endpoint scan</h4>
               </div>
@@ -1454,7 +1454,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=176"></script>
+    <script src="/static/app.js?v=178"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

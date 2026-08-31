@@ -101,6 +101,30 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn('aria-label="Compliance mapping"', fs_step2)
         self.assertNotIn("demo-data-card", fs_step2)
 
+    def test_navigation_dismisses_an_open_setup_wizard(self) -> None:
+        """A wizard lives INSIDE its scan panel, so switching tabs must close
+        it - otherwise the sidebar updates the URL to /scan#file-servers while
+        the setup view stays on screen. The guard also runs during boot, when
+        SCAN_WIZARD_KINDS is still in its temporal dead zone, so the access is
+        wrapped in try/catch rather than a `typeof` check (which throws there)."""
+        switch_start = self.app_js.index("function switchTab(")
+        switch_body = self.app_js[switch_start:switch_start + 900]
+        self.assertIn("closeAnyOpenScanWizard()", switch_body)
+        guard_start = self.app_js.index("function closeAnyOpenScanWizard(")
+        guard = self.app_js[guard_start:guard_start + 500]
+        self.assertIn("try {", guard)
+        self.assertIn("catch", guard)
+        self.assertNotIn('typeof SCAN_WIZARD_KINDS', guard)
+
+    def test_setup_view_fills_the_viewport_without_page_scroll(self) -> None:
+        # The wizard is an app frame: header and footer pinned, only the step
+        # body scrolls, so the setup page always fits the screen.
+        self.assertIn("#fs-wizard .wizard-step:not(.hidden)", self.styles_css)
+        self.assertIn("#tab-file-servers:has(#fs-wizard:not(.hidden))", self.styles_css)
+        # Cards are capped to one chip row so both decks stay the same height.
+        self.assertIn("spc-chip-more", self.app_js)
+        self.assertIn("spc-chip-more", self.styles_css)
+
     def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
         risk_panel = self.index_html[
             self.index_html.index('id="tab-risk"'):

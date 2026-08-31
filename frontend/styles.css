@@ -23441,3 +23441,135 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 }
 #fs-wizard, #endpoint-wizard { gap: 8px !important; }
 #fs-wizard .scan-wizard-footer, #endpoint-wizard .scan-wizard-footer { margin-top: 4px !important; }
+
+/* ============================================================
+   Scan decks & wizards v4
+   The setup view becomes an app frame: header and footer pinned,
+   only the step body scrolls. No page scroll, no dead space.
+   ============================================================ */
+
+/* --- #1 The wizard fills the viewport, never leaves a void -------- */
+#tab-file-servers:has(#fs-wizard:not(.hidden)),
+#tab-endpoint:has(#endpoint-wizard:not(.hidden)) {
+  min-height: calc(100vh - 114px);
+  overflow: hidden;
+}
+#fs-wizard:not(.hidden), #endpoint-wizard:not(.hidden) {
+  display: flex !important;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-width: 1120px;
+}
+/* The FS wizard carries an extra .scan-layout wrapper; both chains must
+   forward the available height down to the scrolling step body. */
+#fs-wizard > .scan-layout {
+  display: flex !important;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#fs-wizard #connection-form,
+#endpoint-wizard > .scan-form-column {
+  display: flex !important;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+#fs-wizard .scan-wizard-head, #endpoint-wizard .scan-wizard-head { flex: 0 0 auto; }
+#fs-wizard .wizard-step:not(.hidden), #endpoint-wizard .wizard-step:not(.hidden) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+  align-content: start;
+}
+#fs-wizard .scan-wizard-footer, #endpoint-wizard .scan-wizard-footer {
+  flex: 0 0 auto;
+  margin-top: 10px !important;
+}
+/* A slim, unobtrusive scrollbar for the step body */
+#fs-wizard .wizard-step::-webkit-scrollbar,
+#endpoint-wizard .wizard-step::-webkit-scrollbar { width: 8px; }
+#fs-wizard .wizard-step::-webkit-scrollbar-thumb,
+#endpoint-wizard .wizard-step::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--muted) 35%, transparent);
+  border-radius: 999px;
+}
+
+/* Wider screens: the Basics fields breathe into three columns instead of
+   leaving half the viewport empty. */
+@media (min-width: 1100px) {
+  #fs-wizard .scan-form-grid { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  #fs-wizard .scan-form-grid .scan-form-wide { grid-column: 1 / -1; }
+  #endpoint-wizard .endpoint-form { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  #endpoint-wizard .endpoint-form .scan-form-wide { grid-column: 1 / -1; }
+}
+
+/* --- #3 Icon-only back control ------------------------------------ */
+#fs-wizard-close, #endpoint-wizard-close {
+  display: grid !important;
+  place-items: center !important;
+  width: 34px !important;
+  height: 34px !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  border-radius: 9px !important;
+}
+#fs-wizard-close .back-ico, #endpoint-wizard-close .back-ico { width: 16px; height: 16px; }
+
+/* --- #4 Bigger step markers with truly centred numbers ------------ */
+#fs-wizard .stepper-dot, #endpoint-wizard .stepper-dot {
+  width: 30px !important;
+  height: 30px !important;
+  min-width: 30px;
+  font-size: 13px !important;
+  font-weight: 650 !important;
+  line-height: 1 !important;
+  display: inline-grid !important;
+  place-items: center !important;
+  padding: 0 !important;
+  font-variant-numeric: tabular-nums;
+  /* The glyph's own metrics sit slightly high in a circle; nudge it back. */
+  text-indent: 0;
+}
+#fs-wizard .stepper-dot > *, #endpoint-wizard .stepper-dot > * { line-height: 1; }
+#fs-wizard .stepper-label, #endpoint-wizard .stepper-label { font-size: 11.5px; }
+#fs-wizard .stepper-node, #endpoint-wizard .stepper-node { padding: 0 9px; gap: 8px; }
+#fs-wizard .stepper-node + .stepper-node::before,
+#endpoint-wizard .stepper-node + .stepper-node::before { width: 22px; margin-right: 9px; }
+#fs-wizard .stepper-node.is-current .stepper-dot,
+#endpoint-wizard .stepper-node.is-current .stepper-dot {
+  box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--accent) 17%, transparent);
+}
+
+/* --- #5 Identical card geometry on both decks --------------------- */
+#fs-profile-grid .scan-profile-card, #endpoint-profile-grid .scan-profile-card {
+  min-height: 118px;
+}
+#fs-profile-grid .spc-body, #endpoint-profile-grid .spc-body {
+  grid-template-rows: auto auto auto 1fr;
+  align-content: start;
+}
+#fs-profile-grid .spc-chips, #endpoint-profile-grid .spc-chips {
+  flex-wrap: nowrap;
+  overflow: hidden;
+  min-height: 18px;
+}
+#fs-profile-grid .spc-chip, #endpoint-profile-grid .spc-chip {
+  flex: 0 0 auto;
+  max-width: 118px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.spc-chip-more { font-weight: 600; }
+#fs-profile-grid .spc-foot, #endpoint-profile-grid .spc-foot { align-self: end; }
+
+@media (max-width: 900px) {
+  #tab-file-servers:has(#fs-wizard:not(.hidden)),
+  #tab-endpoint:has(#endpoint-wizard:not(.hidden)) { overflow: visible; min-height: 0; }
+  #fs-wizard .wizard-step, #endpoint-wizard .wizard-step { overflow: visible; }
+}

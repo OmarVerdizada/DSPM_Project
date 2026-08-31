@@ -3041,13 +3041,8 @@ window.addEventListener("popstate", () => {
   // Leaving a setup URL (back button) closes the wizard; a setup hash never
   // OPENS one - resolveTabName does not know it, so direct entry lands on
   // the deck. The temporary URL dies with the flow.
-  if (typeof closeScanWizard === "function") {
-    Object.keys(SCAN_WIZARD_KINDS || {}).forEach((kind) => {
-      const wizard = document.querySelector(SCAN_WIZARD_KINDS[kind].wizard);
-      if (wizard && !wizard.classList.contains("hidden") && !String(location.hash).endsWith("-setup")) {
-        closeScanWizard(kind, { skipUrl: true });
-      }
-    });
+  if (!String(location.hash).endsWith("-setup")) {
+    closeAnyOpenScanWizard();
   }
   const tab = tabFromLocation();
   if (tab) switchTab(tab);
@@ -3126,6 +3121,11 @@ function switchTab(tabName) {
   const resolvedTab = resolveTabName(tabName);
   const activePanel = document.getElementById(`tab-${resolvedTab}`);
   if (!activePanel) return;
+
+  // A setup wizard lives INSIDE its scan panel, so navigating to that panel
+  // (or away from it) must dismiss it - otherwise the sidebar changes the URL
+  // to /scan#file-servers while the setup view stays on screen.
+  closeAnyOpenScanWizard();
 
   const destination = navDestination(resolvedTab);
   tabs.forEach((tab) => {
@@ -8678,9 +8678,16 @@ function profileChips(profile) {
 function scanProfileCardMarkup(profile) {
   const meta = SCAN_WIZARD_KINDS[profile.kind];
   const running = activeProfileRun && activeProfileRun.id === profile.profile_id;
-  const chips = profileChips(profile)
+  // Three chips maximum keeps every card exactly one chip-row tall, so the
+  // File server and Endpoint decks match. The rest are summarised as "+N".
+  const allChips = profileChips(profile);
+  const shownChips = allChips.slice(0, 3);
+  const hiddenChips = allChips.slice(3);
+  const chips = shownChips
     .map((chip) => `<span class="spc-chip${chip.on ? " on" : ""}">${escapeHtml(chip.label)}</span>`)
-    .join("");
+    .join("") + (hiddenChips.length
+      ? `<span class="spc-chip spc-chip-more" title="${escapeHtml(hiddenChips.map((chip) => chip.label).join(", "))}">+${hiddenChips.length}</span>`
+      : "");
   const saved = String(profile.updated_at || "").slice(0, 10);
   const stateLabel = running ? "Running" : "Ready";
   return `
@@ -8800,6 +8807,25 @@ function openScanWizard(kind, profileId = "") {
   window.setTimeout(() => {
     document.querySelector(kind === "file-server" ? "#fs-profile-name" : "#endpoint-profile-name")?.focus();
   }, 60);
+}
+
+// Safe from anywhere, including before this module's consts initialize and on
+// pages with no wizard. The router calls this during boot, when
+// SCAN_WIZARD_KINDS is still in its temporal dead zone - `typeof` does NOT
+// guard a const there, it throws, so the access itself must be caught.
+function closeAnyOpenScanWizard() {
+  let kinds;
+  try {
+    kinds = SCAN_WIZARD_KINDS;
+  } catch {
+    return;
+  }
+  Object.keys(kinds || {}).forEach((kind) => {
+    const wizard = document.querySelector(kinds[kind].wizard);
+    if (wizard && !wizard.classList.contains("hidden")) {
+      closeScanWizard(kind, { skipUrl: true });
+    }
+  });
 }
 
 function closeScanWizard(kind, options = {}) {
