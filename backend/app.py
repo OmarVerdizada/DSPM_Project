@@ -73,6 +73,9 @@ from backend.store import (
     list_api_keys,
     revoke_api_key,
     save_scan_history,
+    save_scan_profile,
+    list_scan_profiles,
+    delete_scan_profile,
     tenant_exists,
     get_finding,
     get_finding_history,
@@ -1439,6 +1442,42 @@ def store_credentials(payload: CredentialRequest, principal: Principal = Depends
     )
     audit(principal.tenant_id, principal.subject, "credential.stored", {"secret_ref": secret_ref})
     return {"credential_ref": secret_ref, "domain": payload.domain.strip() or "WORKGROUP"}
+
+
+class ScanProfileRequest(BaseModel):
+    profile_id: str = Field(default="", max_length=40)
+    kind: str = Field(pattern="^(file-server|endpoint)$")
+    name: str = Field(min_length=1, max_length=80)
+    config: dict = Field(default_factory=dict)
+
+
+@app.get("/api/scan-profiles")
+def scan_profiles_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    return {"profiles": list_scan_profiles(principal.tenant_id)}
+
+
+@app.post("/api/scan-profiles")
+def scan_profiles_save(payload: ScanProfileRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    try:
+        profile = save_scan_profile(
+            principal.tenant_id,
+            profile_id=payload.profile_id or None,
+            kind=payload.kind,
+            name=payload.name,
+            config=payload.config,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    audit(principal.tenant_id, principal.subject, "scan_profile.saved", {"profile_id": profile["profile_id"], "kind": payload.kind})
+    return profile
+
+
+@app.delete("/api/scan-profiles/{profile_id}")
+def scan_profiles_delete(profile_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    removed = delete_scan_profile(principal.tenant_id, profile_id)
+    if removed:
+        audit(principal.tenant_id, principal.subject, "scan_profile.deleted", {"profile_id": profile_id})
+    return {"deleted": removed}
 
 
 @app.post("/api/test-connection")

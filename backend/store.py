@@ -329,6 +329,17 @@ def init_db() -> None:
                     PRIMARY KEY (tenant_id, secret_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS scan_profiles (
+                    tenant_id TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    config_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, profile_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS alert_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     tenant_id TEXT NOT NULL,
@@ -803,6 +814,103 @@ def init_db() -> None:
 
 
 init_db()
+
+
+SCAN_PROFILE_KINDS = {"file-server", "endpoint"}
+_SCAN_PROFILE_SECRET_KEYS = {"password", "admin_password", "secret", "token"}
+
+
+def _sanitize_scan_profile_config(config: dict) -> dict:
+    """Profiles persist configuration, never credentials.
+
+    The client vaults passwords into credential refs before saving, but the
+    store strips secret-shaped keys anyway so a raw password can never land in
+    the database even through a hand-crafted API call.
+    """
+    cleaned = {}
+    for key, value in (config or {}).items():
+        if str(key).lower() in _SCAN_PROFILE_SECRET_KEYS:
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def list_scan_profiles(tenant_id: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT profile_id, kind, name, config_json, created_at, updated_at "
+            "FROM scan_profiles WHERE tenant_id = ? ORDER BY created_at",
+            (tenant_id,),
+        ).fetchall()
+    profiles = []
+    for row in rows:
+        try:
+            config = json.loads(row["config_json"] or "{}")
+        except json.JSONDecodeError:
+            config = {}
+        profiles.append({
+            "profile_id": row["profile_id"],
+            "kind": row["kind"],
+            "name": row["name"],
+            "config": config,
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+    return profiles
+
+
+def save_scan_profile(
+    tenant_id: str,
+    *,
+    profile_id: str | None,
+    kind: str,
+    name: str,
+    config: dict,
+) -> dict:
+    if kind not in SCAN_PROFILE_KINDS:
+        raise ValueError("Unknown scan profile kind")
+    clean_name = str(name or "").strip()[:80]
+    if not clean_name:
+        raise ValueError("Scan profile name is required")
+    cleaned = _sanitize_scan_profile_config(config if isinstance(config, dict) else {})
+    encoded = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) > 32 * 1024:
+        raise ValueError("Scan profile configuration is too large")
+    now = datetime.now(timezone.utc).isoformat()
+    new_id = str(profile_id or "").strip() or secrets.token_urlsafe(9)
+    with _lock:
+        with _connect() as conn:
+            existing = conn.execute(
+                "SELECT created_at FROM scan_profiles WHERE tenant_id = ? AND profile_id = ?",
+                (tenant_id, new_id),
+            ).fetchone()
+            created_at = existing["created_at"] if existing else now
+            conn.execute(
+                "INSERT INTO scan_profiles (tenant_id, profile_id, kind, name, config_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (tenant_id, profile_id) DO UPDATE SET "
+                "kind = excluded.kind, name = excluded.name, config_json = excluded.config_json, "
+                "updated_at = excluded.updated_at",
+                (tenant_id, new_id, kind, clean_name, encoded, created_at, now),
+            )
+    return {
+        "profile_id": new_id,
+        "kind": kind,
+        "name": clean_name,
+        "config": cleaned,
+        "created_at": created_at,
+        "updated_at": now,
+    }
+
+
+def delete_scan_profile(tenant_id: str, profile_id: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute(
+                "DELETE FROM scan_profiles WHERE tenant_id = ? AND profile_id = ?",
+                (tenant_id, profile_id),
+            )
+    return bool(result.rowcount)
 
 
 def audit(tenant_id: str, actor: str, action: str, detail: dict | None = None) -> None:
