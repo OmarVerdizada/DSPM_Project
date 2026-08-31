@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=215" />
+    <link rel="stylesheet" href="/static/styles.css?v=217" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -171,58 +171,95 @@
           </div>
         </section>
 
-        <section id="tab-file-servers" class="tab-panel">
+                <section id="tab-file-servers" class="tab-panel">
           <div class="section-header">
             <div>
               <h3>File server scan</h3>
             </div>
           </div>
 
-          <div class="scan-layout">
-            <form id="connection-form" class="scan-form-column">
-              <section class="scan-card" aria-label="Connection and scope">
-                <div class="scan-card-head">
-                  <span class="scan-card-ico" aria-hidden="true">
-                    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
-                  </span>
-                  <div class="scan-card-heading">
-                    <h4>Connection &amp; scope</h4>
-                    <span>SMB target or local dataset</span>
+          <div id="fs-scan-deck" class="scan-deck">
+            <div id="fs-profile-grid" class="scan-profile-grid" aria-label="Saved file server scans">
+              <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="file-server">
+                <span class="socket-plus" aria-hidden="true">+</span>
+                <strong>Set up your first file server scan</strong>
+                <small>Name it, point it at a share, and keep it ready to run.</small>
+              </button>
+            </div>
+            <div id="fs-deck-live" class="scan-deck-live">
+              <div id="connection-status" class="status muted">Ready</div>
+              <div id="scan-progress" class="scan-progress hidden" aria-live="polite">
+                <div class="scan-pulse" aria-hidden="true"></div>
+                <div>
+                  <div class="scan-progress-header">
+                    <strong id="scan-progress-label">Scanning...</strong>
+                    <span id="scan-progress-percent">0%</span>
                   </div>
+                  <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="scan-progress-bar"></span></div>
                 </div>
-                <div class="scan-form-grid">
-                  <label>
-                    File server / IP
-                    <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
-                  </label>
-                  <label>
-                    Domain
-                    <input id="domain" name="domain" value="WORKGROUP" placeholder="Domain, WORKGROUP, or server name" />
-                  </label>
-                  <label>
-                    Username
-                    <input id="username" name="username" autocomplete="username" placeholder="Domain or local admin user" />
-                  </label>
-                  <label>
-                    Password
-                    <input id="password" name="password" type="password" autocomplete="current-password" />
-                  </label>
-                  <label>
-                    Credential ref
-                    <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
-                  </label>
-                  <label>
-                    Local sample path
-                    <input id="local_path" name="local_path" value="enterprise_test_data" />
-                  </label>
-                  <label>
-                    Max folder depth
-                    <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
-                  </label>
-                </div>
-              </section>
+              </div>
+              <button type="button" id="scan-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
+            </div>
+          </div>
 
-              <section class="scan-card" aria-label="Scan options">
+          <div id="fs-wizard" class="scan-wizard hidden">
+            <div class="scan-layout">
+            <header class="scan-wizard-head">
+              <button type="button" id="fs-wizard-close" class="secondary-btn mini-btn wizard-back-link">&#8249; Scans</button>
+              <div class="scan-wizard-title">
+                <h4 id="fs-wizard-heading">New file server scan</h4>
+                <span>Three steps: identity, configuration, review.</span>
+              </div>
+              <ol class="scan-stepper" data-stepper="file-server">
+                <li class="stepper-node is-current" data-step-node="1"><span class="stepper-dot">1</span><span class="stepper-label">Basics</span></li>
+                <li class="stepper-node" data-step-node="2"><span class="stepper-dot">2</span><span class="stepper-label">Configuration</span></li>
+                <li class="stepper-node" data-step-node="3"><span class="stepper-dot">3</span><span class="stepper-label">Review &amp; launch</span></li>
+              </ol>
+            </header>
+
+            <form id="connection-form" class="scan-form-column" novalidate>
+              <div class="wizard-step" data-wizard-step="1">
+                <section class="scan-card" aria-label="Scan identity">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <h4>Basics</h4>
+                      <span>Name this scan and enter the connection it uses</span>
+                    </div>
+                  </div>
+                  <div class="scan-form-grid">
+                    <label class="scan-form-wide">
+                      Scan name
+                      <input id="fs-profile-name" maxlength="80" placeholder="HR file share, Finance archive..." />
+                    </label>
+                    <label>
+                      File server / IP
+                      <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
+                    </label>
+                    <label>
+                      Domain
+                      <input id="domain" name="domain" value="WORKGROUP" placeholder="Domain, WORKGROUP, or server name" />
+                    </label>
+                    <label>
+                      Username
+                      <input id="username" name="username" autocomplete="username" placeholder="Domain or local admin user" />
+                    </label>
+                    <label>
+                      Password
+                      <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Stored as a vault reference on save" />
+                    </label>
+                    <label class="scan-form-wide">
+                      Credential ref
+                      <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="2">
+<section class="scan-card" aria-label="Scan options">
                 <div class="scan-card-head">
                   <span class="scan-card-ico" aria-hidden="true">
                     <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M16 3.5v5M4 12h4M12 12h8M8 9.5v5M4 18h12M16 15.5v5M20 18h0"/></svg>
@@ -256,7 +293,28 @@
                 </div>
               </section>
 
-              <section class="scan-card" aria-label="Extension policy">
+                <section class="scan-card" aria-label="Scope">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <h4>Scope</h4>
+                      <span>How deep the walk goes, and the local fallback dataset</span>
+                    </div>
+                  </div>
+                  <div class="scan-form-grid">
+                    <label>
+                      Max folder depth
+                      <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
+                    </label>
+                    <label>
+                      Local sample path
+                      <input id="local_path" name="local_path" value="enterprise_test_data" />
+                    </label>
+                  </div>
+                </section>
+<section class="scan-card" aria-label="Extension policy">
                 <div class="extension-filter scan-form-wide">
                   <div class="scan-card-head">
                     <span class="scan-card-ico" aria-hidden="true">
@@ -308,7 +366,7 @@
                 </div>
               </section>
 
-              <details class="scan-advanced">
+<details class="scan-advanced">
                 <summary>Advanced options — compliance mapping &amp; demo data</summary>
 
               <section class="scan-card" aria-label="Compliance mapping">
@@ -347,37 +405,10 @@
               </section>
               </details>
 
-              <section class="scan-card scan-actions-card" aria-label="Scan actions">
-                <div class="scan-card-head">
-                  <span class="scan-card-ico" aria-hidden="true">
-                    <svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>
-                  </span>
-                  <div class="scan-card-heading">
-                    <h4>Actions</h4>
-                    <span>Validate access, then launch the file scan</span>
-                  </div>
-                </div>
-                <div class="actions">
-                  <button type="button" id="test-btn" class="secondary-btn">Test connection</button>
-                  <button type="submit" id="scan-btn">Run file scan</button>
-                  <button type="button" id="scan-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
-                </div>
-                <div id="connection-status" class="status muted">Ready</div>
-                <div id="scan-progress" class="scan-progress hidden" aria-live="polite">
-                  <div class="scan-pulse" aria-hidden="true"></div>
-                  <div>
-                    <div class="scan-progress-header">
-                      <strong id="scan-progress-label">Scanning...</strong>
-                      <span id="scan-progress-percent">0%</span>
-                    </div>
-                    <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="scan-progress-bar"></span></div>
-                  </div>
-                </div>
-              </section>
-            </form>
+              </div>
 
-            <aside class="scan-summary" aria-label="Scan summary">
-              <section class="scan-card scan-summary-card">
+              <div class="wizard-step hidden" data-wizard-step="3">
+<section class="scan-card scan-summary-card">
                 <div class="scan-summary-head">
                   <div class="scan-card-heading">
                     <h4>Scan summary</h4>
@@ -417,7 +448,35 @@
                   </ul>
                 </div>
               </section>
-            </aside>
+                <section class="scan-card" aria-label="Connection check">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <h4>Connection check</h4>
+                      <span>Verify access before saving - optional but recommended</span>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button type="button" id="test-btn" class="secondary-btn">Test connection</button>
+                  </div>
+                  <div id="fs-wizard-status" class="wizard-status-mirror muted">Ready</div>
+                </section>
+              </div>
+
+              <footer class="scan-wizard-footer">
+                <button type="button" id="fs-wizard-delete" class="wizard-delete-btn hidden">Delete this scan</button>
+                <span id="fs-wizard-hint" class="wizard-hint" aria-live="polite"></span>
+                <div class="wizard-nav">
+                  <button type="button" id="fs-wizard-back" class="secondary-btn" disabled>Back</button>
+                  <button type="button" id="fs-wizard-next">Next</button>
+                  <button type="button" id="fs-wizard-save" class="hidden">Save scan</button>
+                </div>
+                <button type="submit" id="scan-btn" class="hidden" tabindex="-1" aria-hidden="true">Run file scan</button>
+              </footer>
+            </form>
+            </div>
           </div>
 
           <section class="context-strip context-strip-trailing" id="file-server-context">
@@ -429,6 +488,7 @@
             <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
           </section>
         </section>
+
 
         <section id="tab-overview" class="tab-panel active">
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -806,8 +866,8 @@
           </div>
         </section>
 
-        <section id="tab-endpoint" class="tab-panel">
-          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+                <section id="tab-endpoint" class="tab-panel">
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-radar" viewBox="0 0 24 24"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62a10 10 0 1 0 19.02-1.27"/><path d="M16.24 7.76a6 6 0 1 0-8.01 8.91"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></symbol>
               <symbol id="li-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
@@ -842,148 +902,144 @@
             </div>
           </div>
 
-          <details class="scan-advanced">
-            <summary>Optional — prepare local backend WinRM (rarely needed)</summary>
+          <div id="endpoint-scan-deck" class="scan-deck">
+            <div id="endpoint-profile-grid" class="scan-profile-grid" aria-label="Saved endpoint scans">
+              <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="endpoint">
+                <span class="socket-plus" aria-hidden="true">+</span>
+                <strong>Set up your first endpoint scan</strong>
+                <small>Pick a workstation, a user profile, and keep it ready to run.</small>
+              </button>
+            </div>
+            <div id="endpoint-deck-live" class="scan-deck-live">
+              <p id="endpoint-status" class="save-status">Ready. Saved endpoint scans start from their card.</p>
+              <div id="endpoint-scan-progress" class="scan-progress endpoint-scan-progress hidden" aria-live="polite">
+                <div class="scan-pulse" aria-hidden="true"></div>
+                <div>
+                  <div class="scan-progress-header">
+                    <strong id="endpoint-scan-progress-label">Scanning endpoint...</strong>
+                    <span id="endpoint-scan-progress-percent">0%</span>
+                  </div>
+                  <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="endpoint-scan-progress-bar"></span></div>
+                </div>
+              </div>
+              <div class="scan-deck-live-actions">
+                <button type="button" id="endpoint-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
+                <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
+              </div>
+            </div>
+          </div>
 
-          <section class="visual-panel endpoint-panel winrm-activation-panel">
-            <div class="panel-title">
-              <h4>Optional local readiness</h4>
-              <span>Backend host only</span>
-            </div>
-            <div class="asset-form-grid endpoint-form">
-              <label>
-                Domain
-                <input id="local-winrm-domain" value="WORKGROUP" />
-              </label>
-              <label>
-                Admin username
-                <input id="local-winrm-username" autocomplete="username" placeholder="Local admin on this backend host" />
-              </label>
-              <label>
-                Admin password
-                <input id="local-winrm-password" type="password" autocomplete="current-password" />
-              </label>
-            </div>
-            <div class="actions endpoint-actions">
-              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Prepare local backend WinRM</button>
-            </div>
-            <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows host running this backend. Do not enter domain/DC credentials here unless this backend host actually needs them; target machine local-admin credentials are entered below.</p>
-          </section>
-          </details>
+          <div id="endpoint-wizard" class="scan-wizard hidden">
+            <header class="scan-wizard-head">
+              <button type="button" id="endpoint-wizard-close" class="secondary-btn mini-btn wizard-back-link">&#8249; Scans</button>
+              <div class="scan-wizard-title">
+                <h4 id="endpoint-wizard-heading">New endpoint scan</h4>
+                <span>Three steps: identity, configuration, connect &amp; launch.</span>
+              </div>
+              <ol class="scan-stepper" data-stepper="endpoint">
+                <li class="stepper-node is-current" data-step-node="1"><span class="stepper-dot">1</span><span class="stepper-label">Basics</span></li>
+                <li class="stepper-node" data-step-node="2"><span class="stepper-dot">2</span><span class="stepper-label">Configuration</span></li>
+                <li class="stepper-node" data-step-node="3"><span class="stepper-dot">3</span><span class="stepper-label">Connect &amp; launch</span></li>
+              </ol>
+            </header>
 
-          <section class="visual-panel endpoint-panel winrm-activation-panel endpoint-io-panel">
-            <div class="panel-title">
-              <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span>1. Target machine WinRM</h4>
-              <span>Remote preparation</span>
-            </div>
-            <div class="asset-form-grid endpoint-form">
-              <label>
-                Target host / IP
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-server"/></svg><input id="winrm-activate-host" placeholder="10.10.10.25 or laptop01.domain.local" /></span>
-              </label>
-              <label>
-                Target Windows user
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user"/></svg><input id="winrm-target-username" autocomplete="username" placeholder="hr.01" /></span>
-              </label>
-              <label>
-                Domain
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-globe"/></svg><input id="winrm-activate-domain" value="WORKGROUP" /></span>
-              </label>
-              <label>
-                Admin username
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><input id="winrm-activate-username" autocomplete="username" placeholder="Target admin, e.g. Administrator" /></span>
-              </label>
-              <label>
-                Admin password
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="winrm-activate-password" type="password" autocomplete="current-password" /></span>
-              </label>
-            </div>
-            <div class="actions endpoint-actions">
-              <button type="button" id="endpoint-activate-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-plug-zap"/></svg>Prepare & Test target WinRM</button>
-            </div>
-            <p id="winrm-activate-status" class="save-status">Target user is the profile to scan. Admin credential must be an administrator on the target and is used to prepare WinRM.</p>
-          </section>
+            <div class="scan-form-column">
+              <div class="wizard-step" data-wizard-step="1">
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan identity">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span>Basics</h4>
+                    <span>Name this scan and enter the target machine</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label class="scan-form-wide">
+                      Scan name
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-bookmark"/></svg><input id="endpoint-profile-name" maxlength="80" placeholder="HR laptop, Finance workstation..." /></span>
+                    </label>
+                    <label>
+                      Endpoint host / IP
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-server"/></svg><input id="endpoint-host" placeholder="10.10.10.25 or laptop01.domain.local" /></span>
+                    </label>
+                    <label>
+                      Target Windows user
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user"/></svg><input id="endpoint-target-username" placeholder="j.doe, optional for drive scans" /></span>
+                    </label>
+                    <label>
+                      Domain
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-globe"/></svg><input id="endpoint-domain" value="WORKGROUP" /></span>
+                    </label>
+                    <label>
+                      Admin username
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><input id="endpoint-username" autocomplete="username" placeholder="Administrator" /></span>
+                    </label>
+                    <label>
+                      Admin password
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="endpoint-password" type="password" autocomplete="current-password" /></span>
+                    </label>
+                    <label>
+                      Credential ref
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-bookmark"/></svg><input id="endpoint-credential-ref" placeholder="Stored after first credential save" /></span>
+                    </label>
+                  </div>
+                </section>
+              </div>
 
-          <section class="visual-panel endpoint-panel endpoint-io-panel">
-            <div class="panel-title">
-              <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scan-search"/></svg></span>2. Endpoint scan</h4>
-              <span>WinRM discovery</span>
-            </div>
-            <div class="asset-form-grid endpoint-form">
-              <label>
-                Endpoint host / IP
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-server"/></svg><input id="endpoint-host" placeholder="10.10.10.25 or laptop01.domain.local" /></span>
-              </label>
-              <label>
-                Target Windows user
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user"/></svg><input id="endpoint-target-username" placeholder="j.doe, optional for drive scans" /></span>
-              </label>
-              <label>
-                Domain
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-globe"/></svg><input id="endpoint-domain" value="WORKGROUP" /></span>
-              </label>
-              <label>
-                Admin username
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><input id="endpoint-username" autocomplete="username" placeholder="Administrator" /></span>
-              </label>
-              <label>
-                Admin password
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="endpoint-password" type="password" autocomplete="current-password" /></span>
-              </label>
-              <label>
-                Credential ref
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-bookmark"/></svg><input id="endpoint-credential-ref" placeholder="Stored after first credential save" /></span>
-              </label>
-              <label>
-                Path scope
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-tree"/></svg><select id="endpoint-path-scope">
-                  <option value="default">User profile quick scan</option>
-                  <option value="desktop">Desktop only</option>
-                  <option value="documents">Documents only</option>
-                  <option value="downloads">Downloads only</option>
-                  <option value="onedrive">OneDrive only</option>
-                  <option value="all">Target profile data</option>
-                  <option value="all_profiles">All user profiles</option>
-                  <option value="c_drive">C drive data scan</option>
-                  <option value="all_fixed_drives">All fixed drives</option>
-                  <option value="custom">Custom paths</option>
-                </select></span>
-              </label>
-              <label>
-                Custom paths
-                <span class="field-shell field-shell-top"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><textarea id="endpoint-custom-paths" rows="2" placeholder="C:\\Users\\j.doe\\Desktop; C:\\Temp; \\\\server\\share" disabled></textarea></span>
-              </label>
-              <label>
-                Max folder depth
-                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-layers"/></svg><input id="endpoint-max-depth" type="number" min="1" max="12" value="6" /></span>
-              </label>
-              <label class="checkbox-row endpoint-checkbox">
-                <input id="endpoint-read-content" type="checkbox" checked />
-                <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-eye"/></svg>
-                Read content preview
-              </label>
-              <label class="checkbox-row endpoint-checkbox">
-                <input id="endpoint-read-acl" type="checkbox" checked />
-                <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-lock"/></svg>
-                Read permissions / ACL
-              </label>
-              <label class="checkbox-row endpoint-checkbox">
-                <input id="endpoint-inspect-archives" type="checkbox" />
-                <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-file-archive"/></svg>
-                Inspect archive contents
-              </label>
-              <label class="checkbox-row endpoint-checkbox">
-                <input id="endpoint-async-scan" type="checkbox" checked />
-                <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-circle-stop"/></svg>
-                Run as cancellable job
-              </label>
-              <label class="checkbox-row endpoint-checkbox">
-                <input id="endpoint-incremental-enabled" type="checkbox" checked />
-                <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-scan-search"/></svg>
-                Incremental (new/changed content only)
-              </label>
-            </div>
-            <div class="extension-filter endpoint-extension-filter">
+              <div class="wizard-step hidden" data-wizard-step="2">
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan scope">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-tree"/></svg></span>Scope</h4>
+                    <span>What to walk on the endpoint, and how</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label>
+                      Path scope
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-tree"/></svg><select id="endpoint-path-scope">
+                        <option value="default">User profile quick scan</option>
+                        <option value="desktop">Desktop only</option>
+                        <option value="documents">Documents only</option>
+                        <option value="downloads">Downloads only</option>
+                        <option value="onedrive">OneDrive only</option>
+                        <option value="all">Target profile data</option>
+                        <option value="all_profiles">All user profiles</option>
+                        <option value="c_drive">C drive data scan</option>
+                        <option value="all_fixed_drives">All fixed drives</option>
+                        <option value="custom">Custom paths</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Custom paths
+                      <span class="field-shell field-shell-top"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><textarea id="endpoint-custom-paths" rows="2" placeholder="C:\\Users\\j.doe\\Desktop; C:\\Temp; \\\\server\\share" disabled></textarea></span>
+                    </label>
+                    <label>
+                      Max folder depth
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-layers"/></svg><input id="endpoint-max-depth" type="number" min="1" max="12" value="6" /></span>
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-read-content" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-eye"/></svg>
+                      Read content preview
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-read-acl" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-lock"/></svg>
+                      Read permissions / ACL
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-inspect-archives" type="checkbox" />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-file-archive"/></svg>
+                      Inspect archive contents
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-async-scan" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-circle-stop"/></svg>
+                      Run as cancellable job
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-incremental-enabled" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-scan-search"/></svg>
+                      Incremental (new/changed content only)
+                    </label>
+                  </div>
+<div class="extension-filter endpoint-extension-filter">
               <label>Endpoint extension policy</label>
               <div id="endpoint-ext-simple-mode" class="ext-mode-panel">
                 <div class="ext-preset-grid">
@@ -1029,7 +1085,8 @@
               </div>
               <button type="button" id="endpoint-ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
             </div>
-            <div class="compliance-selector endpoint-compliance-selector" data-compliance-scope="endpoint">
+
+<div class="compliance-selector endpoint-compliance-selector" data-compliance-scope="endpoint">
               <div class="compliance-selector-head">
                 <label class="checkbox-row option-tile compliance-toggle">
                   <input id="endpoint-compliance-enabled" type="checkbox" />
@@ -1040,24 +1097,72 @@
               </div>
               <div class="compliance-framework-grid" data-compliance-frameworks="endpoint"></div>
             </div>
-            <div class="actions endpoint-actions">
-              <button type="button" id="endpoint-test-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-activity"/></svg>Test endpoint</button>
-              <button type="button" id="endpoint-scan-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-scan-line"/></svg>Scan endpoint</button>
-              <button type="button" id="endpoint-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
-              <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
-            </div>
-            <div id="endpoint-scan-progress" class="scan-progress endpoint-scan-progress hidden" aria-live="polite">
-              <div class="scan-pulse" aria-hidden="true"></div>
-              <div>
-                <div class="scan-progress-header">
-                  <strong id="endpoint-scan-progress-label">Scanning endpoint...</strong>
-                  <span id="endpoint-scan-progress-percent">0%</span>
-                </div>
-                <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="endpoint-scan-progress-bar"></span></div>
+
+                </section>
               </div>
+
+              <div class="wizard-step hidden" data-wizard-step="3">
+                <section class="visual-panel endpoint-panel winrm-activation-panel endpoint-io-panel" aria-label="Target WinRM">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-plug-zap"/></svg></span>Prepare target WinRM</h4>
+                    <span>Uses the admin credential from Basics</span>
+                  </div>
+                  <div class="hidden" aria-hidden="true">
+                    <input id="winrm-activate-host" tabindex="-1" />
+                    <input id="winrm-target-username" tabindex="-1" autocomplete="username" />
+                    <input id="winrm-activate-domain" tabindex="-1" value="WORKGROUP" />
+                    <input id="winrm-activate-username" tabindex="-1" autocomplete="username" />
+                    <input id="winrm-activate-password" tabindex="-1" type="password" autocomplete="current-password" />
+                  </div>
+                  <div class="actions endpoint-actions">
+                    <button type="button" id="endpoint-activate-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-plug-zap"/></svg>Prepare &amp; Test target WinRM</button>
+                    <button type="button" id="endpoint-test-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-activity"/></svg>Test endpoint</button>
+                  </div>
+                  <p id="winrm-activate-status" class="save-status">One-time per machine: enables WinRM on the target using the admin credential, then verifies the connection.</p>
+                  <div id="endpoint-wizard-status" class="wizard-status-mirror muted">Ready</div>
+                </section>
+<details class="scan-advanced">
+            <summary>Optional — prepare local backend WinRM (rarely needed)</summary>
+
+          <section class="visual-panel endpoint-panel winrm-activation-panel">
+            <div class="panel-title">
+              <h4>Optional local readiness</h4>
+              <span>Backend host only</span>
             </div>
-            <p id="endpoint-status" class="save-status">Fill the endpoint scan details after WinRM is active on the workstation.</p>
+            <div class="asset-form-grid endpoint-form">
+              <label>
+                Domain
+                <input id="local-winrm-domain" value="WORKGROUP" />
+              </label>
+              <label>
+                Admin username
+                <input id="local-winrm-username" autocomplete="username" placeholder="Local admin on this backend host" />
+              </label>
+              <label>
+                Admin password
+                <input id="local-winrm-password" type="password" autocomplete="current-password" />
+              </label>
+            </div>
+            <div class="actions endpoint-actions">
+              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Prepare local backend WinRM</button>
+            </div>
+            <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows host running this backend. Do not enter domain/DC credentials here unless this backend host actually needs them; target machine local-admin credentials are entered below.</p>
           </section>
+          </details>
+              </div>
+
+              <footer class="scan-wizard-footer">
+                <button type="button" id="endpoint-wizard-delete" class="wizard-delete-btn hidden">Delete this scan</button>
+                <span id="endpoint-wizard-hint" class="wizard-hint" aria-live="polite"></span>
+                <div class="wizard-nav">
+                  <button type="button" id="endpoint-wizard-back" class="secondary-btn" disabled>Back</button>
+                  <button type="button" id="endpoint-wizard-next">Next</button>
+                  <button type="button" id="endpoint-wizard-save" class="hidden">Save scan</button>
+                </div>
+                <button type="button" id="endpoint-scan-btn" class="hidden" tabindex="-1" aria-hidden="true"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-scan-line"/></svg>Scan endpoint</button>
+              </footer>
+            </div>
+          </div>
 
           <section class="context-strip context-strip-trailing" id="endpoint-context">
             <div>
@@ -1068,6 +1173,7 @@
             <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
           </section>
         </section>
+
 
         <section id="tab-security" class="tab-panel">
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
@@ -1305,12 +1411,12 @@
           </button>
         </div>
         <div class="asset-detail-tabs" role="tablist" aria-label="Asset detail sections">
-          <button type="button" class="asset-tab active" data-asset-tab="essential" role="tab" aria-selected="true">Essential</button>
-          <button type="button" class="asset-tab" data-asset-tab="findings" role="tab" aria-selected="false">Findings</button>
-          <button type="button" class="asset-tab" data-asset-tab="reasons" role="tab" aria-selected="false">Reasons</button>
-          <button type="button" class="asset-tab" data-asset-tab="actions" role="tab" aria-selected="false">Actions</button>
+          <button type="button" id="asset-tab-essential" class="asset-tab active" data-asset-tab="essential" role="tab" aria-controls="asset-modal-body" aria-selected="true">Essentials</button>
+          <button type="button" id="asset-tab-findings" class="asset-tab" data-asset-tab="findings" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Findings</button>
+          <button type="button" id="asset-tab-reasons" class="asset-tab" data-asset-tab="reasons" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Reasons</button>
+          <button type="button" id="asset-tab-actions" class="asset-tab" data-asset-tab="actions" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Actions</button>
         </div>
-        <div id="asset-modal-body" class="asset-detail-body" role="tabpanel"></div>
+        <div id="asset-modal-body" class="asset-detail-body" role="tabpanel" aria-labelledby="asset-tab-essential" tabindex="0"></div>
       </div>
     </div>
 
@@ -1355,7 +1461,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=173"></script>
+    <script src="/static/app.js?v=174"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

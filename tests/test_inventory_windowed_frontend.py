@@ -89,9 +89,12 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         expansion = self.script.split("function renderInventoryExpandedDetails", 1)[1].split(chr(10) + "async function", 1)[0]
         self.assertNotIn("Findings and redacted evidence", expansion)
         self.assertNotIn("Risk rationale", expansion)
-        self.assertIn("Asset properties", expansion)
-        self.assertIn("Access and permissions", expansion)
-        self.assertIn("Scan diagnostics", expansion)
+        # Section labels follow the dossier's current naming; the contract is
+        # that the expansion covers asset/access/scan context and sanitized
+        # preview only - never detection evidence.
+        self.assertIn("Identity and location", expansion)
+        self.assertIn("Exposure context", expansion)
+        self.assertIn("Scan coverage and provenance", expansion)
         self.assertIn("Sanitized content only", expansion)
         # The dossier keeps the grouped evidence.
         self.assertIn("renderFindingDrawerGroups", self.script)

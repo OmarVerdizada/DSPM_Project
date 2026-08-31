@@ -22217,6 +22217,192 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 .asset-detail-body .inventory-expanded-facts > div strong { font-size: 13.5px; line-height: 1.25; }
 
+/* Essentials is an asset-context dossier, not a second copy of Findings.
+   Native details/summary controls keep every category compact and keyboard
+   accessible while the explicit field groups prevent raw collector dumps. */
+.asset-detail-body .inventory-expanded-panel {
+  padding: 0;
+  border: 0;
+}
+.essential-scope-note {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  padding: 8px 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--card));
+  color: var(--muted);
+}
+.essential-scope-note > span {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-family: Georgia, serif;
+  font-size: 12px;
+  font-weight: 700;
+}
+.essential-scope-note p { margin: 0; font-size: 11.5px; line-height: 1.45; }
+.essential-scope-note strong { color: var(--text); font-weight: 650; }
+.essential-stack {
+  display: grid;
+  gap: 9px;
+  max-width: 1000px;
+}
+.essential-disclosure {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--card) 92%, var(--card-2));
+}
+.essential-disclosure > summary {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto 18px;
+  align-items: center;
+  gap: 10px;
+  min-height: 57px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.essential-disclosure > summary::-webkit-details-marker { display: none; }
+.essential-disclosure > summary::marker { content: ""; }
+.essential-disclosure > summary:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.essential-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.essential-disclosure-icon {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--card));
+  color: var(--accent-strong);
+}
+.essential-disclosure-icon svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.essential-disclosure-copy { min-width: 0; }
+.essential-disclosure-copy > span {
+  display: block;
+  margin-bottom: 1px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .065em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+.essential-disclosure-copy > strong {
+  display: block;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+.essential-disclosure-copy > small {
+  display: block;
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.essential-disclosure-metric {
+  display: grid;
+  justify-items: end;
+  min-width: 46px;
+  color: var(--muted);
+}
+.essential-disclosure-metric strong { color: var(--text); font-size: 13px; line-height: 1.1; }
+.essential-disclosure-metric small { margin-top: 2px; font-size: 9px; line-height: 1.1; }
+.essential-disclosure-caret {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 150ms ease;
+}
+.essential-disclosure[open] > summary {
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--accent) 3%, transparent);
+}
+.essential-disclosure[open] > summary .essential-disclosure-caret { transform: rotate(180deg); }
+.essential-disclosure-body { padding: 10px 12px 12px 54px; }
+.essential-data-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--line);
+}
+.essential-data-grid > div { min-width: 0; padding: 7px 9px; background: var(--card); }
+.essential-data-grid dt {
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+.essential-data-grid dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.essential-preview {
+  display: grid;
+  max-height: 250px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--card-2);
+}
+.essential-preview code {
+  display: block;
+  padding: 5px 9px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  background: transparent;
+  color: var(--text);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.essential-preview code:last-of-type { border-bottom: 0; }
+.essential-preview .subtext { padding: 7px 9px; }
+
+/* Decorative ordinals made modal content look like a procedure. Counts that
+   carry meaning (occurrences, reasons, fixes, principals) remain unchanged. */
+.asset-detail-body .detail-list { counter-reset: none; }
+.asset-detail-body .detail-list > li {
+  counter-increment: none;
+  padding-left: 14px;
+}
+.asset-detail-body .detail-list > li::before { content: none; display: none; }
+
 
 /* == Asset pop-up grows into a tabbed workspace ==================== */
 :root:root .asset-detail-panel {
@@ -22259,6 +22445,24 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 :root:root .asset-tab:focus-visible { outline: 2px solid var(--accent) !important; outline-offset: -2px !important; }
 .asset-detail-body { flex: 1 1 auto; }
 .asset-tab-single { max-width: 860px; }
+
+@media (max-width: 760px) {
+  .asset-detail-modal { padding: 0; }
+  :root:root .asset-detail-panel { width: 100vw !important; height: 100vh !important; max-height: 100vh !important; border-radius: 0; }
+  .asset-detail-tabs { overflow-x: auto; }
+  :root:root .asset-tab { flex: 0 0 auto; }
+  .asset-detail-body { padding: 12px; }
+  .essential-disclosure > summary { grid-template-columns: 30px minmax(0, 1fr) auto 16px; gap: 8px; padding: 8px 10px; }
+  .essential-disclosure-icon { width: 30px; height: 30px; }
+  .essential-disclosure-copy > small { white-space: normal; }
+  .essential-disclosure-body { padding: 9px 10px 10px; }
+  .essential-data-grid { grid-template-columns: 1fr; }
+  .essential-disclosure-metric small { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .essential-disclosure-caret { transition: none; }
+}
 
 /* Reasons / Actions cells: an icon and plain words, not a label+badge. */
 :root:root #results-body .detail-cell-btn {
@@ -22445,3 +22649,312 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   text-transform: uppercase;
   color: var(--muted);
 }
+
+/* ============================================================
+   Scan decks & wizards v1 — saved scan cards + 3-step setup
+   The deck is the page: saved scans are plugged-in cards, the
+   next slot is an empty dashed socket. One scan = one card.
+   ============================================================ */
+
+#fs-scan-deck, #endpoint-scan-deck {
+  display: grid;
+  gap: 16px;
+}
+
+#fs-profile-grid, #endpoint-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+/* --- Profile card ------------------------------------------------ */
+.scan-profile-card {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 0;
+  min-width: 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+  transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease;
+}
+.scan-profile-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  transform: translateY(-1px);
+}
+.scan-profile-card.is-running {
+  border-color: var(--accent);
+}
+.spc-rail {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(165deg, color-mix(in srgb, var(--accent) 88%, #1e1b4b), color-mix(in srgb, var(--accent) 55%, #312e81));
+  color: #fff;
+}
+.spc-rail svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+.spc-body {
+  display: grid;
+  gap: 8px;
+  padding: 13px 14px 12px;
+  min-width: 0;
+}
+.spc-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.spc-name {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink, inherit);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.spc-kind {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.spc-target {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.spc-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.spc-chip {
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 4px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--card) 60%, transparent);
+  white-space: nowrap;
+}
+.spc-chip.on {
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.spc-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-top: 2px;
+}
+.spc-actions button {
+  flex: 1;
+  min-height: 33px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  border-radius: 8px;
+}
+.spc-actions .spc-start-btn { flex: 1.35; }
+.spc-run-note { font-size: 11px; color: var(--muted); }
+
+/* --- Empty socket ------------------------------------------------ */
+.scan-socket {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  min-height: 132px;
+  padding: 18px;
+  background: transparent;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-radius: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color .18s ease, background .18s ease, color .18s ease;
+}
+.scan-socket:hover, .scan-socket:focus-visible {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  color: var(--accent-strong);
+}
+.scan-socket strong { font-size: 13.5px; font-weight: 600; color: inherit; }
+.scan-socket small { font-size: 11.5px; max-width: 30ch; }
+.socket-plus {
+  display: grid;
+  place-items: center;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: 1.5px dashed currentColor;
+  font-size: 22px;
+  font-weight: 400;
+  line-height: 1;
+}
+.scan-socket-hero {
+  min-height: 240px;
+  grid-column: 1 / -1;
+  gap: 10px;
+}
+.scan-socket-hero .socket-plus { width: 58px; height: 58px; font-size: 30px; }
+.scan-socket-hero strong { font-size: 16px; }
+.scan-socket-hero small { font-size: 12.5px; max-width: 44ch; }
+#fs-profile-grid:not(:has(.scan-profile-card)) .scan-socket,
+#endpoint-profile-grid:not(:has(.scan-profile-card)) .scan-socket {
+  grid-column: 1 / -1;
+  min-height: 240px;
+}
+
+/* --- Deck live strip --------------------------------------------- */
+.scan-deck-live { display: grid; gap: 10px; }
+.scan-deck-live:not(:has(.scan-progress:not(.hidden))):not(:has(button:not(.hidden))) { gap: 4px; }
+.scan-deck-live .status, .scan-deck-live .save-status { margin: 0; }
+.scan-deck-live-actions { display: flex; gap: 8px; }
+.scan-deck-live-actions button { width: auto; }
+#scan-cancel-btn { justify-self: start; width: auto; }
+
+/* --- Wizard ------------------------------------------------------ */
+.scan-wizard { display: grid; gap: 16px; }
+.scan-wizard.hidden { display: none; }
+#fs-wizard .scan-layout { display: block; }
+.scan-wizard-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-soft);
+}
+.wizard-back-link { white-space: nowrap; }
+.scan-wizard-title { min-width: 0; }
+.scan-wizard-title h4 { margin: 0; font-size: 14.5px; }
+.scan-wizard-title span { font-size: 11.5px; color: var(--muted); }
+
+.scan-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.stepper-node {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  position: relative;
+}
+.stepper-node + .stepper-node::before {
+  content: "";
+  width: 26px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--line);
+  margin-right: 10px;
+}
+.stepper-node.is-done + .stepper-node::before,
+.stepper-node.is-done + .stepper-node.is-current::before {
+  background: var(--accent);
+}
+.stepper-dot {
+  display: grid;
+  place-items: center;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line);
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--muted);
+  background: var(--card);
+  transition: all .18s ease;
+}
+.stepper-node.is-current .stepper-dot {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.stepper-node.is-done .stepper-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+.stepper-label { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.stepper-node.is-current .stepper-label { color: inherit; font-weight: 600; }
+
+.wizard-step { display: grid; gap: 14px; }
+.wizard-step.hidden { display: none; }
+
+.scan-wizard-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-top: 14px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow-soft);
+}
+.wizard-hint { flex: 1; font-size: 12px; color: var(--muted); text-align: right; }
+.wizard-nav { display: flex; gap: 8px; }
+.wizard-nav button { min-width: 88px; }
+.wizard-delete-btn {
+  background: none;
+  border: none;
+  padding: 4px 2px;
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.wizard-delete-btn:hover { color: #dc2626; }
+
+.wizard-status-mirror {
+  font-size: 12.5px;
+  padding: 9px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  min-height: 20px;
+}
+
+/* Wizard panels stay single-column and centered */
+#fs-wizard, #endpoint-wizard { max-width: 920px; }
+#fs-wizard .scan-form-column, #endpoint-wizard .scan-form-column { display: grid; gap: 14px; }
+
+@media (max-width: 860px) {
+  .scan-wizard-head { grid-template-columns: auto 1fr; }
+  .scan-stepper { grid-column: 1 / -1; justify-content: center; padding-top: 4px; }
+  .stepper-label { display: none; }
+  .stepper-node.is-current .stepper-label { display: inline; }
+}
+@media (max-width: 640px) {
+  #fs-profile-grid, #endpoint-profile-grid { grid-template-columns: 1fr; }
+  .scan-wizard-footer { flex-wrap: wrap; }
+  .wizard-hint { order: -1; flex-basis: 100%; text-align: left; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .scan-profile-card, .scan-socket, .stepper-dot { transition: none; }
+}
+
+/* Socket cards must stay quiet: legacy button layers paint any <button> in a
+   grid solid accent, which turns the "empty slot" into a loud filled block. */
+#fs-profile-grid .scan-socket,
+#endpoint-profile-grid .scan-socket {
+  background: transparent !important;
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 32%, var(--line)) !important;
+  color: var(--muted) !important;
+  box-shadow: none !important;
+  font-weight: 500 !important;
+}
+#fs-profile-grid .scan-socket:hover,
+#fs-profile-grid .scan-socket:focus-visible,
+#endpoint-profile-grid .scan-socket:hover,
+#endpoint-profile-grid .scan-socket:focus-visible {
+  background: color-mix(in srgb, var(--accent) 7%, transparent) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent-strong) !important;
+}
+#fs-profile-grid .scan-socket strong,
+#endpoint-profile-grid .scan-socket strong { color: inherit; }

@@ -3162,15 +3162,13 @@ function applyTheme(theme) {
 
 function renderPreview(preview) {
   if (!preview?.available) {
-    return '<div class="preview-panel hidden"><span class="subtext">Preview unavailable for this file type.</span></div>';
+    return "";
   }
 
-  const lines = (preview.lines || []).map((line, index) => {
-    return `<code><span>${index + 1}</span>${escapeHtml(line || " ")}</code>`;
-  });
+  const lines = (preview.lines || []).map((line) => `<code>${escapeHtml(line || " ")}</code>`);
   const truncated = preview.truncated ? '<div class="subtext">Preview truncated for safe display.</div>' : "";
 
-  return `<div class="preview-panel hidden">${lines.join("")}${truncated}</div>`;
+  return `<div class="essential-preview" aria-label="Sanitized content preview">${lines.join("")}${truncated}</div>`;
 }
 
 function riskOption(value, label, selected) {
@@ -3258,89 +3256,252 @@ function humanizeDetailKey(key) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function renderInventoryObjectSection(title, eyebrow, value, className = "") {
-  const entries = Array.isArray(value)
-    ? [["Entries", value]]
-    : value && typeof value === "object"
-      ? Object.entries(value)
-      : hasDisplayValue(value) ? [["Value", value]] : [];
-  const visible = entries.filter(([key, item]) => !String(key).startsWith("__") && hasDisplayValue(item));
+const ESSENTIAL_UNSAFE_FIELD = /(?:^|_)(?:raw|unmasked|secret_value|full_value|fingerprint|sample|preview|file_content|content_body|search_text|detail_json|response_json)(?:$|_)/i;
+
+const ESSENTIAL_DISCLOSURE_ICONS = {
+  identity: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h16v11H4z"></path><path d="M8 10h4M8 14h7"></path></svg>',
+  exposure: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8 7 10 4.2-2 7-5.4 7-10V6z"></path><path d="M9 12h6M12 9v6"></path></svg>',
+  protection: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v2"></path></svg>',
+  document: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"></path><path d="M14 3v5h5M9 12h6M9 16h6"></path></svg>',
+  scan: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"></path><path d="M7 12h2l1.5-3 3 6 1.5-3h2"></path></svg>',
+  preview: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>',
+};
+
+function essentialBoolean(value, positive, negative) {
+  if (value === undefined || value === null || value === "") return "";
+  const enabled = typeof value === "string"
+    ? ["1", "true", "yes", "enabled"].includes(value.trim().toLowerCase())
+    : Boolean(value);
+  return enabled ? positive : negative;
+}
+
+function safeEssentialEntries(value = {}, excluded = new Set()) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  return Object.entries(value).filter(([key, item]) => {
+    const normalized = String(key || "").toLowerCase();
+    return !normalized.startsWith("__")
+      && !excluded.has(normalized)
+      && !ESSENTIAL_UNSAFE_FIELD.test(normalized)
+      && hasDisplayValue(item);
+  });
+}
+
+function formatEssentialValue(value, depth = 0) {
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (Array.isArray(value)) {
+    const formatted = value.map((item) => formatEssentialValue(item, depth + 1)).filter(Boolean);
+    const visible = formatted.slice(0, 8);
+    return `${visible.join(" • ")}${formatted.length > visible.length ? ` • ${formatted.length - visible.length} more` : ""}`;
+  }
+  if (value && typeof value === "object") {
+    if (depth > 1) return "Structured value available";
+    return safeEssentialEntries(value)
+      .slice(0, 8)
+      .map(([key, item]) => `${humanizeDetailKey(key)}: ${formatEssentialValue(item, depth + 1)}`)
+      .filter(Boolean)
+      .join(" • ");
+  }
+  return String(value ?? "").trim();
+}
+
+function renderEssentialRows(rows = []) {
+  const visible = rows.filter((row) => hasDisplayValue(row.value));
   if (!visible.length) return "";
   return `
-    <section class="inventory-detail-section ${escapeHtml(className)}">
-      <div class="inventory-detail-section-head"><div><span>${escapeHtml(eyebrow)}</span><h5>${escapeHtml(title)}</h5></div><b>${escapeHtml(visible.length)}</b></div>
-      <dl class="inventory-data-list">
-        ${visible.map(([key, item]) => `<div><dt>${escapeHtml(humanizeDetailKey(key))}</dt><dd>${escapeHtml(formatDetailValue(item))}</dd></div>`).join("")}
-      </dl>
-    </section>
+    <dl class="essential-data-grid">
+      ${visible.map((row) => `
+        <div class="${escapeHtml(row.className || "")}">
+          <dt>${escapeHtml(row.label)}</dt>
+          <dd>${escapeHtml(row.display || formatEssentialValue(row.value))}</dd>
+        </div>
+      `).join("")}
+    </dl>
   `;
 }
 
-function renderInventorySupplementalDetails(file) {
-  const excluded = new Set([
-    "id", "source", "path", "full_path", "name", "extension", "share", "host", "server",
-    "risk", "risk_level", "risk_score", "findings", "finding_count", "finding_types", "top_frameworks", "framework_keys",
-    "preview", "permissions", "acl", "metadata", "compliance", "scan_diagnostics", "size", "owner", "owner_name", "file_owner",
-    "modified", "modified_at", "created", "created_at", "accessed_at", "sha256", "file_hash", "attributes",
-    "is_hidden", "is_system", "is_protected", "protected", "content_status", "scan_error", "scan_mode", "protection_type",
-    "search_text", "detail_json", "baseline_result",
-  ]);
-  const additional = Object.fromEntries(Object.entries(file || {}).filter(([key, value]) => {
-    const normalized = String(key).toLowerCase();
-    if (excluded.has(key) || normalized.startsWith("__")) return false;
-    if (/raw|unmasked|secret_value|full_value|fingerprint|content$|search_text/.test(normalized)) return false;
-    return hasDisplayValue(value);
+function renderEssentialDisclosure({ id, icon, eyebrow, title, summary, rows = [], content = "", open = false, count = null, countLabel = "" }) {
+  const visibleRows = rows.filter((row) => hasDisplayValue(row.value));
+  if (!visibleRows.length && !content) return "";
+  const numericCount = Number(count);
+  const hasCount = count !== null && count !== "" && Number.isFinite(numericCount) && numericCount >= 0;
+  return `
+    <details class="essential-disclosure" data-essential-section="${escapeHtml(id)}" ${open ? "open" : ""}>
+      <summary>
+        <span class="essential-disclosure-icon">${ESSENTIAL_DISCLOSURE_ICONS[icon] || ESSENTIAL_DISCLOSURE_ICONS.document}</span>
+        <span class="essential-disclosure-copy">
+          <span>${escapeHtml(eyebrow)}</span>
+          <strong>${escapeHtml(title)}</strong>
+          <small>${escapeHtml(summary)}</small>
+        </span>
+        ${hasCount ? `<span class="essential-disclosure-metric"><strong>${escapeHtml(numericCount)}</strong><small>${escapeHtml(countLabel)}</small></span>` : ""}
+        <svg class="essential-disclosure-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"></path></svg>
+      </summary>
+      <div class="essential-disclosure-body">
+        ${renderEssentialRows(visibleRows)}
+        ${content}
+      </div>
+    </details>
+  `;
+}
+
+function essentialObjectRows(value = {}, excluded = []) {
+  const excludedKeys = new Set(excluded.map((key) => String(key).toLowerCase()));
+  return safeEssentialEntries(value, excludedKeys).map(([key, item]) => ({
+    label: humanizeDetailKey(key),
+    value: item,
   }));
-  return renderInventoryObjectSection("Additional scan context", "Collector output", additional, "inventory-detail-wide");
+}
+
+function collectionSize(value) {
+  if (Array.isArray(value)) return value.length;
+  if (value && typeof value === "object") return Object.keys(value).length;
+  return hasDisplayValue(value) ? 1 : 0;
 }
 
 function renderInventoryExpandedDetails(file) {
-  const findings = primaryFindingsForFile(file);
-  const allFindings = file?.findings || [];
-  const childCount = Math.max(0, allFindings.length - findings.length);
-  const occurrences = findings.reduce((total, finding) => total + findingOccurrenceCount(finding), 0);
-  const effectiveRisk = getEffectiveRisk(file);
-  const sourceName = file.source || file.share || "workspace";
-  const frameworks = findingFrameworkStrip(findings);
-  const properties = renderFilePropertyRows(file, fileHashValue(file), hasHashChanged(file), hasDuplicateHashPath(file));
-  const preview = renderPreview(file.preview).replace("preview-panel hidden", "preview-panel inventory-expanded-preview");
-  const facts = [
-    ["Risk", `${effectiveRisk.level} ${effectiveRisk.score}`],
-    ["Findings", `${findings.length} primary${childCount ? ` + ${childCount} supporting` : ""}`],
-    ["Occurrences", occurrences],
-    ["Source", sourceName],
-    ["Owner", filePropertyOwner(file) || "Unassigned"],
-    ["Protection", isProtectedFile(file) ? getProtectionLabel(file) : "No lock reported"],
-    ["Modified", getFriendlyTimestamp(file.modified_at || file.modified) || "Not reported"],
-    ["Content", file.content_status || file.scan_mode || "Scanned"],
+  const permissions = file?.permissions && typeof file.permissions === "object" ? file.permissions : {};
+  const acl = file?.acl && typeof file.acl === "object" ? file.acl : {};
+  const owner = filePropertyOwner(file);
+  const aclOwner = String(acl.owner || "").trim();
+  const principals = acl.principals || permissions.principals || [];
+  const permissionGrants = acl.permissions || permissions.grants || [];
+  const accessIssues = permissions.issues || acl.issues || [];
+  const principalCount = collectionSize(principals);
+  const grantCount = collectionSize(permissionGrants);
+  const broadAccess = Boolean(permissions.public || permissions.wide_access);
+  const writable = Boolean(permissions.writable);
+  const privileged = Boolean(permissions.privileged_access);
+  const exposureAttention = broadAccess || writable || privileged || collectionSize(accessIssues) > 0;
+  const accessPosture = broadAccess
+    ? "Broad access reported"
+    : writable
+      ? "Writable access reported"
+      : privileged
+        ? "Privileged access reported"
+        : principalCount || grantCount
+          ? "Explicit access controls available"
+          : "Access details not reported";
+
+  const hash = fileHashValue(file);
+  const contentHash = String(file.content_hash || "").trim().toLowerCase();
+  const hashChanged = hasHashChanged(file);
+  const duplicateHashPath = hasDuplicateHashPath(file);
+  const protectedAsset = isProtectedFile(file);
+  const protectionAttention = protectedAsset || file.content_scannable === false || hashChanged || duplicateHashPath;
+  const protectionSummary = protectedAsset
+    ? `Protected: ${getProtectionLabel(file)}`
+    : file.content_scannable === false
+      ? "Content could not be fully inspected"
+      : "No protection barrier reported";
+
+  const detectorMetrics = file?.detector_metrics && typeof file.detector_metrics === "object" ? file.detector_metrics : {};
+  const detectorCount = collectionSize(detectorMetrics.detectors);
+  const slowDetectorCount = collectionSize(detectorMetrics.slow_detectors);
+  const bytesScanned = Number(file.bytes_scanned);
+  const totalBytes = Number(file.total_bytes);
+  const coverage = Number.isFinite(bytesScanned) && bytesScanned >= 0
+    ? `${formatBytes(bytesScanned)} analyzed${Number.isFinite(totalBytes) && totalBytes > 0 ? ` of ${formatBytes(totalBytes)}` : ""}`
+    : "";
+  const elapsedMs = Number(file.detector_elapsed_ms ?? detectorMetrics.elapsed_ms);
+  const timeoutSeconds = Number(detectorMetrics.detector_timeout_seconds);
+  const scanAttention = Boolean(file.scan_error || file.truncated || detectorMetrics.slow_detector_degraded_mode || file.compliance_degraded_mode)
+    || String(file.scan_completeness || "").toLowerCase() === "partial";
+
+  const identityRows = [
+    { label: "Owner", value: owner || "Unassigned" },
+    { label: "Author", value: firstFileValue(file, ["author", "metadata.author", "document_author", "documentAuthor"]) },
+    { label: "Created by", value: firstFileValue(file, ["created_by", "creator", "metadata.creator"]) },
+    { label: "Modified by", value: firstFileValue(file, ["modified_by", "last_modified_by", "metadata.last_modified_by"]) },
+    { label: "Asset type", value: file.is_dir ? "Directory" : file.extension || "File" },
+    { label: "Size", value: file.is_dir ? "" : formatBytes(file.size) },
+    { label: "Source", value: file.source || "workspace" },
+    { label: "Share or host", value: file.share || file.host || file.server || "" },
+    { label: "Created", value: getFriendlyTimestamp(firstFileValue(file, ["created_at", "createdAt", "created", "creation_time"])) },
+    { label: "Modified", value: getFriendlyTimestamp(firstFileValue(file, ["modified_at", "modifiedAt", "last_modified", "mtime"])) },
+    { label: "Last accessed", value: getFriendlyTimestamp(firstFileValue(file, ["accessed_at", "accessedAt", "last_accessed", "atime"])) },
   ];
+  const exposureRows = [
+    { label: "Access posture", value: accessPosture },
+    { label: "Write access", value: essentialBoolean(permissions.writable, "Allowed", "Not reported") },
+    { label: "Privileged access", value: essentialBoolean(permissions.privileged_access, "Detected", "Not reported") },
+    { label: "ACL owner", value: aclOwner && aclOwner !== owner ? aclOwner : "" },
+    { label: "Principals", value: principals },
+    { label: "Permission grants", value: permissionGrants },
+    { label: "Observed access issues", value: accessIssues },
+  ];
+  const protectionRows = [
+    { label: "Protection state", value: protectedAsset ? getProtectionLabel(file) : "No protection signal reported" },
+    { label: "Content inspection", value: essentialBoolean(file.content_scannable, "Scannable", "Not scannable") },
+    { label: "Content status", value: file.content_status || file.scan_error || "" },
+    { label: "Protection type", value: file.protection_type },
+    { label: "File attributes", value: filePropertyAttributes(file) },
+    { label: "SHA-256", value: hash ? shortHash(hash) : "" },
+    { label: "Content hash", value: contentHash && contentHash !== hash ? shortHash(contentHash) : "" },
+    { label: "Integrity change", value: hashChanged ? "Hash changed since the previous scan" : "" },
+    { label: "Duplicate content", value: duplicateHashPath ? "The same SHA-256 exists at another path" : "" },
+  ];
+  const documentRows = essentialObjectRows(file.metadata, [
+    "owner", "author", "creator", "created_by", "modified_by", "last_modified_by",
+    "path", "full_path", "name", "size", "source", "share", "host", "server",
+  ]);
+  const scanRows = [
+    { label: "Collection completeness", value: file.scan_completeness },
+    { label: "Coverage", value: coverage },
+    { label: "Scan mode", value: file.scan_mode },
+    { label: "Last scanned", value: getFriendlyTimestamp(file.last_scanned_at) },
+    { label: "Truncation", value: essentialBoolean(file.truncated, "Partial content", "Not truncated") },
+    { label: "Incremental reuse", value: essentialBoolean(file.incremental_reused, "Reused unchanged result", "Fresh analysis") },
+    { label: "Incremental decision", value: file.incremental_scan_reason },
+    { label: "Detector cache", value: essentialBoolean(file.cache_reused ?? detectorMetrics.cache_hit, "Cache hit", "Cache miss") },
+    { label: "Baseline result", value: file.baseline_result },
+    { label: "Detector version", value: file.detector_version },
+    { label: "Rule catalog", value: file.rule_catalog_version },
+    { label: "Keyword catalog", value: file.keyword_catalog_status },
+    { label: "Detection route", value: detectorMetrics.triage_route },
+    { label: "Detection duration", value: Number.isFinite(elapsedMs) && elapsedMs >= 0 ? `${Math.round(elapsedMs)} ms` : "" },
+    { label: "Detector timeout", value: Number.isFinite(timeoutSeconds) && timeoutSeconds > 0 ? `${timeoutSeconds} seconds` : "" },
+    { label: "Slow detectors", value: slowDetectorCount ? detectorMetrics.slow_detectors : "" },
+    { label: "Degraded detector mode", value: essentialBoolean(detectorMetrics.slow_detector_degraded_mode, "Enabled", "Not active") },
+    { label: "Compliance mapping mode", value: essentialBoolean(file.compliance_degraded_mode, "Degraded", "Standard") },
+    { label: "Scan error", value: file.scan_error },
+  ];
+  const preview = renderPreview(file.preview);
+  const previewLineCount = Array.isArray(file?.preview?.lines) ? file.preview.lines.length : 0;
+
   return `
     <div class="inventory-expanded-panel">
-      <header class="inventory-expanded-head">
-        <div class="inventory-expanded-title">
-          <span>Asset &amp; scan detail</span>
-          <strong>${escapeHtml(file.name || file.path || "Unknown asset")}</strong>
-          <p>${escapeHtml(file.path || "Path unavailable")}</p>
-        </div>
-        <div class="inventory-expanded-frameworks">${frameworks || '<span class="subtext">No framework mapping</span>'}</div>
-      </header>
-      <div class="inventory-expanded-facts">
-        ${facts.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
+      <div class="essential-scope-note">
+        <span aria-hidden="true">i</span>
+        <p><strong>Asset context only.</strong> Detection evidence, scoring rationale, and remediation stay in Findings, Reasons, and Actions.</p>
       </div>
-      <div class="inventory-expanded-grid">
-        <section class="inventory-detail-section inventory-detail-wide">
-          <div class="inventory-detail-section-head"><div><span>Filesystem and document context</span><h5>Asset properties</h5></div></div>
-          <dl class="inventory-property-grid">${properties}</dl>
-        </section>
-        ${renderInventoryObjectSection("Access and permissions", "Exposure context", file.permissions || file.acl)}
-        ${renderInventoryObjectSection("Document metadata", "Extracted properties", file.metadata)}
-        ${renderInventoryObjectSection("Compliance context", "Framework assessment", file.compliance, "inventory-detail-wide")}
-        ${renderInventoryObjectSection("Scan diagnostics", "Collection quality", file.scan_diagnostics, "inventory-detail-wide")}
-        <section class="inventory-detail-section inventory-detail-wide">
-          <div class="inventory-detail-section-head"><div><span>Sanitized content only</span><h5>File preview</h5></div></div>
-          ${preview}
-        </section>
-        ${renderInventorySupplementalDetails(file)}
+      <div class="essential-stack">
+        ${renderEssentialDisclosure({
+          id: "identity", icon: "identity", eyebrow: "Asset context", title: "Identity and location",
+          summary: "Ownership, origin, format, and lifecycle timestamps", rows: identityRows, open: true,
+        })}
+        ${renderEssentialDisclosure({
+          id: "exposure", icon: "exposure", eyebrow: "Access control", title: "Exposure context",
+          summary: accessPosture, rows: exposureRows, open: exposureAttention,
+          count: principalCount || grantCount || null, countLabel: principalCount ? `principal${principalCount === 1 ? "" : "s"}` : `grant${grantCount === 1 ? "" : "s"}`,
+        })}
+        ${renderEssentialDisclosure({
+          id: "protection", icon: "protection", eyebrow: "Data handling", title: "Protection and integrity",
+          summary: protectionSummary, rows: protectionRows, open: protectionAttention,
+        })}
+        ${renderEssentialDisclosure({
+          id: "document", icon: "document", eyebrow: "Extracted properties", title: "Document metadata",
+          summary: "Non-sensitive format and document properties", rows: documentRows,
+        })}
+        ${renderEssentialDisclosure({
+          id: "scan", icon: "scan", eyebrow: "Collection quality", title: "Scan coverage and provenance",
+          summary: "Completeness, reuse decisions, detector health, and catalog versions", rows: scanRows, open: scanAttention,
+          count: detectorCount || null, countLabel: `detector${detectorCount === 1 ? "" : "s"}`,
+        })}
+        ${renderEssentialDisclosure({
+          id: "preview", icon: "preview", eyebrow: "Sanitized content only", title: "Content preview",
+          summary: "Redacted collector output; open only when needed", content: preview,
+          count: previewLineCount || null, countLabel: `line${previewLineCount === 1 ? "" : "s"}`,
+        })}
       </div>
     </div>
   `;
@@ -3348,6 +3509,7 @@ function renderInventoryExpandedDetails(file) {
 
 let assetModalFile = null;
 let assetModalTab = "essential";
+let assetModalReturnFocus = null;
 
 const ASSET_MODAL_TABS = {
   essential: (file) => renderInventoryExpandedDetails(file),
@@ -3366,13 +3528,16 @@ const ASSET_MODAL_TABS = {
 
 function setAssetModalTab(tab) {
   assetModalTab = ASSET_MODAL_TABS[tab] ? tab : "essential";
+  let activeButton = null;
   document.querySelectorAll("#asset-detail-modal .asset-tab").forEach((button) => {
     const active = button.dataset.assetTab === assetModalTab;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
+    if (active) activeButton = button;
   });
   const body = document.getElementById("asset-modal-body");
+  if (activeButton?.id) body.setAttribute("aria-labelledby", activeButton.id);
   if (assetModalFile) {
     body.innerHTML = ASSET_MODAL_TABS[assetModalTab](assetModalFile);
     body.scrollTop = 0;
@@ -3387,6 +3552,7 @@ async function openAssetDetailModal(keyOrControl, tab = "essential") {
   if (!file) return;
   const modal = document.getElementById("asset-detail-modal");
   if (!modal) return;
+  assetModalReturnFocus = keyOrControl instanceof Element ? keyOrControl : document.activeElement;
   assetModalFile = null;
   document.getElementById("asset-modal-title").textContent = file.name || file.path || "Asset";
   document.getElementById("asset-modal-path").textContent = file.path || "";
@@ -3396,6 +3562,7 @@ async function openAssetDetailModal(keyOrControl, tab = "essential") {
   modal.getBoundingClientRect();
   modal.classList.add("open");
   setAssetModalTab(tab);
+  requestAnimationFrame(() => modal.querySelector(".asset-tab.active")?.focus());
   try {
     file = await ensureInventoryAssetDetail(file);
     if (modal.classList.contains("hidden")) return;
@@ -3411,11 +3578,28 @@ document.addEventListener("click", (event) => {
   if (tabButton) setAssetModalTab(tabButton.dataset.assetTab);
 });
 
+document.addEventListener("keydown", (event) => {
+  const tabButton = event.target.closest("#asset-detail-modal .asset-tab");
+  if (!tabButton || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = [...tabButton.closest("[role='tablist']").querySelectorAll(".asset-tab")];
+  const current = tabs.indexOf(tabButton);
+  const next = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? tabs.length - 1
+      : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  event.preventDefault();
+  setAssetModalTab(tabs[next].dataset.assetTab);
+  tabs[next].focus();
+});
+
 function closeAssetDetailModal() {
   const modal = document.getElementById("asset-detail-modal");
   if (!modal || modal.classList.contains("hidden")) return;
   modal.classList.remove("open");
   modal.classList.add("hidden");
+  if (assetModalReturnFocus?.isConnected) assetModalReturnFocus.focus();
+  assetModalReturnFocus = null;
 }
 
 document.addEventListener("click", (event) => {
@@ -3506,7 +3690,6 @@ function renderGenericFindingDetails(file, finding) {
       ${renderFindingEvidenceSections(finding)}
       ${finding.severity_rationale ? `<div class="detail-evidence"><span>Severity rationale</span><code>${escapeHtml(finding.severity_rationale)}</code></div>` : ""}
       ${finding.remediation ? `<div class="detail-evidence"><span>Remediation</span><code>${escapeHtml(finding.remediation)}</code></div>` : ""}
-      ${renderAdditionalFindingAttributes(finding)}
       ${renderChildFindingEvidence(file, children)}
     </li>
   `;
@@ -3525,36 +3708,10 @@ function renderChildFindingEvidence(file, children = []) {
           ${renderFindingMetadataGrid(file, child)}
           ${child.description ? `<p>${escapeHtml(child.description)}</p>` : ""}
           ${renderFindingEvidenceSections(child)}
-          ${renderAdditionalFindingAttributes(child)}
         </article>
       `).join("")}
     </div>
   `;
-}
-
-function renderAdditionalFindingAttributes(finding = {}) {
-  const excluded = new Set([
-    "type", "technical_type", "rule_id", "display_name", "display_name_az", "label", "data_type", "service",
-    "risk", "severity", "description", "framework", "frameworks", "framework_mappings", "requirement_mappings", "compliance_mappings", "mapped_controls",
-    "data_element", "data_category", "personal_data_type", "category", "category_id", "finding_category", "classification_domain", "pci_category", "pci_requirements",
-    "confidence", "detection_confidence", "mapping_confidence", "confidence_basis", "count", "occurrence_count", "unique_value_count", "occurrences",
-    "samples", "matched_keywords", "keywords", "matched_signal_groups", "contributing_signals", "negative_signals", "threshold",
-    "validation_status", "luhn_valid", "card_brand", "emv_tag", "pin_block_format", "correlated_elements", "logical_boundary", "parent_finding_type", "child_finding_types",
-    "catalog_version", "catalog_hash", "confidentiality_impact", "integrity_impact", "availability_impact", "overall_impact", "impact_basis", "official_definition_en",
-    "source_kind", "source_status", "governance_status", "handling_tier", "detection_mode", "protection_state", "claimed_protection_state", "verified_protection_state",
-    "encryption_state", "encryption_algorithm", "key_id", "token_provider", "hash_algorithm", "masking_format", "storage_state", "authorization_state", "entity_role", "environment",
-    "scope_impact", "display_state", "suppressed_by", "review_status", "workflow_status", "status", "exception_status", "exception_required", "data_owner", "last_seen", "sla", "remediation", "severity_rationale",
-    "secure_value_fingerprints", "secure_fingerprints",
-  ]);
-  const additional = Object.fromEntries(Object.entries(finding).filter(([key, value]) => {
-    const normalized = String(key).toLowerCase();
-    if (excluded.has(key) || normalized.startsWith("__")) return false;
-    if (/raw|unmasked|secret_value|full_value|fingerprint/.test(normalized)) return false;
-    return hasDisplayValue(value);
-  }));
-  const entries = Object.entries(additional);
-  if (!entries.length) return "";
-  return `<div class="detail-evidence detail-section additional-finding-attributes"><span>Additional detector attributes</span><dl>${entries.map(([key, value]) => `<div><dt>${escapeHtml(humanizeDetailKey(key))}</dt><dd>${escapeHtml(formatDetailValue(value))}</dd></div>`).join("")}</dl></div>`;
 }
 
 function renderDetailSection(title, rows = {}) {
@@ -7122,6 +7279,7 @@ async function loadHistory() {
     loadHashComparison(),
     api("/api/inventory/facets", null, "GET").catch(() => null),
   ]);
+  loadScanProfiles().catch(() => {});
   latestDashboard = dashboard;
   latestHashComparison = hashComparison;
   estateSummary = estateFacets ? facetsToEstateSummary(estateFacets) : null;
@@ -8408,3 +8566,516 @@ window.addEventListener("storage", (event) => {
     renderProfile();
   }
 });
+
+// ============================================================
+// Scan profile decks & wizards
+// A saved scan is a named, editable configuration card. The
+// wizard re-houses the existing form widgets in three steps,
+// so every field id and behavior below it is unchanged.
+// ============================================================
+
+const SCAN_WIZARD_KINDS = {
+  "file-server": {
+    deck: "#fs-scan-deck", grid: "#fs-profile-grid", wizard: "#fs-wizard",
+    heading: "#fs-wizard-heading", stepper: '[data-stepper="file-server"]',
+    back: "#fs-wizard-back", next: "#fs-wizard-next", save: "#fs-wizard-save",
+    close: "#fs-wizard-close", del: "#fs-wizard-delete", hint: "#fs-wizard-hint",
+    mirror: "#fs-wizard-status", statusSource: "#connection-status",
+    newTitle: "New file server scan", icon: "li-server",
+  },
+  endpoint: {
+    deck: "#endpoint-scan-deck", grid: "#endpoint-profile-grid", wizard: "#endpoint-wizard",
+    heading: "#endpoint-wizard-heading", stepper: '[data-stepper="endpoint"]',
+    back: "#endpoint-wizard-back", next: "#endpoint-wizard-next", save: "#endpoint-wizard-save",
+    close: "#endpoint-wizard-close", del: "#endpoint-wizard-delete", hint: "#endpoint-wizard-hint",
+    mirror: "#endpoint-wizard-status", statusSource: "#endpoint-status",
+    newTitle: "New endpoint scan", icon: "li-monitor-cog",
+  },
+};
+
+let scanProfilesState = [];
+const scanWizardState = {
+  "file-server": { step: 1, editingId: "" },
+  endpoint: { step: 1, editingId: "" },
+};
+let activeProfileRun = null;
+let fsLaunchArmed = false;
+
+function wizardEl(kind, key) {
+  return document.querySelector(SCAN_WIZARD_KINDS[kind][key]);
+}
+
+async function loadScanProfiles() {
+  if (!accessToken) return;
+  try {
+    const data = await api("/api/scan-profiles", null, "GET");
+    scanProfilesState = Array.isArray(data.profiles) ? data.profiles : [];
+  } catch {
+    scanProfilesState = [];
+  }
+  renderScanDecks();
+}
+
+function profilesOf(kind) {
+  return scanProfilesState.filter((profile) => profile.kind === kind);
+}
+
+const EXT_PRESET_LABELS = { secrets: "Secrets", recommended: "Recommended", broad: "Broad", all: "All types" };
+const ENDPOINT_SCOPE_LABELS = {
+  default: "Profile quick scan", desktop: "Desktop", documents: "Documents", downloads: "Downloads",
+  onedrive: "OneDrive", all: "Profile data", all_profiles: "All profiles", c_drive: "C: drive",
+  all_fixed_drives: "All drives", custom: "Custom paths",
+};
+
+function profileTargetLine(profile) {
+  const config = profile.config || {};
+  if (profile.kind === "endpoint") {
+    const user = config.target_username ? ` · ${config.target_username}` : "";
+    return `${config.host || "no host"}${user}`;
+  }
+  return config.server ? `\\\\${config.server}` : `Local: ${config.local_path || "enterprise_test_data"}`;
+}
+
+function profileChips(profile) {
+  const config = profile.config || {};
+  const ui = config.ui || {};
+  const chips = [];
+  if (profile.kind === "endpoint") {
+    chips.push({ label: ENDPOINT_SCOPE_LABELS[ui.path_scope] || "Scope", on: true });
+    chips.push({ label: `Depth ${config.max_depth ?? 6}` });
+    if (config.read_acl) chips.push({ label: "ACL", on: true });
+    if (config.incremental_enabled) chips.push({ label: "Incremental", on: true });
+  } else {
+    chips.push({ label: EXT_PRESET_LABELS[ui.ext_preset] || "Custom types", on: true });
+    chips.push({ label: `Depth ${config.max_depth ?? 4}` });
+    if (config.incremental_enabled) chips.push({ label: "Incremental", on: true });
+    if (config.inspect_archives) chips.push({ label: "ZIP" });
+  }
+  if (config.compliance_enabled && (config.compliance_frameworks || []).length) {
+    chips.push({ label: `Compliance ${(config.compliance_frameworks || []).length}`, on: true });
+  }
+  return chips;
+}
+
+function scanProfileCardMarkup(profile) {
+  const meta = SCAN_WIZARD_KINDS[profile.kind];
+  const running = activeProfileRun && activeProfileRun.id === profile.profile_id;
+  const chips = profileChips(profile)
+    .map((chip) => `<span class="spc-chip${chip.on ? " on" : ""}">${escapeHtml(chip.label)}</span>`)
+    .join("");
+  const saved = String(profile.updated_at || "").slice(0, 10);
+  return `
+    <article class="scan-profile-card${running ? " is-running" : ""}" data-profile-id="${escapeHtml(profile.profile_id)}">
+      <span class="spc-rail" aria-hidden="true"><svg class="f-ico"><use href="#${meta.icon}"/></svg></span>
+      <div class="spc-body">
+        <div class="spc-top">
+          <span class="spc-name" title="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</span>
+          <span class="spc-kind">${profile.kind === "endpoint" ? "Endpoint" : "File server"}</span>
+        </div>
+        <span class="spc-target" title="${escapeHtml(profileTargetLine(profile))}">${escapeHtml(profileTargetLine(profile))}</span>
+        <div class="spc-chips">${chips}</div>
+        <div class="spc-actions">
+          <button type="button" class="spc-start-btn" data-profile-start="${escapeHtml(profile.profile_id)}">${running ? "Running..." : "Start"}</button>
+          <button type="button" class="secondary-btn" data-profile-edit="${escapeHtml(profile.profile_id)}">Edit</button>
+        </div>
+        <span class="spc-run-note">Saved ${escapeHtml(saved)}</span>
+      </div>
+    </article>`;
+}
+
+function renderScanDecks() {
+  Object.keys(SCAN_WIZARD_KINDS).forEach((kind) => {
+    const grid = wizardEl(kind, "grid");
+    if (!grid) return;
+    const profiles = profilesOf(kind);
+    if (!profiles.length) {
+      grid.innerHTML = `
+        <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="${kind}">
+          <span class="socket-plus" aria-hidden="true">+</span>
+          <strong>Set up your first ${kind === "endpoint" ? "endpoint" : "file server"} scan</strong>
+          <small>${kind === "endpoint" ? "Pick a workstation, a user profile, and keep it ready to run." : "Name it, point it at a share, and keep it ready to run."}</small>
+        </button>`;
+      return;
+    }
+    grid.innerHTML = profiles.map(scanProfileCardMarkup).join("") + `
+      <button type="button" class="scan-socket" data-open-scan-wizard="${kind}">
+        <span class="socket-plus" aria-hidden="true">+</span>
+        <strong>New scan</strong>
+      </button>`;
+  });
+  refreshDeckBusyState();
+}
+
+function refreshDeckBusyState() {
+  const busy = Boolean(activeProfileRun);
+  document.querySelectorAll("[data-profile-start]").forEach((button) => {
+    button.disabled = busy;
+  });
+}
+
+// ---- Wizard open/close/steps ----------------------------------------------
+
+function setWizardStep(kind, step) {
+  const state = scanWizardState[kind];
+  state.step = step;
+  const wizard = wizardEl(kind, "wizard");
+  wizard.querySelectorAll("[data-wizard-step]").forEach((panel) => {
+    panel.classList.toggle("hidden", Number(panel.dataset.wizardStep) !== step);
+  });
+  document.querySelectorAll(`${SCAN_WIZARD_KINDS[kind].stepper} .stepper-node`).forEach((node) => {
+    const nodeStep = Number(node.dataset.stepNode);
+    node.classList.toggle("is-current", nodeStep === step);
+    node.classList.toggle("is-done", nodeStep < step);
+    const dot = node.querySelector(".stepper-dot");
+    if (dot) dot.textContent = nodeStep < step ? "✓" : String(nodeStep);
+  });
+  wizardEl(kind, "back").disabled = step === 1;
+  wizardEl(kind, "next").classList.toggle("hidden", step === 3);
+  wizardEl(kind, "save").classList.toggle("hidden", step !== 3);
+  setWizardHint(kind, "");
+  if (kind === "endpoint" && step === 3) syncWinrmActivationFields();
+  wizard.scrollIntoView({ behavior: "auto", block: "start" });
+}
+
+function setWizardHint(kind, message) {
+  const hint = wizardEl(kind, "hint");
+  if (hint) hint.textContent = message || "";
+}
+
+function openScanWizard(kind, profileId = "") {
+  const state = scanWizardState[kind];
+  state.editingId = profileId;
+  const profile = profileId ? scanProfilesState.find((p) => p.profile_id === profileId) : null;
+  if (kind === "file-server") applyFileServerProfile(profile);
+  else applyEndpointProfile(profile);
+  wizardEl(kind, "heading").textContent = profile ? `Edit — ${profile.name}` : SCAN_WIZARD_KINDS[kind].newTitle;
+  wizardEl(kind, "del").classList.toggle("hidden", !profile);
+  wizardEl(kind, "deck").classList.add("hidden");
+  wizardEl(kind, "wizard").classList.remove("hidden");
+  setWizardStep(kind, 1);
+}
+
+function closeScanWizard(kind) {
+  wizardEl(kind, "wizard").classList.add("hidden");
+  wizardEl(kind, "deck").classList.remove("hidden");
+  scanWizardState[kind].editingId = "";
+}
+
+function validateWizardStep(kind, step) {
+  if (step === 1) {
+    if (kind === "file-server") {
+      const name = document.querySelector("#fs-profile-name").value.trim();
+      if (!name) return "Give this scan a name.";
+      const server = document.querySelector("#server").value.trim();
+      const hasCred = document.querySelector("#username").value.trim()
+        || document.querySelector("#password").value
+        || document.querySelector("#credential_ref").value.trim();
+      if (server && !hasCred) return "SMB targets need a username + password, or a credential ref.";
+    } else {
+      if (!document.querySelector("#endpoint-profile-name").value.trim()) return "Give this scan a name.";
+      if (!document.querySelector("#endpoint-host").value.trim()) return "Enter the endpoint host or IP.";
+      const hasCred = document.querySelector("#endpoint-password").value
+        || document.querySelector("#endpoint-credential-ref").value.trim();
+      if (!document.querySelector("#endpoint-username").value.trim() || !hasCred) {
+        return "Enter the admin username and a password (or credential ref).";
+      }
+    }
+  }
+  if (step === 2 && kind === "endpoint") {
+    try {
+      readEndpointPayload();
+    } catch (error) {
+      return error.message;
+    }
+  }
+  return "";
+}
+
+function wizardNext(kind) {
+  const state = scanWizardState[kind];
+  const problem = validateWizardStep(kind, state.step);
+  if (problem) {
+    setWizardHint(kind, problem);
+    return;
+  }
+  if (state.step < 3) setWizardStep(kind, state.step + 1);
+}
+
+function wizardBack(kind) {
+  const state = scanWizardState[kind];
+  if (state.step > 1) setWizardStep(kind, state.step - 1);
+}
+
+// ---- Collect & apply -------------------------------------------------------
+
+function collectUiState(scope) {
+  const isEndpoint = scope === "endpoint";
+  const presetInput = document.querySelector(
+    isEndpoint ? "input[name='endpoint-ext-preset']:checked" : "input[name='ext-preset']:checked"
+  );
+  const advancedVisible = !document
+    .querySelector(isEndpoint ? "#endpoint-ext-advanced-mode" : "#ext-advanced-mode")
+    ?.classList.contains("hidden");
+  const list = isEndpoint ? endpointAllowedExtensionsList : allowedExtensionsList;
+  return {
+    ext_preset: advancedVisible ? "" : presetInput?.value || "",
+    extensions: readSelectedExtensions(list),
+    path_scope: isEndpoint ? document.querySelector("#endpoint-path-scope").value : undefined,
+    custom_paths: isEndpoint ? document.querySelector("#endpoint-custom-paths").value : undefined,
+  };
+}
+
+function applyExtensionUiState(scope, ui) {
+  const isEndpoint = scope === "endpoint";
+  const list = isEndpoint ? endpointAllowedExtensionsList : allowedExtensionsList;
+  const search = isEndpoint ? endpointExtensionSearch : extensionSearch;
+  const radios = document.querySelectorAll(
+    isEndpoint ? "input[name='endpoint-ext-preset']" : "input[name='ext-preset']"
+  );
+  if (ui.ext_preset && EXT_PRESET_LABELS[ui.ext_preset]) {
+    radios.forEach((radio) => { radio.checked = radio.value === ui.ext_preset; });
+    applySimpleExtensionPolicy(ui.ext_preset, list, search);
+    return;
+  }
+  const selected = new Set(ui.extensions || []);
+  [...list.querySelectorAll("input[type='checkbox']")].forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+  reorderExtensionOptions(list);
+  filterExtensionList(list, search);
+  updateExtensionSummary(list);
+}
+
+function applyComplianceState(scope, enabled, frameworks) {
+  const toggle = scope === "endpoint" ? endpointComplianceEnabledInput : complianceEnabledInput;
+  if (!toggle) return;
+  toggle.checked = Boolean(enabled);
+  toggle.dispatchEvent(new Event("change"));
+  const wanted = new Set(frameworks || []);
+  document
+    .querySelectorAll(`[data-compliance-frameworks="${scope}"] input[type='checkbox']`)
+    .forEach((input) => { input.checked = wanted.has(input.value); });
+}
+
+function collectFileServerProfile() {
+  const payload = readPayload();
+  delete payload.password;
+  delete payload.asset_overrides;
+  payload.ui = collectUiState("file-server");
+  return {
+    profile_id: scanWizardState["file-server"].editingId,
+    kind: "file-server",
+    name: document.querySelector("#fs-profile-name").value.trim(),
+    config: payload,
+  };
+}
+
+function collectEndpointProfile() {
+  const payload = readEndpointPayload();
+  delete payload.password;
+  delete payload.asset_overrides;
+  payload.ui = collectUiState("endpoint");
+  return {
+    profile_id: scanWizardState.endpoint.editingId,
+    kind: "endpoint",
+    name: document.querySelector("#endpoint-profile-name").value.trim(),
+    config: payload,
+  };
+}
+
+function applyFileServerProfile(profile) {
+  const config = profile?.config || {};
+  const ui = config.ui || {};
+  document.querySelector("#fs-profile-name").value = profile?.name || "";
+  document.querySelector("#server").value = config.server || "";
+  document.querySelector("#domain").value = config.domain || "WORKGROUP";
+  document.querySelector("#username").value = config.username || "";
+  document.querySelector("#password").value = "";
+  document.querySelector("#credential_ref").value = config.credential_ref || "";
+  document.querySelector("#local_path").value = config.local_path || "enterprise_test_data";
+  document.querySelector("#max_depth").value = config.max_depth ?? 4;
+  document.querySelector("#async_scan").checked = config.async_scan ?? true;
+  document.querySelector("#incremental_enabled").checked = config.incremental_enabled ?? true;
+  document.querySelector("#inspect_archives").checked = Boolean(config.inspect_archives);
+  document.querySelector("#include_admin_shares").checked = Boolean(config.include_admin_shares);
+  applyExtensionUiState("file-server", profile ? ui : { ext_preset: "recommended" });
+  applyComplianceState("file-server", config.compliance_enabled, config.compliance_frameworks);
+  document.dispatchEvent(new Event("scan-form-updated"));
+}
+
+function applyEndpointProfile(profile) {
+  const config = profile?.config || {};
+  const ui = config.ui || {};
+  document.querySelector("#endpoint-profile-name").value = profile?.name || "";
+  document.querySelector("#endpoint-host").value = config.host || "";
+  document.querySelector("#endpoint-target-username").value = config.target_username || "";
+  document.querySelector("#endpoint-domain").value = config.domain || "WORKGROUP";
+  document.querySelector("#endpoint-username").value = config.username || "";
+  document.querySelector("#endpoint-password").value = "";
+  document.querySelector("#endpoint-credential-ref").value = config.credential_ref || "";
+  const scope = ui.path_scope || "default";
+  endpointPathScope.value = scope;
+  endpointPathScope.dispatchEvent(new Event("change"));
+  document.querySelector("#endpoint-custom-paths").value = ui.custom_paths || "";
+  document.querySelector("#endpoint-max-depth").value = config.max_depth ?? 6;
+  document.querySelector("#endpoint-read-content").checked = config.read_content ?? true;
+  document.querySelector("#endpoint-read-acl").checked = config.read_acl ?? true;
+  document.querySelector("#endpoint-inspect-archives").checked = Boolean(config.inspect_archives);
+  document.querySelector("#endpoint-async-scan").checked = config.async_scan ?? true;
+  document.querySelector("#endpoint-incremental-enabled").checked = config.incremental_enabled ?? true;
+  applyExtensionUiState("endpoint", profile ? ui : { ext_preset: "all" });
+  applyComplianceState("endpoint", config.compliance_enabled, config.compliance_frameworks);
+}
+
+function syncWinrmActivationFields() {
+  document.querySelector("#winrm-activate-host").value = document.querySelector("#endpoint-host").value.trim();
+  document.querySelector("#winrm-target-username").value = document.querySelector("#endpoint-target-username").value.trim();
+  document.querySelector("#winrm-activate-domain").value = document.querySelector("#endpoint-domain").value.trim() || "WORKGROUP";
+  document.querySelector("#winrm-activate-username").value = document.querySelector("#endpoint-username").value.trim();
+  document.querySelector("#winrm-activate-password").value = document.querySelector("#endpoint-password").value;
+}
+
+// ---- Save / delete / start -------------------------------------------------
+
+async function saveScanProfileFromWizard(kind) {
+  const problem = validateWizardStep(kind, 1) || validateWizardStep(kind, 2);
+  if (problem) {
+    setWizardHint(kind, problem);
+    return;
+  }
+  const saveBtn = wizardEl(kind, "save");
+  saveBtn.disabled = true;
+  try {
+    requireAuth();
+    if (kind === "file-server") {
+      await ensureCredential(readPayload());
+    } else {
+      await ensureEndpointCredential(readEndpointPayload());
+    }
+    const profile = kind === "file-server" ? collectFileServerProfile() : collectEndpointProfile();
+    const saved = await api("/api/scan-profiles", profile);
+    const index = scanProfilesState.findIndex((p) => p.profile_id === saved.profile_id);
+    if (index >= 0) scanProfilesState[index] = saved;
+    else scanProfilesState.push(saved);
+    renderScanDecks();
+    closeScanWizard(kind);
+    showToast("Scan saved", `"${saved.name}" is ready to run.`, "info");
+  } catch (error) {
+    setWizardHint(kind, `Save failed: ${error.message}`);
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+async function deleteScanProfileFromWizard(kind) {
+  const state = scanWizardState[kind];
+  if (!state.editingId) return;
+  const profile = scanProfilesState.find((p) => p.profile_id === state.editingId);
+  if (!window.confirm(`Delete "${profile?.name || "this scan"}"? Its results stay in the tenant.`)) return;
+  try {
+    await api(`/api/scan-profiles/${encodeURIComponent(state.editingId)}`, null, "DELETE");
+    scanProfilesState = scanProfilesState.filter((p) => p.profile_id !== state.editingId);
+    renderScanDecks();
+    closeScanWizard(kind);
+    showToast("Scan deleted", "", "info");
+  } catch (error) {
+    setWizardHint(kind, `Delete failed: ${error.message}`);
+  }
+}
+
+async function startProfileScan(kind, profileId) {
+  const profile = scanProfilesState.find((p) => p.profile_id === profileId);
+  if (!profile || activeProfileRun) return;
+  activeProfileRun = { kind, id: profileId };
+  renderScanDecks();
+  try {
+    if (kind === "file-server") {
+      applyFileServerProfile(profile);
+      fsLaunchArmed = true;
+      form.requestSubmit(scanBtn);
+    } else {
+      applyEndpointProfile(profile);
+      endpointScanBtn.click();
+    }
+  } catch (error) {
+    activeProfileRun = null;
+    renderScanDecks();
+    setStatus(`Scan start failed: ${error.message}`);
+  }
+}
+
+function watchScanRunState() {
+  const clearWhenIdle = (progressEl) => {
+    if (!progressEl) return;
+    new MutationObserver(() => {
+      if (progressEl.classList.contains("hidden") && activeProfileRun) {
+        activeProfileRun = null;
+        renderScanDecks();
+      }
+    }).observe(progressEl, { attributes: true, attributeFilter: ["class"] });
+  };
+  clearWhenIdle(document.querySelector("#scan-progress"));
+  clearWhenIdle(document.querySelector("#endpoint-scan-progress"));
+}
+
+function mirrorWizardStatus() {
+  Object.keys(SCAN_WIZARD_KINDS).forEach((kind) => {
+    const source = document.querySelector(SCAN_WIZARD_KINDS[kind].statusSource);
+    const mirror = wizardEl(kind, "mirror");
+    if (!source || !mirror) return;
+    new MutationObserver(() => {
+      mirror.textContent = source.textContent;
+    }).observe(source, { childList: true, characterData: true, subtree: true });
+  });
+}
+
+function initScanProfileDecks() {
+  document.addEventListener("click", (event) => {
+    const opener = event.target.closest("[data-open-scan-wizard]");
+    if (opener) {
+      openScanWizard(opener.dataset.openScanWizard);
+      return;
+    }
+    const startBtn = event.target.closest("[data-profile-start]");
+    if (startBtn) {
+      const kind = startBtn.closest("#fs-profile-grid") ? "file-server" : "endpoint";
+      startProfileScan(kind, startBtn.dataset.profileStart);
+      return;
+    }
+    const editBtn = event.target.closest("[data-profile-edit]");
+    if (editBtn) {
+      const kind = editBtn.closest("#fs-profile-grid") ? "file-server" : "endpoint";
+      openScanWizard(kind, editBtn.dataset.profileEdit);
+    }
+  });
+
+  Object.keys(SCAN_WIZARD_KINDS).forEach((kind) => {
+    wizardEl(kind, "next")?.addEventListener("click", () => wizardNext(kind));
+    wizardEl(kind, "back")?.addEventListener("click", () => wizardBack(kind));
+    wizardEl(kind, "close")?.addEventListener("click", () => closeScanWizard(kind));
+    wizardEl(kind, "save")?.addEventListener("click", () => saveScanProfileFromWizard(kind));
+    wizardEl(kind, "del")?.addEventListener("click", () => deleteScanProfileFromWizard(kind));
+  });
+
+  // Enter inside the wizard advances a step; only an armed programmatic
+  // submit (a card's Start button) may launch the scan.
+  form.addEventListener("submit", (event) => {
+    if (fsLaunchArmed) {
+      fsLaunchArmed = false;
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    wizardNext("file-server");
+  }, true);
+
+  document.querySelector("#endpoint-activate-btn")?.addEventListener("click", () => {
+    syncWinrmActivationFields();
+  }, true);
+
+  watchScanRunState();
+  mirrorWizardStatus();
+  renderScanDecks();
+}
+
+initScanProfileDecks();
