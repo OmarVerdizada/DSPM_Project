@@ -1227,6 +1227,7 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
   const diagnostics = endpoint.scan_diagnostics || {};
   const visited = Number(diagnostics.visited_files || 0);
   const matched = Number(diagnostics.matched_files || 0);
+  const filtered = Math.max(0, visited - matched);
   const archiveFiles = Number(diagnostics.archive_files || 0);
   const archiveEntries = Number(diagnostics.archive_entries || 0);
   const skippedDirs = Number(diagnostics.skipped_dirs || 0);
@@ -1236,7 +1237,7 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
   const archiveErrors = (diagnostics.archive_errors || []).slice(0, 2).join("; ");
   const unreadable = (diagnostics.unreadable_dirs || []).slice(0, 3).join("; ");
   const allowed = (diagnostics.allowed_extensions || endpoint.allowed_extensions || []).join(", ");
-  const parts = [`Visited: ${visited}`, `Matched: ${matched}`];
+  const parts = [`Visited: ${visited}`, `Matched: ${matched}`, `Filtered: ${filtered}`];
   const incremental = diagnostics.incremental || {};
   if (incremental.enabled) {
     parts.push(`Delta: ${Number(incremental.unchanged_objects || 0)} reused, ${Number(incremental.content_reads || 0)} read`);

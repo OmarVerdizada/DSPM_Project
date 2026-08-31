@@ -47,6 +47,9 @@ DEFAULT_WINRM_RESPONSE_MAX_BYTES = 512 * 1024 * 1024
 # One stdin slice must stay well inside the target's WS-Man MaxEnvelopeSize
 # (default ~150 KB on older hosts) once SOAP/base64 framing is added.
 _WINRM_STDIN_CHUNK_BYTES = 48 * 1024
+# Primary delivery is one command. Keep a little protocol headroom while making
+# the former 31-command upload fail a regression test immediately.
+WINRM_FAST_DELIVERY_COMMAND_BUDGET = 3
 
 
 def _is_stdin_capability_error(exc: BaseException) -> bool:
@@ -598,10 +601,18 @@ class WinRMEndpointConfig:
     include_system: bool = False
     hidden_filter_enabled: bool = False
     system_filter_enabled: bool = False
-    read_acl: bool = False
+    read_acl: bool = True
     inspect_archives: bool = False
     hash_files: bool = True
     read_owner: bool = True
+
+
+@dataclass(slots=True)
+class _WinRMSessionBinding:
+    identity: tuple[object, ...]
+    connection_host: str
+    transport: str
+    session: object
 
 
 class WinRMEndpointScanner:
@@ -609,11 +620,30 @@ class WinRMEndpointScanner:
         self.config = config
         self.last_scan_diagnostics: dict = {}
         self.last_connection_host = ""
+        self.last_connection_transport = ""
         # How the last script reached the endpoint. Without this a silent demotion
         # to the legacy path - the exact regression this work removes - is
         # invisible in a saved report.
         self.last_delivery_diagnostics: dict = {}
-        self._legacy_remote_commands = 0
+        self._delivery_remote_commands_current = 0
+        self._response_envelopes_current = 0
+        self._delivery_total_ms = 0.0
+        self._remote_commands_total = 0
+        self._response_envelopes_total = 0
+        self._delivery_invocations = 0
+        # P4: a scanner is scoped to one API scan job. Keep the successfully
+        # negotiated pywinrm Session on that job-local object so a metadata pass
+        # and its content batches reuse the HTTP/authentication state. This is
+        # deliberately not process-global: credentials and sessions do not
+        # outlive the operation that supplied them.
+        self._session_binding: _WinRMSessionBinding | None = None
+        self._session_creations = 0
+        self._session_negotiations = 0
+        self._session_reuse_count = 0
+        self._session_failovers = 0
+        self._last_session_reused = False
+        self._connection_candidates_target = ""
+        self._connection_candidates_cache: list[str] = []
 
     def activate_winrm(self) -> dict:
         if platform.system().lower() != "windows":
@@ -728,6 +758,7 @@ class WinRMEndpointScanner:
                 "user": info.get("user", ""),
                 "computer": info.get("computer", self.config.host),
                 "message": "Connected successfully" if result.status_code == 0 else _clean_error(result.std_err),
+                **self._session_diagnostics(),
             }
         except Exception as exc:
             return {"connected": False, "host": self.config.host, "message": "WinRM connection test failed"}
@@ -791,6 +822,7 @@ class WinRMEndpointScanner:
                 "host_admission": admission_stats,
                 **response_diagnostics,
             }
+            self.last_scan_diagnostics.update(self._session_diagnostics())
             return []
         if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
             self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
@@ -858,6 +890,7 @@ class WinRMEndpointScanner:
         self.last_scan_diagnostics.update(response_diagnostics)
         self.last_scan_diagnostics.setdefault("io_parallel_active", False)
         self.last_scan_diagnostics["host_admission"] = admission_stats
+        self.last_scan_diagnostics.update(self._session_diagnostics())
         return normalize_records(records)
 
     def _is_profile_scoped_request(self) -> bool:
@@ -890,7 +923,11 @@ class WinRMEndpointScanner:
         return resolve_endpoint_connection_host(self.config.host)
 
     def _connection_hosts(self) -> list[str]:
-        return endpoint_connection_hosts(self.config.host) or [self.config.host.strip()]
+        target = self.config.host.strip()
+        if target != self._connection_candidates_target or not self._connection_candidates_cache:
+            self._connection_candidates_cache = endpoint_connection_hosts(target) or [target]
+            self._connection_candidates_target = target
+        return list(self._connection_candidates_cache)
 
     def _username(self) -> str:
         username = self.config.username.strip()
@@ -939,6 +976,87 @@ class WinRMEndpointScanner:
             kwargs["server_cert_validation"] = self._winrm_cert_validation()
         return winrm.Session(self._endpoint_url(connection_host), **kwargs)
 
+    def _session_identity(self) -> tuple[object, ...]:
+        """Network/auth fields that determine whether a session is reusable.
+
+        Scan-only fields (paths, filters, read modes) intentionally do not take
+        part: P4 changes those between the metadata and content scripts. A host,
+        credential, SSL, port, validation, or transport-policy change forces a
+        fresh security negotiation instead of borrowing an incompatible session.
+        """
+
+        return (
+            self.config.host.strip().casefold(),
+            self._username(),
+            self.config.password,
+            bool(self.config.use_ssl),
+            self.config.port or (5986 if self.config.use_ssl else 5985),
+            self._winrm_cert_validation(),
+            tuple(self._winrm_transports()),
+        )
+
+    def _session_diagnostics(self) -> dict:
+        return {
+            "session_reused": bool(self._last_session_reused),
+            "session_reuse_count": int(self._session_reuse_count),
+            "session_creations": int(self._session_creations),
+            "session_negotiations": int(self._session_negotiations),
+            "session_failovers": int(self._session_failovers),
+            "connection_transport": self.last_connection_transport,
+        }
+
+    def _run_with_session(self, operation):
+        """Run against the working binding, negotiating only when necessary."""
+
+        identity = self._session_identity()
+        binding = self._session_binding
+        last_error: Exception | None = None
+        self._last_session_reused = False
+
+        if binding is not None and binding.identity == identity:
+            try:
+                result = operation(binding.session)
+            except Exception as exc:
+                # A once-good connection can expire during a long scan. Drop it
+                # and use the normal candidate/transport failover below. Scan
+                # scripts are read-only, so a transport-level retry is safe.
+                self._session_binding = None
+                self._session_failovers += 1
+                last_error = exc
+            else:
+                self.last_connection_host = binding.connection_host
+                self.last_connection_transport = binding.transport
+                self._session_reuse_count += 1
+                self._last_session_reused = True
+                return result
+        elif binding is not None:
+            # A caller changed a security-relevant config field. Never reuse a
+            # binding across a host/credential/transport boundary.
+            self._session_binding = None
+
+        for connection_host in self._connection_hosts():
+            for transport in self._winrm_transports():
+                try:
+                    session = self._winrm_session(connection_host, transport)
+                    self._session_creations += 1
+                    result = operation(session)
+                    self._session_binding = _WinRMSessionBinding(
+                        identity=identity,
+                        connection_host=connection_host,
+                        transport=transport,
+                        session=session,
+                    )
+                    self._session_negotiations += 1
+                    self.last_connection_host = connection_host
+                    self.last_connection_transport = transport
+                    return result
+                except Exception as exc:
+                    last_error = exc
+                    continue
+        if last_error:
+            raise last_error
+        raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
+
     def _run_ps(self, script: str):
         try:
             import winrm  # noqa: F401 - dependency presence check
@@ -947,20 +1065,7 @@ class WinRMEndpointScanner:
 
         if not self.config.use_ssl and _winrm_ssl_required():
             raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
-        last_error: Exception | None = None
-        for connection_host in self._connection_hosts():
-            for transport in self._winrm_transports():
-                try:
-                    session = self._winrm_session(connection_host, transport)
-                    result = session.run_ps(script)
-                    self.last_connection_host = connection_host
-                    return result
-                except Exception as exc:
-                    last_error = exc
-                    continue
-        if last_error:
-            raise last_error
-        raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
+        return self._run_with_session(lambda session: session.run_ps(script))
 
     def _run_ps_file(self, script: str):
         try:
@@ -970,25 +1075,16 @@ class WinRMEndpointScanner:
 
         if not self.config.use_ssl and _winrm_ssl_required():
             raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
-        last_error: Exception | None = None
-        for connection_host in self._connection_hosts():
-            for transport in self._winrm_transports():
-                try:
-                    session = self._winrm_session(connection_host, transport)
-                    result = self._run_ps_file_with_session(session, script)
-                    self.last_connection_host = connection_host
-                    return result
-                except Exception as exc:
-                    last_error = exc
-                    continue
-        if last_error:
-            raise last_error
-        raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
+        return self._run_with_session(
+            lambda session: self._run_ps_file_with_session(session, script)
+        )
 
     def _run_ps_file_with_session(self, session, script: str):
         started = time.perf_counter()
         # Never let a previous candidate's outcome describe this attempt.
         self.last_delivery_diagnostics = {}
+        self._delivery_remote_commands_current = 0
+        self._response_envelopes_current = 0
         try:
             result = self._run_ps_file_over_stdin(session, script)
         except Exception as exc:
@@ -999,31 +1095,61 @@ class WinRMEndpointScanner:
                 # connect timeout per host/transport candidate), so those
                 # propagate immediately and let the caller try the next
                 # candidate.
-                self.last_delivery_diagnostics = {
-                    "delivery_mode": "failed",
-                    "delivery_ms": round((time.perf_counter() - started) * 1000, 3),
-                    "delivery_fallback_reason": type(exc).__name__,
-                }
+                self._record_delivery_diagnostics(
+                    mode="failed",
+                    started=started,
+                    fallback_reason=type(exc).__name__,
+                )
                 raise
             # Some older/restricted WS-Man targets reject command input even
             # though ordinary run_cmd calls work. Preserve compatibility without
             # making the legacy 31-PowerShell-spawn path the common case.
             fallback_reason = type(exc).__name__
-            result = self._run_ps_file_legacy(session, script)
-            self.last_delivery_diagnostics = {
-                "delivery_mode": "legacy_disk_chunks",
-                "delivery_ms": round((time.perf_counter() - started) * 1000, 3),
-                "delivery_remote_commands": self._legacy_remote_commands,
-                "delivery_fallback_reason": fallback_reason,
-            }
+            try:
+                result = self._run_ps_file_legacy(session, script)
+            except Exception:
+                self._record_delivery_diagnostics(
+                    mode="failed",
+                    started=started,
+                    fallback_reason=fallback_reason,
+                )
+                raise
+            self._record_delivery_diagnostics(
+                mode="legacy_disk_chunks",
+                started=started,
+                fallback_reason=fallback_reason,
+            )
             return result
-        self.last_delivery_diagnostics = {
-            "delivery_mode": "stdin_gzip",
-            "delivery_ms": round((time.perf_counter() - started) * 1000, 3),
-            "delivery_remote_commands": 1,
-            "delivery_fallback_reason": "",
-        }
+        self._record_delivery_diagnostics(mode="stdin_gzip", started=started)
         return result
+
+    def _record_delivery_diagnostics(
+        self,
+        *,
+        mode: str,
+        started: float,
+        fallback_reason: str = "",
+    ) -> None:
+        last_ms = round((time.perf_counter() - started) * 1000, 3)
+        self._delivery_invocations += 1
+        self._delivery_total_ms += last_ms
+        self._remote_commands_total += self._delivery_remote_commands_current
+        self._response_envelopes_total += self._response_envelopes_current
+        self.last_delivery_diagnostics = {
+            "delivery_mode": mode,
+            # P5 job totals: on a warm scan these include metadata and every
+            # content batch because P4 keeps all invocations on one scanner.
+            "delivery_ms": round(self._delivery_total_ms, 3),
+            "remote_commands": int(self._remote_commands_total),
+            "response_envelopes": int(self._response_envelopes_total),
+            "delivery_invocations": int(self._delivery_invocations),
+            # Per-attempt detail remains available for fallback diagnosis and
+            # the <=3-command primary-path guardrail.
+            "delivery_last_ms": last_ms,
+            "delivery_remote_commands": int(self._delivery_remote_commands_current),
+            "delivery_response_envelopes": int(self._response_envelopes_current),
+            "delivery_fallback_reason": fallback_reason,
+        }
 
     def _run_ps_file_over_stdin(self, session, script: str):
         """Run one byte-identical script through a single WinRM command.
@@ -1059,6 +1185,7 @@ class WinRMEndpointScanner:
                 "powershell.exe",
                 ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_bootstrap],
             )
+            self._delivery_remote_commands_current += 1
             # Send in bounded slices: one oversized WS-Man envelope is refused by
             # the target (default MaxEnvelopeSize is ~150-500 KB), which would
             # silently demote a large scan - P2 batches up to 256 paths into one
@@ -1071,10 +1198,85 @@ class WinRMEndpointScanner:
                     slice_,
                     end=index + _WINRM_STDIN_CHUNK_BYTES >= len(payload),
                 )
-            return Response(protocol.get_command_output(shell_id, command_id))
+            return Response(self._get_command_output(protocol, shell_id, command_id))
         finally:
             # Preserve the delivery/output exception if cleanup also fails; the
             # caller then takes the compatible disk-based path on this session.
+            if shell_id and command_id:
+                try:
+                    protocol.cleanup_command(shell_id, command_id)
+                except Exception:
+                    pass
+            if shell_id:
+                try:
+                    protocol.close_shell(shell_id)
+                except Exception:
+                    pass
+
+    def _get_command_output(self, protocol, shell_id: str, command_id: str):
+        """Collect output while counting the actual WS-Man Receive envelopes.
+
+        pywinrm's high-level ``get_command_output`` hides this loop. Its public
+        raw method exposes one Receive response at a time, including operation
+        timeout responses, which lets P5 report a real envelope count. Minimal
+        protocol fakes and older compatible clients retain the high-level path
+        and conservatively report one envelope.
+        """
+
+        get_raw = getattr(protocol, "get_command_output_raw", None)
+        if not callable(get_raw):
+            output = protocol.get_command_output(shell_id, command_id)
+            self._response_envelopes_current += 1
+            return output
+
+        from winrm.exceptions import WinRMOperationTimeoutError
+
+        stdout_buffer: list[bytes] = []
+        stderr_buffer: list[bytes] = []
+        return_code = -1
+        command_done = False
+        while not command_done:
+            self._response_envelopes_current += 1
+            try:
+                stdout, stderr, return_code, command_done = get_raw(shell_id, command_id)
+            except WinRMOperationTimeoutError:
+                continue
+            stdout_buffer.append(stdout)
+            stderr_buffer.append(stderr)
+        return b"".join(stdout_buffer), b"".join(stderr_buffer), return_code
+
+    def _run_cmd_with_session(self, session, command: str, arguments: list[str]):
+        """pywinrm ``run_cmd`` with receive-envelope accounting when possible."""
+
+        from winrm import Response
+
+        protocol = getattr(session, "protocol", None)
+        low_level = protocol is not None and all(
+            callable(getattr(protocol, name, None))
+            for name in (
+                "open_shell",
+                "run_command",
+                "cleanup_command",
+                "close_shell",
+            )
+        ) and (
+            callable(getattr(protocol, "get_command_output_raw", None))
+            or callable(getattr(protocol, "get_command_output", None))
+        )
+        if not low_level:
+            self._delivery_remote_commands_current += 1
+            result = session.run_cmd(command, arguments)
+            self._response_envelopes_current += 1
+            return result
+
+        shell_id = ""
+        command_id = ""
+        try:
+            shell_id = protocol.open_shell()
+            command_id = protocol.run_command(shell_id, command, arguments)
+            self._delivery_remote_commands_current += 1
+            return Response(self._get_command_output(protocol, shell_id, command_id))
+        finally:
             if shell_id and command_id:
                 try:
                     protocol.cleanup_command(shell_id, command_id)
@@ -1093,12 +1295,11 @@ class WinRMEndpointScanner:
         b64_name = f"dspm_{token}.b64"
         encoded_script = base64.b64encode(script.encode("utf-8")).decode("ascii")
         chunk_size = 1800
-        self._legacy_remote_commands = 0
 
         def run_short(command: str):
             encoded_command = base64.b64encode(command.encode("utf-16le")).decode("ascii")
-            self._legacy_remote_commands += 1
-            return session.run_cmd(
+            return self._run_cmd_with_session(
+                session,
                 "powershell.exe",
                 ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_command],
             )
@@ -1128,7 +1329,8 @@ class WinRMEndpointScanner:
 
         def cleanup_temp_file() -> None:
             try:
-                session.run_cmd(
+                self._run_cmd_with_session(
+                    session,
                     "cmd.exe",
                     ["/d", "/q", "/c", f'del /f /q "{remote_temp_path}" >nul 2>nul'],
                 )
@@ -1137,8 +1339,8 @@ class WinRMEndpointScanner:
 
         for index in range(0, len(encoded_script), chunk_size):
             chunk = encoded_script[index : index + chunk_size]
-            self._legacy_remote_commands += 1
-            append = session.run_cmd(
+            append = self._run_cmd_with_session(
+                session,
                 "cmd.exe",
                 ["/d", "/q", "/c", f'echo({chunk}>>"{remote_temp_path}"'],
             )

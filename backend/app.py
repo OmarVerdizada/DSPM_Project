@@ -114,6 +114,7 @@ from classification.compliance.nist_catalog import (
 )
 from collectors.file_scanner import normalize_extension_filter, scan_directory
 from collectors.net_guard import ip_disallowed_reason
+from collectors.win_security import security_for_path
 from collectors.winrm_endpoint_scanner import (
     ENDPOINT_PATH_ALIASES,
     WinRMEndpointConfig,
@@ -153,6 +154,23 @@ TRUSTED_HOSTS = [
     if host.strip()
 ]
 ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE = 256
+ENDPOINT_REUSED_SCANNER_DIAGNOSTIC_FIELDS = (
+    "session_reused",
+    "session_reuse_count",
+    "session_creations",
+    "session_negotiations",
+    "session_failovers",
+    "connection_transport",
+    "delivery_mode",
+    "delivery_ms",
+    "delivery_last_ms",
+    "delivery_invocations",
+    "delivery_remote_commands",
+    "delivery_response_envelopes",
+    "delivery_fallback_reason",
+    "remote_commands",
+    "response_envelopes",
+)
 LOGIN_WINDOW_SECONDS = int(os.getenv("DSPM_LOGIN_WINDOW_SECONDS", "600"))
 LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
 # M4: an aggregate per-IP failure cap alongside the per-(IP,username) cap, so one
@@ -448,7 +466,7 @@ class EndpointScanRequest(BaseModel):
     paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"], max_length=40)
     max_depth: int = Field(default=12, ge=1, le=12)
     read_content: bool = True
-    read_acl: bool = False
+    read_acl: bool = True
     inspect_archives: bool = False
     async_scan: bool = False
     compact_result: bool = False
@@ -2417,24 +2435,25 @@ def _run_endpoint_scan_payload(
         # PowerShell walk is running. Enumerate size/mtime without content,
         # owner/ACL or hashing, resolve the baseline locally, then fetch only
         # new/changed paths in bounded commands.
-        metadata_scanner = WinRMEndpointScanner(
-            replace(
-                config,
-                read_content=False,
-                read_acl=False,
-                inspect_archives=False,
-                hash_files=False,
-                read_owner=False,
-            )
+        # P4: keep one job-local scanner so the working WinRM host, transport,
+        # and pywinrm Session survive from metadata enumeration into every
+        # content batch. Only scan-script options change between invocations.
+        scanner.config = replace(
+            config,
+            read_content=False,
+            read_acl=False,
+            inspect_archives=False,
+            hash_files=False,
+            read_owner=False,
         )
         with collection_heartbeat(job, ceiling=45):
-            metadata_records = metadata_scanner.scan()
-        collection_diagnostics = dict(metadata_scanner.last_scan_diagnostics or {})
+            metadata_records = scanner.scan()
+        collection_diagnostics = dict(scanner.last_scan_diagnostics or {})
         records_by_path: dict[str, dict] = {}
         reused_archive_records: list[dict] = []
         fetched_archive_records: list[dict] = []
         changed_paths: list[str] = []
-        host_key = config.host or metadata_scanner.last_connection_host
+        host_key = config.host or scanner.last_connection_host
         for record in metadata_records:
             object_key = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
             snapshot = report._reuse_probe(
@@ -2473,16 +2492,23 @@ def _run_endpoint_scan_payload(
             if job:
                 job.progress = max(job.progress, min(65, 46 + int((offset / max(len(changed_paths), 1)) * 19)))
                 job.message = f"Reading changed endpoint files {min(offset + len(chunk), len(changed_paths))}/{len(changed_paths)}"
-            changed_scanner = WinRMEndpointScanner(
-                replace(config, paths=chunk, max_depth=1, hash_files=True, read_owner=True)
+            scanner.config = replace(
+                config,
+                paths=chunk,
+                max_depth=1,
+                hash_files=True,
+                read_owner=True,
             )
             try:
                 with collection_heartbeat(job, ceiling=65):
-                    changed_records = changed_scanner.scan()
+                    changed_records = scanner.scan()
             except Exception as exc:
                 fetch_errors.append(type(exc).__name__)
                 continue
-            changed_diagnostics = dict(changed_scanner.last_scan_diagnostics or {})
+            changed_diagnostics = dict(scanner.last_scan_diagnostics or {})
+            for field in ENDPOINT_REUSED_SCANNER_DIAGNOSTIC_FIELDS:
+                if field in changed_diagnostics:
+                    collection_diagnostics[field] = changed_diagnostics[field]
             for marker in (
                 "scan_truncated",
                 "record_limit_reached",
@@ -2501,6 +2527,8 @@ def _run_endpoint_scan_payload(
                     fetched_archive_records.append(record)
                 else:
                     records_by_path[path_key] = record
+
+        scanner.config = config
 
         records = []
         changed_path_keys = {path.casefold() for path in changed_paths if path}
@@ -2608,6 +2636,33 @@ def _run_endpoint_scan_payload(
     return data
 
 
+def _apply_local_endpoint_acl(record: dict, *, read_acl: bool) -> None:
+    """Give local-endpoint records the same owner/DACL shape as SMB/WinRM."""
+
+    owner = str(record.get("owner") or "")
+    acl = record.get("acl") if isinstance(record.get("acl"), dict) else {}
+    if (
+        read_acl
+        and not (record.get("cache_reused") or record.get("incremental_reused"))
+        and "::" not in str(record.get("path") or "")
+    ):
+        acl = security_for_path(str(record.get("path") or ""), with_dacl=True)
+    if read_acl:
+        owner = str((acl or {}).get("owner") or owner)
+        record["owner"] = owner
+        record["acl"] = {
+            "owner": owner,
+            "principals": [str(item) for item in ((acl or {}).get("principals") or [])],
+            "permissions": [str(item) for item in ((acl or {}).get("permissions") or [])],
+        }
+    else:
+        record["acl"] = {
+            "owner": owner,
+            "principals": [],
+            "permissions": [],
+        }
+
+
 def _run_local_endpoint_scan_payload(
     config: WinRMEndpointConfig,
     payload: EndpointScanRequest,
@@ -2672,12 +2727,7 @@ def _run_local_endpoint_scan_payload(
                 record["content_scannable"] = False
             record["source"] = "endpoint-local"
             record["share"] = config.host or socket.gethostname()
-            owner = record.get("owner", "")
-            record["acl"] = {
-                "owner": owner,
-                "principals": [],
-                "permissions": [],
-            }
+            _apply_local_endpoint_acl(record, read_acl=config.read_acl)
             records.append(record)
 
     if job:
@@ -2722,7 +2772,7 @@ def _run_local_endpoint_scan_payload(
             "hidden_filter_enabled": config.hidden_filter_enabled,
             "system_filter_enabled": config.system_filter_enabled,
             "read_content": config.read_content,
-            "read_acl": False,
+            "read_acl": config.read_acl,
             "inspect_archives": config.inspect_archives,
             "raw_record_count": len(records),
             "extension_counts": extension_counts,

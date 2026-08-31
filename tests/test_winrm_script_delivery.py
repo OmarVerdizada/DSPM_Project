@@ -11,7 +11,11 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from collectors.winrm_endpoint_scanner import WinRMEndpointConfig, WinRMEndpointScanner
+from collectors.winrm_endpoint_scanner import (
+    WINRM_FAST_DELIVERY_COMMAND_BUDGET,
+    WinRMEndpointConfig,
+    WinRMEndpointScanner,
+)
 
 
 class _StreamingProtocol:
@@ -216,8 +220,49 @@ class WinRMDeliveryFallbackScopeTests(unittest.TestCase):
         diagnostics = scanner.last_delivery_diagnostics
         self.assertEqual(diagnostics["delivery_mode"], "stdin_gzip")
         self.assertEqual(diagnostics["delivery_remote_commands"], 1)
+        self.assertLessEqual(
+            diagnostics["delivery_remote_commands"],
+            WINRM_FAST_DELIVERY_COMMAND_BUDGET,
+            "primary delivery exceeded the P5 command budget",
+        )
+        self.assertEqual(diagnostics["remote_commands"], 1)
+        self.assertEqual(diagnostics["response_envelopes"], 1)
+        self.assertEqual(diagnostics["delivery_invocations"], 1)
         self.assertEqual(diagnostics["delivery_fallback_reason"], "")
         self.assertGreaterEqual(diagnostics["delivery_ms"], 0)
+
+    def test_receive_envelopes_are_counted_from_raw_wsman_pages(self) -> None:
+        from winrm.exceptions import WinRMOperationTimeoutError
+
+        class PagedProtocol(_StreamingProtocol):
+            def __init__(self):
+                super().__init__()
+                self.timeout_pending = True
+                self.pages = [
+                    (b"page-1", b"", -1, False),
+                    (b"-page-2", b"warning", -1, False),
+                    (b"-page-3", b"", 0, True),
+                ]
+
+            def get_command_output(self, shell_id, command_id):
+                raise AssertionError("raw WS-Man receive pages should be used")
+
+            def get_command_output_raw(self, shell_id, command_id):
+                if self.timeout_pending:
+                    self.timeout_pending = False
+                    raise WinRMOperationTimeoutError()
+                return self.pages.pop(0)
+
+        scanner = self._scanner()
+        protocol = PagedProtocol()
+        session = SimpleNamespace(protocol=protocol, run_cmd=mock.Mock())
+
+        result = scanner._run_ps_file_with_session(session, "Write-Output ok")
+
+        self.assertEqual(result.std_out, b"page-1-page-2-page-3")
+        self.assertEqual(result.std_err, b"warning")
+        self.assertEqual(scanner.last_delivery_diagnostics["response_envelopes"], 4)
+        self.assertEqual(scanner.last_delivery_diagnostics["delivery_response_envelopes"], 4)
 
 
 class WinRMStdinChunkingTests(unittest.TestCase):

@@ -151,14 +151,35 @@ class EndpointP2SingleDeliveryTests(unittest.TestCase):
     def test_changed_path_fetch_stays_bounded_at_256(self) -> None:
         metadata = [_record(fr"C:\Data\file-{index}.txt", content="") for index in range(300)]
         fetched_batches: list[list[str]] = []
+        scanner_instances: list[object] = []
 
         class Scanner:
             def __init__(self, config):
                 self.config = config
                 self.last_scan_diagnostics = {}
                 self.last_connection_host = "endpoint-01"
+                self.scan_calls = 0
+                scanner_instances.append(self)
 
             def scan(self):
+                self.scan_calls += 1
+                self.last_scan_diagnostics = {
+                    "session_reused": self.scan_calls > 1,
+                    "session_reuse_count": max(0, self.scan_calls - 1),
+                    "session_creations": 1,
+                    "session_negotiations": 1,
+                    "session_failovers": 0,
+                    "connection_transport": "ntlm",
+                    "delivery_mode": "stdin_gzip",
+                    "delivery_ms": float(self.scan_calls * 10),
+                    "delivery_last_ms": 10.0,
+                    "delivery_invocations": self.scan_calls,
+                    "delivery_remote_commands": 1,
+                    "delivery_response_envelopes": 1,
+                    "delivery_fallback_reason": "",
+                    "remote_commands": self.scan_calls,
+                    "response_envelopes": self.scan_calls,
+                }
                 if not self.config.read_content:
                     return metadata
                 fetched_batches.append(list(self.config.paths))
@@ -166,8 +187,16 @@ class EndpointP2SingleDeliveryTests(unittest.TestCase):
 
         result = self._run(baseline=True, scanner_factory=Scanner)
 
+        self.assertEqual(len(scanner_instances), 1, "one scan job must own one reusable WinRM scanner")
         self.assertEqual([len(batch) for batch in fetched_batches], [256, 44])
         self.assertEqual(result["scan_diagnostics"]["incremental_content_fetch_commands"], 2)
+        self.assertTrue(result["scan_diagnostics"]["session_reused"])
+        self.assertEqual(result["scan_diagnostics"]["session_reuse_count"], 2)
+        self.assertEqual(result["scan_diagnostics"]["session_negotiations"], 1)
+        self.assertEqual(result["scan_diagnostics"]["delivery_invocations"], 3)
+        self.assertEqual(result["scan_diagnostics"]["remote_commands"], 3)
+        self.assertEqual(result["scan_diagnostics"]["response_envelopes"], 3)
+        self.assertEqual(result["scan_diagnostics"]["delivery_ms"], 30.0)
 
     def test_missing_changed_record_marks_incremental_scan_incomplete(self) -> None:
         metadata = [_record(r"C:\Data\one.txt", content=""), _record(r"C:\Data\two.txt", content="")]

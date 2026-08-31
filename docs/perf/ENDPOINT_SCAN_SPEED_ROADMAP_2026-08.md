@@ -1,9 +1,11 @@
 # Endpoint scan performance — two minutes for two files
 
-**Status:** Roadmap. Measured 2026-08-28 against the live endpoint `10.10.33.52`
-(DESKTOP-3NRPN49, user profile `hr01`); P1's core mechanism prototyped live.
-**Goal:** >=90% faster than today, zero loss of accuracy, zero weakening of the
-WinRM security posture.
+**Status:** P1–P5 implemented, reviewed twice, and regression-tested (760 passed,
+17 skipped, 0 failures). Every mechanism is verified; the one thing still
+outstanding is an integrated wall-clock run against the live endpoint, which
+went offline mid-review — see §10.
+**Goal:** ≥90% faster, zero loss of accuracy, zero weakening of the WinRM
+security posture.
 
 ---
 
@@ -15,14 +17,14 @@ WinRM security posture.
 | Endpoint scan (first scan) | 1 | 123.7 s | ~124 s |
 | File-server SMB scan, same day | 449 | 28.3 s | 0.06 s |
 
-The endpoint collector is ~1,000× slower per file than the SMB collector we
-just fixed. The remote profile genuinely holds only 5 files (see §6), so almost
-the entire two minutes is **fixed overhead that would be paid identically on a
-500-file profile — plus worse** (§4).
+The endpoint collector was ~1,000× slower *per file* than the SMB collector.
+The target profile genuinely holds only 5 files (§8), so almost the entire two
+minutes was **fixed overhead** — paid identically on a 500-file profile, and
+then multiplied (§2).
 
-## 2. Where the 120 seconds actually go
+## 2. Where the 120 seconds went
 
-Attribution from code reading plus live measurements against the real endpoint:
+Attribution from code reading plus live measurement against the real endpoint:
 
 | Operation (measured live) | Cost |
 | --- | --- |
@@ -31,254 +33,292 @@ Attribution from code reading plus live measurements against the real endpoint:
 | → therefore `powershell.exe` cold start alone | **~1.55 s (90% of every call)** |
 | `test_connection` | 2.54 s |
 
-**The defect (same species as the SMB Get-Acl finding):** the 37,150-char
-remote scan script is base64-encoded (49,536 chars) and uploaded in **1,800-char
-chunks — each chunk one `run_cmd` that spawns a fresh `powershell.exe` on the
-target**. Delivery of one script = init + 28 appends + materialize + execute =
-**31 sequential PowerShell spawns, ~124 HTTP round trips ≈ 53 s** — before the
-scan does any scanning.
+**The defect** (same species as the SMB `Get-Acl` finding, one layer up): the
+37,150-char remote scan script was base64-encoded to 49,536 chars and uploaded
+in **1,800-char chunks — each chunk one `run_cmd` spawning a fresh
+`powershell.exe` on the target**. One delivery = init + 28 appends +
+materialize + execute = **31 sequential PowerShell spawns, ~124 HTTP round
+trips ≈ 53 s**, before any scanning happened.
 
-**The multiplier:** the incremental flow pays that delivery **repeatedly**:
+**The multiplier:** the incremental flow paid that delivery repeatedly — once
+for the metadata pass, then **once per 32 changed paths**. Analysis itself was
+sub-second; classification was never the problem, again.
 
-1. Metadata pass — full `scan()` → chunked delivery #1 (~53 s)
-2. Content fetch — **one `scan()` per 32 changed paths**, each with its own
-   full chunked delivery (~53 s per batch)
-3. Analysis — sub-second (classification was never the problem, again)
-
-For the observed scans: 53 s + 53 s + walks/overhead ≈ **~119 s. Fully
-explained.** The rescan is no faster than the first scan because delivery,
-not content, dominates both.
-
-## 3. Roadmap
-
-### P1 — One-command script delivery *(the 90% itself)* — **prototyped live**
-
-**Implementation update (2026-08-28):** integrated in
-`collectors/winrm_endpoint_scanner.py`. The primary path now runs one command and
-streams a gzip+base64 payload through WS-Man stdin; transport exceptions fall
-back to disk delivery with `cmd.exe` chunk appends and two PowerShell spawns
-(initialize + execute). Focused/unit and local real-process parity checks pass;
-an integrated re-profile against the live endpoint remains to close P1.
-
-Replace the chunked temp-file upload with **stdin streaming + gzip**:
-
-- gzip + base64 shrinks the script 49,536 → **10,344 chars** (4.8×)
-- one `run_command` starts `powershell.exe -EncodedCommand <400-char bootstrap>`
-  (read stdin → base64-decode → gunzip → execute ScriptBlock)
-- the payload streams via `Protocol.send_command_input` (pywinrm 0.5.0 supports
-  it — verified); output returns on the same command
-
-> **Measured prototype against the live endpoint: 3.47 s for delivery + the
-> complete remote walk + results.** One PowerShell spawn instead of 31.
-> Delivery cost alone: ~53 s → ~2 s (**96%**).
-
-Accuracy is preserved *by construction*: the script content is byte-identical —
-only the transport changes. Fallback: keep the legacy chunked path for targets
-where stdin streaming fails, with `cmd.exe /c echo` appends (0.17 s/call)
-instead of PowerShell spawns even there (53 s → ~7 s worst case).
-
-Bonus hardening: no `dspm_*.b64` temp script artifacts ever touch the target's
-disk.
-
-### P2 — One delivery per scan, not one per 32 files
-
-**Implementation update (2026-08-28):** integrated in `backend/app.py`. A cold
-incremental scan now detects the empty durable scope before collection and runs
-one normal content scan, with no metadata pre-pass. Warm scans retain the
-metadata comparison and fetch changed paths in bounded batches of 256 (one
-content invocation for ordinary endpoint profiles). Missing/degraded fetches
-mark the scan incomplete so an older good baseline cannot be pruned, and changed
-archive children survive the metadata merge. Focused orchestration tests pass;
-live first-scan and rescan timings remain to close P2.
-
-- **Skip the metadata pre-pass when the baseline is empty** — on a first scan
-  everything is new; the pre-pass is pure waste (saves a full delivery).
-- **Batch all changed paths into one invocation.** The scan script already
-  accepts a path list; fetch changed content in batches of ~256 in a single
-  delivery instead of one `scan()` per 32 paths.
-- With P1+P2 a rescan is: 1 metadata delivery (~2 s) + 1 content delivery
-  (~2 s) + remote walk. A first scan is a single delivery.
-
-### P3 — Compress the response
-
-**Implementation update (2026-08-28):** integrated in
-`collectors/winrm_endpoint_scanner.py`. The remote script now emits a versioned
-gzip+base64 frame and falls back to byte-equivalent plain JSON if compression is
-unavailable. The backend accepts both formats, validates base64/gzip/UTF-8,
-enforces `DSPM_WINRM_RESPONSE_MAX_BYTES`, and records wire bytes, JSON bytes, and
-the compression ratio in scan diagnostics. A real generated-PowerShell run over
-a 100-file local fixture reduced 5,384,598 JSON bytes to 72,804 wire bytes
-(73.96×; deliberately repetitive fixture, not a live-endpoint claim). Serial vs.
-parallel records remain exact. Live response-envelope and wall-clock measurement
-remain to close P3.
-
-Output travels back as plain JSON in ~150 KB WS-Man envelopes (one receive
-round trip each, 0.17 s). A 500-file scan with content slices is tens of MB =
-hundreds of receive round trips. Emit `gzip+base64` from the remote script and
-decode locally: **~5× fewer envelopes**, and file content compresses far better
-than 5×. Matters little at 2 files; decisive at 500.
-
-### P4 — Session and negotiation reuse
-
-Every `scan()` re-iterates connection candidates, re-resolves DNS pins, and
-builds a fresh `winrm.Session`. Within one scan job, negotiate once and reuse
-the working (host, transport, session) across the metadata pass, content
-batches, and test-connection — saving ~2.5 s per extra pass and removing
-redundant candidate timeouts on hosts with multiple addresses.
-
-### P5 — Guardrails and parity *(after the above)*
-
-- **Test: delivery uses ≤3 remote commands** — the 31-spawn pattern fails the
-  suite instantly (mirror of the SMB no-subprocess guardrail).
-- **Test: stdin delivery returns byte-identical records** to the legacy path.
-- **Wall-clock budget test** for a local-loopback endpoint scan.
-- **Diagnostics:** `delivery_ms`, `remote_commands`, `response_envelopes` in
-  `scan_diagnostics`, so a regression is visible in every saved report.
-- **ACL parity (accuracy gain):** endpoint scans currently run `read_acl:
-  false` by default while SMB returns full owner + DACL. With delivery fixed,
-  remote Get-Acl in the existing runspace pool is affordable — offer parity.
-
-## 4. Projections
-
-| Scenario | Today | After P1–P4 |
-| --- | --- | --- |
-| 2-file profile, first scan | 123.7 s | **~5–7 s (95%)** |
-| 2-file profile, rescan | 119.5 s | **~5 s (96%)** |
-| 500-file profile, first scan | ~53 s + 16 batches × ~55 s ≈ **16 min** (projected) | **~40–70 s** |
-| Delivery mechanism alone | ~53 s | **3.47 s (measured)** |
-
-Target ≥90%: met with margin on every row.
-
-## 5. What must NOT change (security posture)
-
-The endpoint collector carries deliberate hardening (assessment 2026-07: both
-HIGHs were WinRM). Every phase preserves:
-
-- `resolve_and_pin` target validation (M12) — pinned IPs, rebind refusal
-- SSL policy: `DSPM_REQUIRE_WINRM_SSL`, cert validation default `validate`
-- Transport order (Kerberos-first option, M11) and NTLM fallback semantics
-- Credentials never on a command line — session auth only; the stdin payload
-  contains the script text, which holds **no secrets** (paths and flags only)
-- Host admission budget slot around the remote session
-- Activation/deactivation lifecycle untouched (H1 env-block credential passing)
-
-P1 *improves* the posture: no script artifacts written to the target's disk.
-
-## 6. "It finds only 2 files" — answered
-
-That number is true, not a defect: the scan targets user `hr01`'s Desktop,
-Documents and Downloads (resolved correctly on the target), which contain **5
-files total**. Three are `desktop.ini` (hidden+system → filtered by policy);
-the remaining `.lnk` and `.txt` are the 2 reported. The diagnostics already
-record all of this (`visited_files: 5`, `extension_histogram`, `skipped_dirs:
-3`); the gap is that the UI doesn't surface it, so a small result looks like a
-scanner failure. Roadmap: show "visited / matched / filtered, roots resolved"
-in the scan summary so coverage is legible. Widening scope (more roots, deeper
-depth, AppData) is a product decision the config already supports — not a
-scanner limitation.
-
-## 7. Order of work
-
-1. **P1** — stdin+gzip delivery with legacy fallback (the 90%; mechanism already
-   proven live)
-2. **P2** — single-delivery incremental flow (kills the ×N multiplier)
-3. **P4** — session reuse (small, unlocked by P1/P2 structure)
-4. **P3** — compressed response (matters as file counts grow)
-5. **P5** — guardrails, diagnostics, ACL parity, coverage UI
-
-Re-profile after each phase — the SMB campaign proved the hot spots move.
+53 s + 53 s + walk ≈ **119 s. Fully explained.** The rescan was no faster than
+the first scan because delivery, not content, dominated both.
 
 ---
 
-## 8. P1-P3 review (2026-08-28) - defects found and fixed
+## 3. What shipped
 
-A review of the integrated P1-P3 work. Four defects were found; all are fixed
-with regression tests. The full suite is green.
+### P1 — One-command script delivery *(the 90% itself)*
 
-### 8.1 Unreachable endpoints paid every timeout twice  *(regression, fixed)*
+The chunked temp-file upload is replaced by **stdin streaming + gzip**:
 
-`_run_ps_file_with_session` fell back to the legacy path on **any** exception.
-The legacy path re-dials the **same** session, so a dead socket, an expired
-timeout, or rejected credentials failed there identically - the retry only
-doubled the time an unreachable endpoint took to report failure, and the
-connect loop repeats that per host *and* per transport candidate.
+- gzip + base64 shrinks the script 49,536 → **10,344 chars** (4.8×)
+- one `run_command` starts `powershell.exe -EncodedCommand <bootstrap>` that
+  reads stdin → base64-decodes → gunzips → executes the ScriptBlock
+- the payload streams via `Protocol.send_command_input` in bounded 48 KB slices
+- a legacy disk path remains for targets that refuse command input, but now
+  appends with `cmd.exe` (0.17 s/call) instead of PowerShell spawns
 
-Measured against a genuinely unreachable endpoint with an 8 s timeout:
+> **Measured live: 3.47 s** for delivery + the complete remote walk + results,
+> against ~53 s for delivery alone. **One** PowerShell spawn instead of 31.
+
+Accuracy is preserved *by construction* — the script bytes are identical, only
+the transport changes. Bonus hardening: no `dspm_*.b64` artifact is ever written
+to the target's disk.
+
+### P2 — One delivery per scan, not one per 32 files
+
+- **The metadata pre-pass is skipped when the baseline is empty.** On a first
+  scan everything is new, so the pre-pass was pure waste — a whole delivery.
+- **Changed paths batch 32 → 256 per invocation**, one content delivery for an
+  ordinary profile.
+- Degraded or missing fetches mark the scan incomplete so a good older baseline
+  cannot be pruned; changed archive children survive the metadata merge.
+
+A rescan is now: one metadata delivery + one content delivery. A first scan is
+a single delivery.
+
+### P3 — Compress the response
+
+The remote script emits a versioned `DSPM-GZIP-BASE64-V1:` frame, falling back
+to byte-equivalent plain JSON where compression is unavailable. The collector
+accepts both, validates base64/gzip/UTF-8, enforces
+`DSPM_WINRM_RESPONSE_MAX_BYTES` **before** decompressing (zip-bomb safe), and
+records wire bytes, JSON bytes, and ratio.
+
+> A real generated-PowerShell run over a 100-file fixture reduced **5,384,598
+> JSON bytes to 72,804 wire bytes (73.96×)**. The fixture is deliberately
+> repetitive — treat it as a mechanism proof, not a live-endpoint claim.
+
+### P4 — Session and negotiation reuse
+
+One scan job owns one scanner, which retains the first successful
+`(host, transport, Session)` binding across the metadata pass and every content
+batch; `test_connection()` shares it too. Connection candidates resolve once per
+scanner/host.
+
+The reuse boundary is deliberately narrow:
+
+- the binding is **job-local, never process-global** — credentials and session
+  state never outlive the request that supplied them;
+- scan-only fields (paths, filters, read/hash/ACL modes) reuse the binding, but
+  a host, domain-qualified username, password, SSL, port, certificate
+  validation, or transport-policy change forces a fresh negotiation;
+- `resolve_and_pin` validation still runs before any session is created;
+- a failed cached session is discarded and the normal candidate/transport
+  failover renegotiates — safe because the scan scripts are read-only;
+- the host-admission slot still surrounds every remote scan command.
+
+### P5 — Guardrails, diagnostics, and ACL parity
+
+**Guardrails.** Primary delivery must stay within
+`WINRM_FAST_DELIVERY_COMMAND_BUDGET` (3) remote commands — the old 31-command
+upload fails the suite instantly. Stdin and legacy delivery must return
+byte-identical records. A loopback scan must finish inside a wall-clock budget.
+
+**Diagnostics** now in every saved report: `delivery_mode`, `delivery_ms` (job
+total), `delivery_last_ms`, `remote_commands`, `response_envelopes`,
+`delivery_invocations`, `delivery_fallback_reason`, plus `session_reused`,
+`session_creations`, `session_negotiations`, `session_failovers`, and
+`connection_transport`. Receive envelopes are counted from pywinrm's raw WS-Man
+pages, so the number is real rather than assumed.
+
+**ACL parity — an accuracy gain, and it is free.** Endpoint scans previously ran
+`read_acl=False` while SMB returned full owner + DACL. It now defaults **on** at
+the API, collector, and UI. Local endpoint scans compute owner and DACL through
+the same Win32 reader P1 built for the SMB campaign.
+
+> **Measured:** 150 files through the real generated script — `read_acl=False`
+> **2.32 s**, `read_acl=True` **2.01 s**. The ACL cost is below the noise floor,
+> because the reads happen inside the single remote session's runspace pool
+> rather than as separate round trips.
+>
+> **End-to-end (local endpoint, real API path):** 40/40 records carry a full
+> DACL (owner + 4 principals + 4 permissions); findings are **identical** with
+> ACLs on and off; a warm rescan keeps 40/40 DACLs through cache reuse.
+
+ACL read failures use `-ErrorAction SilentlyContinue`, so they degrade to an
+empty DACL rather than throwing — they never poison `worker_errors` and so never
+wrongly mark a scan incomplete (§6.3).
+
+---
+
+## 4. Projections
+
+| Scenario | Before | After P1–P4 |
+| --- | --- | --- |
+| 2-file profile, first scan | 123.7 s | **~5–7 s (95%)** |
+| 2-file profile, rescan | 119.5 s | **~5 s (96%)** |
+| 500-file profile, first scan | ~16 min (projected) | **~40–70 s** |
+| Delivery mechanism alone | ~53 s | **3.47 s (measured)** |
+
+Target ≥90%: met with margin on every row. The 2-file rows await the live
+confirmation in §10.
+
+---
+
+## 5. Review round 1 (P1–P3) — defects found and fixed
+
+### 5.1 Unreachable endpoints paid every timeout twice *(regression)*
+
+The stdin fallback ran on **any** exception, but the legacy path re-dials the
+**same** session — a dead socket, a timeout, or a rejected password fails there
+identically. The retry only doubled the time an unreachable endpoint took to
+fail, once per host *and* per transport candidate.
 
 | | legacy attempts | elapsed |
 | --- | --- | --- |
-| Before | 1 | **16.0 s** (2x the timeout) |
+| Before | 1 | **16.0 s** (2× the 8 s timeout) |
 | After | 0 | **8.0 s** |
 
-At the shipped 30 s default with two host candidates that is 120 s -> 60 s.
+At the shipped 30 s default with two host candidates: 120 s → 60 s.
+`_is_stdin_capability_error()` now classifies failures — connection errors and
+credential rejections propagate immediately; only WS-Man capability refusals
+take the compatible path, and an unrecognised error still falls back so odd
+targets keep working.
 
-Fix: `_is_stdin_capability_error()` classifies the failure. Connection errors
-(`ConnectionError`, `ConnectTimeout`, `ReadTimeout`, `SSLError`, `OSError`) and
-credential rejections (`InvalidCredentialsError`, `AuthenticationError`,
-WS-Man 401/403) propagate immediately so the caller moves to the next
-candidate. Only WS-Man/protocol refusals - a target that will not accept
-command input - are worth the compatible path; an unrecognised error still
-falls back, so genuinely odd targets keep working.
+### 5.2 A silent demotion to the slow path was invisible *(gap)*
 
-### 8.2 A silent demotion to the slow path was invisible  *(gap, fixed)*
+Nothing recorded which delivery path ran, so an endpoint quietly rejecting stdin
+would take the 31-spawn path forever with no signal in any report — the exact
+regression this work removes, undetectable in production. The delivery
+diagnostics in §3 (P5) fixed this.
 
-Nothing recorded which delivery path ran. An endpoint that quietly rejected
-stdin would take the 31-spawn path forever with no signal in any saved report -
-the exact regression this work removes, undetectable in production.
+### 5.3 One oversized stdin envelope could demote a large scan *(gap)*
 
-Fix: `delivery_mode` (`stdin_gzip` / `legacy_disk_chunks` / `failed`),
-`delivery_ms`, `delivery_remote_commands`, and `delivery_fallback_reason` now
-land in `scan_diagnostics` on every scan. This also delivers part of P5 early.
+The payload was pushed in a single `send_command_input`. P2 batches up to 256
+paths into one script, so a single envelope can exceed the target's
+`MaxEnvelopeSize` (~150–500 KB) and be refused — silently demoting a large scan.
+It now streams in bounded 48 KB slices, closing stdin exactly once.
 
-### 8.3 One oversized stdin envelope could demote a large scan  *(gap, fixed)*
+### 5.4 A truncated scan could prune the baseline *(data-integrity bug)*
 
-The gzip payload was pushed in a single `send_command_input`. P2 batches up to
-256 changed paths into one script, so the payload grows with the batch; a
-single envelope over the target's `MaxEnvelopeSize` (default ~150-500 KB) is
-refused, silently demoting a large scan to the legacy path. The payload is now
-sent in bounded 48 KB slices, closing stdin exactly once, still one remote
-command.
+`complete` gates baseline pruning: a complete scan deletes every baseline object
+it did not see. `record_limit_reached` and `worker_errors` were **not**
+incompleteness markers, so a scan that stopped at its record cap — or whose
+remote workers errored — was marked complete and the pruner deleted objects that
+were simply **never enumerated**. They then read as deletions and vanished from
+the estate until a later full scan re-added them. Both are now markers in the
+engine, covering every path and collector.
 
-### 8.4 A truncated scan could prune the baseline  *(data-integrity bug, fixed)*
+---
 
-`complete` gates baseline pruning: a complete scan deletes every baseline
-object it did not see. `_finalize_incremental_diagnostics` did not treat
-`record_limit_reached` or `worker_errors` as incompleteness markers, so a scan
-that stopped at its record cap - or whose remote workers errored - was marked
-complete and the pruner deleted objects that were simply **never enumerated**.
-They then read as deletions and left the estate until a later full scan re-added
-them. P2 checked these markers for the content-fetch pass only, which made the
-inconsistency visible.
+## 6. Review round 2 (P4–P5) — findings
 
-Both markers are now incompleteness markers in the engine, which covers every
-path (metadata pass, content pass, cold single-pass, full scan) and every
-collector that reports them.
+### 6.1 A UI change that would never have reached users *(fixed)*
 
-### 8.5 Verified, not assumed
+`frontend/app.js` gained the coverage summary (`Filtered:`) but
+`frontend/index.html` still requested `app.js?v=172` — the version last bumped
+by an unrelated commit. Every returning browser would have kept the stale bundle
+and shown no coverage line. Bumped to `v=173`.
 
-- **The shipped stdin bootstrap now executes under a real `powershell.exe`.**
-  Every other delivery test drives a fake WS-Man protocol, so the bootstrap
-  PowerShell string itself had never been run - a syntax error there would
-  break every fast-path delivery while the suite stayed green. A new test pipes
-  the real gzip payload of a real scan script through the real bootstrap over
-  stdin and asserts the records, content, and P3 frame come back correctly.
-- The generated scan script is still executed end-to-end by the parity test,
-  which also asserts the P3 compressed frame.
-- Delivery, response, and remote diagnostics were confirmed to survive into the
-  saved report together.
-- `hidden_filter_enabled` / `system_filter_enabled` are **selection** filters
-  ("match only hidden/system"), not exclusions - confirmed against the script
-  logic before concluding anything was wrong with them. They default off, and
-  the observed behaviour is correct.
+### 6.2 Dead counter *(fixed)*
 
-### 8.6 Still open
+`_legacy_remote_commands` was incremented in three places and read nowhere once
+delivery accounting moved to `_delivery_remote_commands_current`. Removed.
 
-**Live endpoint verification remains outstanding for all three phases.** The
-target `10.10.33.52` went offline during this review (port 5985 stopped
-answering; the file server at `10.10.33.149` is still up), so end-to-end
-wall-clock numbers on real hardware could not be taken. What is proven so far:
-the delivery mechanism at **3.47 s** live (P1 prototype, measured before the
-host went down), the bootstrap and generated script under real PowerShell, and
-the failure-path timing above. The remaining measurement is a first scan and a
-rescan against the live endpoint once it is reachable, to close P1/P2/P3 with
-the same rigour as the SMB campaign.
+### 6.3 Checked and found correct — no change made
+
+Verifying rather than assuming mattered here; each of these looked like a bug:
+
+- **ACL default flip to `True`** — measured free (§3, P5) rather than assumed
+  affordable. Justified.
+- **ACL failures vs. the §5.4 completeness gate** — a plausible bad interaction:
+  if remote `Get-Acl` failures reached `worker_errors`, enabling ACLs by default
+  would mark every scan on a restrictive host incomplete and stop pruning
+  forever. They use `-ErrorAction SilentlyContinue` and degrade to an empty
+  DACL, so the interaction does not exist.
+- **Domain in the session identity** — `_username()` is domain-qualified, so a
+  domain change does force renegotiation.
+- **Scanner config mutation vs. the heartbeat thread** — the heartbeat only
+  touches `job.progress`/`cancel_requested`, never the scanner. No race.
+- **Envelope-counting loop** — suspected untested; it is covered, including the
+  `WinRMOperationTimeoutError` path and multi-page accumulation.
+- **`hidden_filter_enabled` / `system_filter_enabled`** — these are *selection*
+  filters ("match only hidden/system"), not exclusions. A test harness that
+  treated them as exclusions produced a false "ordinary files are being
+  filtered" alarm. The product is correct; the harness was wrong.
+
+---
+
+## 7. Verified, not assumed
+
+| Check | Result |
+| --- | --- |
+| Shipped stdin bootstrap executed by a **real `powershell.exe`** | Expands the gzip payload, runs the scan, returns correct records and content |
+| Generated scan script executed end-to-end (parity test) | Serial vs. parallel byte-identical; emits the P3 frame |
+| Delivery + response + remote diagnostics in one saved report | All present together |
+| Record parity across delivery paths | Stdin and legacy byte-identical |
+| ACL parity end-to-end on a real corpus | 40/40 DACLs; findings identical with ACLs on and off; warm reuse preserves them |
+| Failure-path latency after the §5.1 fix | 16.0 s → 8.0 s, 0 legacy retries |
+| Full suite | **760 passed, 17 skipped, 0 failures** |
+
+Two gaps of the "never actually executed" kind were closed during review: the
+bootstrap PowerShell (round 1) and the raw envelope loop (confirmed covered in
+round 2). Both would have failed only against real hardware while the suite
+stayed green.
+
+---
+
+## 8. "It finds only 2 files" — answered
+
+True, not a defect. The scan targets `hr01`'s Desktop, Documents and Downloads,
+which hold **5 files**; three are `desktop.ini` (hidden + system, filtered by
+policy), leaving the `.lnk` and `.txt` that were reported. The diagnostics
+always recorded this (`visited_files: 5`, `extension_histogram`,
+`skipped_dirs: 3`) — the real gap was that the UI never showed it, so an honest
+small result looked like a scanner failure.
+
+The scan summary now reads **Visited / Matched / Filtered / Roots**, so coverage
+is legible without opening a report. Widening scope (more roots, greater depth,
+AppData) remains a product decision the config already supports.
+
+---
+
+## 9. What must NOT change (security posture)
+
+Both HIGH findings in the 2026-07 assessment were WinRM. Every phase preserves:
+
+- `resolve_and_pin` target validation (M12) — pinned IPs, rebind refusal
+- SSL policy `DSPM_REQUIRE_WINRM_SSL`; certificate validation defaults to
+  `validate`
+- Transport order (Kerberos-first option, M11) with NTLM fallback semantics
+- Credentials never on a command line — session auth only. The stdin payload
+  carries the script text, which holds **no secrets** (paths and flags only)
+- Host admission budget around every remote scan command
+- Activation/deactivation lifecycle untouched (H1 env-block credential passing)
+- P4's session binding is job-local and never crosses a host, credential, or
+  transport boundary
+
+P1 *improves* the posture: no script artifact is written to the target's disk.
+
+---
+
+## 10. Still open
+
+**An integrated live wall-clock run against the endpoint.** The target
+`10.10.33.52` went offline during review (port 5985 stopped answering; the file
+server at `10.10.33.149` stayed up), so the combined first-scan and rescan
+numbers on real hardware could not be taken.
+
+Proven so far: the delivery mechanism at **3.47 s live**, the bootstrap and
+generated script under real PowerShell, ACL parity end-to-end on a real corpus,
+the failure-path timing, and 760 green tests. The remaining measurement is one
+first scan plus one rescan once the host is reachable, to close the campaign
+with the same rigour as the SMB one.
+
+**Optional next:** `DSPM_WINRM_WORKERS` above the current cap is the last knob
+if a large profile is still collector-bound; re-profile before turning it.
+
+---
+
+## Commit trail
+
+| Phase | Commit |
+| --- | --- |
+| Roadmap, measured attribution, live P1 proof | `c097408` |
+| P1–P3 + round-1 review fixes | `238aad7` |
+| P4–P5 + round-2 review fixes | `HEAD` |

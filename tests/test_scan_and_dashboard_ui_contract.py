@@ -77,6 +77,13 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
             endpoint_panel.index('id="endpoint-status"'),
         )
 
+    def test_endpoint_acl_parity_and_coverage_summary_are_default_visible(self) -> None:
+        self.assertIn('id="endpoint-read-acl" type="checkbox" checked', self.index_html)
+        summary_start = self.app_js.index("function summarizeEndpointDiagnostics(")
+        summary = self.app_js[summary_start:summary_start + 2200]
+        for label in ("Visited:", "Matched:", "Filtered:", "Roots:"):
+            self.assertIn(label, summary)
+
     def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
         risk_panel = self.index_html[
             self.index_html.index('id="tab-risk"'):
