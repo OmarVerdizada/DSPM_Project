@@ -8682,21 +8682,32 @@ function scanProfileCardMarkup(profile) {
     .map((chip) => `<span class="spc-chip${chip.on ? " on" : ""}">${escapeHtml(chip.label)}</span>`)
     .join("");
   const saved = String(profile.updated_at || "").slice(0, 10);
+  const stateLabel = running ? "Running" : "Ready";
   return `
     <article class="scan-profile-card${running ? " is-running" : ""}" data-profile-id="${escapeHtml(profile.profile_id)}">
       <span class="spc-rail" aria-hidden="true"><svg class="f-ico"><use href="#${meta.icon}"/></svg></span>
       <div class="spc-body">
         <div class="spc-top">
           <span class="spc-name" title="${escapeHtml(profile.name)}">${escapeHtml(profile.name)}</span>
-          <span class="spc-kind">${profile.kind === "endpoint" ? "Endpoint" : "File server"}</span>
+          <span class="spc-live ${running ? "is-running" : "is-ready"}" role="status">${stateLabel}</span>
         </div>
         <span class="spc-target" title="${escapeHtml(profileTargetLine(profile))}">${escapeHtml(profileTargetLine(profile))}</span>
         <div class="spc-chips">${chips}</div>
-        <div class="spc-actions">
-          <button type="button" class="spc-start-btn" data-profile-start="${escapeHtml(profile.profile_id)}">${running ? "Running..." : "Start"}</button>
-          <button type="button" class="secondary-btn" data-profile-edit="${escapeHtml(profile.profile_id)}">Edit</button>
+        <div class="spc-foot">
+          <span class="spc-run-note">${profile.kind === "endpoint" ? "Endpoint" : "File server"} · saved ${escapeHtml(saved)}</span>
+          <span class="spc-icon-actions">
+            <button type="button" class="spc-icon-btn spc-start" data-profile-start="${escapeHtml(profile.profile_id)}"
+              title="${running ? "Scan in progress" : "Start scan"}" aria-label="${running ? "Scan in progress" : `Start ${escapeHtml(profile.name)}`}">
+              ${running
+                ? '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" class="spc-spin"/></svg>'
+                : '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>'}
+            </button>
+            <button type="button" class="spc-icon-btn" data-profile-edit="${escapeHtml(profile.profile_id)}"
+              title="Edit scan" aria-label="Edit ${escapeHtml(profile.name)}">
+              <svg viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/></svg>
+            </button>
+          </span>
         </div>
-        <span class="spc-run-note">Saved ${escapeHtml(saved)}</span>
       </div>
     </article>`;
 }
@@ -8711,7 +8722,7 @@ function renderScanDecks() {
         <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="${kind}">
           <span class="socket-plus" aria-hidden="true">+</span>
           <strong>Set up your first ${kind === "endpoint" ? "endpoint" : "file server"} scan</strong>
-          <small>${kind === "endpoint" ? "Pick a workstation, a user profile, and keep it ready to run." : "Name it, point it at a share, and keep it ready to run."}</small>
+          <small>${kind === "endpoint" ? "Choose a workstation and profile once. Run it whenever you need to." : "Define the connection once. Run it whenever you need to."}</small>
         </button>`;
       return;
     }

@@ -23278,3 +23278,166 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 }
 #fs-wizard .review-value, #endpoint-wizard .review-value { color: inherit !important; }
 #fs-wizard .review-value b, #endpoint-wizard .review-value b { font-weight: 600 !important; }
+
+/* ============================================================
+   Scan decks & wizards v3 — icon actions, status light,
+   bottom-anchored context, and a wizard that fits the screen.
+   ============================================================ */
+
+/* --- #1 Context strip anchors to the page bottom ------------------ */
+#tab-file-servers.tab-panel.active,
+#tab-endpoint.tab-panel.active {
+  display: flex !important;
+  flex-direction: column;
+  min-height: calc(100vh - 118px);
+}
+#tab-file-servers .context-strip-trailing,
+#tab-endpoint .context-strip-trailing {
+  margin-top: auto !important;
+}
+
+/* --- #2/#3 Compact card: light + icon actions --------------------- */
+#fs-profile-grid, #endpoint-profile-grid {
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+}
+.scan-profile-card { grid-template-columns: 38px 1fr; }
+.spc-rail svg { width: 17px; height: 17px; }
+.spc-body { padding: 10px 12px 9px !important; gap: 6px !important; }
+.spc-name { font-size: 13.5px; }
+.spc-target { font-size: 11.5px; }
+.spc-chips { gap: 4px; }
+.spc-chip { font-size: 10px; padding: 3px 6px; }
+
+.spc-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--muted);
+}
+.spc-live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  box-shadow: 0 0 8px transparent;
+}
+.spc-live.is-ready { color: var(--status-low, #16a34a); }
+.spc-live.is-ready::before {
+  background: var(--status-low, #16a34a);
+  box-shadow: 0 0 8px var(--status-low, #16a34a);
+}
+.spc-live.is-running { color: var(--accent-strong); }
+.spc-live.is-running::before {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: mc-pulse 1.4s ease-in-out infinite;
+}
+
+.spc-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+}
+.spc-run-note { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spc-icon-actions { display: inline-flex; gap: 6px; flex: 0 0 auto; }
+#fs-profile-grid .spc-icon-btn, #endpoint-profile-grid .spc-icon-btn {
+  display: grid !important;
+  place-items: center !important;
+  width: 30px !important;
+  height: 30px !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--line) !important;
+  background: color-mix(in srgb, var(--card) 70%, transparent) !important;
+  color: var(--muted) !important;
+  box-shadow: none !important;
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease;
+}
+#fs-profile-grid .spc-icon-btn svg, #endpoint-profile-grid .spc-icon-btn svg {
+  width: 15px; height: 15px;
+  fill: currentColor; stroke: none;
+}
+#fs-profile-grid .spc-icon-btn [stroke], #endpoint-profile-grid .spc-icon-btn [stroke] { stroke: currentColor; }
+#fs-profile-grid .spc-icon-btn:hover:not(:disabled),
+#endpoint-profile-grid .spc-icon-btn:hover:not(:disabled),
+#fs-profile-grid .spc-icon-btn:focus-visible,
+#endpoint-profile-grid .spc-icon-btn:focus-visible {
+  color: var(--accent-strong) !important;
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line)) !important;
+  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+}
+#fs-profile-grid .spc-start:not(:disabled), #endpoint-profile-grid .spc-start:not(:disabled) {
+  color: var(--accent-strong) !important;
+}
+#fs-profile-grid .spc-icon-btn:disabled, #endpoint-profile-grid .spc-icon-btn:disabled {
+  opacity: .55; cursor: default;
+}
+.spc-spin {
+  fill: none !important;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-dasharray: 40 18;
+  stroke-linecap: round;
+  transform-origin: center;
+  animation: spcSpin 1.1s linear infinite;
+}
+@keyframes spcSpin { to { transform: rotate(360deg); } }
+
+/* Empty sockets stay proportionate to the tighter cards */
+#fs-profile-grid .scan-socket:not(.scan-socket-hero),
+#endpoint-profile-grid .scan-socket:not(.scan-socket-hero) { min-height: 118px; }
+
+/* --- #4 The wizard fits the screen -------------------------------- */
+#fs-wizard, #endpoint-wizard { gap: 10px !important; }
+#fs-wizard .scan-wizard-head, #endpoint-wizard .scan-wizard-head {
+  padding: 8px 14px !important;
+  gap: 10px !important;
+}
+#fs-wizard .scan-wizard-title h4, #endpoint-wizard .scan-wizard-title h4 { font-size: 13.5px !important; }
+#fs-wizard .stepper-dot, #endpoint-wizard .stepper-dot { width: 21px; height: 21px; font-size: 10.5px; }
+#fs-wizard .stepper-label, #endpoint-wizard .stepper-label { font-size: 11px; }
+#fs-wizard .stepper-node { padding: 0 7px; }
+#fs-wizard .stepper-node + .stepper-node::before { width: 18px; margin-right: 7px; }
+
+#fs-wizard .scan-form-column, #endpoint-wizard .scan-form-column { gap: 10px !important; }
+#fs-wizard .wizard-step, #endpoint-wizard .wizard-step { gap: 10px !important; }
+#fs-wizard .scan-card { padding: 14px 16px !important; gap: 11px !important; }
+#endpoint-wizard .visual-panel { padding: 14px 16px !important; }
+#fs-wizard .scan-card-head { gap: 10px !important; }
+#fs-wizard .scan-card-heading h4, #endpoint-wizard .panel-title h4 { font-size: 13px !important; }
+#fs-wizard .scan-card-heading span, #endpoint-wizard .panel-title span { font-size: 11px !important; }
+#fs-wizard .scan-form-grid { gap: 9px 14px !important; }
+#fs-wizard .scan-form-grid label, #endpoint-wizard .endpoint-form label { font-size: 11.5px !important; gap: 4px !important; }
+#fs-wizard .scan-form-grid input, #fs-wizard .wizard-behavior-fields input,
+#endpoint-wizard .endpoint-form input, #endpoint-wizard .endpoint-form select {
+  min-height: 32px !important;
+  padding-top: 5px !important;
+  padding-bottom: 5px !important;
+  font-size: 12.5px !important;
+}
+#endpoint-wizard .endpoint-form { gap: 9px 14px !important; }
+#fs-wizard .scan-wizard-footer, #endpoint-wizard .scan-wizard-footer {
+  padding: 9px 14px !important;
+  margin-top: 10px !important;
+}
+#fs-wizard .scan-wizard-footer button, #endpoint-wizard .scan-wizard-footer button {
+  min-height: 33px;
+}
+
+/* While the wizard is open the page heading is redundant with the wizard's
+   own header - reclaim its height so Basics fits a laptop viewport. */
+#tab-file-servers:has(#fs-wizard:not(.hidden)) > .section-header,
+#tab-endpoint:has(#endpoint-wizard:not(.hidden)) > .section-header {
+  display: none;
+}
+#fs-wizard, #endpoint-wizard { gap: 8px !important; }
+#fs-wizard .scan-wizard-footer, #endpoint-wizard .scan-wizard-footer { margin-top: 4px !important; }
