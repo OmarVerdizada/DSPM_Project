@@ -1,0 +1,53 @@
+"""Phase 0 of the enterprise database roadmap (DB-01): one authority.
+
+Production must refuse SQLite, a configured expected identity must refuse a
+mis-pointed DSN, and operators must be able to see which database an instance
+serves. Two supported launch paths silently serving different estates was the
+assessment's top critical finding.
+"""
+
+from __future__ import annotations
+
+import unittest
+from unittest import mock
+
+from backend import db
+
+
+class DatabaseAuthorityTests(unittest.TestCase):
+    def test_sqlite_identity_names_the_file(self) -> None:
+        identity = db.database_identity()
+        self.assertEqual(identity["backend"], "sqlite")
+        self.assertTrue(identity["identity"].lower().endswith(".sqlite"))
+
+    def test_production_refuses_sqlite(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "production requires PostgreSQL"):
+            db.enforce_database_authority(True)
+
+    def test_development_allows_sqlite(self) -> None:
+        identity = db.enforce_database_authority(False)
+        self.assertEqual(identity["backend"], "sqlite")
+
+    def test_expected_identity_mismatch_refuses_in_any_environment(self) -> None:
+        with mock.patch.dict("os.environ", {"DSPM_DB_EXPECTED_IDENTITY": "1234/other_db"}):
+            with self.assertRaisesRegex(RuntimeError, "does not match DSPM_DB_EXPECTED_IDENTITY"):
+                db.enforce_database_authority(False)
+
+    def test_expected_identity_match_passes(self) -> None:
+        actual = db.database_identity()["identity"]
+        with mock.patch.dict("os.environ", {"DSPM_DB_EXPECTED_IDENTITY": actual}):
+            identity = db.enforce_database_authority(False)
+        self.assertEqual(identity["identity"], actual)
+
+    def test_health_payload_carries_the_database_identity(self) -> None:
+        from fastapi.testclient import TestClient
+        from backend.app import app
+
+        payload = TestClient(app).get("/api/health").json()
+        self.assertIn("database", payload)
+        self.assertIn(payload["database"]["backend"], ("sqlite", "postgres"))
+        self.assertTrue(payload["database"]["identity"])
+
+
+if __name__ == "__main__":
+    unittest.main()

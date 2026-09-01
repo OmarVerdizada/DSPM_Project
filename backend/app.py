@@ -182,6 +182,12 @@ LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
 LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_IP_MAX_ATTEMPTS", "30"))
 ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
 IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
+# Phase 0 (DB-01): one database authority. Production refuses SQLite, and a
+# configured expected identity refuses a mis-pointed DSN. Runs at import so a
+# wrong deployment never serves a single request.
+from backend import db as _db
+
+DATABASE_IDENTITY = _db.enforce_database_authority(IS_PRODUCTION)
 REPORT_DIR = Path(os.getenv("DSPM_REPORT_DIR", BASE_DIR / "data" / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -743,7 +749,17 @@ def health() -> dict:
     from collectors.ocr import ocr_status
     from backend.search import search_health
 
-    return {"status": "ok", "service": "dspm-discovery", "ocr": ocr_status(), "search": search_health()}
+    return {
+        "status": "ok",
+        "service": "dspm-discovery",
+        "ocr": ocr_status(),
+        "search": search_health(),
+        # Operator diagnostics (Phase 0): which database this instance serves.
+        "database": {
+            "backend": DATABASE_IDENTITY.get("backend"),
+            "identity": DATABASE_IDENTITY.get("identity"),
+        },
+    }
 
 
 @app.get("/api/risk-rules")

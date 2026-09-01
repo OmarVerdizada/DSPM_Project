@@ -86,6 +86,66 @@ def backend_name() -> str:
     return "postgres" if is_postgres() else "sqlite"
 
 
+def database_identity() -> dict:
+    """Non-secret identity of the connected database (roadmap Phase 0, DB-01).
+
+    PostgreSQL: the cluster's immutable system identifier plus the database
+    name - enough to prove "this deployment is talking to the database it
+    thinks it is" without exposing host, credentials, or DSN. SQLite: the
+    resolved file path. Failures degrade to an "unavailable" marker so health
+    reporting never takes the app down.
+    """
+    try:
+        if is_postgres():
+            with connect(Path("unused")) as conn:
+                row = conn.execute(
+                    "SELECT system_identifier::text AS sysid, current_database() AS db "
+                    "FROM pg_control_system()"
+                ).fetchone()
+            return {
+                "backend": "postgres",
+                "system_identifier": str(row["sysid"]),
+                "database": str(row["db"]),
+                "identity": f"{row['sysid']}/{row['db']}",
+            }
+        from backend.store import DB_PATH  # local import: store depends on db
+        resolved = str(Path(DB_PATH).resolve())
+        return {"backend": "sqlite", "database": resolved, "identity": resolved}
+    except Exception as exc:  # pragma: no cover - degraded identity, not an outage
+        return {"backend": backend_name(), "identity": "unavailable", "error": type(exc).__name__}
+
+
+def enforce_database_authority(is_production: bool) -> dict:
+    """The Phase 0 gate: production runs on PostgreSQL, and only on the
+    PostgreSQL this deployment expects.
+
+    - Production + SQLite -> refuse startup. Two launch paths serving
+      different estates (DB-01) is exactly the failure this closes.
+    - DSPM_DB_EXPECTED_IDENTITY set (any environment) -> the connected
+      cluster/database identity must match, so a mis-pointed DSN cannot
+      silently serve the wrong estate.
+
+    Returns the identity dict so callers can surface it in diagnostics.
+    """
+    identity = database_identity()
+    if is_production and identity.get("backend") != "postgres":
+        raise RuntimeError(
+            "Refusing to start: production requires PostgreSQL (set DSPM_DB_URL). "
+            "SQLite is for local development only - see the enterprise database "
+            "roadmap, Phase 0 (DB-01)."
+        )
+    expected = os.getenv("DSPM_DB_EXPECTED_IDENTITY", "").strip()
+    if expected:
+        actual = str(identity.get("identity") or "")
+        if actual == "unavailable" or actual != expected:
+            raise RuntimeError(
+                "Refusing to start: connected database identity "
+                f"'{actual}' does not match DSPM_DB_EXPECTED_IDENTITY. "
+                "The deployment is pointed at the wrong database."
+            )
+    return identity
+
+
 def _env_number(name: str, default, minimum, maximum, cast):
     """Read a bounded numeric setting without making startup typo-sensitive."""
     try:
