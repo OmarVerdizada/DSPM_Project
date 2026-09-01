@@ -755,11 +755,24 @@ def health() -> dict:
         "ocr": ocr_status(),
         "search": search_health(),
         # Operator diagnostics (Phase 0): which database this instance serves.
+        # Phase 1: how stale the newest backup is - a backup that stopped
+        # happening must be visible before it becomes a recovery incident.
         "database": {
             "backend": DATABASE_IDENTITY.get("backend"),
             "identity": DATABASE_IDENTITY.get("identity"),
+            "backup_age_seconds": _backup_age_or_none(),
         },
     }
+
+
+def _backup_age_or_none():
+    try:
+        from backend.backup import latest_backup_age_seconds
+
+        age = latest_backup_age_seconds()
+        return round(age, 1) if age is not None else None
+    except Exception:
+        return None
 
 
 @app.get("/api/risk-rules")
