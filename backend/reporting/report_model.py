@@ -30,8 +30,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from backend.copilot.posture import compute_posture_score
-from backend.copilot.remediation_policy import build_remediation_steps_for_types
+from backend.reporting.posture import compute_posture_score
+from backend.reporting.remediation_policy import build_remediation_steps_for_types
 
 SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
 

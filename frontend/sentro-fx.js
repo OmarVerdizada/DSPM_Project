@@ -52,7 +52,6 @@
       { sel: "#export-word-btn", title: "Export Word pack", subtitle: "Reporting center", kind: "Action" },
       { sel: "#export-pdf-btn", title: "Open PDF composer", subtitle: "Reporting center", kind: "Action" },
       { sel: "#theme-toggle", title: "Toggle theme", subtitle: "Light / dark", kind: "Action" },
-      { sel: "#copilot-launcher", title: "Open AI Copilot", subtitle: "Ask about DSPM data", kind: "Action" },
     ];
     actions.forEach(function (a) {
       var el = document.querySelector(a.sel);

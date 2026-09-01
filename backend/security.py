@@ -327,7 +327,7 @@ def require_principal(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
 
 
-ARTIFACT_DL_TOKEN_TTL_SECONDS = int(os.getenv("COPILOT_ARTIFACT_DL_TOKEN_TTL_SECONDS", "300"))
+ARTIFACT_DL_TOKEN_TTL_SECONDS = int(os.getenv("DSPM_ARTIFACT_DL_TOKEN_TTL_SECONDS", "300"))
 
 
 def create_artifact_download_token(artifact_id: str, tenant_id: str, subject: str, role: str, ttl_seconds: int = ARTIFACT_DL_TOKEN_TTL_SECONDS) -> str:

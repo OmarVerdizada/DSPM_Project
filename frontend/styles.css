@@ -1958,7 +1958,6 @@ tbody tr.row-flash {
 .toast-host {
   position: fixed;
   right: 22px;
-  /* Keep notifications clear of the 58px AI Copilot launcher. */
   bottom: 96px;
   z-index: 10001;
   display: grid;
@@ -11185,19 +11184,6 @@ button:not(.tab):not(.profile-action):not(.profile-toggle):not(.secondary-btn):h
   box-shadow: 0 16px 36px rgba(0, 229, 255, .28);
 }
 
-/* ── Copilot ────────────────────────────────────────────── */
-.copilot-launcher {
-  background: linear-gradient(135deg, #00c2de, #3b6bf5) !important;
-  box-shadow: 0 18px 38px rgba(0, 194, 222, .32) !important;
-}
-:root[data-theme="dark"] .copilot-message.user {
-  background: #3b6bf5 !important;
-  border-color: #3b6bf5 !important;
-}
-:root[data-theme="dark"] .copilot-form input {
-  background: #0b1026 !important;
-  border-color: #1a2250 !important;
-}
 
 
 .profile-avatar { background: linear-gradient(135deg, #00c2de, #7b5bf2) !important; }
@@ -11932,10 +11918,6 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 :root:not([data-theme="dark"]) .profile-avatar {
   background: linear-gradient(135deg, #6a74e8, #4b55d6) !important;
 }
-:root:not([data-theme="dark"]) .copilot-launcher {
-  background: linear-gradient(135deg, #5a64e0, #3a43ba) !important;
-  box-shadow: 0 14px 30px rgba(75, 85, 214, .35) !important;
-}
 
 /* Command palette — light */
 :root:not([data-theme="dark"]) .mc-palette-item .mc-palette-k {
@@ -12033,7 +12015,7 @@ button:not(.tab), .secondary-btn, input, select, textarea { border-radius: 8px; 
 .visual-panel, .workspace, .metric, .context-strip,
 .asset-editor, .insight-card, .integration-card, .logic-card,
 .mssp-summary-card, .table-wrap { border-radius: 12px; }
- .detail-drawer-panel, .copilot-popup,
+ .detail-drawer-panel,
 .mc-palette { border-radius: 16px; }
 .detail-drawer-panel { border-radius: 16px 0 0 16px; }
 .risk-filter, .profile-avatar { border-radius: 999px; }
@@ -12300,18 +12282,6 @@ button:disabled {
   font-family: 'JetBrains Mono', monospace;
 }
 
-/* ── 13. Copilot — command-center polish (dark) ──────────── */
-:root[data-theme="dark"] .copilot-popup {
-  background: var(--bg-glass) !important;
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: 1px solid color-mix(in srgb, var(--status-safe) 20%, var(--line)) !important;
-  box-shadow: 0 30px 80px rgba(0, 0, 0, .55), 0 0 40px var(--mc-glow) !important;
-}
-:root[data-theme="dark"] .copilot-form textarea {
-  background: var(--bg-elevated-2) !important;
-  border-color: var(--border-default) !important;
-}
 
 /* ── 14. Command palette — recents tag ───────────────────── */
 .mc-palette-item .mc-palette-k.is-recent {
@@ -13368,7 +13338,7 @@ td.empty { padding: 48px 20px !important; }
 }
 .mc-empty-cta:hover { background: var(--accent-strong); transform: none; box-shadow: none; }
 
-/* ── 15. Toasts, drawer, palette, copilot ───────────────── */
+/* ── 15. Toasts, drawer, palette ─────────────────────────── */
 .toast,
 :root[data-theme="dark"] .toast,
 :root:not([data-theme="dark"]) .toast {
@@ -13409,19 +13379,6 @@ td.empty { padding: 48px 20px !important; }
 }
 .mc-palette-item.is-active { background: var(--accent-soft); border-left-color: var(--accent); }
 .mc-palette-item .mc-palette-k.is-recent { color: var(--status-sensitive); border-color: color-mix(in srgb, var(--status-sensitive) 30%, transparent); }
-.copilot-launcher,
-:root:not([data-theme="dark"]) .copilot-launcher {
-  background: var(--accent) !important;
-  box-shadow: var(--shadow) !important;
-}
-.copilot-launcher:hover { background: var(--accent-strong) !important; }
-:root[data-theme="dark"] .copilot-popup {
-  background: var(--surface) !important;
-  border: 1px solid var(--line) !important;
-  box-shadow: var(--shadow) !important;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
 
 /* Scan progress: thin indigo bar */
 .scan-progress-track span,
@@ -21131,7 +21088,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 
 /* The account flyout must never lose to a sticky toolbar or chart layer
    in the content column: the sidebar's stacking context now sits above
-   all in-page layers, below real overlays (modals, copilot at 9999+). */
+   all in-page layers, below real overlays (modals at 9999+). */
 :root:root .app-shell > .sidebar { z-index: 1200 !important; }
 
 

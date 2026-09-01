@@ -10,8 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=229" />
-    <link rel="stylesheet" href="/static/copilot.css?v=13" />
+    <link rel="stylesheet" href="/static/styles.css?v=230" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -1415,47 +1414,10 @@
 
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
 
-    <section id="copilot-widget" class="copilot-widget" aria-label="DSPM AI Copilot">
-      <button type="button" id="copilot-launcher" class="copilot-launcher" aria-label="Open AI Copilot" aria-expanded="false" title="AI Copilot">
-        <span class="copilot-launcher-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 14 8l4.5 2-4.5 2-2 4.5-2-4.5-4.5-2L10 8l2-4.5Z"></path><path d="m18.5 15 .8 1.8 1.7.7-1.7.8-.8 1.7-.7-1.7-1.8-.8 1.8-.7.7-1.8Z"></path></svg></span><b id="copilot-insight-badge" class="copilot-insight-badge hidden">0</b>
-      </button>
-      <div id="copilot-popup" class="copilot-popup hidden" role="dialog" aria-modal="false" aria-labelledby="copilot-title">
-        <header class="copilot-header">
-          <div class="copilot-brand">
-            <span class="copilot-brand-orb" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 14 8l4.5 2-4.5 2-2 4.5-2-4.5-4.5-2L10 8l2-4.5Z"></path></svg></span>
-            <div><h3 id="copilot-title">SENTRO Copilot</h3><span class="copilot-presence"><i></i>DSPM intelligence online</span></div>
-          </div>
-          <div class="copilot-actions">
-            <button type="button" id="copilot-new-btn" aria-label="Start new Copilot conversation" title="New conversation"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg></button>
-            <button type="button" id="copilot-expand-btn" aria-label="Expand Copilot" title="Expand"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg></button>
-            <button type="button" id="copilot-close-btn" aria-label="Close Copilot" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
-          </div>
-        </header>
-        <div id="copilot-insights" class="copilot-insights hidden"></div>
-        <div id="copilot-messages" class="copilot-messages" aria-live="polite">
-          <div id="copilot-empty" class="copilot-empty">
-            <span class="copilot-empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 14 8l4.5 2-4.5 2-2 4.5-2-4.5-4.5-2L10 8l2-4.5Z"></path></svg></span>
-            <strong>What would you like to investigate?</strong>
-            <span>I can analyze scans, prioritize exposure and turn evidence into an action plan.</span>
-            <div class="copilot-starters">
-              <button type="button" data-copilot-prompt="Summarize the latest scan and the top three risks.">Summarize latest scan</button>
-              <button type="button" data-copilot-prompt="Show the highest-risk exposed files and explain why they matter.">Prioritize exposed data</button>
-              <button type="button" data-copilot-prompt="Create a remediation plan for the latest critical findings.">Build remediation plan</button>
-            </div>
-          </div>
-        </div>
-        <div id="copilot-meta" class="copilot-meta" aria-live="polite"><span>Grounded in your latest authorized scan</span></div>
-        <form id="copilot-form" class="copilot-form">
-          <div class="copilot-composer"><textarea id="copilot-input" rows="1" maxlength="2000" placeholder="Ask SENTRO about your data posture…" autocomplete="off"></textarea><span>Enter to send · Shift+Enter for new line</span></div>
-          <button type="submit" id="copilot-send-btn" aria-label="Send message" disabled><svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/></svg><svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg></button>
-        </form>
-      </div>
-    </section>
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=183"></script>
-    <script src="/static/copilot.js?v=8"></script>
+    <script src="/static/app.js?v=184"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

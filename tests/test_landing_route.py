@@ -33,16 +33,11 @@ class RootRouteTests(unittest.TestCase):
         response = self.client.get("/dashboard")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("SENTRO Copilot", response.text)
         self.assertIn("inventory-workspace", response.text)
+        # Copilot was removed: no launcher, popup, or bundle may return.
+        self.assertNotIn("copilot", response.text.lower())
 
-    def test_copilot_launcher_is_a_true_open_close_toggle(self):
-        script = (FRONTEND_DIR / "copilot.js").read_text(encoding="utf-8")
-
-        self.assertIn('if (popup.classList.contains("hidden")) open();', script)
-        self.assertIn("else close();", script)
-
-    def test_toasts_are_positioned_above_the_copilot_launcher(self):
+    def test_toasts_clear_the_bottom_right_action_stack(self):
         styles = (FRONTEND_DIR / "styles.css").read_text(encoding="utf-8")
 
         toast_rule = styles[styles.index(".toast-host {"):styles.index(".toast {", styles.index(".toast-host {"))]

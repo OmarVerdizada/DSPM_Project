@@ -7,14 +7,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from backend.copilot.report_model import build_report_model
-from backend.copilot.report_pdf import REPORT_TEMPLATE_ID, render_visual_report_pdf
+from backend.reporting.report_model import build_report_model
+from backend.reporting.report_pdf import REPORT_TEMPLATE_ID, render_visual_report_pdf
 from backend.security import Principal, create_artifact_download_token
 from backend.store import DATA_DIR, read_scan_history, read_scan_report
 
 
 ARTIFACT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
-ARTIFACT_ROOT = DATA_DIR / "copilot"
+ARTIFACT_ROOT = DATA_DIR / "reports_artifacts"
 
 
 class ArtifactError(Exception):
@@ -238,9 +238,9 @@ def create_report_artifact(
         "artifact_id": artifact_id,
         "type": "pdf",
         "filename": safe_filename,
-        "download_url": f"/api/v1/copilot/artifacts/{artifact_id}?dl_token={dl_token}",
-        "preview_url": f"/api/v1/copilot/artifacts/{artifact_id}?dl_token={dl_token}&inline=1",
-        "html_download_url": f"/api/v1/copilot/artifacts/{artifact_id}?format=html&dl_token={dl_token}",
+        "download_url": f"/api/v1/reports/artifacts/{artifact_id}?dl_token={dl_token}",
+        "preview_url": f"/api/v1/reports/artifacts/{artifact_id}?dl_token={dl_token}&inline=1",
+        "html_download_url": f"/api/v1/reports/artifacts/{artifact_id}?format=html&dl_token={dl_token}",
         "created_at": created_at,
         "source_scan_id": source_scan_id,
         "filter_severity": filter_severity_meta,

@@ -101,7 +101,7 @@ jobs:
       - name: Assert .env.example stays in sync with the code
         run: |
           missing=0
-          vars=$(grep -rhoE '(os\.getenv|os\.environ\.get)\(\s*"(DSPM|COPILOT|OLLAMA)_[A-Z_0-9]+"' \
+          vars=$(grep -rhoE '(os\.getenv|os\.environ\.get)\(\s*"DSPM_[A-Z_0-9]+"' \
             --include='*.py' . | grep -oE '"[A-Z_0-9]+"' | tr -d '"' | sort -u)
           for v in $vars; do
             if ! grep -qE "^#?\s*$v=" .env.example; then

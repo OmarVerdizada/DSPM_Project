@@ -25,8 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from backend.alerts import evaluate_alerts
-from backend.copilot.router import router as copilot_router
-from backend.copilot.session_context import session_context_sweeper
+from backend.reporting.router import router as reporting_router
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
 from backend.jobs import cancel_job, cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
@@ -183,9 +182,6 @@ LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
 LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_IP_MAX_ATTEMPTS", "30"))
 ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
 IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
-# ARCH-002: Copilot is an optional subsystem. DSPM_COPILOT_ENABLED=0 deploys the
-# core platform without it - no router, no session sweeper, no post-scan hook.
-COPILOT_ENABLED = os.getenv("DSPM_COPILOT_ENABLED", "1").strip() != "0"
 REPORT_DIR = Path(os.getenv("DSPM_REPORT_DIR", BASE_DIR / "data" / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -231,7 +227,6 @@ async def app_lifespan(_: FastAPI):
             threading.Thread(target=warmup, name="ocr-warmup", daemon=True).start()
     except Exception:
         pass
-    sweeper = asyncio.create_task(session_context_sweeper()) if COPILOT_ENABLED else None
     try:
         yield
     finally:
@@ -239,10 +234,6 @@ async def app_lifespan(_: FastAPI):
             from backend.search import stop_search_reconciler
 
             stop_search_reconciler()
-        if sweeper is not None:
-            sweeper.cancel()
-            with suppress(asyncio.CancelledError):
-                await sweeper
         # Close the DB connection pool cleanly on shutdown (no-op on SQLite).
         with suppress(Exception):
             from backend import db
@@ -272,8 +263,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
-if COPILOT_ENABLED:  # ARCH-002: flag defined near IS_PRODUCTION above
-    app.include_router(copilot_router)
+app.include_router(reporting_router)
 
 
 @app.middleware("http")
@@ -2380,13 +2370,6 @@ def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, princi
             generate_report(data, REPORT_DIR / f"{principal.tenant_id}_{report_id}.json")
         except Exception as exc:
             warnings.append({"stage": "report_export", "error": type(exc).__name__})
-    if COPILOT_ENABLED:
-        try:
-            from backend.copilot.insight_hooks import on_scan_complete
-
-            on_scan_complete(principal.tenant_id, scan_id)
-        except Exception as exc:
-            warnings.append({"stage": "copilot_insights", "error": type(exc).__name__})
     if warnings:
         data["scan_warnings"] = warnings
         try:

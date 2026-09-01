@@ -27,7 +27,7 @@ defusedxml==0.7.1
 # Encrypted credential vault
 cryptography==45.0.7
 
-# Async HTTP client used by the copilot LLM client (backend/copilot/llm_client.py)
+# Async HTTP client used by outbound integrations
 httpx==0.28.1
 
 # Local .env loading. Currently declared but not imported anywhere; all config

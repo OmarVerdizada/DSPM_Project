@@ -1,8 +1,7 @@
 """Frontend source-contract tests for the stabilization pass.
 
 This frontend has no browser test runner, so these assert the fixed behavior at
-the source-contract level (the same approach as the existing Copilot UI
-contract tests). They guard:
+the source-contract level. They guard:
 
 * the scan poller tolerating transient poll errors instead of abandoning a
   live scan (the stuck-progress class of bug);

@@ -6307,7 +6307,7 @@ async function exportPdf() {
   reportWindow.focus();
   setStatus("Preparing the unified SENTRO PDF report...");
   try {
-    const response = await fetch("/api/v1/copilot/reports", {
+    const response = await fetch("/api/v1/reports", {
       method: "POST",
       headers: authHeaders(),
       body: JSON.stringify({ scan_id: latestReport?.scan_id || null }),
