@@ -144,11 +144,20 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn("inventoryFacets?.scans", self.app_js)
         self.assertIn("All scans", self.index_html)
 
-    def test_setup_view_uses_the_full_window(self) -> None:
-        # A centred max-width column left half a wide screen empty, and the
-        # legacy .scan-layout align-items:start shrink-wrapped the form.
+    def test_setup_view_uses_the_full_window_with_one_scrollbar(self) -> None:
+        # The wizard spans the content area (a centred max-width column left
+        # half a wide screen empty, and the legacy .scan-layout
+        # align-items:start shrink-wrapped the form)...
         self.assertIn("max-width: none !important", self.styles_css)
         self.assertIn("#fs-wizard > .scan-layout { align-items: stretch !important; }", self.styles_css)
+        # ...and scrolls with the PAGE only. The app-frame's capped height plus
+        # an inner scroller put a second scrollbar inside the card area, so the
+        # cap and the inner overflow are both released for both wizards.
+        v8 = self.styles_css[self.styles_css.index("Scan setup v8"):]
+        self.assertIn("max-height: none !important", v8)
+        self.assertIn("overflow: visible !important", v8)
+        for wizard in ("#fs-wizard", "#endpoint-wizard"):
+            self.assertIn(wizard, v8)
 
     def test_scan_wizard_speaks_the_console_type_system(self) -> None:
         """The setup pages must share the console's attributes, not their own
@@ -168,7 +177,6 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
             "font-size: 12.5px !important",       # labels = console forms
             "min-height: 40px !important",        # inputs/buttons = console controls
             ".wizard-step-eyebrow::before",       # the accent-tick group label
-            "max-height: calc(100vh - 114px)",    # the frame CAPS height so steps scroll
         ):
             self.assertIn(probe, v6)
 
@@ -183,8 +191,9 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertNotIn("scrollIntoView", step_body)
         self.assertIn("visiblePanel.scrollTop = 0", step_body)
         self.assertIn("preventScroll: true", self.app_js)
-        # The head bar balances back control, title, and progress.
-        self.assertIn("grid-template-columns: 1fr auto 1fr !important", self.styles_css)
+        # The head bar puts back control and title left, progress right,
+        # all on one vertically centred line.
+        self.assertIn("grid-template-columns: auto auto 1fr !important", self.styles_css)
 
     def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
         risk_panel = self.index_html[

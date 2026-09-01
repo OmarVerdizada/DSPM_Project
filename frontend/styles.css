@@ -23767,3 +23767,115 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
   #tab-file-servers:has(#fs-wizard:not(.hidden)),
   #tab-endpoint:has(#endpoint-wizard:not(.hidden)) { max-height: none; min-height: 0; }
 }
+
+/* ============================================================
+   Scan setup v8 — one page scrollbar, left-aligned head
+   The app-frame (capped height + inner scroller) put a second
+   scrollbar inside the card area. The wizard now flows like
+   every other console page: the browser's own scrollbar is the
+   only one, and the footer follows the content.
+   ============================================================ */
+
+/* Drop the height cap and the inner scroller entirely. */
+#tab-file-servers:has(#fs-wizard:not(.hidden)),
+#tab-endpoint:has(#endpoint-wizard:not(.hidden)) {
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: visible !important;
+  display: block !important;
+}
+#fs-wizard:not(.hidden), #endpoint-wizard:not(.hidden) {
+  display: block !important;
+  flex: none !important;
+  min-height: 0 !important;
+}
+#fs-wizard > .scan-layout,
+#fs-wizard #connection-form,
+#endpoint-wizard > .scan-form-column {
+  display: block !important;
+  flex: none !important;
+  min-height: 0 !important;
+}
+#fs-wizard .wizard-step:not(.hidden), #endpoint-wizard .wizard-step:not(.hidden) {
+  display: grid !important;
+  gap: 10px;
+  flex: none !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: visible !important;
+  padding-right: 0 !important;
+  scrollbar-gutter: auto;
+}
+/* The footer follows the content instead of being pinned by the frame. */
+#fs-wizard .scan-wizard-footer, #endpoint-wizard .scan-wizard-footer {
+  flex: none !important;
+  margin-top: 10px !important;
+}
+/* The page heading returns: there is no full-height frame to make room for. */
+#tab-file-servers:has(#fs-wizard:not(.hidden)) > .section-header,
+#tab-endpoint:has(#endpoint-wizard:not(.hidden)) > .section-header {
+  display: block;
+}
+
+/* Head bar: one line, vertically centred - back control and title together
+   on the left, step progress on the right. */
+#fs-wizard .scan-wizard-head, #endpoint-wizard .scan-wizard-head {
+  display: grid !important;
+  grid-template-columns: auto auto 1fr !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+#fs-wizard .scan-wizard-title, #endpoint-wizard .scan-wizard-title {
+  justify-self: start !important;
+  text-align: left !important;
+}
+#fs-wizard .scan-stepper, #endpoint-wizard .scan-stepper {
+  justify-self: end !important;
+}
+
+/* A legacy button rule adds margin-top:14px, which dropped the back control
+   7px below the head's centre line. */
+#fs-wizard .scan-wizard-head .wizard-back-link,
+#endpoint-wizard .scan-wizard-head .wizard-back-link {
+  margin: 0 !important;
+  align-self: center !important;
+}
+/* The wizard header already names the flow; the page heading would repeat it. */
+#tab-file-servers:has(#fs-wizard:not(.hidden)) > .section-header,
+#tab-endpoint:has(#endpoint-wizard:not(.hidden)) > .section-header {
+  display: none;
+}
+
+/* The endpoint wizard inherited .panel-title, which pushes the subtitle to the
+   far right in uppercase. The file-server wizard stacks icon + title +
+   subtitle on the left. Both setup pages now read identically. */
+#endpoint-wizard .visual-panel .panel-title {
+  display: grid !important;
+  grid-template-columns: auto 1fr !important;
+  align-items: center !important;
+  gap: 10px !important;
+  text-align: left !important;
+}
+#endpoint-wizard .visual-panel .panel-title h4 {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 !important;
+}
+#endpoint-wizard .visual-panel .panel-title .panel-ico {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+#endpoint-wizard .visual-panel .panel-title > span {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: start !important;
+  text-align: left !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  font-size: 11px !important;
+  font-weight: 400 !important;
+  color: var(--muted) !important;
+}
