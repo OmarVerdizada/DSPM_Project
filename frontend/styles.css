@@ -23597,3 +23597,119 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 }
 #fs-wizard .wizard-step > .scan-card,
 #endpoint-wizard .wizard-step > .visual-panel { align-content: start; }
+
+/* ============================================================
+   Scan setup v6 — one type system with the rest of the console
+   Measured against the dashboard: titles 15px/600/-0.15px,
+   eyebrows 13px/950 uppercase, labels 12.5px/500, inputs
+   13.5px at 40px, buttons 13.5px. The fit-the-screen pass had
+   shrunk the wizard below that scale; the step body scrolls,
+   so the system sizes fit regardless.
+   ============================================================ */
+
+/* Step eyebrow — the console's section device, one per step */
+#fs-wizard .wizard-step-eyebrow, #endpoint-wizard .wizard-step-eyebrow {
+  margin: 2px 2px 0;
+}
+
+/* Titles match dashboard panel headings */
+#fs-wizard .scan-wizard-title h4, #endpoint-wizard .scan-wizard-title h4 {
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.15px;
+}
+#fs-wizard .scan-card-heading h4, #endpoint-wizard .panel-title h4 {
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.15px;
+}
+#fs-wizard .scan-card-heading span, #endpoint-wizard .panel-title > span {
+  font-size: 11px !important;
+}
+
+/* Form controls match every other console form */
+#fs-wizard .scan-form-grid label, #fs-wizard .wizard-behavior-fields label,
+#endpoint-wizard .endpoint-form label {
+  font-size: 12.5px !important;
+  font-weight: 500;
+}
+#fs-wizard .scan-form-grid input, #fs-wizard .wizard-behavior-fields input,
+#endpoint-wizard .endpoint-form input, #endpoint-wizard .endpoint-form select,
+#endpoint-wizard .endpoint-form textarea {
+  font-size: 13.5px !important;
+  min-height: 40px !important;
+  border-radius: 10px !important;
+}
+#fs-wizard #extension-search, #endpoint-wizard #endpoint-extension-search {
+  font-size: 13.5px;
+  min-height: 40px;
+  border-radius: 10px;
+}
+
+/* Actions match console buttons */
+#fs-wizard .scan-wizard-footer button, #endpoint-wizard .scan-wizard-footer button,
+#fs-wizard .actions button, #endpoint-wizard .endpoint-actions button {
+  font-size: 13.5px !important;
+  min-height: 40px !important;
+}
+#fs-wizard-close, #endpoint-wizard-close {
+  width: 40px !important;
+  height: 40px !important;
+}
+
+/* Option and preset copy step up to legible console sizes */
+#fs-wizard .wizard-behavior-grid .scan-option-copy { font-size: 12.5px !important; }
+#endpoint-wizard .endpoint-checkbox { font-size: 12.5px !important; }
+#fs-wizard .ext-preset-title, #endpoint-wizard .ext-preset-title { font-size: 13px !important; }
+#fs-wizard .ext-preset-desc, #endpoint-wizard .ext-preset-desc { font-size: 11px !important; }
+#fs-wizard .compliance-framework-card strong, #endpoint-wizard .compliance-framework-card strong { font-size: 13px !important; }
+#fs-wizard .compliance-framework-card small, #endpoint-wizard .compliance-framework-card small { font-size: 11px !important; }
+#fs-wizard .extension-list label, #endpoint-wizard .extension-list label { font-size: 12.5px !important; }
+
+/* Review board values read at body scale */
+#fs-wizard .review-value, #endpoint-wizard .review-value { font-size: 13.5px; }
+#fs-wizard .review-value small, #endpoint-wizard .review-value small { font-size: 11.5px; }
+#fs-wizard .wizard-status-mirror, #endpoint-wizard .wizard-status-mirror { font-size: 13px; }
+#fs-wizard .wizard-save-note { font-size: 12px; }
+#fs-wizard .wizard-hint, #endpoint-wizard .wizard-hint { font-size: 12.5px; }
+
+/* The step label speaks the console's CURRENT group-label device (the same
+   one that draws "Risk summary" / "Posture intelligence" on the dashboard):
+   10px/700 uppercase with a small accent tick. The old .eyebrow class is
+   retired product-wide, so the label carries its own class. */
+#fs-wizard .wizard-step-eyebrow, #endpoint-wizard .wizard-step-eyebrow {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 7px;
+  margin: 2px 2px 0;
+  position: relative;
+  padding-left: 14px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  line-height: 1;
+}
+#fs-wizard .wizard-step-eyebrow::before, #endpoint-wizard .wizard-step-eyebrow::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 8px;
+  height: 2px;
+  border-radius: 0 999px 999px 0;
+  background: var(--accent);
+}
+
+/* The frame must CAP height, not only reserve it: with min-height alone a
+   tall step grows the page instead of engaging the step body's scroller. */
+#tab-file-servers:has(#fs-wizard:not(.hidden)),
+#tab-endpoint:has(#endpoint-wizard:not(.hidden)) {
+  max-height: calc(100vh - 114px);
+}
+@media (max-width: 900px) {
+  #tab-file-servers:has(#fs-wizard:not(.hidden)),
+  #tab-endpoint:has(#endpoint-wizard:not(.hidden)) { max-height: none; }
+}

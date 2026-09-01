@@ -150,6 +150,28 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn("max-width: none !important", self.styles_css)
         self.assertIn("#fs-wizard > .scan-layout { align-items: stretch !important; }", self.styles_css)
 
+    def test_scan_wizard_speaks_the_console_type_system(self) -> None:
+        """The setup pages must share the console's attributes, not their own
+        scale: 15px/600 card headings, 12.5px labels, 13.5px/40px inputs, and
+        the console's group-label device (uppercase 10px/700 with the accent
+        tick - the retired .eyebrow class is display:none product-wide, so the
+        step labels carry their own class)."""
+        for wizard in ("fs-wizard", "endpoint-wizard"):
+            lo = self.index_html.index(f'id="{wizard}"')
+            hi = self.index_html.index("scan-wizard-footer", lo)
+            region = self.index_html[lo:hi]
+            self.assertEqual(region.count("wizard-step-eyebrow"), 3, wizard)
+            self.assertNotIn('class="eyebrow wizard-step-eyebrow"', region, wizard)
+        v6 = self.styles_css[self.styles_css.index("Scan setup v6"):]
+        for probe in (
+            "font-size: 15px !important",         # card headings = dashboard h4
+            "font-size: 12.5px !important",       # labels = console forms
+            "min-height: 40px !important",        # inputs/buttons = console controls
+            ".wizard-step-eyebrow::before",       # the accent-tick group label
+            "max-height: calc(100vh - 114px)",    # the frame CAPS height so steps scroll
+        ):
+            self.assertIn(probe, v6)
+
     def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
         risk_panel = self.index_html[
             self.index_html.index('id="tab-risk"'):

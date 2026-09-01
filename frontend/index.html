@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=230" />
+    <link rel="stylesheet" href="/static/styles.css?v=233" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -228,6 +228,7 @@
 
             <form id="connection-form" class="scan-form-column" novalidate>
               <div class="wizard-step" data-wizard-step="1">
+                <p class="wizard-step-eyebrow">Step 1 — Scan identity</p>
                 <section class="scan-card" aria-label="Scan identity">
                   <div class="scan-card-head">
                     <span class="scan-card-ico" aria-hidden="true">
@@ -268,6 +269,7 @@
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="2">
+                <p class="wizard-step-eyebrow">Step 2 — Configuration</p>
 <section class="scan-card wizard-behavior-card" aria-label="Scan behavior">
                   <div class="scan-card-head">
                     <span class="scan-card-ico" aria-hidden="true">
@@ -389,6 +391,7 @@
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="3">
+                <p class="wizard-step-eyebrow">Step 3 — Review &amp; launch</p>
                 <div class="wizard-review-grid">
                   <section class="scan-card wizard-review-card" aria-label="Review">
                     <div class="scan-card-head">
@@ -930,6 +933,7 @@
 
             <div class="scan-form-column">
               <div class="wizard-step" data-wizard-step="1">
+                <p class="wizard-step-eyebrow">Step 1 — Scan identity</p>
                 <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan identity">
                   <div class="panel-title">
                     <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span>Basics</h4>
@@ -969,6 +973,7 @@
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="2">
+                <p class="wizard-step-eyebrow">Step 2 — Configuration</p>
                 <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan scope">
                   <div class="panel-title">
                     <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-tree"/></svg></span>Scope</h4>
@@ -1087,6 +1092,7 @@
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="3">
+                <p class="wizard-step-eyebrow">Step 3 — Connect &amp; launch</p>
                 <section class="visual-panel endpoint-panel endpoint-io-panel wizard-review-card" aria-label="Review">
                   <div class="panel-title">
                     <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Review</h4>
@@ -1417,7 +1423,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=184"></script>
+    <script src="/static/app.js?v=185"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
