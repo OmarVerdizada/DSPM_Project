@@ -153,6 +153,14 @@ class ScanProfileApiTests(unittest.TestCase):
         self.assertEqual(len(list_inventory(tenant, source="Finance archive")["items"]), 2)
         self.assertEqual(len(list_inventory(tenant, source="smb")["items"]), 6)
 
+    def test_inventory_api_accepts_a_full_length_scan_name_filter(self) -> None:
+        response = self.client.get(
+            "/api/inventory",
+            params={"source": "S" * 80},
+            headers=_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
     def test_sorting_orders_the_whole_inventory_not_one_page(self) -> None:
         """A column header sorts every asset in the tenant. The API orders the
         full table and returns one keyset page, so a 3-row page must match the

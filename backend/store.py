@@ -296,546 +296,576 @@ def revoke_api_key(tenant_id: str, key_id: str) -> bool:
 
 
 def init_db() -> None:
+    """Converge the schema (legacy path). Production routes through
+    backend.migrations instead - see ensure_schema_ready()."""
     global _sqlite_inventory_fts_enabled
     with _lock:
         with _connect() as conn:
+            apply_baseline_schema(conn)
+
+
+def apply_baseline_schema(conn) -> None:
+    """Revision 0001: the convergent baseline DDL, factored out so the
+    versioned migration runner (roadmap Phase 2, DB-05) applies it as the
+    first recorded revision instead of anonymous startup DDL."""
+    global _sqlite_inventory_fts_enabled
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS scan_reports (
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            timestamp TEXT,
+            source TEXT,
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            report_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, scan_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            actor TEXT NOT NULL,
+            action TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}'
+        );
+
+        CREATE TABLE IF NOT EXISTS secrets (
+            tenant_id TEXT NOT NULL,
+            secret_id TEXT NOT NULL,
+            ciphertext TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, secret_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS scan_profiles (
+            tenant_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, profile_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS alert_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT,
+            alerts_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS login_failures (
+            rate_key TEXT NOT NULL,
+            timestamp REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS revoked_tokens (
+            jti TEXT PRIMARY KEY,
+            expires_at INTEGER NOT NULL,
+            revoked_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('admin', 'analyst', 'viewer')),
+            tenant_id TEXT NOT NULL DEFAULT 'default',
+            full_name TEXT NOT NULL DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_login_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS tenants (
+            tenant_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            registration_code TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        -- M5: time-boxed, limited-use registration invites. The plaintext
+        -- token is never stored - only its sha256. Redemption is an atomic
+        -- conditional UPDATE (not expired, not revoked, used_count<max_uses).
+        CREATE TABLE IF NOT EXISTS registration_invites (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            token_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'viewer',
+            max_uses INTEGER NOT NULL DEFAULT 1,
+            used_count INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT NOT NULL,
+            requires_approval INTEGER NOT NULL DEFAULT 0,
+            revoked INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            last_redeemed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_registration_invites_lookup
+            ON registration_invites (tenant_id, token_hash);
+
+        -- M18: DB-backed API keys with a full lifecycle (created / last-used
+        -- / revoked / expiry), so a key is revocable and expirable WITHOUT
+        -- a redeploy. Only the key's sha256 is stored.
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            key_hash TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            role TEXT NOT NULL DEFAULT 'analyst',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            last_used_at TEXT,
+            expires_at TEXT,
+            revoked INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
+
+        CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created
+            ON scan_reports (tenant_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created_scan
+            ON scan_reports (tenant_id, created_at, scan_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_timestamp
+            ON audit_events (tenant_id, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_alert_events_tenant_created
+            ON alert_events (tenant_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_login_failures_key_timestamp
+            ON login_failures (rate_key, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires
+            ON revoked_tokens (expires_at);
+        CREATE INDEX IF NOT EXISTS idx_users_tenant
+            ON users (tenant_id, role);
+
+        -- Phase 1 (DATA-001) normalized model. Written alongside the
+        -- report_json blob (dual-write); reads still use the blob.
+        CREATE TABLE IF NOT EXISTS scan_runs (
+            tenant_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            source TEXT,
+            mode TEXT,
+            policy_version TEXT,
+            started_at TEXT,
+            ended_at TEXT,
+            status TEXT,
+            total_files INTEGER NOT NULL DEFAULT 0,
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, id)
+        );
+
+        CREATE TABLE IF NOT EXISTS assets (
+            tenant_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            source TEXT,
+            stable_object_id TEXT,
+            path TEXT,
+            name TEXT,
+            -- S-B queryable-inventory columns (denormalized from the scan
+            -- so the inventory list filters/sorts/searches in the DB).
+            extension TEXT,
+            share TEXT,
+            risk_level TEXT,
+            risk_score INTEGER NOT NULL DEFAULT 0,
+            size INTEGER NOT NULL DEFAULT 0,
+            owner TEXT,
+            modified_at TEXT,
+            finding_count INTEGER NOT NULL DEFAULT 0,
+            top_frameworks TEXT,
+            is_hidden INTEGER NOT NULL DEFAULT 0,
+            is_system INTEGER NOT NULL DEFAULT 0,
+            is_protected INTEGER NOT NULL DEFAULT 0,
+            search_text TEXT,
+            finding_types TEXT NOT NULL DEFAULT '[]',
+            framework_keys TEXT NOT NULL DEFAULT '[]',
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            scan_label TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (tenant_id, id)
+        );
+
+        CREATE TABLE IF NOT EXISTS asset_versions (
+            tenant_id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            size INTEGER NOT NULL DEFAULT 0,
+            mtime TEXT,
+            content_hash TEXT,
+            coverage TEXT,
+            PRIMARY KEY (tenant_id, asset_id, version)
+        );
+
+        -- Track P-A: authoritative per-object delta baseline. The
+        -- analyzed snapshot remains normalized in assets.detail_json;
+        -- this table owns only identity/fingerprint/generation state.
+        CREATE TABLE IF NOT EXISTS scan_object_baselines (
+            tenant_id TEXT NOT NULL,
+            scope_key TEXT NOT NULL,
+            object_key TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            size BIGINT NOT NULL DEFAULT 0,
+            mtime TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL DEFAULT '',
+            version_signature TEXT NOT NULL,
+            last_scan_id TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (tenant_id, scope_key, object_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS findings (
+            tenant_id TEXT NOT NULL,
+            id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            rule TEXT,
+            severity TEXT,
+            category TEXT,
+            framework TEXT,
+            status TEXT,
+            first_seen TEXT,
+            last_seen TEXT,
+            PRIMARY KEY (tenant_id, id)
+        );
+
+        CREATE TABLE IF NOT EXISTS finding_occurrences (
+            tenant_id TEXT NOT NULL,
+            finding_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            locator TEXT,
+            fingerprint TEXT,
+            occurrence_count INTEGER NOT NULL DEFAULT 1
+        );
+
+        -- Materialized per-finding read index (DATA-001 read-switch).
+        -- Stores the exact list_findings response per finding so the
+        -- read path can serve findings without loading full report
+        -- blobs. Behind DSPM_READ_FROM_NORMALIZED (default off).
+        CREATE TABLE IF NOT EXISTS finding_index (
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            finding_id TEXT NOT NULL,
+            status TEXT,
+            response_json TEXT NOT NULL,
+            -- F2: stamps the logic version that produced response_json. A
+            -- read only trusts rows whose stamp == FINDING_INDEX_VERSION,
+            -- so a change to _finding_response/_finding_status invalidates
+            -- stale rows (they fall back to the blob until re-backfilled).
+            index_version TEXT NOT NULL DEFAULT ''
+        );
+
+        -- S-F.2 durable reconciliation metrics for the optional search
+        -- projection. The DB remains authoritative; this stores only
+        -- counts/status, never document metadata or evidence.
+        CREATE TABLE IF NOT EXISTS search_reconciliation_state (
+            provider TEXT NOT NULL,
+            index_uid TEXT NOT NULL,
+            checked_at TEXT NOT NULL,
+            metrics_json TEXT NOT NULL,
+            PRIMARY KEY (provider, index_uid)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scan_runs_tenant
+            ON scan_runs (tenant_id, started_at);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_asset
+            ON findings (tenant_id, asset_id);
+        CREATE INDEX IF NOT EXISTS idx_occurrences_scan
+            ON finding_occurrences (tenant_id, scan_id);
+        CREATE INDEX IF NOT EXISTS idx_occurrences_finding
+            ON finding_occurrences (finding_id);
+        CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan
+            ON finding_index (tenant_id, scan_id);
+        CREATE INDEX IF NOT EXISTS idx_scan_object_baselines_generation
+            ON scan_object_baselines (tenant_id, scope_key, last_scan_id);
+
+        -- Durable job state (ARCH-003). The executor is still in-memory,
+        -- but the job RECORD survives a restart so status/history are not
+        -- lost and an orphaned "running" job can be recovered to failed.
+        CREATE TABLE IF NOT EXISTS scan_jobs (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress INTEGER NOT NULL DEFAULT 0,
+            message TEXT,
+            created_at TEXT NOT NULL,
+            finished_at TEXT,
+            error TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_jobs_tenant
+            ON scan_jobs (tenant_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    columns = db.table_columns(conn, "tenants")
+    if "registration_code" not in columns:
+        conn.execute("ALTER TABLE tenants ADD COLUMN registration_code TEXT NOT NULL DEFAULT ''")
+    user_columns = db.table_columns(conn, "users")
+    if "avatar" not in user_columns:
+        # Profile photo as a bounded data URL (~300 KB cap enforced at the
+        # API); kept off _public_user so /api/users listings stay small.
+        conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''")
+    # F2: bring pre-version-stamp finding_index rows up to the current
+    # schema. They land with index_version='' (i.e. "unknown logic"), so
+    # the read-switch treats them as stale and serves the blob until a
+    # backfill re-stamps them - the safe default for a migration mirror.
+    fi_columns = db.table_columns(conn, "finding_index")
+    if "index_version" not in fi_columns:
+        conn.execute("ALTER TABLE finding_index ADD COLUMN index_version TEXT NOT NULL DEFAULT ''")
+    # Created here (not in the schema script above) because the column it
+    # covers may have just been added by the ALTER on a pre-existing DB.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_finding_index_version ON finding_index (tenant_id, index_version)")
+
+    baseline_columns = db.table_columns(conn, "scan_object_baselines")
+    if "snapshot_json" not in baseline_columns:
+        conn.execute("ALTER TABLE scan_object_baselines ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
+
+    # S-B: bring pre-existing `assets` tables up to the queryable-inventory
+    # schema. New columns default to 0/NULL; a re-scan (dual-write) or
+    # backfill_normalized_scans() populates them for historical assets.
+    asset_columns = db.table_columns(conn, "assets")
+    for col, coltype in (
+        ("extension", "TEXT"),
+        ("share", "TEXT"),
+        ("risk_level", "TEXT"),
+        ("risk_score", "INTEGER NOT NULL DEFAULT 0"),
+        ("size", "INTEGER NOT NULL DEFAULT 0"),
+        ("owner", "TEXT"),
+        ("modified_at", "TEXT"),
+        ("finding_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("top_frameworks", "TEXT"),
+        ("is_hidden", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_system", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_protected", "INTEGER NOT NULL DEFAULT 0"),
+        ("search_text", "TEXT"),
+        ("finding_types", "TEXT NOT NULL DEFAULT '[]'"),
+        ("framework_keys", "TEXT NOT NULL DEFAULT '[]'"),
+        ("detail_json", "TEXT NOT NULL DEFAULT '{}'"),
+        # The operator-facing scan name ("HR file share"), so Data
+        # Inventory can filter by the scan a customer configured
+        # instead of the collector protocol (smb / endpoint-winrm).
+        ("scan_label", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if col not in asset_columns:
+            conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {coltype}")
+    # Index every filter/sort column (created after the ALTERs so the
+    # columns exist on a migrated DB).
+    for _idx in (
+        "idx_assets_tenant_risk_score ON assets (tenant_id, risk_score)",
+        "idx_assets_tenant_risk_level ON assets (tenant_id, risk_level)",
+        "idx_assets_tenant_extension ON assets (tenant_id, extension)",
+        "idx_assets_tenant_size ON assets (tenant_id, size)",
+        "idx_assets_tenant_modified ON assets (tenant_id, modified_at)",
+        "idx_assets_tenant_finding_count ON assets (tenant_id, finding_count)",
+        "idx_assets_tenant_source ON assets (tenant_id, source)",
+        "idx_assets_tenant_protected ON assets (tenant_id, is_protected)",
+    ):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
+
+    # S-C.1: match every keyset ORDER BY with its id tiebreaker. A
+    # two-column sort index still makes the database sort equal-valued
+    # rows at scale; these composites serve first and deep pages alike.
+    for _idx in (
+        "idx_assets_tenant_risk_score_id ON assets (tenant_id, risk_score, id)",
+        "idx_assets_tenant_size_id ON assets (tenant_id, size, id)",
+        "idx_assets_tenant_finding_count_id ON assets (tenant_id, finding_count, id)",
+        # New sortable columns need the same id-tiebreaker composite, or
+        # keyset pagination falls back to a temp B-tree at scale.
+        "idx_assets_tenant_risk_level_id ON assets (tenant_id, risk_level, id)",
+        "idx_assets_tenant_source_id ON assets (tenant_id, source, id)",
+        "idx_assets_tenant_scan_label_id ON assets (tenant_id, scan_label, id)",
+    ):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
+    if db.is_postgres():
+        # Track S 5M PostgreSQL acceptance composites. These match the
+        # production inventory filter predicates while preserving
+        # risk_score/id ordering for LIMIT/keyset reads.
+        for _idx in (
+            "idx_assets_tenant_risk_level_source_extension_risk_score_id "
+            "ON assets (tenant_id, risk_level, source, extension, risk_score, id)",
+            "idx_assets_tenant_protected_risk_score_id "
+            "ON assets (tenant_id, is_protected, risk_score, id)",
+            "idx_assets_tenant_risk_level_source_risk_score_id "
+            "ON assets (tenant_id, risk_level, source, risk_score, id)",
+        ):
+            conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
+
+        # Text keysets explicitly use C collation for SQLite/Python
+        # parity, so the index expression must use that same collation.
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_assets_tenant_modified_c_id '
+            'ON assets (tenant_id, (COALESCE(modified_at, \'\') COLLATE "C"), id)'
+        )
+        conn.execute(
+            'CREATE INDEX IF NOT EXISTS idx_assets_tenant_name_c_id '
+            'ON assets (tenant_id, (COALESCE(name, \'\') COLLATE "C"), id)'
+        )
+    else:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assets_tenant_modified_c_id "
+            "ON assets (tenant_id, COALESCE(modified_at, ''), id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assets_tenant_name_c_id "
+            "ON assets (tenant_id, COALESCE(name, ''), id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assets_tenant_scan_label_c_id "
+            "ON assets (tenant_id, COALESCE(scan_label, ''), id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assets_tenant_source_c_id "
+            "ON assets (tenant_id, COALESCE(source, ''), id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assets_tenant_risk_level_c_id "
+            "ON assets (tenant_id, COALESCE(risk_level, ''), id)"
+        )
+        # SQLite cannot reliably select the OR-predicate partial index
+        # below. detail_json is NOT NULL on SQLite, so an exact empty-JSON
+        # index makes the readiness probe constant time without indexing
+        # the large JSON text itself.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_assets_tenant_empty_detail "
+            "ON assets (tenant_id) WHERE detail_json = '{}'"
+        )
+        # SQLite development/on-prem compatibility path: FTS5's trigram
+        # tokenizer preserves the product's literal substring semantics
+        # (partial names, paths and identifiers) without scanning every
+        # potentially large search_text value. External-content triggers
+        # keep the index transactional with the authoritative assets row.
+        try:
+            required_triggers = {
+                "assets_search_fts_ai", "assets_search_fts_ad", "assets_search_fts_au",
+            }
+            existing_objects = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE name = 'assets_search_fts' "
+                    "OR name IN ('assets_search_fts_ai', 'assets_search_fts_ad', 'assets_search_fts_au')"
+                ).fetchall()
+            }
+            needs_rebuild = "assets_search_fts" not in existing_objects or not required_triggers <= existing_objects
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS assets_search_fts USING fts5("
+                "tenant_id UNINDEXED, search_text, content='assets', content_rowid='rowid', tokenize='trigram')"
+            )
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS scan_reports (
-                    tenant_id TEXT NOT NULL,
-                    scan_id TEXT NOT NULL,
-                    timestamp TEXT,
-                    source TEXT,
-                    summary_json TEXT NOT NULL DEFAULT '{}',
-                    report_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (tenant_id, scan_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS audit_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tenant_id TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    detail_json TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE TABLE IF NOT EXISTS secrets (
-                    tenant_id TEXT NOT NULL,
-                    secret_id TEXT NOT NULL,
-                    ciphertext TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (tenant_id, secret_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS scan_profiles (
-                    tenant_id TEXT NOT NULL,
-                    profile_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    config_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (tenant_id, profile_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS alert_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tenant_id TEXT NOT NULL,
-                    scan_id TEXT,
-                    alerts_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS login_failures (
-                    rate_key TEXT NOT NULL,
-                    timestamp REAL NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS revoked_tokens (
-                    jti TEXT PRIMARY KEY,
-                    expires_at INTEGER NOT NULL,
-                    revoked_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS users (
-                    username TEXT PRIMARY KEY,
-                    password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL CHECK (role IN ('admin', 'analyst', 'viewer')),
-                    tenant_id TEXT NOT NULL DEFAULT 'default',
-                    full_name TEXT NOT NULL DEFAULT '',
-                    is_active INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    last_login_at TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS tenants (
-                    tenant_id TEXT PRIMARY KEY,
-                    display_name TEXT NOT NULL,
-                    registration_code TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                -- M5: time-boxed, limited-use registration invites. The plaintext
-                -- token is never stored - only its sha256. Redemption is an atomic
-                -- conditional UPDATE (not expired, not revoked, used_count<max_uses).
-                CREATE TABLE IF NOT EXISTS registration_invites (
-                    id TEXT PRIMARY KEY,
-                    tenant_id TEXT NOT NULL,
-                    token_hash TEXT NOT NULL,
-                    role TEXT NOT NULL DEFAULT 'viewer',
-                    max_uses INTEGER NOT NULL DEFAULT 1,
-                    used_count INTEGER NOT NULL DEFAULT 0,
-                    expires_at TEXT NOT NULL,
-                    requires_approval INTEGER NOT NULL DEFAULT 0,
-                    revoked INTEGER NOT NULL DEFAULT 0,
-                    created_by TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    last_redeemed_at TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_registration_invites_lookup
-                    ON registration_invites (tenant_id, token_hash);
-
-                -- M18: DB-backed API keys with a full lifecycle (created / last-used
-                -- / revoked / expiry), so a key is revocable and expirable WITHOUT
-                -- a redeploy. Only the key's sha256 is stored.
-                CREATE TABLE IF NOT EXISTS api_keys (
-                    id TEXT PRIMARY KEY,
-                    tenant_id TEXT NOT NULL,
-                    key_hash TEXT NOT NULL,
-                    label TEXT NOT NULL DEFAULT '',
-                    role TEXT NOT NULL DEFAULT 'analyst',
-                    created_by TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    last_used_at TEXT,
-                    expires_at TEXT,
-                    revoked INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
-
-                CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created
-                    ON scan_reports (tenant_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created_scan
-                    ON scan_reports (tenant_id, created_at, scan_id);
-                CREATE INDEX IF NOT EXISTS idx_audit_events_tenant_timestamp
-                    ON audit_events (tenant_id, timestamp);
-                CREATE INDEX IF NOT EXISTS idx_alert_events_tenant_created
-                    ON alert_events (tenant_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_login_failures_key_timestamp
-                    ON login_failures (rate_key, timestamp);
-                CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires
-                    ON revoked_tokens (expires_at);
-                CREATE INDEX IF NOT EXISTS idx_users_tenant
-                    ON users (tenant_id, role);
-
-                -- Phase 1 (DATA-001) normalized model. Written alongside the
-                -- report_json blob (dual-write); reads still use the blob.
-                CREATE TABLE IF NOT EXISTS scan_runs (
-                    tenant_id TEXT NOT NULL,
-                    id TEXT NOT NULL,
-                    source TEXT,
-                    mode TEXT,
-                    policy_version TEXT,
-                    started_at TEXT,
-                    ended_at TEXT,
-                    status TEXT,
-                    total_files INTEGER NOT NULL DEFAULT 0,
-                    summary_json TEXT NOT NULL DEFAULT '{}',
-                    PRIMARY KEY (tenant_id, id)
-                );
-
-                CREATE TABLE IF NOT EXISTS assets (
-                    tenant_id TEXT NOT NULL,
-                    id TEXT NOT NULL,
-                    source TEXT,
-                    stable_object_id TEXT,
-                    path TEXT,
-                    name TEXT,
-                    -- S-B queryable-inventory columns (denormalized from the scan
-                    -- so the inventory list filters/sorts/searches in the DB).
-                    extension TEXT,
-                    share TEXT,
-                    risk_level TEXT,
-                    risk_score INTEGER NOT NULL DEFAULT 0,
-                    size INTEGER NOT NULL DEFAULT 0,
-                    owner TEXT,
-                    modified_at TEXT,
-                    finding_count INTEGER NOT NULL DEFAULT 0,
-                    top_frameworks TEXT,
-                    is_hidden INTEGER NOT NULL DEFAULT 0,
-                    is_system INTEGER NOT NULL DEFAULT 0,
-                    is_protected INTEGER NOT NULL DEFAULT 0,
-                    search_text TEXT,
-                    finding_types TEXT NOT NULL DEFAULT '[]',
-                    framework_keys TEXT NOT NULL DEFAULT '[]',
-                    detail_json TEXT NOT NULL DEFAULT '{}',
-                    scan_label TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY (tenant_id, id)
-                );
-
-                CREATE TABLE IF NOT EXISTS asset_versions (
-                    tenant_id TEXT NOT NULL,
-                    asset_id TEXT NOT NULL,
-                    version TEXT NOT NULL,
-                    size INTEGER NOT NULL DEFAULT 0,
-                    mtime TEXT,
-                    content_hash TEXT,
-                    coverage TEXT,
-                    PRIMARY KEY (tenant_id, asset_id, version)
-                );
-
-                -- Track P-A: authoritative per-object delta baseline. The
-                -- analyzed snapshot remains normalized in assets.detail_json;
-                -- this table owns only identity/fingerprint/generation state.
-                CREATE TABLE IF NOT EXISTS scan_object_baselines (
-                    tenant_id TEXT NOT NULL,
-                    scope_key TEXT NOT NULL,
-                    object_key TEXT NOT NULL,
-                    asset_id TEXT NOT NULL,
-                    size BIGINT NOT NULL DEFAULT 0,
-                    mtime TEXT NOT NULL DEFAULT '',
-                    content_hash TEXT NOT NULL DEFAULT '',
-                    version_signature TEXT NOT NULL,
-                    last_scan_id TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    snapshot_json TEXT NOT NULL DEFAULT '{}',
-                    PRIMARY KEY (tenant_id, scope_key, object_key)
-                );
-
-                CREATE TABLE IF NOT EXISTS findings (
-                    tenant_id TEXT NOT NULL,
-                    id TEXT NOT NULL,
-                    asset_id TEXT NOT NULL,
-                    rule TEXT,
-                    severity TEXT,
-                    category TEXT,
-                    framework TEXT,
-                    status TEXT,
-                    first_seen TEXT,
-                    last_seen TEXT,
-                    PRIMARY KEY (tenant_id, id)
-                );
-
-                CREATE TABLE IF NOT EXISTS finding_occurrences (
-                    tenant_id TEXT NOT NULL,
-                    finding_id TEXT NOT NULL,
-                    scan_id TEXT NOT NULL,
-                    locator TEXT,
-                    fingerprint TEXT,
-                    occurrence_count INTEGER NOT NULL DEFAULT 1
-                );
-
-                -- Materialized per-finding read index (DATA-001 read-switch).
-                -- Stores the exact list_findings response per finding so the
-                -- read path can serve findings without loading full report
-                -- blobs. Behind DSPM_READ_FROM_NORMALIZED (default off).
-                CREATE TABLE IF NOT EXISTS finding_index (
-                    tenant_id TEXT NOT NULL,
-                    scan_id TEXT NOT NULL,
-                    seq INTEGER NOT NULL,
-                    finding_id TEXT NOT NULL,
-                    status TEXT,
-                    response_json TEXT NOT NULL,
-                    -- F2: stamps the logic version that produced response_json. A
-                    -- read only trusts rows whose stamp == FINDING_INDEX_VERSION,
-                    -- so a change to _finding_response/_finding_status invalidates
-                    -- stale rows (they fall back to the blob until re-backfilled).
-                    index_version TEXT NOT NULL DEFAULT ''
-                );
-
-                -- S-F.2 durable reconciliation metrics for the optional search
-                -- projection. The DB remains authoritative; this stores only
-                -- counts/status, never document metadata or evidence.
-                CREATE TABLE IF NOT EXISTS search_reconciliation_state (
-                    provider TEXT NOT NULL,
-                    index_uid TEXT NOT NULL,
-                    checked_at TEXT NOT NULL,
-                    metrics_json TEXT NOT NULL,
-                    PRIMARY KEY (provider, index_uid)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_scan_runs_tenant
-                    ON scan_runs (tenant_id, started_at);
-                CREATE INDEX IF NOT EXISTS idx_findings_tenant_asset
-                    ON findings (tenant_id, asset_id);
-                CREATE INDEX IF NOT EXISTS idx_occurrences_scan
-                    ON finding_occurrences (tenant_id, scan_id);
-                CREATE INDEX IF NOT EXISTS idx_occurrences_finding
-                    ON finding_occurrences (finding_id);
-                CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan
-                    ON finding_index (tenant_id, scan_id);
-                CREATE INDEX IF NOT EXISTS idx_scan_object_baselines_generation
-                    ON scan_object_baselines (tenant_id, scope_key, last_scan_id);
-
-                -- Durable job state (ARCH-003). The executor is still in-memory,
-                -- but the job RECORD survives a restart so status/history are not
-                -- lost and an orphaned "running" job can be recovered to failed.
-                CREATE TABLE IF NOT EXISTS scan_jobs (
-                    id TEXT PRIMARY KEY,
-                    tenant_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    progress INTEGER NOT NULL DEFAULT 0,
-                    message TEXT,
-                    created_at TEXT NOT NULL,
-                    finished_at TEXT,
-                    error TEXT,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_scan_jobs_tenant
-                    ON scan_jobs (tenant_id, created_at);
-
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
+                CREATE TRIGGER IF NOT EXISTS assets_search_fts_ai AFTER INSERT ON assets BEGIN
+                    INSERT INTO assets_search_fts(rowid, tenant_id, search_text)
+                    VALUES (new.rowid, new.tenant_id, COALESCE(new.search_text, ''));
+                END;
+                CREATE TRIGGER IF NOT EXISTS assets_search_fts_ad AFTER DELETE ON assets BEGIN
+                    INSERT INTO assets_search_fts(assets_search_fts, rowid, tenant_id, search_text)
+                    VALUES ('delete', old.rowid, old.tenant_id, COALESCE(old.search_text, ''));
+                END;
+                CREATE TRIGGER IF NOT EXISTS assets_search_fts_au
+                AFTER UPDATE OF tenant_id, search_text ON assets BEGIN
+                    INSERT INTO assets_search_fts(assets_search_fts, rowid, tenant_id, search_text)
+                    VALUES ('delete', old.rowid, old.tenant_id, COALESCE(old.search_text, ''));
+                    INSERT INTO assets_search_fts(rowid, tenant_id, search_text)
+                    VALUES (new.rowid, new.tenant_id, COALESCE(new.search_text, ''));
+                END;
                 """
             )
-            now = datetime.now(timezone.utc).isoformat()
-            columns = db.table_columns(conn, "tenants")
-            if "registration_code" not in columns:
-                conn.execute("ALTER TABLE tenants ADD COLUMN registration_code TEXT NOT NULL DEFAULT ''")
-            user_columns = db.table_columns(conn, "users")
-            if "avatar" not in user_columns:
-                # Profile photo as a bounded data URL (~300 KB cap enforced at the
-                # API); kept off _public_user so /api/users listings stay small.
-                conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''")
-            # F2: bring pre-version-stamp finding_index rows up to the current
-            # schema. They land with index_version='' (i.e. "unknown logic"), so
-            # the read-switch treats them as stale and serves the blob until a
-            # backfill re-stamps them - the safe default for a migration mirror.
-            fi_columns = db.table_columns(conn, "finding_index")
-            if "index_version" not in fi_columns:
-                conn.execute("ALTER TABLE finding_index ADD COLUMN index_version TEXT NOT NULL DEFAULT ''")
-            # Created here (not in the schema script above) because the column it
-            # covers may have just been added by the ALTER on a pre-existing DB.
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_finding_index_version ON finding_index (tenant_id, index_version)")
+            if needs_rebuild:
+                conn.execute("INSERT INTO assets_search_fts(assets_search_fts) VALUES ('rebuild')")
+            _sqlite_inventory_fts_enabled = True
+        except Exception as exc:  # pragma: no cover - depends on SQLite build options
+            _sqlite_inventory_fts_enabled = False
+            logger.warning(
+                "SQLite trigram inventory index unavailable; using compatible LIKE search: %s",
+                type(exc).__name__,
+            )
+    # Readiness checks run on every normalized request. This partial
+    # index is empty for a healthy mirror, avoiding a 5M-row scan merely
+    # to prove that no pre-S-E detail rows remain.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assets_tenant_missing_detail "
+        "ON assets (tenant_id) WHERE detail_json IS NULL OR detail_json = '{}'"
+    )
 
-            baseline_columns = db.table_columns(conn, "scan_object_baselines")
-            if "snapshot_json" not in baseline_columns:
-                conn.execute("ALTER TABLE scan_object_baselines ADD COLUMN snapshot_json TEXT NOT NULL DEFAULT '{}'")
-
-            # S-B: bring pre-existing `assets` tables up to the queryable-inventory
-            # schema. New columns default to 0/NULL; a re-scan (dual-write) or
-            # backfill_normalized_scans() populates them for historical assets.
-            asset_columns = db.table_columns(conn, "assets")
-            for col, coltype in (
-                ("extension", "TEXT"),
-                ("share", "TEXT"),
-                ("risk_level", "TEXT"),
-                ("risk_score", "INTEGER NOT NULL DEFAULT 0"),
-                ("size", "INTEGER NOT NULL DEFAULT 0"),
-                ("owner", "TEXT"),
-                ("modified_at", "TEXT"),
-                ("finding_count", "INTEGER NOT NULL DEFAULT 0"),
-                ("top_frameworks", "TEXT"),
-                ("is_hidden", "INTEGER NOT NULL DEFAULT 0"),
-                ("is_system", "INTEGER NOT NULL DEFAULT 0"),
-                ("is_protected", "INTEGER NOT NULL DEFAULT 0"),
-                ("search_text", "TEXT"),
-                ("finding_types", "TEXT NOT NULL DEFAULT '[]'"),
-                ("framework_keys", "TEXT NOT NULL DEFAULT '[]'"),
-                ("detail_json", "TEXT NOT NULL DEFAULT '{}'"),
-                # The operator-facing scan name ("HR file share"), so Data
-                # Inventory can filter by the scan a customer configured
-                # instead of the collector protocol (smb / endpoint-winrm).
-                ("scan_label", "TEXT NOT NULL DEFAULT ''"),
-            ):
-                if col not in asset_columns:
-                    conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {coltype}")
-            # Index every filter/sort column (created after the ALTERs so the
-            # columns exist on a migrated DB).
-            for _idx in (
-                "idx_assets_tenant_risk_score ON assets (tenant_id, risk_score)",
-                "idx_assets_tenant_risk_level ON assets (tenant_id, risk_level)",
-                "idx_assets_tenant_extension ON assets (tenant_id, extension)",
-                "idx_assets_tenant_size ON assets (tenant_id, size)",
-                "idx_assets_tenant_modified ON assets (tenant_id, modified_at)",
-                "idx_assets_tenant_finding_count ON assets (tenant_id, finding_count)",
-                "idx_assets_tenant_source ON assets (tenant_id, source)",
-                "idx_assets_tenant_protected ON assets (tenant_id, is_protected)",
-            ):
-                conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
-
-            # S-C.1: match every keyset ORDER BY with its id tiebreaker. A
-            # two-column sort index still makes the database sort equal-valued
-            # rows at scale; these composites serve first and deep pages alike.
-            for _idx in (
-                "idx_assets_tenant_risk_score_id ON assets (tenant_id, risk_score, id)",
-                "idx_assets_tenant_size_id ON assets (tenant_id, size, id)",
-                "idx_assets_tenant_finding_count_id ON assets (tenant_id, finding_count, id)",
-                # New sortable columns need the same id-tiebreaker composite, or
-                # keyset pagination falls back to a temp B-tree at scale.
-                "idx_assets_tenant_risk_level_id ON assets (tenant_id, risk_level, id)",
-                "idx_assets_tenant_source_id ON assets (tenant_id, source, id)",
-                "idx_assets_tenant_scan_label_id ON assets (tenant_id, scan_label, id)",
-            ):
-                conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
-            if db.is_postgres():
-                # Track S 5M PostgreSQL acceptance composites. These match the
-                # production inventory filter predicates while preserving
-                # risk_score/id ordering for LIMIT/keyset reads.
-                for _idx in (
-                    "idx_assets_tenant_risk_level_source_extension_risk_score_id "
-                    "ON assets (tenant_id, risk_level, source, extension, risk_score, id)",
-                    "idx_assets_tenant_protected_risk_score_id "
-                    "ON assets (tenant_id, is_protected, risk_score, id)",
-                    "idx_assets_tenant_risk_level_source_risk_score_id "
-                    "ON assets (tenant_id, risk_level, source, risk_score, id)",
-                ):
-                    conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
-
-                # Text keysets explicitly use C collation for SQLite/Python
-                # parity, so the index expression must use that same collation.
-                conn.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_assets_tenant_modified_c_id '
-                    'ON assets (tenant_id, (COALESCE(modified_at, \'\') COLLATE "C"), id)'
-                )
-                conn.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_assets_tenant_name_c_id '
-                    'ON assets (tenant_id, (COALESCE(name, \'\') COLLATE "C"), id)'
-                )
-            else:
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_modified_c_id "
-                    "ON assets (tenant_id, COALESCE(modified_at, ''), id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_name_c_id "
-                    "ON assets (tenant_id, COALESCE(name, ''), id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_scan_label_c_id "
-                    "ON assets (tenant_id, COALESCE(scan_label, ''), id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_source_c_id "
-                    "ON assets (tenant_id, COALESCE(source, ''), id)"
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_risk_level_c_id "
-                    "ON assets (tenant_id, COALESCE(risk_level, ''), id)"
-                )
-                # SQLite cannot reliably select the OR-predicate partial index
-                # below. detail_json is NOT NULL on SQLite, so an exact empty-JSON
-                # index makes the readiness probe constant time without indexing
-                # the large JSON text itself.
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_empty_detail "
-                    "ON assets (tenant_id) WHERE detail_json = '{}'"
-                )
-                # SQLite development/on-prem compatibility path: FTS5's trigram
-                # tokenizer preserves the product's literal substring semantics
-                # (partial names, paths and identifiers) without scanning every
-                # potentially large search_text value. External-content triggers
-                # keep the index transactional with the authoritative assets row.
-                try:
-                    required_triggers = {
-                        "assets_search_fts_ai", "assets_search_fts_ad", "assets_search_fts_au",
-                    }
-                    existing_objects = {
-                        str(row["name"])
-                        for row in conn.execute(
-                            "SELECT name FROM sqlite_master WHERE name = 'assets_search_fts' "
-                            "OR name IN ('assets_search_fts_ai', 'assets_search_fts_ad', 'assets_search_fts_au')"
-                        ).fetchall()
-                    }
-                    needs_rebuild = "assets_search_fts" not in existing_objects or not required_triggers <= existing_objects
-                    conn.execute(
-                        "CREATE VIRTUAL TABLE IF NOT EXISTS assets_search_fts USING fts5("
-                        "tenant_id UNINDEXED, search_text, content='assets', content_rowid='rowid', tokenize='trigram')"
-                    )
-                    conn.executescript(
-                        """
-                        CREATE TRIGGER IF NOT EXISTS assets_search_fts_ai AFTER INSERT ON assets BEGIN
-                            INSERT INTO assets_search_fts(rowid, tenant_id, search_text)
-                            VALUES (new.rowid, new.tenant_id, COALESCE(new.search_text, ''));
-                        END;
-                        CREATE TRIGGER IF NOT EXISTS assets_search_fts_ad AFTER DELETE ON assets BEGIN
-                            INSERT INTO assets_search_fts(assets_search_fts, rowid, tenant_id, search_text)
-                            VALUES ('delete', old.rowid, old.tenant_id, COALESCE(old.search_text, ''));
-                        END;
-                        CREATE TRIGGER IF NOT EXISTS assets_search_fts_au
-                        AFTER UPDATE OF tenant_id, search_text ON assets BEGIN
-                            INSERT INTO assets_search_fts(assets_search_fts, rowid, tenant_id, search_text)
-                            VALUES ('delete', old.rowid, old.tenant_id, COALESCE(old.search_text, ''));
-                            INSERT INTO assets_search_fts(rowid, tenant_id, search_text)
-                            VALUES (new.rowid, new.tenant_id, COALESCE(new.search_text, ''));
-                        END;
-                        """
-                    )
-                    if needs_rebuild:
-                        conn.execute("INSERT INTO assets_search_fts(assets_search_fts) VALUES ('rebuild')")
-                    _sqlite_inventory_fts_enabled = True
-                except Exception as exc:  # pragma: no cover - depends on SQLite build options
-                    _sqlite_inventory_fts_enabled = False
-                    logger.warning(
-                        "SQLite trigram inventory index unavailable; using compatible LIKE search: %s",
-                        type(exc).__name__,
-                    )
-            # Readiness checks run on every normalized request. This partial
-            # index is empty for a healthy mirror, avoiding a 5M-row scan merely
-            # to prove that no pre-S-E detail rows remain.
+    # Track S-D: PostgreSQL substring search over paths/names/owners is
+    # backed by pg_trgm without changing the S-C API's literal-substring
+    # semantics. The expression is intentionally identical to the WHERE
+    # predicate below. SQLite keeps its compatible LIKE fallback.
+    #
+    # CREATE EXTENSION belongs to scripts/provision_postgres.py because
+    # the runtime role is least-privilege. Existing deployments that have
+    # not rerun provisioning remain correct (sequential LIKE), but warn.
+    if db.is_postgres():
+        if db.postgres_extension_available(conn, "pg_trgm"):
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_assets_tenant_missing_detail "
-                "ON assets (tenant_id) WHERE detail_json IS NULL OR detail_json = '{}'"
+                "CREATE INDEX IF NOT EXISTS idx_assets_search_trgm "
+                "ON assets USING GIN ((lower(COALESCE(search_text, ''))) gin_trgm_ops)"
+            )
+        else:
+            logger.warning(
+                "Track S-D search index unavailable: pg_trgm is not installed; "
+                "rerun scripts/provision_postgres.py as the PostgreSQL admin"
             )
 
-            # Track S-D: PostgreSQL substring search over paths/names/owners is
-            # backed by pg_trgm without changing the S-C API's literal-substring
-            # semantics. The expression is intentionally identical to the WHERE
-            # predicate below. SQLite keeps its compatible LIKE fallback.
-            #
-            # CREATE EXTENSION belongs to scripts/provision_postgres.py because
-            # the runtime role is least-privilege. Existing deployments that have
-            # not rerun provisioning remain correct (sequential LIKE), but warn.
-            if db.is_postgres():
-                if db.postgres_extension_available(conn, "pg_trgm"):
-                    conn.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_assets_search_trgm "
-                        "ON assets USING GIN ((lower(COALESCE(search_text, ''))) gin_trgm_ops)"
-                    )
-                else:
-                    logger.warning(
-                        "Track S-D search index unavailable: pg_trgm is not installed; "
-                        "rerun scripts/provision_postgres.py as the PostgreSQL admin"
-                    )
-
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
-                VALUES ('default', 'Default', ?, ?, ?)
-                """,
-                (generate_registration_code(), now, now),
-            )
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
-                SELECT tenant_id, tenant_id, '', ?, ? FROM users
-                UNION
-                SELECT tenant_id, tenant_id, '', ?, ? FROM scan_reports
-                UNION
-                SELECT tenant_id, tenant_id, '', ?, ? FROM audit_events
-                UNION
-                SELECT tenant_id, tenant_id, '', ?, ? FROM secrets
-                UNION
-                SELECT tenant_id, tenant_id, '', ?, ? FROM alert_events
-                """,
-                (now, now, now, now, now, now, now, now, now, now),
-            )
-            rows = conn.execute("SELECT tenant_id FROM tenants WHERE registration_code = ''").fetchall()
-            for row in rows:
-                conn.execute(
-                    "UPDATE tenants SET registration_code = ?, updated_at = ? WHERE tenant_id = ?",
-                    (generate_registration_code(), now, row["tenant_id"]),
-                )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
+        VALUES ('default', 'Default', ?, ?, ?)
+        """,
+        (generate_registration_code(), now, now),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
+        SELECT tenant_id, tenant_id, '', ?, ? FROM users
+        UNION
+        SELECT tenant_id, tenant_id, '', ?, ? FROM scan_reports
+        UNION
+        SELECT tenant_id, tenant_id, '', ?, ? FROM audit_events
+        UNION
+        SELECT tenant_id, tenant_id, '', ?, ? FROM secrets
+        UNION
+        SELECT tenant_id, tenant_id, '', ?, ? FROM alert_events
+        """,
+        (now, now, now, now, now, now, now, now, now, now),
+    )
+    rows = conn.execute("SELECT tenant_id FROM tenants WHERE registration_code = ''").fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE tenants SET registration_code = ?, updated_at = ? WHERE tenant_id = ?",
+            (generate_registration_code(), now, row["tenant_id"]),
+        )
 
 
-init_db()
+
+def ensure_schema_ready() -> None:
+    """Startup schema policy (Phase 2, DB-05).
+
+    Development/SQLite: auto-apply pending revisions (same convergent behavior
+    as before, now recorded). Production: NEVER apply DDL at startup - verify
+    the recorded revision matches this build and refuse to serve otherwise, so
+    schema changes only happen through an operator-run migration step.
+    """
+    if os.getenv("DSPM_MIGRATIONS_CLI") == "1":
+        return  # the migrations CLI is driving; keep the import inert
+
+    from backend import migrations  # local import; migrations imports store
+
+    if os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}:
+        migrations.verify_or_raise()
+    else:
+        migrations.upgrade()
+
+
+ensure_schema_ready()
 
 
 SCAN_PROFILE_KINDS = {"file-server", "endpoint"}

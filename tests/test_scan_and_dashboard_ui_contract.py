@@ -140,8 +140,22 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         apply_body = self.app_js[apply_start:apply_start + 700]
         self.assertIn("resetInventoryPageWindow()", apply_body)
         self.assertIn("refreshInventoryPageWindow()", apply_body)
-        # The Source facet names configured scans, not collector protocols.
-        self.assertIn("inventoryFacets?.scans", self.app_js)
+        # The Scan facet lists the scans the operator CONFIGURED (the saved
+        # profile cards), not collector protocols or whatever source strings
+        # old results happen to carry.
+        self.assertIn("function configuredInventoryScanNames(", self.app_js)
+        names_start = self.app_js.index("function configuredInventoryScanNames(")
+        names_body = self.app_js[names_start:names_start + 400]
+        self.assertIn("scanProfilesState", names_body)
+        # Saving/deleting a profile refreshes the selector via the deck render.
+        deck_start = self.app_js.index("function renderScanDecks(")
+        deck_body = self.app_js[deck_start:self.app_js.index("function refreshDeckBusyState(")]
+        self.assertIn("renderInventoryScanOptions()", deck_body)
+        # scanProfilesState is read by the inventory module during boot, long
+        # before the appended scan-deck module runs - it must be declared in
+        # the top-of-file state block, not in the appended module (TDZ).
+        self.assertLess(self.app_js.index("let scanProfilesState"),
+                        self.app_js.index("function configuredInventoryScanNames("))
         self.assertIn("All scans", self.index_html)
 
     def test_setup_view_uses_the_full_window_with_one_scrollbar(self) -> None:
@@ -162,23 +176,24 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
     def test_scan_wizard_speaks_the_console_type_system(self) -> None:
         """The setup pages must share the console's attributes, not their own
         scale: 15px/600 card headings, 12.5px labels, 13.5px/40px inputs, and
-        the console's group-label device (uppercase 10px/700 with the accent
-        tick - the retired .eyebrow class is display:none product-wide, so the
-        step labels carry their own class)."""
+        a live step subtitle in the page head."""
         for wizard in ("fs-wizard", "endpoint-wizard"):
             lo = self.index_html.index(f'id="{wizard}"')
             hi = self.index_html.index("scan-wizard-footer", lo)
             region = self.index_html[lo:hi]
             self.assertEqual(region.count("wizard-step-eyebrow"), 3, wizard)
-            self.assertNotIn('class="eyebrow wizard-step-eyebrow"', region, wizard)
+            self.assertEqual(region.count('class="wizard-current-step"'), 1, wizard)
         v6 = self.styles_css[self.styles_css.index("Scan setup v6"):]
         for probe in (
             "font-size: 15px !important",         # card headings = dashboard h4
             "font-size: 12.5px !important",       # labels = console forms
             "min-height: 40px !important",        # inputs/buttons = console controls
-            ".wizard-step-eyebrow::before",       # the accent-tick group label
+            ".wizard-current-step",               # live page-head step subtitle
         ):
             self.assertIn(probe, v6)
+        v9 = self.styles_css[self.styles_css.index("Scan setup v9"):]
+        self.assertIn("display: none !important", v9)
+        self.assertIn("padding: 2px 0 10px !important", v9)
 
     def test_wizard_arrives_animated_and_never_scrolls_the_page(self) -> None:
         # Opening rises in (reduced-motion guarded); a step change resets its

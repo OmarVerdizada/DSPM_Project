@@ -112,7 +112,9 @@ class InventoryWindowFrontendTests(unittest.TestCase):
     def test_inventory_command_surface_has_compact_even_group_rhythm(self) -> None:
         self.assertIn("complete disclosure", self.styles)
         self.assertIn("margin: 0 !important", self.styles)
-        self.assertIn("grid-template-columns: minmax(190px, .8fr) minmax(220px, 1fr) minmax(390px, 2fr) auto", self.styles)
+        self.assertIn("grid-template-columns: minmax(220px, 240px) minmax(220px, 1fr) minmax(390px, 2fr) auto", self.styles)
+        self.assertIn(".inventory-scan-facet .facet-shell select", self.styles)
+        self.assertIn("width: 180px !important", self.styles)
         self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", self.styles)
         self.assertIn(".inventory-expanded-grid", self.styles)
 

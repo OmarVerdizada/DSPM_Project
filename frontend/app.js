@@ -489,6 +489,7 @@ let inventoryPageWindow = createInventoryPageWindow();
 let inventoryPageRequest = 0;
 let inventoryPageAbortController = null;
 let inventoryFacets = null;
+let scanProfilesState = [];
 // Estate-wide summary aggregated server-side across ALL scan sources (file
 // server + endpoint + local). The dashboard tiles must describe the whole
 // indexed inventory - the same data Data Inventory shows - not whichever
@@ -2841,23 +2842,28 @@ document.addEventListener("keydown", (event) => {
   applyInventorySort(th.dataset.inventorySort);
 });
 
-function updateInventoryFilterOptions(files = latestFiles) {
+function configuredInventoryScanNames() {
+  // The scan selector represents configurations the operator created, not
+  // collector protocols or generic/template sources found in old results.
+  return [...new Set(scanProfilesState
+    .map((profile) => String(profile?.name || "").trim())
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function renderInventoryScanOptions() {
   if (inventorySourceFilter) {
-    // Prefer the scans a customer actually configured ("HR file share") over
-    // collector protocols ("smb"); protocols remain as the fallback for assets
-    // captured before scans carried a name.
-    const scanNames = (inventoryFacets?.scans || []).map((item) => String(item.value || "")).filter(Boolean);
-    const sources = scanNames.length
-      ? scanNames
-      : inventoryFacets
-        ? (inventoryFacets.sources || []).map((item) => String(item.value || "")).filter(Boolean)
-        : [...new Set(files.map(getInventorySourceValue).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    const current = sources.includes(inventorySourceFacet) ? inventorySourceFacet : "ALL";
+    const scanNames = configuredInventoryScanNames();
+    const current = scanNames.includes(inventorySourceFacet) ? inventorySourceFacet : "ALL";
     inventorySourceFacet = current;
-    inventorySourceFilter.innerHTML = ["ALL", ...sources]
+    inventorySourceFilter.innerHTML = ["ALL", ...scanNames]
       .map((value) => `<option value="${escapeHtml(value)}" ${value === current ? "selected" : ""}>${escapeHtml(value === "ALL" ? "All scans" : value)}</option>`)
       .join("");
   }
+}
+
+function updateInventoryFilterOptions(files = latestFiles) {
+  renderInventoryScanOptions();
   if (inventoryFindingFilter) {
     const findings = inventoryFacets
       ? (inventoryFacets.finding_types || []).map((item) => String(item.value || "")).filter(Boolean)
@@ -8664,23 +8670,24 @@ window.addEventListener("storage", (event) => {
 const SCAN_WIZARD_KINDS = {
   "file-server": {
     deck: "#fs-scan-deck", grid: "#fs-profile-grid", wizard: "#fs-wizard",
-    heading: "#fs-wizard-heading", stepper: '[data-stepper="file-server"]',
+    heading: "#fs-wizard-heading", currentStep: "#fs-wizard-current-step", stepper: '[data-stepper="file-server"]',
     back: "#fs-wizard-back", next: "#fs-wizard-next", save: "#fs-wizard-save",
     close: "#fs-wizard-close", del: "#fs-wizard-delete", hint: "#fs-wizard-hint",
     mirror: "#fs-wizard-status", statusSource: "#connection-status",
+    stepLabels: ["", "Scan identity", "Configuration", "Review & launch"],
     newTitle: "New file server scan", icon: "li-server",
   },
   endpoint: {
     deck: "#endpoint-scan-deck", grid: "#endpoint-profile-grid", wizard: "#endpoint-wizard",
-    heading: "#endpoint-wizard-heading", stepper: '[data-stepper="endpoint"]',
+    heading: "#endpoint-wizard-heading", currentStep: "#endpoint-wizard-current-step", stepper: '[data-stepper="endpoint"]',
     back: "#endpoint-wizard-back", next: "#endpoint-wizard-next", save: "#endpoint-wizard-save",
     close: "#endpoint-wizard-close", del: "#endpoint-wizard-delete", hint: "#endpoint-wizard-hint",
     mirror: "#endpoint-wizard-status", statusSource: "#endpoint-status",
+    stepLabels: ["", "Scan identity", "Configuration", "Connect & launch"],
     newTitle: "New endpoint scan", icon: "li-monitor-cog",
   },
 };
 
-let scanProfilesState = [];
 const scanWizardState = {
   "file-server": { step: 1, editingId: "" },
   endpoint: { step: 1, editingId: "" },
@@ -8809,6 +8816,7 @@ function renderScanDecks() {
       </button>`;
   });
   refreshDeckBusyState();
+  renderInventoryScanOptions();
 }
 
 function refreshDeckBusyState() {
@@ -8837,6 +8845,14 @@ function setWizardStep(kind, step) {
   wizardEl(kind, "back").disabled = step === 1;
   wizardEl(kind, "next").classList.toggle("hidden", step === 3);
   wizardEl(kind, "save").classList.toggle("hidden", step !== 3);
+  const currentStep = wizardEl(kind, "currentStep");
+  const currentNode = wizard.querySelector(`.stepper-node[data-step-node="${step}"]`);
+  if (currentStep) {
+    const label = SCAN_WIZARD_KINDS[kind].stepLabels?.[step]
+      || currentNode?.querySelector(".stepper-label")?.textContent?.trim()
+      || "Setup";
+    currentStep.textContent = `Step ${step}: ${label}`;
+  }
   setWizardHint(kind, "");
   if (kind === "endpoint" && step === 3) {
     syncWinrmActivationFields();

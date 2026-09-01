@@ -757,12 +757,27 @@ def health() -> dict:
         # Operator diagnostics (Phase 0): which database this instance serves.
         # Phase 1: how stale the newest backup is - a backup that stopped
         # happening must be visible before it becomes a recovery incident.
+        # Phase 2: the applied schema revision vs what this build expects.
         "database": {
             "backend": DATABASE_IDENTITY.get("backend"),
             "identity": DATABASE_IDENTITY.get("identity"),
             "backup_age_seconds": _backup_age_or_none(),
+            "schema_revision": _schema_revision_or_none(),
         },
     }
+
+
+def _schema_revision_or_none():
+    try:
+        from backend import migrations, store
+
+        with store._connect() as conn:
+            return {
+                "applied": migrations.current_revision(conn),
+                "expected": migrations.expected_revision(),
+            }
+    except Exception:
+        return None
 
 
 def _backup_age_or_none():
@@ -1733,7 +1748,7 @@ def findings_index(
 def inventory_index(
     principal: Principal = Depends(require_role("viewer")),
     risk: str = Query(default="", max_length=20),
-    source: str = Query(default="", max_length=40),
+    source: str = Query(default="", max_length=80),
     framework: str = Query(default="", max_length=200),
     finding_type: str = Query(default="", max_length=160),
     protected: bool | None = Query(default=None),
@@ -1772,7 +1787,7 @@ def inventory_export(
     principal: Principal = Depends(require_role("viewer")),
     format: str = Query(default="csv", pattern="^(csv|ndjson)$"),
     risk: str = Query(default="", max_length=20),
-    source: str = Query(default="", max_length=40),
+    source: str = Query(default="", max_length=80),
     framework: str = Query(default="", max_length=200),
     finding_type: str = Query(default="", max_length=160),
     protected: bool | None = Query(default=None),

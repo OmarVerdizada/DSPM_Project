@@ -21504,10 +21504,10 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
    own control. */
 :root:root #inventory-workspace .inventory-facet-row {
   display: grid !important;
-  grid-template-columns: minmax(190px, .8fr) minmax(220px, 1fr) minmax(390px, 2fr) auto !important;
+  grid-template-columns: minmax(220px, 240px) minmax(220px, 1fr) minmax(390px, 2fr) auto !important;
   align-items: center !important;
   gap: 6px 22px !important;
-  padding: 3px 0 !important;
+  padding: 3px 8px !important;
   overflow: visible !important;
 }
 :root:root #inventory-workspace .inventory-facet-row > label {
@@ -21520,6 +21520,16 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 :root:root #inventory-workspace .inventory-facet-row .facet-shell select {
   width: 100% !important;
   max-width: none !important;
+}
+:root:root #inventory-workspace .inventory-facet-row > .inventory-scan-facet {
+  grid-template-columns: auto 180px !important;
+  justify-self: start !important;
+  width: auto !important;
+}
+:root:root #inventory-workspace .inventory-scan-facet .facet-shell,
+:root:root #inventory-workspace .inventory-scan-facet .facet-shell select {
+  width: 180px !important;
+  max-width: 180px !important;
 }
 :root:root #inventory-workspace .inventory-framework-filter {
   display: grid !important;
@@ -23878,4 +23888,41 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
   font-size: 11px !important;
   font-weight: 400 !important;
   color: var(--muted) !important;
+}
+
+/* Scan setup v9 - page-head parity. The live step description stays in the
+   top page head, and the form begins after one small, consistent gap. */
+#fs-wizard .wizard-step-eyebrow, #endpoint-wizard .wizard-step-eyebrow {
+  display: none !important;
+}
+#fs-wizard .wizard-current-step, #endpoint-wizard .wizard-current-step {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.25;
+}
+#fs-wizard .scan-wizard-head, #endpoint-wizard .scan-wizard-head {
+  padding: 2px 0 10px !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--line) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+#fs-wizard #connection-form, #endpoint-wizard > .scan-form-column {
+  margin-top: 10px;
+}
+
+@media (max-width: 860px) {
+  #fs-wizard .scan-wizard-head, #endpoint-wizard .scan-wizard-head {
+    grid-template-columns: auto 1fr !important;
+  }
+  #fs-wizard .scan-stepper, #endpoint-wizard .scan-stepper {
+    grid-column: 1 / -1;
+    justify-self: start !important;
+    padding-top: 4px;
+  }
 }
