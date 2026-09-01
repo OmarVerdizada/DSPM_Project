@@ -472,6 +472,7 @@ def init_db() -> None:
                     finding_types TEXT NOT NULL DEFAULT '[]',
                     framework_keys TEXT NOT NULL DEFAULT '[]',
                     detail_json TEXT NOT NULL DEFAULT '{}',
+                    scan_label TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (tenant_id, id)
                 );
 
@@ -639,6 +640,10 @@ def init_db() -> None:
                 ("finding_types", "TEXT NOT NULL DEFAULT '[]'"),
                 ("framework_keys", "TEXT NOT NULL DEFAULT '[]'"),
                 ("detail_json", "TEXT NOT NULL DEFAULT '{}'"),
+                # The operator-facing scan name ("HR file share"), so Data
+                # Inventory can filter by the scan a customer configured
+                # instead of the collector protocol (smb / endpoint-winrm).
+                ("scan_label", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if col not in asset_columns:
                     conn.execute(f"ALTER TABLE assets ADD COLUMN {col} {coltype}")
@@ -663,6 +668,11 @@ def init_db() -> None:
                 "idx_assets_tenant_risk_score_id ON assets (tenant_id, risk_score, id)",
                 "idx_assets_tenant_size_id ON assets (tenant_id, size, id)",
                 "idx_assets_tenant_finding_count_id ON assets (tenant_id, finding_count, id)",
+                # New sortable columns need the same id-tiebreaker composite, or
+                # keyset pagination falls back to a temp B-tree at scale.
+                "idx_assets_tenant_risk_level_id ON assets (tenant_id, risk_level, id)",
+                "idx_assets_tenant_source_id ON assets (tenant_id, source, id)",
+                "idx_assets_tenant_scan_label_id ON assets (tenant_id, scan_label, id)",
             ):
                 conn.execute(f"CREATE INDEX IF NOT EXISTS {_idx}")
             if db.is_postgres():
@@ -697,6 +707,18 @@ def init_db() -> None:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_assets_tenant_name_c_id "
                     "ON assets (tenant_id, COALESCE(name, ''), id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_scan_label_c_id "
+                    "ON assets (tenant_id, COALESCE(scan_label, ''), id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_source_c_id "
+                    "ON assets (tenant_id, COALESCE(source, ''), id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_assets_tenant_risk_level_c_id "
+                    "ON assets (tenant_id, COALESCE(risk_level, ''), id)"
                 )
                 # SQLite cannot reliably select the OR-predicate partial index
                 # below. detail_json is NOT NULL on SQLite, so an exact empty-JSON
@@ -1336,8 +1358,8 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
             "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
             "risk_level, risk_score, size, owner, modified_at, finding_count, "
             "top_frameworks, is_hidden, is_system, is_protected, search_text, "
-            "finding_types, framework_keys, detail_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "finding_types, framework_keys, detail_json, scan_label) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (tenant_id, id) DO UPDATE SET "
             "source = excluded.source, stable_object_id = excluded.stable_object_id, "
             "path = excluded.path, name = excluded.name, extension = excluded.extension, "
@@ -1347,12 +1369,12 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
             "is_hidden = excluded.is_hidden, is_system = excluded.is_system, "
             "is_protected = excluded.is_protected, search_text = excluded.search_text, "
             "finding_types = excluded.finding_types, framework_keys = excluded.framework_keys, "
-            "detail_json = excluded.detail_json",
+            "detail_json = excluded.detail_json, scan_label = excluded.scan_label",
             (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
              asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
              asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
              asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
-             asset.finding_types, asset.framework_keys, asset.detail_json),
+             asset.finding_types, asset.framework_keys, asset.detail_json, asset.scan_label),
         )
     for version in scan.asset_versions if write_estate else []:
         conn.execute(
@@ -1866,13 +1888,16 @@ INVENTORY_SORTS: dict[str, tuple[str, bool, str]] = {
     "finding_count": ("finding_count", False, "DESC"),
     "modified_at": ("modified_at", True, "DESC"),
     "name": ("name", True, "ASC"),
+    "source": ("source", True, "ASC"),
+    "scan_label": ("scan_label", True, "ASC"),
+    "risk_level": ("risk_level", True, "ASC"),
 }
 _DEFAULT_INVENTORY_SORT = "risk_score"
 _INVENTORY_COLS = (
     "id", "source", "path", "name", "extension", "share", "risk_level",
     "risk_score", "size", "owner", "modified_at", "finding_count",
     "top_frameworks", "is_hidden", "is_system", "is_protected",
-    "finding_types", "framework_keys",
+    "finding_types", "framework_keys", "scan_label",
 )
 _INVENTORY_COUNT_CAP = 10000
 _INVENTORY_CURSOR_VERSION = "sc-v2"
@@ -2050,7 +2075,11 @@ def _inventory_normalized_where(tenant_id: str, filt: dict) -> tuple[list[str], 
     if filt["risk"]:
         where.append("risk_level = ?"); params.append(filt["risk"])
     if filt["source"]:
-        where.append("source = ?"); params.append(filt["source"])
+        # The Source filter accepts either a collector protocol ("smb") or the
+        # operator-facing scan name ("HR file share"), so the inventory can be
+        # narrowed to one configured scan without a second parameter.
+        where.append("(source = ? OR lower(COALESCE(scan_label, '')) = ?)")
+        params.extend([filt["source"], filt["source"]])
     if filt["extension"]:
         where.append("extension = ?"); params.append(filt["extension"])
     if filt["protected"] is not None:
@@ -2254,7 +2283,9 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
     def _matches(row: dict) -> bool:
         if filt["risk"] and str(row.get("risk_level") or "") != filt["risk"]:
             return False
-        if filt["source"] and str(row.get("source") or "") != filt["source"]:
+        if filt["source"] and filt["source"] not in {
+            str(row.get("source") or ""), str(row.get("scan_label") or "").lower(),
+        }:
             return False
         if filt["extension"] and str(row.get("extension") or "") != filt["extension"]:
             return False
@@ -2330,12 +2361,16 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
     hidden_count = 0
     sensitive_count = 0
     score_total = 0.0
+    scan_label_counts: dict[str, int] = {}
     for row in rows:
         risk = str(row.get("risk_level") or "").upper()
         asset_source = str(row.get("source") or "workspace")
         if risk:
             risk_counts[risk] = risk_counts.get(risk, 0) + 1
         source_counts[asset_source] = source_counts.get(asset_source, 0) + 1
+        scan_label = str(row.get("scan_label") or "").strip()
+        if scan_label:
+            scan_label_counts[scan_label] = scan_label_counts.get(scan_label, 0) + 1
         protected_count += 1 if row.get("is_protected") else 0
         hidden_count += 1 if row.get("is_hidden") else 0
         score_total += float(row.get("risk_score") or 0)
@@ -2350,7 +2385,8 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
         finding_counts["Protected / locked"] = protected_count
     return {
         "total": len(rows), "risk_counts": risk_counts, "protected": protected_count,
-        "sources": _facet_items(source_counts), "finding_types": _facet_items(finding_counts),
+        "sources": _facet_items(source_counts), "scans": _facet_items(scan_label_counts),
+        "finding_types": _facet_items(finding_counts),
         "frameworks": _facet_items(framework_counts),
         "hidden": hidden_count, "sensitive": sensitive_count,
         "avg_risk_score": (score_total / len(rows)) if rows else 0.0,
@@ -2390,6 +2426,12 @@ def inventory_facets(tenant_id: str) -> dict:
                     "SELECT source, COUNT(*) AS n FROM assets WHERE tenant_id = ? GROUP BY source",
                     (tenant_id,),
                 ).fetchall()
+                # Operator-facing scan names for the inventory Source filter.
+                scan_label_rows = conn.execute(
+                    "SELECT scan_label, COUNT(*) AS n FROM assets "
+                    "WHERE tenant_id = ? AND scan_label <> '' GROUP BY scan_label",
+                    (tenant_id,),
+                ).fetchall()
                 protected_row = conn.execute(
                     "SELECT COUNT(*) AS n FROM assets WHERE tenant_id = ? AND is_protected = 1", (tenant_id,)
                 ).fetchone()
@@ -2416,6 +2458,7 @@ def inventory_facets(tenant_id: str) -> dict:
                 "risk_counts": {str(row["risk_level"] or "").upper(): int(row["n"]) for row in risk_rows if row["risk_level"]},
                 "protected": protected_count,
                 "sources": _facet_items({str(row["source"] or "workspace"): int(row["n"]) for row in source_rows}),
+                "scans": _facet_items({str(row["scan_label"]): int(row["n"]) for row in scan_label_rows}),
                 "finding_types": _facet_items(finding_counts),
                 "frameworks": _facet_items(framework_counts),
                 "hidden": int((estate_row["hidden_n"] if estate_row else 0) or 0),

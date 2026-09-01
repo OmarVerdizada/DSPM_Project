@@ -23573,3 +23573,70 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
   #tab-endpoint:has(#endpoint-wizard:not(.hidden)) { overflow: visible; min-height: 0; }
   #fs-wizard .wizard-step, #endpoint-wizard .wizard-step { overflow: visible; }
 }
+
+/* ============================================================
+   Scan setup v5 — the wizard uses the whole window
+   A centred 1120px column left half a wide screen empty. The
+   setup view now spans the content area and lets the field grid
+   find its own column count.
+   ============================================================ */
+#fs-wizard:not(.hidden), #endpoint-wizard:not(.hidden) {
+  max-width: none !important;
+  width: 100% !important;
+  margin-inline: 0 !important;
+}
+#fs-wizard .scan-form-grid, #endpoint-wizard .endpoint-form {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)) !important;
+}
+#fs-wizard .scan-form-grid .scan-form-wide,
+#endpoint-wizard .endpoint-form .scan-form-wide { grid-column: 1 / -1; }
+/* The review board tracks the same full width */
+#fs-wizard .wizard-review-grid { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+/* Cards fill the step body rather than hugging the top of a tall panel */
+#fs-wizard .wizard-step:not(.hidden), #endpoint-wizard .wizard-step:not(.hidden) {
+  align-content: stretch;
+}
+
+/* --- Sortable inventory headers ---------------------------------- */
+.inventory-table th.inv-sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: color .15s ease;
+}
+.inventory-table th.inv-sortable:hover,
+.inventory-table th.inv-sortable:focus-visible { color: var(--accent-strong); }
+.inv-sort-ind {
+  display: inline-block;
+  width: 0; height: 0;
+  margin-left: 6px;
+  vertical-align: middle;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  opacity: 0;
+  transition: opacity .15s ease, transform .15s ease;
+}
+.inventory-table th.inv-sortable:hover .inv-sort-ind { opacity: .4; }
+.inventory-table th.is-sorted { color: var(--accent-strong); }
+.inventory-table th.is-sorted .inv-sort-ind { opacity: 1; }
+.inventory-table th.is-sorted[aria-sort="ascending"] .inv-sort-ind { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) {
+  .inventory-table th.inv-sortable, .inv-sort-ind { transition: none; }
+}
+
+/* The legacy .scan-layout sets align-items:start for its old two-column form +
+   summary arrangement. In the wizard's column flex that shrink-wraps the form
+   to its content width, so the setup card occupied a third of the window. */
+#fs-wizard > .scan-layout { align-items: stretch !important; }
+#fs-wizard #connection-form, #endpoint-wizard > .scan-form-column { width: 100%; }
+#fs-wizard .wizard-step > .scan-card,
+#endpoint-wizard .wizard-step > .visual-panel { width: 100%; }
+
+/* Cards fill the width but keep their natural height: stretching them to the
+   full step body spread their internal rows apart. */
+#fs-wizard .wizard-step:not(.hidden), #endpoint-wizard .wizard-step:not(.hidden) {
+  align-content: start !important;
+}
+#fs-wizard .wizard-step > .scan-card,
+#endpoint-wizard .wizard-step > .visual-panel { align-content: start; }

@@ -125,6 +125,32 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn("spc-chip-more", self.app_js)
         self.assertIn("spc-chip-more", self.styles_css)
 
+    def test_inventory_columns_sort_server_side_and_source_names_the_scan(self) -> None:
+        # Column headers sort through the API (whole table) rather than
+        # re-ordering the rows already in the browser.
+        self.assertIn('data-inventory-sort="name"', self.index_html)
+        self.assertIn('data-inventory-sort="risk_score"', self.index_html)
+        self.assertIn('data-inventory-sort="scan_label"', self.index_html)
+        self.assertIn("let inventorySortKey", self.app_js)
+        query_start = self.app_js.index("function inventoryPageQuery(")
+        query_body = self.app_js[query_start:query_start + 400]
+        self.assertIn('params.set("sort", inventorySortKey)', query_body)
+        self.assertNotIn('params.set("sort", "risk_score")', query_body)
+        # Applying a sort refetches from the server instead of sorting locally.
+        apply_start = self.app_js.index("async function applyInventorySort(")
+        apply_body = self.app_js[apply_start:apply_start + 700]
+        self.assertIn("resetInventoryPageWindow()", apply_body)
+        self.assertIn("refreshInventoryPageWindow()", apply_body)
+        # The Source facet names configured scans, not collector protocols.
+        self.assertIn("inventoryFacets?.scans", self.app_js)
+        self.assertIn("All scans", self.index_html)
+
+    def test_setup_view_uses_the_full_window(self) -> None:
+        # A centred max-width column left half a wide screen empty, and the
+        # legacy .scan-layout align-items:start shrink-wrapped the form.
+        self.assertIn("max-width: none !important", self.styles_css)
+        self.assertIn("#fs-wizard > .scan-layout { align-items: stretch !important; }", self.styles_css)
+
     def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
         risk_panel = self.index_html[
             self.index_html.index('id="tab-risk"'):

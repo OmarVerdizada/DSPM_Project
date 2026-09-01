@@ -395,6 +395,7 @@ class ConnectionRequest(BaseModel):
     username: str = Field(default="", max_length=160)
     password: str = Field(default="", max_length=512)
     credential_ref: str = Field(default="", max_length=120)
+    scan_label: str = Field(default="", max_length=80)
     domain: str = Field(default="WORKGROUP", max_length=120)
     local_path: str = Field(default="enterprise_test_data", max_length=260)
     max_depth: int = Field(default=4, ge=1, le=12)
@@ -466,6 +467,7 @@ class EndpointScanRequest(BaseModel):
     username: str = Field(default="", max_length=160)
     password: str = Field(default="", max_length=512)
     credential_ref: str = Field(default="", max_length=120)
+    scan_label: str = Field(default="", max_length=80)
     paths: list[str] = Field(default_factory=lambda: ["desktop", "documents", "downloads"], max_length=40)
     max_depth: int = Field(default=12, ge=1, le=12)
     read_content: bool = True
@@ -2359,6 +2361,11 @@ def export_dlp_policy(payload: ScanRequest, principal: Principal = Depends(requi
 
 
 def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, principal: Principal) -> None:
+    # The scan's operator-facing name travels with the report so every asset it
+    # produces can be filtered by that name in Data Inventory.
+    label = str(getattr(payload, "scan_label", "") or "").strip()[:80]
+    if label:
+        data["scan_label"] = label
     scan_id = save_scan_history(principal.tenant_id, data)
     data["scan_id"] = scan_id
     warnings: list[dict] = []

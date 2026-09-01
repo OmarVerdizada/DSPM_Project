@@ -167,6 +167,9 @@ class Asset:
     finding_types: str = "[]"
     framework_keys: str = "[]"
     detail_json: str = "{}"
+    # The scan a customer named and configured ("HR file share"), not the
+    # collector protocol. Blank for assets written before scans carried a name.
+    scan_label: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -295,6 +298,7 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
     report = report or {}
     scan_id = str(report.get("scan_id") or "")
     source = str(report.get("source") or "local")
+    scan_label = str(report.get("scan_label") or "").strip()[:80]
     timestamp = str(report.get("timestamp") or "")
     summary = dict(report.get("summary") or {})
 
@@ -334,7 +338,7 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
             framework_keys = _asset_framework_keys(record)
             search_text = " ".join(
                 str(part) for part in (
-                    path, name, owner, extension, source, share, risk_level,
+                    path, name, owner, extension, source, share, risk_level, scan_label,
                     *json.loads(finding_types), *json.loads(framework_keys),
                 ) if part
             ).lower()
@@ -358,6 +362,7 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
                     is_hidden=1 if record.get("is_hidden") else 0,
                     is_system=1 if record.get("is_system") else 0,
                     is_protected=1 if record.get("protected") else 0,
+                    scan_label=scan_label,
                     search_text=search_text,
                     finding_types=finding_types,
                     framework_keys=framework_keys,

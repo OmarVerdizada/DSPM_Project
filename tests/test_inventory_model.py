@@ -191,8 +191,16 @@ class MigrationAndBackfillTests(_TempStore):
                     ).fetchall()
                 )
         self.assertTrue(expected <= installed)
+        # Text sorts order by COALESCE(col, '') and are served by the collated
+        # "_c_id" composites; numeric sorts use the plain "_id" ones. Deriving
+        # the name from INVENTORY_SORTS means a newly added sort is checked
+        # automatically instead of needing a hardcoded entry here.
+        index_stem = {"modified_at": "modified"}
         for sort, plan in plans.items():
-            self.assertIn(f"idx_assets_tenant_{'modified_c' if sort == 'modified_at' else 'name_c' if sort == 'name' else sort}_id", plan)
+            _, is_text, _ = store.INVENTORY_SORTS[sort]
+            stem = index_stem.get(sort, sort)
+            expected_index = f"idx_assets_tenant_{stem}{'_c' if is_text else ''}_id"
+            self.assertIn(expected_index, plan, f"{sort} sort must use {expected_index}")
         if db.is_sqlite():
             self.assertIn("idx_assets_tenant_empty_detail", readiness_plan)
 

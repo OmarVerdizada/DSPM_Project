@@ -10,7 +10,7 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=226" />
+    <link rel="stylesheet" href="/static/styles.css?v=229" />
     <link rel="stylesheet" href="/static/copilot.css?v=13" />
   </head>
   <body class="auth-locked">
@@ -601,9 +601,9 @@
               </div>
               <div class="inventory-facet-row">
                 <label>
-                  Source
+                  Scan
                   <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="inventory-source-filter">
-                    <option value="ALL">All sources</option>
+                    <option value="ALL">All scans</option>
                   </select></span>
                 </label>
                 <label>
@@ -629,10 +629,10 @@
               <table class="inventory-table">
                 <thead>
                   <tr>
-                    <th>File</th>
-                    <th>Source</th>
-                    <th>Findings</th>
-                    <th>Risk</th>
+                    <th class="inv-sortable" data-inventory-sort="name" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by name">File<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="scan_label" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by scan">Source<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="finding_count" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by finding count">Findings<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="risk_score" aria-sort="descending" tabindex="0" role="columnheader" title="Sort every file by risk score">Risk<span class="inv-sort-ind" aria-hidden="true"></span></th>
                     <th>Manual risk</th>
                     <th>Reasons</th>
                     <th>DLP recommendations</th>
@@ -1454,7 +1454,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=178"></script>
+    <script src="/static/app.js?v=183"></script>
     <script src="/static/copilot.js?v=8"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>

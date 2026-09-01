@@ -603,6 +603,13 @@ function authHeaders() {
   return headers;
 }
 
+// The scan currently running from a deck card. Its name is stamped on the
+// report so every asset it produces is filterable by that scan in Data
+// Inventory. Declared with `var` on purpose: app.js is assembled by appending
+// modules, readPayload() runs during boot, and a `let` here would sit in its
+// temporal dead zone and throw.
+var activeScanLabel = "";
+
 function readPayload() {
   const data = new FormData(form);
   const selectedExtensions = readSelectedExtensions();
@@ -635,6 +642,7 @@ function readPayload() {
     asset_overrides: assetRules,
     compliance_enabled: selectedComplianceFrameworks.length > 0,
     compliance_frameworks: selectedComplianceFrameworks,
+    scan_label: activeScanLabel || "",
   };
 }
 
@@ -991,6 +999,7 @@ function readEndpointPayload() {
     asset_overrides: assetRules,
     compliance_enabled: selectedComplianceFrameworks.length > 0,
     compliance_frameworks: selectedComplianceFrameworks,
+    scan_label: activeScanLabel || "",
   };
 }
 
@@ -2378,9 +2387,14 @@ function inventoryFilterParams() {
   return params;
 }
 
+// Sorting is a SERVER concern: the API orders the whole inventory and returns
+// one keyset page, so clicking a column sorts every file in the tenant - not
+// just the rows already loaded in the browser.
+let inventorySortKey = "risk_score";
+
 function inventoryPageQuery(cursor = "") {
   const params = inventoryFilterParams();
-  params.set("sort", "risk_score");
+  params.set("sort", inventorySortKey);
   params.set("limit", String(INVENTORY_SERVER_PAGE_SIZE));
   if (cursor) params.set("after", cursor);
   return params.toString();
@@ -2615,7 +2629,8 @@ function renderRows(files, options = {}) {
       const moreFindings = hiddenFindingCount > 0
         ? `<button type="button" class="detail-toggle finding-chip muted-chip" data-detail-type="findings" data-detail-key="${escapeHtml(key)}" title="Show all findings and matched keywords">+${hiddenFindingCount}</button>`
         : "";
-      const sourceName = file.source || file.share || "workspace";
+      // The scan a customer named, falling back to the collector protocol.
+      const sourceName = getInventorySourceValue(file);
       const path = file.path || file.name || "";
       const sha256 = fileHashValue(file);
 
@@ -2781,15 +2796,66 @@ function renderInventoryControlState(files = latestFiles, visible = getVisibleIn
   }
 }
 
+const INVENTORY_SORT_LABELS = {
+  name: "file name",
+  scan_label: "scan",
+  finding_count: "finding count",
+  risk_score: "risk score",
+};
+
+function syncInventorySortHeaders() {
+  document.querySelectorAll(".inventory-table th[data-inventory-sort]").forEach((th) => {
+    const active = th.dataset.inventorySort === inventorySortKey;
+    th.classList.toggle("is-sorted", active);
+    // Each key has one meaningful direction server-side (risk high-first,
+    // names A-Z), so the header reports that rather than a toggle.
+    th.setAttribute("aria-sort", active
+      ? (["name", "scan_label"].includes(inventorySortKey) ? "ascending" : "descending")
+      : "none");
+  });
+}
+
+async function applyInventorySort(key) {
+  if (!INVENTORY_SORT_LABELS[key] || key === inventorySortKey) return;
+  inventorySortKey = key;
+  syncInventorySortHeaders();
+  setStatus(`Sorting all files by ${INVENTORY_SORT_LABELS[key]}...`);
+  try {
+    resetInventoryPageWindow();
+    await refreshInventoryPageWindow();
+    setStatus(`Sorted every file by ${INVENTORY_SORT_LABELS[key]}.`);
+  } catch (error) {
+    setStatus(`Sort failed: ${error.message}`);
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const th = event.target.closest(".inventory-table th[data-inventory-sort]");
+  if (th) applyInventorySort(th.dataset.inventorySort);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const th = event.target.closest?.(".inventory-table th[data-inventory-sort]");
+  if (!th) return;
+  event.preventDefault();
+  applyInventorySort(th.dataset.inventorySort);
+});
+
 function updateInventoryFilterOptions(files = latestFiles) {
   if (inventorySourceFilter) {
-    const sources = inventoryFacets
-      ? (inventoryFacets.sources || []).map((item) => String(item.value || "")).filter(Boolean)
-      : [...new Set(files.map(getInventorySourceValue).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    // Prefer the scans a customer actually configured ("HR file share") over
+    // collector protocols ("smb"); protocols remain as the fallback for assets
+    // captured before scans carried a name.
+    const scanNames = (inventoryFacets?.scans || []).map((item) => String(item.value || "")).filter(Boolean);
+    const sources = scanNames.length
+      ? scanNames
+      : inventoryFacets
+        ? (inventoryFacets.sources || []).map((item) => String(item.value || "")).filter(Boolean)
+        : [...new Set(files.map(getInventorySourceValue).filter(Boolean))].sort((a, b) => a.localeCompare(b));
     const current = sources.includes(inventorySourceFacet) ? inventorySourceFacet : "ALL";
     inventorySourceFacet = current;
     inventorySourceFilter.innerHTML = ["ALL", ...sources]
-      .map((value) => `<option value="${escapeHtml(value)}" ${value === current ? "selected" : ""}>${escapeHtml(value === "ALL" ? "All sources" : value)}</option>`)
+      .map((value) => `<option value="${escapeHtml(value)}" ${value === current ? "selected" : ""}>${escapeHtml(value === "ALL" ? "All scans" : value)}</option>`)
       .join("");
   }
   if (inventoryFindingFilter) {
@@ -2806,7 +2872,10 @@ function updateInventoryFilterOptions(files = latestFiles) {
 }
 
 function getInventorySourceValue(file) {
-  return String(file.source || file.share || "workspace").trim() || "workspace";
+  // The Source column names the scan a customer configured ("HR file share").
+  // Assets captured before scans carried a name fall back to the collector
+  // protocol so the column is never blank.
+  return String(file.scan_label || file.source || file.share || "workspace").trim() || "workspace";
 }
 
 function inventoryFrameworkOptions(files = latestFiles) {
@@ -8938,6 +9007,7 @@ function collectFileServerProfile() {
   const payload = readPayload();
   delete payload.password;
   delete payload.asset_overrides;
+  delete payload.scan_label;
   payload.ui = collectUiState("file-server");
   return {
     profile_id: scanWizardState["file-server"].editingId,
@@ -8951,6 +9021,7 @@ function collectEndpointProfile() {
   const payload = readEndpointPayload();
   delete payload.password;
   delete payload.asset_overrides;
+  delete payload.scan_label;
   payload.ui = collectUiState("endpoint");
   return {
     profile_id: scanWizardState.endpoint.editingId,
@@ -9064,6 +9135,7 @@ async function startProfileScan(kind, profileId) {
   const profile = scanProfilesState.find((p) => p.profile_id === profileId);
   if (!profile || activeProfileRun) return;
   activeProfileRun = { kind, id: profileId };
+  activeScanLabel = String(profile.name || "");
   renderScanDecks();
   try {
     if (kind === "file-server") {
@@ -9087,6 +9159,7 @@ function watchScanRunState() {
     new MutationObserver(() => {
       if (progressEl.classList.contains("hidden") && activeProfileRun) {
         activeProfileRun = null;
+        activeScanLabel = "";
         renderScanDecks();
       }
     }).observe(progressEl, { attributes: true, attributeFilter: ["class"] });
@@ -9213,6 +9286,7 @@ function initScanProfileDecks() {
   watchScanRunState();
   mirrorWizardStatus();
   hideIdleDeckStatus();
+  syncInventorySortHeaders();
   renderScanDecks();
 }
 

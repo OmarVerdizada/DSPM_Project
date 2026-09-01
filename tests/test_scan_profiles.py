@@ -123,6 +123,62 @@ class ScanProfileApiTests(unittest.TestCase):
         real = self.client.get("/scan", follow_redirects=False)
         self.assertEqual(real.status_code, 200)
 
+    def test_scan_name_labels_assets_and_drives_the_inventory_filter(self) -> None:
+        """Data Inventory filters by the scan a customer configured ("HR file
+        share"), not the collector protocol ("smb"). The name travels on the
+        report, lands on every asset it produced, and is exposed as a facet."""
+        from backend.store import list_inventory, inventory_facets, save_scan_history
+
+        tenant = f"lbl-{uuid4().hex[:8]}"
+        create_tenant(tenant, "Label tenant")
+
+        def report(scan_id, label, prefix, count):
+            return {
+                "scan_id": scan_id, "source": "smb", "scan_label": label, "summary": {},
+                "files": [{"path": f"/{prefix}/f{i}.txt", "name": f"f{i}.txt",
+                           "risk": {"level": "HIGH", "score": 70}} for i in range(count)],
+            }
+
+        save_scan_history(tenant, report("s-hr", "HR file share", "hr", 4))
+        save_scan_history(tenant, report("s-fin", "Finance archive", "fin", 2))
+
+        facets = inventory_facets(tenant)
+        self.assertEqual(
+            {item["value"]: item["count"] for item in facets["scans"]},
+            {"HR file share": 4, "Finance archive": 2},
+        )
+
+        # The one Source parameter accepts a scan name OR a protocol.
+        self.assertEqual(len(list_inventory(tenant, source="HR file share")["items"]), 4)
+        self.assertEqual(len(list_inventory(tenant, source="Finance archive")["items"]), 2)
+        self.assertEqual(len(list_inventory(tenant, source="smb")["items"]), 6)
+
+    def test_sorting_orders_the_whole_inventory_not_one_page(self) -> None:
+        """A column header sorts every asset in the tenant. The API orders the
+        full table and returns one keyset page, so a 3-row page must match the
+        first 3 of the globally sorted set - not a re-sort of loaded rows."""
+        from backend.store import list_inventory, save_scan_history
+
+        tenant = f"srt-{uuid4().hex[:8]}"
+        create_tenant(tenant, "Sort tenant")
+        save_scan_history(tenant, {
+            "scan_id": "s-sort", "source": "smb", "scan_label": "Sort scan", "summary": {},
+            # Names deliberately out of insertion order.
+            "files": [{"path": f"/x/{name}", "name": name, "risk": {"level": "HIGH", "score": score}}
+                      for name, score in (("zulu.txt", 10), ("alpha.txt", 90), ("mike.txt", 50),
+                                          ("bravo.txt", 20), ("yankee.txt", 80))],
+        })
+
+        everything = [item["name"] for item in list_inventory(tenant, sort="name", limit=100)["items"]]
+        self.assertEqual(everything, sorted(everything), "sort must be applied by the database")
+
+        page = [item["name"] for item in list_inventory(tenant, sort="name", limit=3)["items"]]
+        self.assertEqual(page, everything[:3], "a page must be the head of the GLOBAL order")
+        self.assertEqual(page[0], "alpha.txt")
+
+        by_risk = [item["risk_score"] for item in list_inventory(tenant, sort="risk_score", limit=2)["items"]]
+        self.assertEqual(by_risk, [90, 80], "risk sort returns the globally highest first")
+
     def test_validation_rejects_bad_kind_and_blank_name(self) -> None:
         bad_kind = self.client.post(
             "/api/scan-profiles",
