@@ -23713,3 +23713,57 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
   #tab-file-servers:has(#fs-wizard:not(.hidden)),
   #tab-endpoint:has(#endpoint-wizard:not(.hidden)) { max-height: none; }
 }
+
+/* ============================================================
+   Scan setup v7 — arrival, symmetry, one scrollbar
+   ============================================================ */
+
+/* Opening the wizard rises in like every console panel (mc-rise family)
+   instead of snapping. The keyframes replay each time display flips. */
+@keyframes wizardArrive {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+#fs-wizard:not(.hidden), #endpoint-wizard:not(.hidden) {
+  animation: wizardArrive .24s ease-out;
+}
+/* Steps hand over with a shorter version of the same motion. */
+#fs-wizard .wizard-step:not(.hidden), #endpoint-wizard .wizard-step:not(.hidden) {
+  animation: wizardArrive .16s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  #fs-wizard:not(.hidden), #endpoint-wizard:not(.hidden),
+  #fs-wizard .wizard-step:not(.hidden), #endpoint-wizard .wizard-step:not(.hidden) {
+    animation: none;
+  }
+}
+
+/* Head bar: back control, title, and progress balance on one line -
+   equal flanks, title dead centre. */
+#fs-wizard .scan-wizard-head, #endpoint-wizard .scan-wizard-head {
+  grid-template-columns: 1fr auto 1fr !important;
+  align-items: center !important;
+}
+#fs-wizard .scan-wizard-head .wizard-back-link,
+#endpoint-wizard .scan-wizard-head .wizard-back-link { justify-self: start; }
+#fs-wizard .scan-wizard-title, #endpoint-wizard .scan-wizard-title {
+  justify-self: center;
+  text-align: center;
+}
+#fs-wizard .scan-stepper, #endpoint-wizard .scan-stepper { justify-self: end; }
+
+/* Exactly one scrollbar: the step body's. dvh tracks the real viewport
+   (browser chrome, zoom) so the page can never grow a second bar. */
+#tab-file-servers:has(#fs-wizard:not(.hidden)),
+#tab-endpoint:has(#endpoint-wizard:not(.hidden)) {
+  min-height: calc(100dvh - 114px);
+  max-height: calc(100dvh - 114px);
+}
+#fs-wizard .wizard-step:not(.hidden), #endpoint-wizard .wizard-step:not(.hidden) {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+@media (max-width: 900px) {
+  #tab-file-servers:has(#fs-wizard:not(.hidden)),
+  #tab-endpoint:has(#endpoint-wizard:not(.hidden)) { max-height: none; min-height: 0; }
+}

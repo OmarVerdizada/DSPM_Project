@@ -8842,7 +8842,8 @@ function setWizardStep(kind, step) {
     syncWinrmActivationFields();
     renderEndpointReview();
   }
-  wizard.scrollIntoView({ behavior: "auto", block: "start" });
+  const visiblePanel = wizard.querySelector(".wizard-step:not(.hidden)");
+  if (visiblePanel) visiblePanel.scrollTop = 0;
 }
 
 function setWizardHint(kind, message) {
@@ -8874,7 +8875,7 @@ function openScanWizard(kind, profileId = "") {
   }
   setWizardStep(kind, 1);
   window.setTimeout(() => {
-    document.querySelector(kind === "file-server" ? "#fs-profile-name" : "#endpoint-profile-name")?.focus();
+    document.querySelector(kind === "file-server" ? "#fs-profile-name" : "#endpoint-profile-name")?.focus({ preventScroll: true });
   }, 60);
 }
 

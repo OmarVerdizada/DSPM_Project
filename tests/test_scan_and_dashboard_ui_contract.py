@@ -172,6 +172,20 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         ):
             self.assertIn(probe, v6)
 
+    def test_wizard_arrives_animated_and_never_scrolls_the_page(self) -> None:
+        # Opening rises in (reduced-motion guarded); a step change resets its
+        # own scroller instead of scrolling the page - scrollIntoView was the
+        # "Configuration jumps down" bug and must not return.
+        self.assertIn("@keyframes wizardArrive", self.styles_css)
+        self.assertIn("prefers-reduced-motion", self.styles_css)
+        step_start = self.app_js.index("function setWizardStep(")
+        step_body = self.app_js[step_start:step_start + 1600]
+        self.assertNotIn("scrollIntoView", step_body)
+        self.assertIn("visiblePanel.scrollTop = 0", step_body)
+        self.assertIn("preventScroll: true", self.app_js)
+        # The head bar balances back control, title, and progress.
+        self.assertIn("grid-template-columns: 1fr auto 1fr !important", self.styles_css)
+
     def test_remediation_center_uses_compact_queue_first_layout(self) -> None:
         risk_panel = self.index_html[
             self.index_html.index('id="tab-risk"'):
