@@ -1,4 +1,4 @@
-"""Composer-aligned DSPM report data model for Copilot-generated artifacts.
+"""Composer-aligned DSPM report data model for generated report artifacts.
 
 The dashboard's **PDF Composer** (``frontend/app.js`` ``buildReportModel`` /
 ``buildExecutiveReportHtml``) renders a client-side "DSPM Assessment Report"
@@ -8,7 +8,7 @@ comparison, priority file queue, and the full evidence register.
 
 There is no server-side Composer renderer (the dashboard prints the HTML from
 the browser), so this module reproduces the **same underlying report model**
-from the persisted scan report, so a Copilot-generated PDF/HTML follows the
+from the persisted scan report, so a generated PDF/HTML follows the
 same structure and data model as the dashboard Composer instead of a separate
 flat scan-summary text blob.
 

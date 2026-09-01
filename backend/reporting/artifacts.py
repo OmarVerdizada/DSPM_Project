@@ -18,7 +18,7 @@ ARTIFACT_ROOT = DATA_DIR / "reports_artifacts"
 
 
 class ArtifactError(Exception):
-    """Raised when a Copilot artifact cannot be created or served safely."""
+    """Raised when a report artifact cannot be created or served safely."""
 
 
 def _safe(value: str) -> str:
