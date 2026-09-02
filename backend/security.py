@@ -87,6 +87,11 @@ class Principal:
     role: str
     tenant_id: str
     auth_type: str = "jwt"
+    # The tenant selected by X-Tenant-ID is an effective data scope, not a new
+    # identity.  Preserve the authenticated account's home tenant so the
+    # built-in Local Administrator remains a platform administrator after a
+    # pivot (and can therefore list/switch tenants or create another one).
+    home_tenant_id: str = ""
 
 
 def validate_password_strength(password: str) -> None:
@@ -285,7 +290,8 @@ def is_platform_admin(principal: Principal) -> bool:
     enforced on the tenant-management routes; SC-15 makes the X-Tenant-ID pivot
     consistent with it.
     """
-    return principal.role == "admin" and principal.subject == "admin" and principal.tenant_id == "default"
+    home_tenant_id = principal.home_tenant_id or principal.tenant_id
+    return principal.role == "admin" and principal.subject == "admin" and home_tenant_id == "default"
 
 
 def require_principal(
@@ -303,7 +309,13 @@ def require_principal(
             requested_tenant = "".join(ch for ch in x_tenant_id.strip() if ch.isalnum() or ch in {"-", "_"})
             if not requested_tenant or not tenant_exists(requested_tenant):
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant is not valid")
-            return Principal(principal.subject, principal.role, requested_tenant, principal.auth_type)
+            return Principal(
+                principal.subject,
+                principal.role,
+                requested_tenant,
+                principal.auth_type,
+                principal.home_tenant_id or principal.tenant_id,
+            )
         return principal
 
     if x_api_key:

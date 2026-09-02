@@ -6,8 +6,10 @@ import unittest
 from uuid import uuid4
 
 from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.testclient import TestClient
 
 from backend import store
+from backend.app import app
 from backend.security import create_token, hash_password, is_platform_admin, require_principal
 
 
@@ -30,6 +32,41 @@ class TenantPivotTests(unittest.TestCase):
         # the built-in admin/default is the platform admin
         principal = require_principal(_creds(create_token("admin", "admin", "default")), None, target)
         self.assertEqual(principal.tenant_id, target)
+        self.assertEqual(principal.home_tenant_id, "default")
+        self.assertTrue(is_platform_admin(principal), "a tenant pivot must not discard platform authority")
+
+    def test_local_administrator_keeps_platform_controls_while_pivoted(self) -> None:
+        target = f"pivot-ui-{uuid4().hex[:8]}"
+        created = f"created-from-pivot-{uuid4().hex[:8]}"
+        store.create_tenant(target, "Pivot UI")
+        token = create_token("admin", "admin", "default")
+        client = TestClient(app)
+        pivot_headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Tenant-ID": target,
+        }
+
+        portfolio = client.get("/api/tenants", headers=pivot_headers)
+        self.assertEqual(portfolio.status_code, 200, portfolio.text)
+        tenant_ids = {item["tenant_id"] for item in portfolio.json()["tenants"]}
+        self.assertIn("default", tenant_ids)
+        self.assertIn(target, tenant_ids)
+
+        create_response = client.post(
+            "/api/tenants",
+            headers=pivot_headers,
+            json={"tenant_id": created, "display_name": "Created while pivoted"},
+        )
+        self.assertEqual(create_response.status_code, 200, create_response.text)
+
+        # Switching back is just another effective scope on the same token.
+        default_headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Tenant-ID": "default",
+        }
+        back_to_default = client.get("/api/tenants", headers=default_headers)
+        self.assertEqual(back_to_default.status_code, 200, back_to_default.text)
+        self.assertIn(created, {item["tenant_id"] for item in back_to_default.json()["tenants"]})
 
     def test_tenant_admin_may_not_pivot(self) -> None:
         home = f"tenant-a-{uuid4().hex[:8]}"
