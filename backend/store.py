@@ -1137,11 +1137,11 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
     with _lock:
         with _connect() as conn:
             # DATA-002: a scan run's creation timestamp is immutable. Finding-
-            # lifecycle updates re-save the same scan_id to refresh the blob, but
+            # lifecycle updates re-save the same scan_id to refresh the body, but
             # must NOT reset created_at (that broke history/audit ordering). The
             # immutable scan-run record itself lives in the normalized scan_runs
-            # table (dual-written below); the blob remains a mutable projection
-            # until the read-switch retires it.
+            # table, written authoritatively below (Phase 5): if that write
+            # fails, this whole save fails and nothing is persisted.
             existing = conn.execute(
                 "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
                 (tenant_id, scan_id),
@@ -1195,24 +1195,52 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
 FINDING_INDEX_VERSION = "fi-v1"
 
 
-def _dual_write_normalized(conn, tenant_id: str, report: dict) -> bool:
-    """Mirror the scan into the normalized tables (Phase 1, DATA-001).
+class NormalizedWriteFailed(RuntimeError):
+    """A scan could not be written to the normalized surfaces."""
 
-    Best-effort and savepoint-isolated: the report_json blob remains the source
-    of truth during migration, so any failure here rolls back only the mirror
-    rows and never fails the primary save.
+
+def _normalized_write_is_best_effort() -> bool:
+    """Legacy mirror semantics: swallow normalized failures and keep the blob.
+
+    Phase 5 made normalized writes authoritative. This escape hatch exists for
+    emergency operation only (an operator accepting a degraded estate to keep
+    scanning); it is off by default and read live so it can be flipped without
+    a restart.
+    """
+    return os.getenv("DSPM_NORMALIZED_WRITE_BEST_EFFORT", "0") == "1"
+
+
+def _dual_write_normalized(conn, tenant_id: str, report: dict) -> bool:
+    """Write the scan's normalized surfaces (roadmap Phase 5, DB-07).
+
+    **Authoritative:** assets, findings, occurrences and the finding index are
+    written inside the same transaction as the report row, so a failure fails
+    the whole save. Before Phase 5 this was a best-effort mirror whose failure
+    was logged and swallowed - which could persist a report whose normalized
+    projection silently did not exist, and the inventory read path would then
+    serve an estate missing that scan. A scan that cannot be projected is not
+    a scan that happened.
+
+    The savepoint is retained so the best-effort escape hatch can still roll
+    back only the mirror rows.
     """
     try:
         conn.execute("SAVEPOINT dspm_norm")
         _write_normalized_rows(conn, tenant_id, report)
         conn.execute("RELEASE SAVEPOINT dspm_norm")
         return True
-    except Exception as exc:  # pragma: no cover - defensive migration guard
+    except Exception as exc:
         try:
             conn.execute("ROLLBACK TO SAVEPOINT dspm_norm")
             conn.execute("RELEASE SAVEPOINT dspm_norm")
         except Exception:
             pass
+        if not _normalized_write_is_best_effort():
+            raise NormalizedWriteFailed(
+                f"Refusing to save scan {report.get('scan_id')!r}: the normalized "
+                f"surfaces could not be written ({type(exc).__name__}: {exc}). The "
+                "save was rolled back; no partial estate was persisted."
+            ) from exc
         logger.warning("Normalized dual-write skipped for scan %s: %s", report.get("scan_id"), exc)
         return False
 
