@@ -5,19 +5,72 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
+import string
 import time
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from backend.store import create_user, get_user, list_users, mark_user_login
+from pathlib import Path
+
+from backend.store import (
+    create_user,
+    get_active_api_key,
+    get_user,
+    is_token_revoked,
+    mark_user_login,
+    revoke_token_jti,
+    tenant_exists,
+    touch_api_key,
+    update_user_password,
+    update_user_role,
+)
 
 
 ROLES = {"admin": 3, "analyst": 2, "viewer": 1}
-SECRET_KEY = os.getenv("DSPM_SECRET_KEY", "dev-only-change-me")
+ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
+IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_secret_key() -> str:
+    configured = os.getenv("DSPM_SECRET_KEY", "").strip()
+    if configured:
+        if len(configured) < 32:
+            raise RuntimeError("DSPM_SECRET_KEY must be at least 32 characters long")
+        return configured
+    if IS_PRODUCTION:
+        raise RuntimeError("DSPM_SECRET_KEY must be set in production")
+    # M1 (Phase 1.1): the dev signing key lives OUTSIDE data/ so a data/ backup
+    # never carries auth key material (a stolen backup could otherwise forge an
+    # admin token). Default ~/.dspm/ mirrors the vault key's externalization.
+    key_path = Path(os.getenv("DSPM_LOCAL_JWT_SECRET_PATH", str(Path.home() / ".dspm" / "jwt_secret")))
+    legacy_path = BASE_DIR / "data" / ".jwt_secret"
+    try:
+        if key_path.exists():
+            return key_path.read_text(encoding="utf-8").strip()
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        # The old data/.jwt_secret was duplicated across working trees, so it is
+        # ROTATED (a fresh key is generated), not migrated, and the old copy is
+        # removed from data/ so it can no longer reach a backup.
+        generated = secrets.token_urlsafe(48)
+        key_path.write_text(generated, encoding="utf-8")
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        legacy_path.unlink(missing_ok=True)
+        return generated
+    except OSError:
+        raise RuntimeError("Unable to load or persist DSPM_SECRET_KEY")
+
+
+SECRET_KEY = _load_secret_key()
+DEFAULT_SECRET_IN_USE = "DSPM_SECRET_KEY" not in os.environ
 TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "28800"))
 API_KEYS = {
     item.split(":", 1)[0]: item.split(":", 1)[1]
@@ -36,10 +89,22 @@ class Principal:
     auth_type: str = "jwt"
 
 
+def validate_password_strength(password: str) -> None:
+    if len(password or "") < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
+    if len(password) > 200:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password is too long")
+    if not any(ch.isalpha() for ch in password) or not any(ch.isdigit() for ch in password):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must include letters and numbers")
+
+
 def hash_password(password: str) -> str:
+    validate_password_strength(password)
     salt = secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 210_000).hex()
-    return f"pbkdf2_sha256$210000${salt}${digest}"
+    rounds = int(os.getenv("DSPM_PBKDF2_ROUNDS", "310000"))
+    rounds = max(210_000, min(rounds, 1_200_000))
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), rounds).hex()
+    return f"pbkdf2_sha256${rounds}${salt}${digest}"
 
 
 def verify_password(password: str, password_hash: str) -> bool:
@@ -47,24 +112,77 @@ def verify_password(password: str, password_hash: str) -> bool:
         _, rounds, salt, digest = password_hash.split("$", 3)
         candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(rounds)).hex()
         return hmac.compare_digest(candidate, digest)
-    return hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), password_hash)
+    if os.getenv("DSPM_ALLOW_LEGACY_SHA256_PASSWORDS", "0") == "1":
+        return hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), password_hash)
+    return False
 
 
 def sanitize_username(username: str) -> str:
-    return username.strip().lower()
+    cleaned = re.sub(r"[^a-zA-Z0-9._@-]", "", username.strip().lower())
+    return cleaned[:80]
+
+
+def _generate_dev_admin_password(length: int = 20) -> str:
+    """Random password guaranteed to satisfy validate_password_strength()."""
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        candidate = "".join(secrets.choice(alphabet) for _ in range(length))
+        if any(c.isalpha() for c in candidate) and any(c.isdigit() for c in candidate):
+            return candidate
+
+
+def _dev_admin_password() -> str:
+    """Resolve the local built-in admin password without a static default (SC-5).
+
+    Uses DSPM_DEV_ADMIN_PASSWORD when set; otherwise generates a strong random
+    password and prints it once so a local operator can sign in. Only reached in
+    non-production (production requires DSPM_ADMIN_PASSWORD and raises above).
+    The previous hardcoded 'admin123' default allowed trivial admin takeover on
+    any install that forgot to set an env var.
+    """
+    configured = os.getenv("DSPM_DEV_ADMIN_PASSWORD", "").strip()
+    if configured:
+        return configured
+    generated = _generate_dev_admin_password()
+    print(
+        "[dspm] No DSPM_ADMIN_PASSWORD or DSPM_DEV_ADMIN_PASSWORD is set. "
+        f"Generated a one-time local admin password for 'admin': {generated}",
+        flush=True,
+    )
+    return generated
 
 
 def ensure_default_admin() -> None:
-    users = list_users()
-    if users:
+    """Create the built-in admin only when explicitly safe.
+
+    Production must set DSPM_ADMIN_PASSWORD. Local installs use
+    DSPM_DEV_ADMIN_PASSWORD or a generated one-time password (never a static
+    default), and existing admin passwords are not silently reset unless
+    DSPM_SYNC_BUILTIN_ADMIN=1 is explicitly enabled.
+    """
+    username = "admin"
+    configured_password = os.getenv("DSPM_ADMIN_PASSWORD", "").strip()
+    if IS_PRODUCTION and not configured_password:
+        raise RuntimeError("DSPM_ADMIN_PASSWORD must be set in production")
+    user = get_user(username)
+    if user is None:
+        password = configured_password or _dev_admin_password()
+        create_user(
+            username,
+            hash_password(password),
+            "admin",
+            "default",
+            "Local Administrator",
+        )
         return
-    create_user(
-        "admin",
-        hash_password(os.getenv("DSPM_ADMIN_PASSWORD", "admin123")),
-        "admin",
-        "default",
-        "Local Administrator",
-    )
+
+    if os.getenv("DSPM_SYNC_BUILTIN_ADMIN", "0") != "1":
+        return
+
+    if user.get("role") != "admin" or user.get("tenant_id") != "default":
+        update_user_role(username, "admin", "default")
+    if configured_password and not verify_password(configured_password, user["password_hash"]):
+        update_user_password(username, hash_password(configured_password))
 
 
 def _b64url(data: bytes) -> str:
@@ -102,19 +220,42 @@ def create_token(subject: str, role: str, tenant_id: str) -> str:
 
 def verify_token(token: str) -> Principal:
     try:
-        header, payload, signature = token.split(".")
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise ValueError("malformed token")
+        header, payload, signature = parts
         message = f"{header}.{payload}"
         if not hmac.compare_digest(_sign(message), signature):
             raise ValueError("bad signature")
         claims = json.loads(_b64url_decode(payload))
-        if int(claims.get("exp", 0)) < int(time.time()):
+        exp = int(claims.get("exp", 0))
+        if exp < int(time.time()):
             raise ValueError("expired token")
-        role = str(claims.get("role", "viewer"))
+        jti = str(claims.get("jti") or "")
+        if is_token_revoked(jti):
+            raise ValueError("revoked token")
+        subject = sanitize_username(str(claims.get("sub") or ""))
+        user = get_user(subject)
+        if not user or not user.get("is_active"):
+            raise ValueError("inactive user")
+        role = str(user.get("role") or claims.get("role") or "viewer")
         if role not in ROLES:
             raise ValueError("invalid role")
-        return Principal(str(claims["sub"]), role, str(claims.get("tenant") or "default"))
+        tenant_id = str(user.get("tenant_id") or claims.get("tenant") or "default")
+        return Principal(subject, role, tenant_id)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+
+
+def revoke_token(token: str) -> None:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return
+        claims = json.loads(_b64url_decode(parts[1]))
+        revoke_token_jti(str(claims.get("jti") or ""), int(claims.get("exp", 0)))
+    except Exception:
+        return
 
 
 def authenticate_user(username: str, password: str) -> Principal | None:
@@ -136,6 +277,17 @@ def generate_api_key() -> tuple[str, str]:
     return raw, hash_api_key(raw)
 
 
+def is_platform_admin(principal: Principal) -> bool:
+    """The built-in platform admin (the ``admin`` user in the ``default`` tenant).
+
+    Only this identity may operate across tenants. A tenant-scoped admin (role
+    ``admin`` in their own tenant) must not. This is the same definition already
+    enforced on the tenant-management routes; SC-15 makes the X-Tenant-ID pivot
+    consistent with it.
+    """
+    return principal.role == "admin" and principal.subject == "admin" and principal.tenant_id == "default"
+
+
 def require_principal(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
@@ -143,17 +295,75 @@ def require_principal(
 ) -> Principal:
     if credentials and credentials.scheme.lower() == "bearer":
         principal = verify_token(credentials.credentials)
-        if x_tenant_id and principal.role == "admin":
-            return Principal(principal.subject, principal.role, x_tenant_id, principal.auth_type)
+        # SC-15: only the platform admin may pivot tenants via X-Tenant-ID. A
+        # tenant-scoped admin previously could read any other tenant by setting
+        # this header (existence was the only check). Non-platform callers now
+        # simply operate in their own token tenant; the header is ignored.
+        if x_tenant_id and is_platform_admin(principal):
+            requested_tenant = "".join(ch for ch in x_tenant_id.strip() if ch.isalnum() or ch in {"-", "_"})
+            if not requested_tenant or not tenant_exists(requested_tenant):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant is not valid")
+            return Principal(principal.subject, principal.role, requested_tenant, principal.auth_type)
         return principal
 
     if x_api_key:
         key_hash = hash_api_key(x_api_key)
+        # M18: DB-backed keys first - revocable and expiring WITHOUT a redeploy. The
+        # lookup already excludes revoked/expired rows; usage updates last_used_at.
+        db_key = get_active_api_key(key_hash)
+        if db_key:
+            if x_tenant_id and x_tenant_id != db_key["tenant_id"]:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key is not valid for this tenant")
+            touch_api_key(db_key["id"])
+            return Principal("api-key", db_key["role"], db_key["tenant_id"], "api_key")
+        # Legacy env-configured keys (static; kept for backward compatibility).
         for tenant_id, stored_hash in API_KEYS.items():
             if hmac.compare_digest(key_hash, stored_hash):
-                return Principal("api-key", "analyst", x_tenant_id or tenant_id, "api_key")
+                # API keys are tenant-scoped. Do not allow a caller to pivot into another tenant with X-Tenant-ID.
+                if x_tenant_id and x_tenant_id != tenant_id:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key is not valid for this tenant")
+                return Principal("api-key", "analyst", tenant_id, "api_key")
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+
+
+ARTIFACT_DL_TOKEN_TTL_SECONDS = int(os.getenv("DSPM_ARTIFACT_DL_TOKEN_TTL_SECONDS", "300"))
+
+
+def create_artifact_download_token(artifact_id: str, tenant_id: str, subject: str, role: str, ttl_seconds: int = ARTIFACT_DL_TOKEN_TTL_SECONDS) -> str:
+    payload = _b64url(json.dumps({"aid": artifact_id, "tenant": tenant_id, "sub": subject, "role": role, "exp": int(time.time()) + ttl_seconds}, separators=(",", ":")).encode())
+    signature = _b64url(hmac.new(SECRET_KEY.encode(), f"artifact_dl.{payload}".encode(), hashlib.sha256).digest())
+    return f"{payload}.{signature}"
+
+
+def verify_artifact_download_token(token: str, artifact_id: str) -> Principal | None:
+    if not token or "." not in token:
+        return None
+    payload_b64, _, signature = token.partition(".")
+    expected = _b64url(hmac.new(SECRET_KEY.encode(), f"artifact_dl.{payload_b64}".encode(), hashlib.sha256).digest())
+    if not hmac.compare_digest(expected, signature):
+        return None
+    try:
+        claims = json.loads(_b64url_decode(payload_b64))
+    except Exception:
+        return None
+    if str(claims.get("aid") or "") != artifact_id or int(claims.get("exp", 0)) < int(time.time()):
+        return None
+    tenant_id, subject, role = (str(claims.get(key) or "") for key in ("tenant", "sub", "role"))
+    if not tenant_id or not subject or role not in ROLES:
+        return None
+    return Principal(subject, role, tenant_id, "artifact_dl_token")
+
+
+def require_artifact_principal(
+    artifact_id: str,
+    dl_token: Annotated[str | None, Query()] = None,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-ID")] = None,
+) -> Principal:
+    principal = verify_artifact_download_token(dl_token, artifact_id) if dl_token else None
+    return principal or require_principal(credentials, x_api_key, x_tenant_id)
 
 
 def require_role(*roles: str):

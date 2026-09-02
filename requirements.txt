@@ -1,17 +1,41 @@
+# Runtime dependencies only. Development and test tooling lives in
+# requirements-dev.txt; optional ML classification extras live in
+# requirements-ml.txt.
+#
+# Requires Python 3.10 - 3.13 (PEP 604 unions are evaluated at runtime by
+# Pydantic v2 models, so 3.9 fails at import time, not at install time).
+#
+# Direct dependencies are pinned exactly here. For a fully reproducible,
+# hash-verified install of the entire transitive tree, use the generated lock:
+#     pip install --require-hashes -r requirements.lock
+# Regenerate it after changing this file:
+#     pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+# (CI verifies requirements.lock stays in sync and builds the SBOM from it.)
+
 # Runtime API and web server
 fastapi==0.136.1
 uvicorn==0.46.0
 pydantic==2.13.4
 
-# SMB/file-server connector
+# SMB/file-server and Windows endpoint connectors
 pysmb==1.2.10
+pywinrm==0.5.0
+pypdf==6.14.2
+# M8: defuse untrusted document XML (blocks billion-laughs / XXE / external DTD)
+defusedxml==0.7.1
 
-# Local configuration and encrypted credential vault
-python-dotenv==1.2.2
+# Encrypted credential vault
 cryptography==45.0.7
 
-# Test/client utility used by FastAPI/Starlette tooling
+# Async HTTP client used by outbound integrations
 httpx==0.28.1
 
+# Local .env loading. Currently declared but not imported anywhere; all config
+# is read via os.getenv(). Retained for backward compatibility with existing
+# deployment environments - safe to drop once confirmed unused by operators.
+python-dotenv==1.2.2
+
 # SQLite is provided by Python's built-in sqlite3 module.
-# The frontend is static HTML/CSS/JavaScript and has no npm dependencies.
+# The operator console in frontend/ is static HTML/CSS/JavaScript and needs no
+# npm install. The separate marketing site in frontend-landing/ IS a Vite/React
+# build and does require Node - see README "Building the landing page".

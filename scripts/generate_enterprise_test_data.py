@@ -5,6 +5,8 @@ import csv
 import json
 import random
 import shutil
+import subprocess
+import tempfile
 import zipfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -82,6 +84,23 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content.strip() + "\n", encoding="utf-8")
 
 
+def set_windows_attributes(path: Path, *flags: str) -> None:
+    if not flags:
+        return
+    attrib = shutil.which("attrib")
+    if not attrib:
+        return
+    try:
+        subprocess.run(
+            [attrib, *flags, str(path)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+
+
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -123,6 +142,32 @@ def write_pptx(path: Path, slides: list[str]) -> None:
                 f"ppt/slides/slide{index}.xml",
                 f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:t>{escape_xml(text)}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
             )
+
+
+def write_password_protected_zip(path: Path, inner_name: str, content: str, password: str = "DSPM-Test-2026!") -> bool:
+    """Create a synthetic password-protected ZIP when the system zip utility is available.
+
+    Python's stdlib can read encrypted ZIP metadata but cannot create encrypted ZIPs,
+    so this helper uses the platform zip command and falls back safely when unavailable.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    zip_binary = shutil.which("zip")
+    if not zip_binary:
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(inner_name, content)
+        return False
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_root = Path(temp_dir)
+        inner_path = temp_root / inner_name
+        inner_path.write_text(content.strip() + "\n", encoding="utf-8")
+        subprocess.run(
+            [zip_binary, "-j", "-P", password, str(path), str(inner_path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return True
+
 
 
 def escape_xml(value: str) -> str:
@@ -190,6 +235,8 @@ to exercise detection logic.
                 created_files.append({"path": str(path.relative_to(root)), "department": department, "share": share, "extension": extension})
 
     add_cross_department_exports(root, people, created_files)
+    add_protected_content_samples(root, created_files)
+    add_hidden_and_system_samples(root, created_files)
     write_text(root / "_manifest.json", json.dumps({"company": COMPANY, "file_count": len(created_files), "generated": date.today().isoformat(), "files": created_files[:75]}, indent=2))
 
 
@@ -308,6 +355,113 @@ def add_cross_department_exports(root: Path, people: list[dict[str, str]], creat
     vault_path = root / "IT" / "Cloud" / "Current" / "breakglass_admin_credentials.env"
     write_text(vault_path, secret_block(9999) + "\nroot_email=cloud-admin@caspian-retail.example\n")
     created_files.append({"path": str(vault_path.relative_to(root)), "department": "IT", "share": "Cloud", "extension": ".env"})
+
+
+def add_protected_content_samples(root: Path, created_files: list[dict[str, object]]) -> None:
+    secure_root = root / "Executive" / "BoardPackets" / "Secure"
+    protected_zip = secure_root / "password_protected_board_pack.zip"
+    encrypted = write_password_protected_zip(
+        protected_zip,
+        "board_packet_private_notes.txt",
+        "CONFIDENTIAL board notes with synthetic payment card 4111 1111 1111 1111 and break-glass password placeholder.",
+    )
+    created_files.append({
+        "path": str(protected_zip.relative_to(root)),
+        "department": "Executive",
+        "share": "BoardPackets",
+        "extension": ".zip",
+        "protected": encrypted,
+    })
+
+    vault_path = root / "IT" / "Backups" / "Secure" / "production_credential_vault.kdbx"
+    vault_path.parent.mkdir(parents=True, exist_ok=True)
+    vault_path.write_bytes(b"KDBX_SYNTHETIC_PROTECTED_VAULT\x00\x01DSPM_TEST")
+    created_files.append({
+        "path": str(vault_path.relative_to(root)),
+        "department": "IT",
+        "share": "Backups",
+        "extension": ".kdbx",
+        "protected": True,
+    })
+
+
+def add_hidden_and_system_samples(root: Path, created_files: list[dict[str, object]]) -> None:
+    hidden_file = root / "Engineering" / "Data" / "Current" / ".hidden_frontend_scan_test.txt"
+    write_text(
+        hidden_file,
+        """
+CONFIDENTIAL hidden engineering sample.
+api_key=crg_hidden_SYNTHETIC_TOKEN
+Owner: engineering-owner@caspian-retail.example
+Purpose: validates hidden-file filters and Windows attribute collection.
+""",
+    )
+    set_windows_attributes(hidden_file, "+H")
+    created_files.append({
+        "path": str(hidden_file.relative_to(root)),
+        "department": "Engineering",
+        "share": "Data",
+        "extension": ".txt",
+        "hidden": True,
+    })
+
+    hidden_env = root / "IT" / "Cloud" / "Secure" / ".shadow_admin_tokens.env"
+    write_text(
+        hidden_env,
+        """
+AWS_ACCESS_KEY_ID=AKIA0000HIDDENSYNTH
+AWS_SECRET_ACCESS_KEY=synthetic_hidden_secret_value
+password=HiddenWinter2026!
+""",
+    )
+    set_windows_attributes(hidden_env, "+H")
+    created_files.append({
+        "path": str(hidden_env.relative_to(root)),
+        "department": "IT",
+        "share": "Cloud",
+        "extension": ".env",
+        "hidden": True,
+    })
+
+    system_file = root / "IT" / "ServiceDesk" / "SystemSignals" / "current_system_inventory.sys"
+    system_file.parent.mkdir(parents=True, exist_ok=True)
+    system_file.write_bytes(b"SYSTEM_SYNTHETIC_DSPM_SAMPLE\x00owner=IT\\service-desk")
+    set_windows_attributes(system_file, "+S")
+    created_files.append({
+        "path": str(system_file.relative_to(root)),
+        "department": "IT",
+        "share": "ServiceDesk",
+        "extension": ".sys",
+        "system": True,
+    })
+
+    archive_root = root / "Finance" / "Audit" / "Secure"
+    protected_zip = archive_root / "protected_finance_archive.zip"
+    encrypted = write_password_protected_zip(
+        protected_zip,
+        "finance_private_export.csv",
+        "name,email,card\nSynthetic Customer,customer@example.invalid,4111 1111 1111 1111",
+    )
+    created_files.append({
+        "path": str(protected_zip.relative_to(root)),
+        "department": "Finance",
+        "share": "Audit",
+        "extension": ".zip",
+        "protected": encrypted,
+    })
+
+    nested_zip = archive_root / "nested_sensitive_exports.zip"
+    nested_zip.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(nested_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("exports/customer_fin_values.csv", "name,fin\nSynthetic Person,A123456\n")
+        archive.writestr("secrets/release_token.env", "token=synthetic_nested_release_token\n")
+    created_files.append({
+        "path": str(nested_zip.relative_to(root)),
+        "department": "Finance",
+        "share": "Audit",
+        "extension": ".zip",
+        "archive_entries": True,
+    })
 
 
 def main() -> None:

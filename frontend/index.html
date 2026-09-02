@@ -3,112 +3,492 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DSPM DLP Discovery</title>
-    <link rel="stylesheet" href="/static/styles.css?v=11" />
+    <title>SENTRO — DSPM Command Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css?v=238" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand logo-lockup">
-          <span class="brand-mark" aria-hidden="true">
-            <svg viewBox="0 0 48 48" role="img">
-              <path d="M8 13c0-3 2-5 5-5h15c8 0 14 6 14 16s-6 16-14 16H13c-3 0-5-2-5-5V13Z" />
-              <path d="M19 16h8c4 0 7 3 7 8s-3 8-7 8h-8V16Z" />
-              <path d="M19 16v16" />
+          <span class="brand-mark brand-official" aria-hidden="true">
+            <svg viewBox="0 0 100 100" role="img" aria-label="SENTRO logo">
+              <defs>
+                <linearGradient id="dashboard-logo-blue" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#bcd4ff" />
+                  <stop offset="42%" stop-color="#5b8cff" />
+                  <stop offset="78%" stop-color="#2f5ad6" />
+                  <stop offset="100%" stop-color="#1d3a96" />
+                </linearGradient>
+                <linearGradient id="dashboard-logo-blade" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#eaf3ff" />
+                  <stop offset="100%" stop-color="#9fc2ff" />
+                </linearGradient>
+                <linearGradient id="dashboard-logo-blade-indigo" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#2D4CC8" />
+                  <stop offset="55%" stop-color="#2440A6" />
+                  <stop offset="100%" stop-color="#1E3A8A" />
+                </linearGradient>
+              </defs>
+              <circle class="sentro-ring-track" cx="50" cy="50" r="45" />
+              <circle class="sentro-ring" cx="50" cy="50" r="45" />
+              <g class="sentro-blades">
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" />
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(120 50 50)" />
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(240 50 50)" />
+              </g>
+              <circle class="sentro-core" cx="50" cy="50" r="10" />
+              <circle class="sentro-highlight" cx="47" cy="47" r="3" />
             </svg>
           </span>
-          <div>
-            <h1>DSPM</h1>
-            <p>DLP discovery console</p>
+          <div class="brand-copy">
+            <h1>SENTRO</h1>
           </div>
+          <button type="button" id="sidebar-toggle" data-sidebar-toggle class="nav-burger" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <button type="button" data-sidebar-toggle class="rail-expand" aria-label="Expand navigation" title="Expand navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
         </div>
 
-        <form id="connection-form" class="panel">
-          <label>
-            File server / IP
-            <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
-          </label>
-          <label>
-            Domain
-            <input id="domain" name="domain" value="WORKGROUP" />
-          </label>
-          <label>
-            Username
-            <input id="username" name="username" autocomplete="username" placeholder="DOMAIN\\user" />
-          </label>
-          <label>
-            Password
-            <input id="password" name="password" type="password" autocomplete="current-password" />
-          </label>
-          <label>
-            Credential ref
-            <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
-          </label>
-          <label>
-            Local sample path
-            <input id="local_path" name="local_path" value="enterprise_test_data" />
-          </label>
-          <label>
-            Max folder depth
-            <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
-          </label>
-          <label class="checkbox-row">
-            <input id="async_scan" name="async_scan" type="checkbox" checked />
-            Run through async queue
-          </label>
-          <div class="actions">
-            <button type="button" id="test-btn">Test</button>
-            <button type="submit" id="scan-btn">Fetch data</button>
+        <nav class="side-nav" aria-label="Product navigation">
+          <!-- Redesign P3: 6 destinations. Merged destinations (Scan, Evidence,
+               Administration) expand their member pages as sidebar sub-links;
+               the old tab names stay valid deep links. -->
+          <button type="button" class="tab active" data-tab="overview" aria-current="page" title="Posture, inventory, latest scan">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8v8H3zM13 3h8v5h-8zM13 12h8v9h-8zM3 15h8v6H3z"/></svg>
+            <span>Dashboard</span>
+          </button>
+          <button type="button" class="tab" data-tab="findings" title="Secrets, PII, regulated data">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4M11 8v3M11 14h.01"/></svg>
+            <span>Findings</span>
+          </button>
+          <button type="button" class="tab" data-tab="risk" title="Risk score, SLA, owners">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span>Remediation</span>
+          </button>
+          <button type="button" class="tab" data-tab="file-servers" title="File server and endpoint scans">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
+            <span>Scan</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-sub" data-nav-sub="file-servers" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="file-servers">File server</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="endpoint">Endpoint</button>
+            </div>
           </div>
-        </form>
+          <button type="button" class="tab" data-tab="reports" title="Reports, scan history, audit trail">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/></svg>
+            <span>Evidence</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-sub" data-nav-sub="reports" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="reports">Reports</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="history">History &amp; audit</button>
+            </div>
+          </div>
+          <button type="button" class="tab" data-tab="security" title="Users, tenants, asset rules, risk logic">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            <span>Administration</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-sub" data-nav-sub="security" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="security">Security ops</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="admin">Tenants</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="settings">Asset rules</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="logic">Risk logic</button>
+            </div>
+          </div>
+        </nav>
 
-        <div id="connection-status" class="status muted">Ready</div>
+        <section class="profile-menu side-profile" aria-label="Account">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+              <symbol id="li-log-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
+            </defs>
+          </svg>
+          <div class="profile-panel" id="profile-panel">
+            <div class="profile-panel-actions">
+              <a class="profile-action" href="/static/profile.html"><svg class="p-ico" aria-hidden="true"><use href="#li-settings"/></svg>Settings</a>
+              <button type="button" id="logout-btn" class="profile-action danger"><svg class="p-ico" aria-hidden="true"><use href="#li-log-out"/></svg>Sign out</button>
+            </div>
+          </div>
+          <button type="button" id="profile-toggle" class="profile-toggle" aria-expanded="false" aria-controls="profile-panel">
+            <span class="profile-avatar">A</span>
+            <span class="side-profile-copy">
+              <strong id="profile-name">MSSP Admin</strong>
+              <small id="profile-tenant">default tenant</small>
+            </span>
+          </button>
+        </section>
       </aside>
 
       <main>
         <section class="topbar">
-          <div>
-            <p class="eyebrow">Active Directory file-server assessment</p>
-            <h2>Data discovery and DLP rule preparation</h2>
+          <div class="topbar-left">
+            <div class="tb-search" role="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <input id="fx-search" type="search" placeholder="Search files, findings, sources..." aria-label="Search data inventory" autocomplete="off" />
+              <span class="tb-kbd" aria-hidden="true"><kbd>Ctrl</kbd><kbd>K</kbd></span>
+            </div>
           </div>
           <div class="topbar-actions">
-            <button type="button" id="theme-toggle" class="secondary-btn">Dark mode</button>
+            <div class="tb-newscan" id="fx-newscan">
+              <button type="button" id="fx-newscan-btn" class="tb-primary" aria-haspopup="true" aria-expanded="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                New Scan
+              </button>
+              <div class="tb-newscan-menu" role="menu">
+                <button type="button" role="menuitem" data-tab-jump="file-servers">
+                  <b>Start file scan</b><small>SMB or local dataset</small>
+                </button>
+                <button type="button" role="menuitem" data-tab-jump="endpoint">
+                  <b>Start endpoint scan</b><small>WinRM workstation</small>
+                </button>
+                <button type="button" role="menuitem" data-tab-jump="reports">
+                  <b>Open reports</b><small>CSV, Word, PDF evidence</small>
+                </button>
+              </div>
+            </div>
+            <button type="button" id="theme-toggle" class="theme-toggle tb-icon-btn" aria-label="Switch to dark mode" title="Switch theme">
+              <span class="theme-icon" aria-hidden="true">&#9790;</span>
+            </button>
             <div class="health" id="health">API checking...</div>
             <select id="tenant-switcher" class="tenant-switcher" title="Switch MSSP customer">
               <option value="default">default</option>
             </select>
-            <section class="profile-menu" aria-label="Profile">
-              <button type="button" id="profile-toggle" class="profile-toggle">
-                <span class="profile-avatar">A</span>
-                <span>
-                  <strong id="profile-name">Admin</strong>
-                  <small id="profile-tenant">default tenant</small>
-                </span>
-              </button>
-              <div class="profile-panel">
-                <div>
-                  <span>Signed in as</span>
-                  <strong id="profile-role">admin</strong>
-                </div>
-                <button type="button" id="logout-btn" class="secondary-btn">Sign out</button>
-              </div>
-            </section>
           </div>
         </section>
 
-        <nav class="tabs" aria-label="Workspace sections">
-          <button type="button" class="tab active" data-tab="overview">Overview</button>
-          <button type="button" class="tab" data-tab="executive">Executive</button>
-          <button type="button" class="tab" data-tab="assets">Customer Assets</button>
-          <button type="button" class="tab" data-tab="reports">Reports</button>
-          <button type="button" class="tab" data-tab="history">History</button>
-          <button type="button" class="tab" data-tab="tenants">Tenants</button>
-          <button type="button" class="tab" data-tab="security">Security</button>
-          <button type="button" class="tab" data-tab="integrations">Integrations</button>
-          <button type="button" class="tab" data-tab="logic">Risk Logic</button>
-        </nav>
+                <section id="tab-file-servers" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h3>File server scan</h3>
+            </div>
+          </div>
+
+          <div id="fs-scan-deck" class="scan-deck">
+            <div id="fs-profile-grid" class="scan-profile-grid" aria-label="Saved file server scans">
+              <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="file-server">
+                <span class="socket-plus" aria-hidden="true">+</span>
+                <strong>Set up your first file server scan</strong>
+                <small>Define the connection once. Run it whenever you need to.</small>
+              </button>
+            </div>
+            <div id="fs-deck-live" class="scan-deck-live">
+              <div id="connection-status" class="status muted">Ready</div>
+              <div id="scan-progress" class="scan-progress hidden" aria-live="polite">
+                <div class="scan-pulse" aria-hidden="true"></div>
+                <div>
+                  <div class="scan-progress-header">
+                    <strong id="scan-progress-label">Scanning...</strong>
+                    <span id="scan-progress-percent">0%</span>
+                  </div>
+                  <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="scan-progress-bar"></span></div>
+                </div>
+              </div>
+              <button type="button" id="scan-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
+            </div>
+<section class="demo-data-card deck-demo-utility" aria-label="Demo data generator">
+                <span class="scan-card-ico demo-data-ico" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="7" ry="2.5"/><path d="M5 5v14c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V5"/><path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/></svg>
+                </span>
+                <div>
+                  <span>Demo dataset</span>
+                  <strong id="demo-data-title">Enterprise test data</strong>
+                  <small id="demo-data-status">Generate local sample files for scans.</small>
+                </div>
+                <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
+              </section>
+          </div>
+
+          <div id="fs-wizard" class="scan-wizard hidden">
+            <div class="scan-layout">
+            <header class="scan-wizard-head">
+              <button type="button" id="fs-wizard-close" class="secondary-btn mini-btn wizard-back-link" title="Back to scans" aria-label="Back to scans"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg></button>
+              <div class="scan-wizard-title">
+                <h4 id="fs-wizard-heading">New file server scan</h4>
+                <span id="fs-wizard-current-step" class="wizard-current-step" aria-live="polite">Step 1: Scan identity</span>
+              </div>
+              <ol class="scan-stepper" data-stepper="file-server">
+                <li class="stepper-node is-current" data-step-node="1"><span class="stepper-dot">1</span><span class="stepper-label">Basics</span></li>
+                <li class="stepper-node" data-step-node="2"><span class="stepper-dot">2</span><span class="stepper-label">Configuration</span></li>
+                <li class="stepper-node" data-step-node="3"><span class="stepper-dot">3</span><span class="stepper-label">Review &amp; launch</span></li>
+              </ol>
+            </header>
+
+            <form id="connection-form" class="scan-form-column" novalidate>
+              <div class="wizard-step" data-wizard-step="1">
+                <p class="wizard-step-eyebrow">Step 1 — Scan identity</p>
+                <section class="scan-card" aria-label="Scan identity">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <h4>Basics</h4>
+                      <span>Name this scan and enter the connection it uses</span>
+                    </div>
+                  </div>
+                  <div class="scan-form-grid">
+                    <label class="scan-form-wide">
+                      Scan name
+                      <input id="fs-profile-name" maxlength="80" placeholder="HR file share, Finance archive..." />
+                    </label>
+                    <label>
+                      File server / IP
+                      <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
+                    </label>
+                    <label>
+                      Domain
+                      <input id="domain" name="domain" value="WORKGROUP" placeholder="Domain, WORKGROUP, or server name" />
+                    </label>
+                    <label>
+                      Username
+                      <input id="username" name="username" autocomplete="username" placeholder="Domain or local admin user" />
+                    </label>
+                    <label>
+                      Password
+                      <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Stored as a vault reference on save" />
+                    </label>
+                    <label class="scan-form-wide">
+                      Credential ref
+                      <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="2">
+                <p class="wizard-step-eyebrow">Step 2 — Configuration</p>
+<section class="scan-card wizard-behavior-card" aria-label="Scan behavior">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M16 3.5v5M4 12h4M12 12h8M8 9.5v5M4 18h12M16 15.5v5M20 18h0"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <h4>Behavior &amp; scope</h4>
+                      <span>Queue behavior, incremental reuse, and folder depth</span>
+                    </div>
+                  </div>
+                  <div class="wizard-behavior-grid">
+                    <label class="checkbox-row option-tile">
+                      <input id="async_scan" name="async_scan" type="checkbox" checked />
+                      <span class="scan-option-copy">Async queue</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                    <label class="checkbox-row option-tile">
+                      <input id="incremental_enabled" name="incremental_enabled" type="checkbox" checked />
+                      <span class="scan-option-copy">Incremental</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                    <label class="checkbox-row option-tile">
+                      <input id="inspect_archives" name="inspect_archives" type="checkbox" />
+                      <span class="scan-option-copy">ZIP archives</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                    <label class="checkbox-row option-tile">
+                      <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
+                      <span class="scan-option-copy">Admin shares</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
+                  </div>
+                  <div class="wizard-behavior-fields">
+                    <label>
+                      Max folder depth
+                      <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
+                    </label>
+                    <label>
+                      Local sample path
+                      <input id="local_path" name="local_path" value="enterprise_test_data" />
+                    </label>
+                  </div>
+                </section>
+<section class="scan-card" aria-label="Extension policy">
+                <div class="extension-filter scan-form-wide">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <label>Extension policy</label>
+                      <span>Choose which file types the scan inspects</span>
+                    </div>
+                  </div>
+                  <div id="ext-simple-mode" class="ext-mode-panel">
+                    <div class="ext-preset-grid">
+                      <label class="ext-preset-card">
+                        <input type="radio" name="ext-preset" value="secrets" />
+                        <span class="ext-preset-title">Secrets & credentials</span>
+                        <span class="ext-preset-desc">Keys, vaults, configs, remote access profiles.</span>
+                      </label>
+                      <label class="ext-preset-card">
+                        <input type="radio" name="ext-preset" value="recommended" checked />
+                        <span class="ext-preset-title">Recommended</span>
+                        <span class="ext-preset-desc">Secrets, documents, data exports, mailboxes.</span>
+                      </label>
+                      <label class="ext-preset-card">
+                        <input type="radio" name="ext-preset" value="broad" />
+                        <span class="ext-preset-title">Broad</span>
+                        <span class="ext-preset-desc">Enterprise coverage without media-heavy files.</span>
+                      </label>
+                      <label class="ext-preset-card">
+                        <input type="radio" name="ext-preset" value="all" />
+                        <span class="ext-preset-title">All extensions</span>
+                        <span class="ext-preset-desc">Full inventory sweep across every known file type.</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div id="ext-advanced-mode" class="ext-mode-panel hidden">
+                    <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+                    <div class="extension-selected" data-extension-selected-for="file-server"></div>
+                    <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
+                    <div class="extension-actions" aria-label="Extension presets">
+                      <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
+                      <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
+                    </div>
+                    <div class="extension-actions" aria-label="Custom extension">
+                      <input id="custom-extension-input" type="text" placeholder=".custom" />
+                      <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add</button>
+                    </div>
+                  </div>
+                  <button type="button" id="ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
+                </div>
+              </section>
+
+<section class="scan-card" aria-label="Compliance mapping">
+                <div class="scan-card-head">
+                  <span class="scan-card-ico" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
+                  </span>
+                  <div class="scan-card-heading">
+                    <h4>Compliance mapping</h4>
+                    <span>Map findings to regulatory frameworks during the scan</span>
+                  </div>
+                </div>
+                <div class="compliance-selector scan-form-wide" data-compliance-scope="file-server">
+                  <div class="compliance-selector-head">
+                    <label class="checkbox-row option-tile compliance-toggle">
+                      <input id="compliance-enabled" type="checkbox" />
+                      <span class="compliance-toggle-switch" aria-hidden="true"></span>
+                      <span>Enable compliance mapping</span>
+                    </label>
+                    <span class="compliance-hint">Enable to choose compliance frameworks. GDPR, PCI DSS, and NIST are currently available.</span>
+                  </div>
+                  <div class="compliance-framework-grid" data-compliance-frameworks="file-server"></div>
+                </div>
+              </section>
+
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="3">
+                <p class="wizard-step-eyebrow">Step 3 — Review &amp; launch</p>
+                <div class="wizard-review-grid">
+                  <section class="scan-card wizard-review-card" aria-label="Review">
+                    <div class="scan-card-head">
+                      <span class="scan-card-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
+                      </span>
+                      <div class="scan-card-heading">
+                        <h4>Review</h4>
+                        <span>Everything this scan will do — select a row to change it</span>
+                      </div>
+                    </div>
+                    <div class="review-rows">
+                      <button type="button" class="review-row" data-wizard-goto="1">
+                        <span class="review-label">Target</span>
+                        <span class="review-value"><b id="scan-summary-target">Local dataset</b><small id="scan-summary-domain">WORKGROUP</small></span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Path</span>
+                        <span class="review-value scan-summary-mono" id="scan-summary-path">enterprise_test_data</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Depth</span>
+                        <span class="review-value" id="scan-summary-depth">4</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">File types</span>
+                        <span class="review-value" id="scan-summary-policy">Recommended</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <div class="review-row review-row-static">
+                        <span class="review-label">Options</span>
+                        <ul id="scan-summary-options" class="review-option-chips">
+                          <li data-summary-option="async" class="on">Async queue</li>
+                          <li data-summary-option="zip">ZIP inspection</li>
+                          <li data-summary-option="admin">Admin shares</li>
+                          <li data-summary-option="compliance">Compliance mapping</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </section>
+                  <section class="scan-card wizard-launch-card" aria-label="Connection check">
+                    <div class="scan-card-head">
+                      <span class="scan-card-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>
+                      </span>
+                      <div class="scan-card-heading">
+                        <h4>Connection check</h4>
+                        <span>Optional — verify access before saving</span>
+                      </div>
+                    </div>
+                    <div class="actions">
+                      <button type="button" id="test-btn" class="secondary-btn">Test connection</button>
+                    </div>
+                    <div id="fs-wizard-status" class="wizard-status-mirror muted">Ready</div>
+                    <p class="wizard-save-note">Saved scans appear on the scan page, ready to run.</p>
+                  </section>
+                </div>
+              </div>
+
+              <footer class="scan-wizard-footer">
+                <button type="button" id="fs-wizard-delete" class="wizard-delete-btn hidden">Delete this scan</button>
+                <span id="fs-wizard-hint" class="wizard-hint" aria-live="polite"></span>
+                <div class="wizard-nav">
+                  <button type="button" id="fs-wizard-back" class="secondary-btn" disabled>Back</button>
+                  <button type="button" id="fs-wizard-next">Next</button>
+                  <button type="button" id="fs-wizard-save" class="hidden">Save scan</button>
+                </div>
+                <button type="submit" id="scan-btn" class="hidden" tabindex="-1" aria-hidden="true">Run file scan</button>
+              </footer>
+            </form>
+            </div>
+          </div>
+
+          <section class="context-strip context-strip-trailing" id="file-server-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run a file-server scan or open Data Inventory after another scan completes.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+          </section>
+        </section>
+
 
         <section id="tab-overview" class="tab-panel active">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-file-bar-chart-2" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M8 18v-2"/><path d="M12 18v-4"/><path d="M16 18v-6"/></symbol>
+              <symbol id="li-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+              <symbol id="li-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol>
+              <symbol id="li-rotate-ccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+            </defs>
+          </svg>
           <section class="metrics" aria-label="Risk summary">
             <div class="metric critical">
               <span>Critical</span>
@@ -126,37 +506,142 @@
               <span>Low</span>
               <strong id="low-count">0</strong>
             </div>
-            <div class="metric">
+            <div class="metric protected">
+              <span>Protected / Locked</span>
+              <strong id="protected-count">0</strong>
+            </div>
+            <div class="metric total">
               <span>Total files</span>
               <strong id="total-count">0</strong>
             </div>
           </section>
 
-          <section id="overview-insights" class="insights-grid"></section>
+          <!-- Dashboard analytics: hosts for the sentro-fx charts suite
+               (posture trend, severity mix, recent scans, activity feed).
+               The suite reads /api/history + /api/audit read-only. -->
+          <div class="dash-grid" aria-label="Posture analytics">
+            <section class="visual-panel col-main">
+              <div class="panel-title">
+                <h4>Posture trend</h4>
+                <div class="chart-pills" id="fx-posture-pills"></div>
+              </div>
+              <div id="fx-posture-chart" class="fx-chart"></div>
+            </section>
+            <section class="visual-panel col-side">
+              <div class="panel-title"><h4>Severity mix</h4></div>
+              <div id="fx-severity-donut"></div>
+            </section>
+            <section id="overview-insights" class="insights-grid dash-span"></section>
+            <section class="visual-panel col-scans">
+              <div class="panel-title"><h4>Recent scans</h4></div>
+              <div id="fx-recent-scans"></div>
+            </section>
+            <section class="visual-panel col-activity">
+              <div class="panel-title"><h4>Activity</h4></div>
+              <div id="fx-activity"></div>
+            </section>
+          </div>
 
-          <section class="workspace">
-            <div class="table-toolbar">
+        </section>
+
+        <section id="tab-findings" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></symbol>
+              <symbol id="li-clock-3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4.5"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
+              <h3>Sensitive findings</h3>
+            </div>
+          </div>
+          <div class="executive-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Detection signal mix</h4>
+                <span>From latest scan</span>
+              </div>
+              <div id="findings-signal-summary" class="empty compact">Run a scan to populate finding categories.</div>
+            </section>
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4>Priority finding queue</h4>
+                <span>Critical and high sensitivity</span>
+              </div>
+              <div id="findings-priority-summary" class="empty compact">Sensitive files will appear in Data Inventory and Risk & Remediation.</div>
+            </section>
+          </div>
+
+          <section class="workspace" id="inventory-workspace">
+            <div class="table-toolbar inventory-toolbar">
               <div>
-                <h3>Discovered data</h3>
+                <p class="eyebrow">Data catalog</p>
+                <h3>Data inventory</h3>
                 <p id="scan-meta">No scan has been run yet.</p>
               </div>
-              <input id="filter" placeholder="Filter by file, finding, or risk" />
+              <div class="inventory-toolbar-actions">
+                <div class="inventory-search-box">
+                  <span aria-hidden="true"><svg class="f-ico" aria-hidden="true"><use href="#li-search"/></svg></span>
+                  <input id="filter" placeholder="Search file, path, finding, source, risk..." autocomplete="off" />
+                </div>
+                <div class="inventory-export-actions" aria-label="Stream filtered inventory">
+                  <button type="button" id="inventory-export-csv" class="secondary-btn mini-btn" aria-describedby="inventory-export-status">Stream CSV</button>
+                  <button type="button" id="inventory-export-ndjson" class="secondary-btn mini-btn" aria-describedby="inventory-export-status">Stream NDJSON</button>
+                </div>
+                <span id="inventory-export-status" class="visually-hidden" role="status" aria-live="polite">Exports stream filtered metadata directly to disk.</span>
+              </div>
             </div>
 
-            <div class="table-wrap">
-              <table>
+            <section class="inventory-command-bar" aria-label="Inventory filters and context">
+              <div class="risk-filter-group" aria-label="Risk filters">
+                <button type="button" class="risk-filter active" data-risk-filter="ALL">All</button>
+                <button type="button" class="risk-filter critical" data-risk-filter="CRITICAL">Critical</button>
+                <button type="button" class="risk-filter high" data-risk-filter="HIGH">High</button>
+                <button type="button" class="risk-filter medium" data-risk-filter="MEDIUM">Medium</button>
+                <button type="button" class="risk-filter low" data-risk-filter="LOW">Low</button>
+                <button type="button" class="risk-filter protected" data-risk-filter="PROTECTED">Protected</button>
+              </div>
+              <div class="inventory-facet-row">
+                <label class="inventory-scan-facet">
+                  Scan
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="inventory-source-filter">
+                    <option value="ALL">All scans</option>
+                  </select></span>
+                </label>
+                <label>
+                  Finding type
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-scan-search"/></svg><select id="inventory-finding-filter">
+                    <option value="ALL">All finding types</option>
+                  </select></span>
+                </label>
+                <div class="inventory-framework-filter" aria-label="Framework filters">
+                  <span><svg class="f-ico fw-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>Framework</span>
+                  <div id="inventory-framework-filter" class="inventory-framework-options"></div>
+                </div>
+                <button type="button" id="clear-inventory-filters" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Clear filters</button>
+              </div>
+              <div id="inventory-context-metrics" class="inventory-context-metrics">
+                <div><span>Visible</span><strong>0</strong><small>files</small></div>
+                <div><span>Sensitive</span><strong>0</strong><small>files</small></div>
+                <div><span>Avg risk</span><strong>0</strong><small>/100</small></div>
+              </div>
+            </section>
+
+            <div class="table-wrap inventory-table-wrap">
+              <table class="inventory-table">
                 <thead>
                   <tr>
-                    <th>File</th>
-                    <th>Source</th>
-                    <th>Findings</th>
-                    <th>Risk</th>
+                    <th class="inv-sortable" data-inventory-sort="name" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by name">File<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="scan_label" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by scan">Source<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="finding_count" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by finding count">Findings<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="risk_score" aria-sort="descending" tabindex="0" role="columnheader" title="Sort every file by risk score">Risk<span class="inv-sort-ind" aria-hidden="true"></span></th>
                     <th>Manual risk</th>
                     <th>Reasons</th>
                     <th>DLP recommendations</th>
                   </tr>
                 </thead>
-                <tbody id="results-body">
+                <tbody id="results-body" aria-live="polite" aria-relevant="all">
                   <tr>
                     <td colspan="7" class="empty">Run a scan to see file risk assessment.</td>
                   </tr>
@@ -166,117 +651,118 @@
           </section>
         </section>
 
-        <section id="tab-executive" class="tab-panel">
+        <section id="tab-risk" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-pie-chart" viewBox="0 0 24 24"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></symbol>
+              <symbol id="li-siren" viewBox="0 0 24 24"><path d="M7 18v-6a5 5 0 1 1 10 0v6"/><path d="M5 21a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2z"/><path d="M21 12h1"/><path d="M18.5 4.5 18 5"/><path d="M2 12h1"/><path d="M12 2v1"/><path d="m4.929 4.929.707.707"/><path d="M12 12v6"/></symbol>
+              <symbol id="li-folder-open-dot" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/><circle cx="14" cy="15" r="1"/></symbol>
+              <symbol id="li-map" viewBox="0 0 24 24"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"/><path d="M15 5.764v15"/><path d="M9 3.236v15"/></symbol>
+              <symbol id="li-share-2" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></symbol>
+              <symbol id="li-git-compare" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></symbol>
+            </defs>
+          </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">CISO view</p>
-              <h3>Risk posture command center</h3>
-              <p>Current exposure, trend movement, alert pressure, and the top files that need attention.</p>
+              <h3>Remediation Center</h3>
             </div>
             <button type="button" id="refresh-executive-btn" class="secondary-btn">Refresh</button>
           </div>
 
-          <div id="executive-hero" class="executive-hero"></div>
-          <section class="visual-panel mssp-panel">
-            <div class="panel-title">
-              <h4>MSSP customer portfolio</h4>
-              <span>Tenant isolation and customer posture</span>
-            </div>
-            <div id="mssp-portfolio" class="mssp-portfolio"></div>
+          <div id="executive-hero" class="executive-hero remediation-summary"></div>
+          <section class="visual-panel mssp-panel remediation-workspace-panel" aria-label="Workspace status">
+            <div id="mssp-portfolio" class="mssp-portfolio remediation-workspace-status"></div>
           </section>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Posture trend</h4>
-                <span>Last scans</span>
-              </div>
-              <div id="posture-trend" class="posture-trend"></div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Remediation workflow</h4>
-                <span>Owner and SLA</span>
-              </div>
-              <div id="remediation-workflow" class="remediation-workflow"></div>
-            </section>
+          <div class="risk-analytics">
+            <div class="risk-analytics-main">
+              <section class="visual-panel risk-anchor-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-pie-chart"/></svg></span>Risk distribution</h4>
+                  <span id="risk-total-label">No scan yet</span>
+                </div>
+                <div id="risk-distribution"></div>
+              </section>
+              <section class="visual-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-siren"/></svg></span>Critical and high files</h4>
+                </div>
+                <div id="priority-risk-files"></div>
+              </section>
+              
+              
+            </div>
+            <aside class="risk-analytics-side">
+              <section class="visual-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-activity"/></svg></span>Posture trend</h4>
+                </div>
+                <div id="posture-trend" class="posture-trend"></div>
+              </section>
+              
+            </aside>
           </div>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Risk distribution</h4>
-                <span id="risk-total-label">No scan yet</span>
-              </div>
-              <div id="risk-distribution"></div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Folder heatmap</h4>
-                <span>By source path</span>
-              </div>
-              <div id="risk-heatmap"></div>
-            </section>
-          </div>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Signal mix</h4>
-                <span>Detection categories</span>
-              </div>
-              <div id="signal-matrix"></div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Risk topology</h4>
-                <span>Source to exposure path</span>
-              </div>
-              <div id="risk-topology" class="risk-topology"></div>
-            </section>
-          </div>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Critical and high files</h4>
-                <span>Priority review queue</span>
-              </div>
-              <div id="priority-risk-files"></div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Department risk</h4>
-                <span>Team or folder ownership</span>
-              </div>
-              <div id="department-risk"></div>
-            </section>
-          </div>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Scan comparison</h4>
-                <span>Latest versus previous scan</span>
-              </div>
-              <div id="scan-comparison"></div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Top risky folders</h4>
-                <span>Concentrated exposure</span>
-              </div>
-              <div id="top-risky-folders"></div>
-            </section>
-          </div>
-          <div id="executive-top-files" class="top-files-grid"></div>
+
+          <section class="visual-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-git-compare"/></svg></span>Scan comparison</h4>
+                </div>
+                <div id="scan-comparison"></div>
+              </section>
+
+          <section class="visual-panel remediation-queue-panel">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Remediation queue</h4>
+                  <span>Highest priority first</span>
+                </div>
+                <div id="remediation-workflow" class="remediation-workflow"></div>
+              </section>
+
+          <section class="visual-panel exposure-insights">
+                <div class="panel-title">
+                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-open-dot"/></svg></span>Exposure insights</h4>
+                </div>
+                <div class="insight-tabs">
+                  <input type="radio" name="exposure-tab" id="xt-folders" class="insight-tab-radio" checked />
+                  <input type="radio" name="exposure-tab" id="xt-departments" class="insight-tab-radio" />
+                  <input type="radio" name="exposure-tab" id="xt-heatmap" class="insight-tab-radio" />
+                  <input type="radio" name="exposure-tab" id="xt-signals" class="insight-tab-radio" />
+                  <input type="radio" name="exposure-tab" id="xt-topology" class="insight-tab-radio" />
+                  <div class="insight-tab-bar" role="tablist" aria-label="Exposure insight views">
+                    <label for="xt-folders"><svg class="f-ico" aria-hidden="true"><use href="#li-folder-open-dot"/></svg>Top risky folders</label>
+                    <label for="xt-departments"><svg class="f-ico" aria-hidden="true"><use href="#li-building-2"/></svg>Department risk</label>
+                    <label for="xt-heatmap"><svg class="f-ico" aria-hidden="true"><use href="#li-map"/></svg>Folder heatmap</label>
+                    <label for="xt-signals"><svg class="f-ico" aria-hidden="true"><use href="#li-activity"/></svg>Signal mix</label>
+                    <label for="xt-topology"><svg class="f-ico" aria-hidden="true"><use href="#li-share-2"/></svg>Topology</label>
+                  </div>
+                  <div class="insight-tab-panels">
+                    <div class="insight-tab-panel" data-tab="folders"><div id="top-risky-folders"></div></div>
+                    <div class="insight-tab-panel" data-tab="departments"><div id="department-risk"></div></div>
+                    <div class="insight-tab-panel" data-tab="heatmap"><div id="risk-heatmap"></div></div>
+                    <div class="insight-tab-panel" data-tab="signals"><div id="signal-matrix"></div></div>
+                    <div class="insight-tab-panel" data-tab="topology"><div id="risk-topology" class="risk-topology"></div></div>
+                  </div>
+                </div>
+              </section>
+
+          <div id="executive-top-files" class="top-files-grid hidden" aria-hidden="true"></div>
         </section>
 
-        <section id="tab-assets" class="tab-panel">
+        <section id="tab-settings" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-save" viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></symbol>
+              <symbol id="li-search-code" viewBox="0 0 24 24"><path d="m13 13.5 2-2.5-2-2.5"/><path d="m21 21-4.3-4.3"/><path d="M9 8.5 7 11l2 2.5"/><circle cx="11" cy="11" r="8"/></symbol>
+            </defs>
+          </svg>
           <div class="asset-header">
             <div>
-              <p class="eyebrow">MSSP customer context</p>
               <h3>Customer asset risk</h3>
               <p>Define tenant-specific crown-jewel paths, folders, extensions, or filenames. Saved rules are applied to every new scan.</p>
             </div>
             <div class="asset-actions">
+              <button type="button" class="secondary-btn" data-tab-jump="logic"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-shield-alert"/></svg>Risk logic</button>
               <button type="button" id="add-asset-btn" class="secondary-btn">Add asset</button>
-              <button type="button" id="save-assets-btn">Save rules</button>
+              <button type="button" id="save-assets-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-save"/></svg>Save rules</button>
             </div>
           </div>
 
@@ -284,20 +770,20 @@
             <div class="asset-form-grid">
               <label>
                 Match pattern
-                <input id="asset-pattern" placeholder="finance, /HR/, .env, password.txt" />
+                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-search-code"/></svg><input id="asset-pattern" placeholder="finance, /HR/, .env, password.txt" /></span>
               </label>
               <label>
                 Forced risk
-                <select id="asset-level">
+                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-alert"/></svg><select id="asset-level">
                   <option value="CRITICAL">Critical</option>
                   <option value="HIGH">High</option>
                   <option value="MEDIUM">Medium</option>
                   <option value="LOW">Low</option>
-                </select>
+                </select></span>
               </label>
               <label>
                 Business reason
-                <input id="asset-reason" placeholder="Customer considers this a regulated or crown-jewel asset" />
+                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-file-text"/></svg><input id="asset-reason" placeholder="Customer considers this a regulated or crown-jewel asset" /></span>
               </label>
             </div>
             <p id="asset-save-status" class="save-status">Rules are loaded from this browser.</p>
@@ -307,16 +793,23 @@
         </section>
 
         <section id="tab-reports" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-file-check-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m3 15 2 2 4-4"/></symbol>
+              <symbol id="li-file-spreadsheet" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/></symbol>
+              <symbol id="li-file-text" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
+              <symbol id="li-file-type-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 13v-1h6v1"/><path d="M5 12v6"/><path d="M4 18h2"/></symbol>
+              <symbol id="li-files" viewBox="0 0 24 24"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l5 5v9a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></symbol>
+            </defs>
+          </svg>
           <div class="report-header">
             <div>
-              <p class="eyebrow">Executive evidence</p>
               <h3>Reporting center</h3>
-              <p>Generate customer-ready reports from the latest scan and current manual risk decisions.</p>
             </div>
             <div class="report-actions">
-              <button type="button" id="export-csv-btn" class="secondary-btn">Export Excel</button>
-              <button type="button" id="export-word-btn" class="secondary-btn">Export Word</button>
-              <button type="button" id="export-pdf-btn">Print / PDF</button>
+              <button type="button" id="export-csv-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-spreadsheet"/></svg>Export Excel Workbook</button>
+              <button type="button" id="export-word-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-text"/></svg>Export Word Pack</button>
+              <button type="button" id="export-pdf-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-text"/></svg>Open PDF Composer</button>
             </div>
           </div>
 
@@ -324,12 +817,24 @@
         </section>
 
         <section id="tab-history" class="tab-panel workspace">
-          <div class="table-toolbar">
+          <div class="table-toolbar history-toolbar">
+            <div class="toolbar-fx" aria-hidden="true"><i class="fx-sweep"></i></div>
             <div>
               <h3>Scan history and audit</h3>
-              <p>Tenant scan trend, posture score, and immutable activity trail.</p>
             </div>
-            <button type="button" id="refresh-history-btn" class="secondary-btn">Refresh</button>
+            <div class="history-controls">
+                <span class="field-shell history-filter-shell"><svg class="f-ico field-ico dropdown-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg><select id="history-range" class="tenant-switcher" title="Filter scan history">
+                <option value="all">All scans</option>
+                <option value="1">Last 24 hours</option>
+                <option value="5">Last 5 days</option>
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="custom">Custom range</option>
+              </select></span>
+              <input id="history-from" class="history-date hidden" type="date" title="From date" />
+              <input id="history-to" class="history-date hidden" type="date" title="To date" />
+              <button type="button" id="refresh-history-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+            </div>
           </div>
           <div id="executive-summary" class="history-grid"></div>
           <div class="table-wrap">
@@ -351,20 +856,346 @@
           </div>
         </section>
 
-        <section id="tab-security" class="tab-panel">
+                <section id="tab-endpoint" class="tab-panel">
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-radar" viewBox="0 0 24 24"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62a10 10 0 1 0 19.02-1.27"/><path d="M16.24 7.76a6 6 0 1 0-8.01 8.91"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></symbol>
+              <symbol id="li-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+              <symbol id="li-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+              <symbol id="li-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+              <symbol id="li-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+              <symbol id="li-key-round" viewBox="0 0 24 24"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+              <symbol id="li-bookmark" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></symbol>
+              <symbol id="li-folder-tree" viewBox="0 0 24 24"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.9a1 1 0 0 1-.88-.55l-.42-.85a1 1 0 0 0-.92-.6H13a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M3 5a2 2 0 0 0 2 2h3"/><path d="M3 3v13a2 2 0 0 0 2 2h3"/></symbol>
+              <symbol id="li-folder-cog" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><path d="M10.3 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v3.3"/><path d="m21.7 19.4-.9-.3"/><path d="m15.2 16.9-.9-.3"/><path d="m16.6 21.7.3-.9"/><path d="m19.1 15.2.3-.9"/><path d="m19.6 21.7-.4-1"/><path d="m16.8 15.3-.4-1"/><path d="m14.3 19.6 1-.4"/><path d="m20.7 16.8 1-.4"/></symbol>
+              <symbol id="li-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></symbol>
+              <symbol id="li-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+              <symbol id="li-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+              <symbol id="li-file-archive" viewBox="0 0 24 24"><path d="M10 12v-1"/><path d="M10 18v-2"/><path d="M10 7V6"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M15.5 22H18a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v16a2 2 0 0 0 .274 1.01"/><circle cx="10" cy="20" r="2"/></symbol>
+              <symbol id="li-circle-stop" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+              <symbol id="li-scan-search" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/></symbol>
+              <symbol id="li-scan-line" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></symbol>
+              <symbol id="li-plug-zap" viewBox="0 0 24 24"><path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z"/><path d="m2 22 3-3"/><path d="M7.5 13.5 10 11"/><path d="M10.5 16.5 13 14"/><path d="m18 3-4 4h6l-4 4"/></symbol>
+              <symbol id="li-activity" viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+              <symbol id="li-star" viewBox="0 0 24 24"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/></symbol>
+              <symbol id="li-layout-grid" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
+              <symbol id="li-sparkles" viewBox="0 0 24 24"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></symbol>
+              <symbol id="li-monitor-cog" viewBox="0 0 24 24"><path d="M12 17v4"/><path d="M8 21h8"/><path d="M22 12.5V15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5"/><circle cx="18.5" cy="6" r="3"/><path d="m15.2 4.9-.9-.4"/><path d="m15.2 7.1-.9.4"/><path d="m16.9 3.2-.4-.9"/><path d="m16.9 8.8-.4.9"/><path d="m19.5 3.2.4-.9"/><path d="m19.5 8.8.4.9"/><path d="m21.7 4.9.9-.4"/><path d="m21.7 7.1.9.4"/></symbol>
+              <symbol id="li-list-checks" viewBox="0 0 24 24"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></symbol>
+              <symbol id="li-server-cog" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M4.5 10H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-.5"/><path d="M4.5 14H4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-.5"/><path d="M6 6h.01"/><path d="M6 18h.01"/><path d="m15.7 13.4-.9-.3"/><path d="m9.2 10.9-.9-.3"/><path d="m10.6 15.7.3-.9"/><path d="m13.6 15.7-.4-1"/><path d="m10.8 8.3-.4-1"/><path d="m13.4 8.4-.3.9"/><path d="m16.2 10.8-1 .4"/><path d="m8.8 13.2-1 .4"/></symbol>
+              <symbol id="li-folder-search" viewBox="0 0 24 24"><path d="M10.7 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v4.1"/><circle cx="17" cy="17" r="3"/><path d="m21 21-1.5-1.5"/></symbol>
+            </defs>
+          </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">Governance</p>
+              <h3>Endpoint local-admin scan</h3>
+            </div>
+          </div>
+
+          <div id="endpoint-scan-deck" class="scan-deck">
+            <div id="endpoint-profile-grid" class="scan-profile-grid" aria-label="Saved endpoint scans">
+              <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="endpoint">
+                <span class="socket-plus" aria-hidden="true">+</span>
+                <strong>Set up your first endpoint scan</strong>
+                <small>Choose a workstation and profile once. Run it whenever you need to.</small>
+              </button>
+            </div>
+            <div id="endpoint-deck-live" class="scan-deck-live">
+              <p id="endpoint-status" class="save-status">Ready. Saved endpoint scans start from their card.</p>
+              <div id="endpoint-scan-progress" class="scan-progress endpoint-scan-progress hidden" aria-live="polite">
+                <div class="scan-pulse" aria-hidden="true"></div>
+                <div>
+                  <div class="scan-progress-header">
+                    <strong id="endpoint-scan-progress-label">Scanning endpoint...</strong>
+                    <span id="endpoint-scan-progress-percent">0%</span>
+                  </div>
+                  <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="endpoint-scan-progress-bar"></span></div>
+                </div>
+              </div>
+              <div class="scan-deck-live-actions">
+                <button type="button" id="endpoint-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
+                <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="endpoint-wizard" class="scan-wizard hidden">
+            <header class="scan-wizard-head">
+              <button type="button" id="endpoint-wizard-close" class="secondary-btn mini-btn wizard-back-link" title="Back to scans" aria-label="Back to scans"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg></button>
+              <div class="scan-wizard-title">
+                <h4 id="endpoint-wizard-heading">New endpoint scan</h4>
+                <span id="endpoint-wizard-current-step" class="wizard-current-step" aria-live="polite">Step 1: Scan identity</span>
+              </div>
+              <ol class="scan-stepper" data-stepper="endpoint">
+                <li class="stepper-node is-current" data-step-node="1"><span class="stepper-dot">1</span><span class="stepper-label">Basics</span></li>
+                <li class="stepper-node" data-step-node="2"><span class="stepper-dot">2</span><span class="stepper-label">Configuration</span></li>
+                <li class="stepper-node" data-step-node="3"><span class="stepper-dot">3</span><span class="stepper-label">Connect &amp; launch</span></li>
+              </ol>
+            </header>
+
+            <div class="scan-form-column">
+              <div class="wizard-step" data-wizard-step="1">
+                <p class="wizard-step-eyebrow">Step 1 — Scan identity</p>
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan identity">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span>Basics</h4>
+                    <span>Name this scan and enter the target machine</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label class="scan-form-wide">
+                      Scan name
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-bookmark"/></svg><input id="endpoint-profile-name" maxlength="80" placeholder="HR laptop, Finance workstation..." /></span>
+                    </label>
+                    <label>
+                      Endpoint host / IP
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-server"/></svg><input id="endpoint-host" placeholder="10.10.10.25 or laptop01.domain.local" /></span>
+                    </label>
+                    <label>
+                      Target Windows user
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user"/></svg><input id="endpoint-target-username" placeholder="j.doe, optional for drive scans" /></span>
+                    </label>
+                    <label>
+                      Domain
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-globe"/></svg><input id="endpoint-domain" value="WORKGROUP" /></span>
+                    </label>
+                    <label>
+                      Admin username
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><input id="endpoint-username" autocomplete="username" placeholder="Administrator" /></span>
+                    </label>
+                    <label>
+                      Admin password
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="endpoint-password" type="password" autocomplete="current-password" /></span>
+                    </label>
+                    <label>
+                      Credential ref
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-bookmark"/></svg><input id="endpoint-credential-ref" placeholder="Stored after first credential save" /></span>
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="2">
+                <p class="wizard-step-eyebrow">Step 2 — Configuration</p>
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan scope">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-tree"/></svg></span>Scope</h4>
+                    <span>What to walk on the endpoint, and how</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label>
+                      Path scope
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-tree"/></svg><select id="endpoint-path-scope">
+                        <option value="default">User profile quick scan</option>
+                        <option value="desktop">Desktop only</option>
+                        <option value="documents">Documents only</option>
+                        <option value="downloads">Downloads only</option>
+                        <option value="onedrive">OneDrive only</option>
+                        <option value="all">Target profile data</option>
+                        <option value="all_profiles">All user profiles</option>
+                        <option value="c_drive">C drive data scan</option>
+                        <option value="all_fixed_drives">All fixed drives</option>
+                        <option value="custom">Custom paths</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Custom paths
+                      <span class="field-shell field-shell-top"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><textarea id="endpoint-custom-paths" rows="2" placeholder="C:\\Users\\j.doe\\Desktop; C:\\Temp; \\\\server\\share" disabled></textarea></span>
+                    </label>
+                    <label>
+                      Max folder depth
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-layers"/></svg><input id="endpoint-max-depth" type="number" min="1" max="12" value="6" /></span>
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-read-content" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-eye"/></svg>
+                      Read content preview
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-read-acl" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-lock"/></svg>
+                      Read permissions / ACL
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-inspect-archives" type="checkbox" />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-file-archive"/></svg>
+                      Inspect archive contents
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-async-scan" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-circle-stop"/></svg>
+                      Run as cancellable job
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-incremental-enabled" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-scan-search"/></svg>
+                      Incremental (new/changed content only)
+                    </label>
+                  </div>
+<div class="extension-filter endpoint-extension-filter">
+              <label>Endpoint extension policy</label>
+              <div id="endpoint-ext-simple-mode" class="ext-mode-panel">
+                <div class="ext-preset-grid">
+                  <label class="ext-preset-card ext-tier-secrets">
+                    <input type="radio" name="endpoint-ext-preset" value="secrets" />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span>
+                    <span class="ext-preset-title">Secrets & credentials</span>
+                    <span class="ext-preset-desc">Keys, vaults, configs, remote access profiles.</span>
+                  </label>
+                  <label class="ext-preset-card ext-tier-recommended">
+                    <input type="radio" name="endpoint-ext-preset" value="recommended" />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-star"/></svg></span>
+                    <span class="ext-preset-badge">Default</span>
+                    <span class="ext-preset-title">Recommended</span>
+                    <span class="ext-preset-desc">Secrets, documents, data exports, mailboxes.</span>
+                  </label>
+                  <label class="ext-preset-card ext-tier-broad">
+                    <input type="radio" name="endpoint-ext-preset" value="broad" />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-layout-grid"/></svg></span>
+                    <span class="ext-preset-title">Broad</span>
+                    <span class="ext-preset-desc">Enterprise coverage without media-heavy files.</span>
+                  </label>
+                  <label class="ext-preset-card ext-tier-all">
+                    <input type="radio" name="endpoint-ext-preset" value="all" checked />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-sparkles"/></svg></span>
+                    <span class="ext-preset-title">All extensions</span>
+                    <span class="ext-preset-desc">Full inventory sweep across every known file type.</span>
+                  </label>
+                </div>
+              </div>
+              <div id="endpoint-ext-advanced-mode" class="ext-mode-panel hidden">
+                <input id="endpoint-extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+                <div class="extension-selected" data-extension-selected-for="endpoint"></div>
+                <div id="endpoint_allowed_extensions" class="extension-list" role="group" aria-label="Endpoint extension filter"></div>
+                <div class="extension-actions" aria-label="Endpoint extension presets">
+                  <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="all">All</button>
+                  <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="clear">Clear</button>
+                </div>
+                <div class="extension-actions" aria-label="Endpoint custom extension">
+                  <input id="endpoint-custom-extension-input" type="text" placeholder=".custom" />
+                  <button type="button" class="secondary-btn mini-btn" id="endpoint-add-custom-extension-btn">Add</button>
+                </div>
+              </div>
+              <button type="button" id="endpoint-ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
+            </div>
+
+<div class="compliance-selector endpoint-compliance-selector" data-compliance-scope="endpoint">
+              <div class="compliance-selector-head">
+                <label class="checkbox-row option-tile compliance-toggle">
+                  <input id="endpoint-compliance-enabled" type="checkbox" />
+                  <span class="compliance-toggle-switch" aria-hidden="true"></span>
+                  <span>Enable compliance mapping</span>
+                </label>
+                <span class="compliance-hint">Enable to choose compliance frameworks. GDPR, PCI DSS, and NIST are currently available.</span>
+              </div>
+              <div class="compliance-framework-grid" data-compliance-frameworks="endpoint"></div>
+            </div>
+
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="3">
+                <p class="wizard-step-eyebrow">Step 3 — Connect &amp; launch</p>
+                <section class="visual-panel endpoint-panel endpoint-io-panel wizard-review-card" aria-label="Review">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Review</h4>
+                    <span>Select a row to change it</span>
+                  </div>
+                  <div class="review-rows" id="endpoint-review-rows"></div>
+                </section>
+                <section class="visual-panel endpoint-panel winrm-activation-panel endpoint-io-panel" aria-label="Target WinRM">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-plug-zap"/></svg></span>Prepare target WinRM</h4>
+                    <span>Uses the admin credential from Basics</span>
+                  </div>
+                  <div class="hidden" aria-hidden="true">
+                    <input id="winrm-activate-host" tabindex="-1" />
+                    <input id="winrm-target-username" tabindex="-1" autocomplete="username" />
+                    <input id="winrm-activate-domain" tabindex="-1" value="WORKGROUP" />
+                    <input id="winrm-activate-username" tabindex="-1" autocomplete="username" />
+                    <input id="winrm-activate-password" tabindex="-1" type="password" autocomplete="current-password" />
+                  </div>
+                  <div class="actions endpoint-actions">
+                    <button type="button" id="endpoint-activate-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-plug-zap"/></svg>Prepare &amp; Test target WinRM</button>
+                    <button type="button" id="endpoint-test-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-activity"/></svg>Test endpoint</button>
+                  </div>
+                  <p id="winrm-activate-status" class="save-status">One-time per machine: enables WinRM on the target using the admin credential, then verifies the connection.</p>
+                  <div id="endpoint-wizard-status" class="wizard-status-mirror muted">Ready</div>
+                </section>
+<details class="scan-advanced">
+            <summary>Optional — prepare local backend WinRM (rarely needed)</summary>
+
+          <section class="visual-panel endpoint-panel winrm-activation-panel">
+            <div class="panel-title">
+              <h4>Optional local readiness</h4>
+              <span>Backend host only</span>
+            </div>
+            <div class="asset-form-grid endpoint-form">
+              <label>
+                Domain
+                <input id="local-winrm-domain" value="WORKGROUP" />
+              </label>
+              <label>
+                Admin username
+                <input id="local-winrm-username" autocomplete="username" placeholder="Local admin on this backend host" />
+              </label>
+              <label>
+                Admin password
+                <input id="local-winrm-password" type="password" autocomplete="current-password" />
+              </label>
+            </div>
+            <div class="actions endpoint-actions">
+              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Prepare local backend WinRM</button>
+            </div>
+            <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows host running this backend. Do not enter domain/DC credentials here unless this backend host actually needs them; target machine local-admin credentials are entered below.</p>
+          </section>
+          </details>
+              </div>
+
+              <footer class="scan-wizard-footer">
+                <button type="button" id="endpoint-wizard-delete" class="wizard-delete-btn hidden">Delete this scan</button>
+                <span id="endpoint-wizard-hint" class="wizard-hint" aria-live="polite"></span>
+                <div class="wizard-nav">
+                  <button type="button" id="endpoint-wizard-back" class="secondary-btn" disabled>Back</button>
+                  <button type="button" id="endpoint-wizard-next">Next</button>
+                  <button type="button" id="endpoint-wizard-save" class="hidden">Save scan</button>
+                </div>
+                <button type="button" id="endpoint-scan-btn" class="hidden" tabindex="-1" aria-hidden="true"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-scan-line"/></svg>Scan endpoint</button>
+              </footer>
+            </div>
+          </div>
+
+          <section class="context-strip context-strip-trailing" id="endpoint-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run an endpoint scan or review the latest file-server scan in Data Inventory.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+          </section>
+        </section>
+
+
+        <section id="tab-security" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-users-round" viewBox="0 0 24 24"><path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="8" r="5"/><path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/></symbol>
+              <symbol id="li-user-cog" viewBox="0 0 24 24"><circle cx="18" cy="15" r="3"/><circle cx="9" cy="7" r="4"/><path d="M10 15H6a4 4 0 0 0-4 4v2"/><path d="m21.7 16.4-.9-.3"/><path d="m15.2 13.9-.9-.3"/><path d="m16.6 18.7.3-.9"/><path d="m19.1 12.2.3-.9"/><path d="m19.6 18.7-.4-1"/><path d="m16.8 12.3-.4-1"/><path d="m14.3 16.6 1-.4"/><path d="m20.7 13.8 1-.4"/></symbol>
+              <symbol id="li-file-json" viewBox="0 0 24 24"><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1"/><path d="M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1"/></symbol>
+              <symbol id="li-list-filter" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></symbol>
+              <symbol id="li-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
               <h3>Security operations</h3>
-              <p>API keys, audit evidence, DLP export, and tenant controls exposed by the backend.</p>
             </div>
           </div>
 
           <div class="security-grid">
             <section class="visual-panel">
               <div class="panel-title">
-                <h4>User management</h4>
-                <span>Admin only</span>
+                <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-user-cog"/></svg></span>User management</h4>
+                <span class="panel-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
               </div>
               <div class="asset-form-grid compact-form">
                 <label>
@@ -376,7 +1207,7 @@
                   <select id="new-user-role">
                     <option value="viewer">Viewer</option>
                     <option value="analyst">Analyst</option>
-                    <option value="admin">Admin</option>
+                    <option value="admin">MSSP Admin</option>
                   </select>
                 </label>
                 <label>
@@ -400,8 +1231,8 @@
 
             <section class="visual-panel">
               <div class="panel-title">
-                <h4>API key management</h4>
-                <span>Admin only</span>
+                <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span>API key management</h4>
+                <span class="panel-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
               </div>
               <label>
                 Key label
@@ -413,8 +1244,8 @@
 
             <section class="visual-panel">
               <div class="panel-title">
-                <h4>DLP policy export</h4>
-                <span>Generic JSON</span>
+                <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-file-json"/></svg></span>DLP policy export</h4>
+                <span class="panel-badge">Generic JSON</span>
               </div>
               <p class="panel-copy">Exports the current customer asset rules as an import-ready policy skeleton.</p>
               <button type="button" id="export-dlp-policy-btn" class="secondary-btn">Generate policy</button>
@@ -428,7 +1259,7 @@
                 <h3>Users and roles</h3>
                 <p>Manage tenant access levels and reset local passwords.</p>
               </div>
-              <button type="button" id="refresh-users-btn" class="secondary-btn">Refresh users</button>
+              <button type="button" id="refresh-users-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh users</button>
             </div>
             <div class="table-wrap">
               <table class="logic-table">
@@ -439,10 +1270,11 @@
                     <th>Role</th>
                     <th>Last login</th>
                     <th>Reset password</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody id="users-body">
-                  <tr><td colspan="5" class="empty">Sign in as admin to load users.</td></tr>
+                  <tr><td colspan="6" class="empty">Sign in as admin to load users.</td></tr>
                 </tbody>
               </table>
             </div>
@@ -451,10 +1283,22 @@
           <section class="workspace">
             <div class="table-toolbar">
               <div>
-                <h3>Audit trail</h3>
+                <h3><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scroll-text"/></svg></span>Audit trail</h3>
                 <p>Immutable tenant activity captured by the backend.</p>
               </div>
-              <button type="button" id="refresh-audit-btn" class="secondary-btn">Refresh audit</button>
+              <div class="history-controls audit-controls">
+                <span class="field-shell audit-filter-shell"><svg class="f-ico field-ico dropdown-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg><select id="audit-range" class="tenant-switcher" title="Filter audit trail">
+                  <option value="all">All events</option>
+                  <option value="1">Last 24 hours</option>
+                  <option value="5">Last 5 days</option>
+                  <option value="7">Last 7 days</option>
+                  <option value="30">Last 30 days</option>
+                  <option value="custom">Custom range</option>
+                </select></span>
+                <input id="audit-from" class="history-date hidden" type="date" title="Audit from date" />
+                <input id="audit-to" class="history-date hidden" type="date" title="Audit to date" />
+                <button type="button" id="refresh-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh audit</button>
+              </div>
             </div>
             <div class="table-wrap">
               <table class="logic-table">
@@ -474,19 +1318,27 @@
           </section>
         </section>
 
-        <section id="tab-tenants" class="tab-panel">
+        <section id="tab-admin" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+            <defs>
+              <symbol id="li-building-2" viewBox="0 0 24 24"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></symbol>
+              <symbol id="li-scroll-text" viewBox="0 0 24 24"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></symbol>
+              <symbol id="li-shield-alert" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+              <symbol id="li-lock-keyhole" viewBox="0 0 24 24"><circle cx="12" cy="16" r="1"/><rect x="3" y="10" width="18" height="12" rx="2"/><path d="M7 10V7a5 5 0 0 1 10 0v3"/></symbol>
+              <symbol id="li-user-plus" viewBox="0 0 24 24"><path d="M2 21a8 8 0 0 1 13.292-6"/><circle cx="10" cy="8" r="5"/><path d="M19 16v6"/><path d="M22 19h-6"/></symbol>
+              <symbol id="li-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+            </defs>
+          </svg>
           <div class="section-header">
             <div>
-              <p class="eyebrow">Tenant management</p>
               <h3>Customers and workspaces</h3>
-              <p>Register new accounts against an existing tenant and let admins create or remove empty tenant workspaces.</p>
             </div>
           </div>
 
           <section class="visual-panel tenant-admin-panel">
             <div class="panel-title">
-              <h4>Add tenant</h4>
-              <span>Admin only</span>
+              <h4><span class="panel-ico adm-panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-building-2"/></svg></span>Add tenant</h4>
+              <span class="admin-only-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
             </div>
             <div class="asset-form-grid compact-form">
               <label>
@@ -498,7 +1350,7 @@
                 <input id="new-tenant-name" placeholder="Customer A" />
               </label>
             </div>
-            <button type="button" id="create-tenant-btn">Create tenant</button>
+            <button type="button" id="create-tenant-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-user-plus"/></svg>Create tenant</button>
             <p id="tenant-management-status" class="save-status">Tenant controls load after admin sign-in.</p>
           </section>
 
@@ -508,13 +1360,14 @@
                 <h3>Tenant list</h3>
                 <p>Available tenants are used by registration, user management, and the MSSP switcher.</p>
               </div>
-              <button type="button" id="refresh-tenants-btn" class="secondary-btn">Refresh tenants</button>
+              <button type="button" id="refresh-tenants-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh tenants</button>
             </div>
             <div class="table-wrap">
               <table class="logic-table">
                 <thead>
                   <tr>
                     <th>Tenant</th>
+                    <th>Registration code</th>
                     <th>Reports</th>
                     <th>Audit</th>
                     <th>Alerts</th>
@@ -522,33 +1375,11 @@
                   </tr>
                 </thead>
                 <tbody id="tenants-body">
-                  <tr><td colspan="5" class="empty">Sign in as admin to load tenants.</td></tr>
+                  <tr><td colspan="6" class="empty">Sign in as admin to load tenants.</td></tr>
                 </tbody>
               </table>
             </div>
           </section>
-        </section>
-
-        <section id="tab-integrations" class="tab-panel">
-          <div class="section-header">
-            <div>
-              <p class="eyebrow">Platform coverage</p>
-              <h3>Connectors and response workflows</h3>
-              <p>What is active today, what has a backend adapter, and what is ready for production integration.</p>
-            </div>
-          </div>
-          <div class="integration-layout">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Reference architecture</h4>
-                <span>Connector-ready</span>
-              </div>
-              <div id="integration-diagram" class="integration-diagram"></div>
-            </section>
-            <section>
-              <div id="integration-grid" class="integration-grid"></div>
-            </section>
-          </div>
         </section>
 
         <section id="tab-logic" class="tab-panel workspace risk-logic">
@@ -566,21 +1397,38 @@
       </main>
     </div>
 
-    <div id="detail-drawer" class="detail-drawer hidden">
-      <div class="detail-drawer-backdrop" data-close-detail></div>
-      <aside class="detail-drawer-panel" aria-label="File detail">
-        <div class="detail-drawer-header">
-          <div>
-            <span id="detail-drawer-eyebrow">Risk context</span>
-            <h3 id="detail-drawer-title">Details</h3>
-            <p id="detail-drawer-meta"></p>
+    <div id="asset-detail-modal" class="asset-detail-modal hidden" role="dialog" aria-modal="true" aria-labelledby="asset-modal-title">
+      <div class="asset-detail-backdrop" data-close-asset-modal></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Asset &amp; scan detail</span>
+            <h3 id="asset-modal-title">Asset</h3>
+            <p id="asset-modal-path" class="asset-detail-path"></p>
           </div>
-          <button type="button" class="icon-btn" data-close-detail title="Close detail">x</button>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-asset-modal title="Close" aria-label="Close asset detail">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
         </div>
-        <div id="detail-drawer-body" class="detail-drawer-body"></div>
-      </aside>
+        <div class="asset-detail-tabs" role="tablist" aria-label="Asset detail sections">
+          <button type="button" id="asset-tab-essential" class="asset-tab active" data-asset-tab="essential" role="tab" aria-controls="asset-modal-body" aria-selected="true">Essentials</button>
+          <button type="button" id="asset-tab-findings" class="asset-tab" data-asset-tab="findings" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Findings</button>
+          <button type="button" id="asset-tab-reasons" class="asset-tab" data-asset-tab="reasons" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Reasons</button>
+          <button type="button" id="asset-tab-actions" class="asset-tab" data-asset-tab="actions" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Actions</button>
+        </div>
+        <div id="asset-modal-body" class="asset-detail-body" role="tabpanel" aria-labelledby="asset-tab-essential" tabindex="0"></div>
+      </div>
     </div>
 
-    <script src="/static/app.js?v=11"></script>
+    <div id="toast-host" class="toast-host" aria-live="polite"></div>
+
+
+    <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
+    <script src="/static/sso-handoff.js?v=1"></script>
+    <script src="/static/app.js?v=187"></script>
+    <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
+    <script src="/static/scan-summary.js?v=1"></script>
+    <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
+    <script src="/static/sentro-fx.js?v=13" defer></script>
   </body>
 </html>

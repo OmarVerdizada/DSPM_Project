@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Floor is 3.10: PEP 604 unions are evaluated at runtime by Pydantic v2.
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies (runtime from the hash-verified lock)
+        # M17: the matrix installs the runtime tree from the pinned, hash-verified
+        # lock (reproducible + tamper-evident), then the dev-only test runner.
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.lock
+          pip install -r requirements-dev.txt
+
+      - name: Byte-compile all sources
+        run: python -m compileall -q backend classification collectors discovery risk scripts permissions main.py
+
+      - name: Run test suite
+        # Baseline at the time of writing: 296 passed, 1 skipped.
+        run: python -m pytest
+
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+
+      # Release gate recorded as outstanding in three fix reports under docs/:
+      # these syntax checks were never run because Node was absent from the
+      # development environment.
+      - name: Syntax-check operator console JavaScript
+        run: |
+          for f in frontend/*.js; do
+            echo "checking $f"
+            node --check "$f"
+          done
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Runtime state, developer-only assets and secrets must never be tracked.
+      - name: Assert no generated or developer-only files are tracked
+        run: |
+          status=0
+          while read -r pattern; do
+            [ -z "$pattern" ] && continue
+            matches=$(git ls-files -- "$pattern")
+            if [ -n "$matches" ]; then
+              echo "::error::tracked files match forbidden pattern '$pattern':"
+              echo "$matches"
+              status=1
+            fi
+          done <<'PATTERNS'
+          data/**
+          tmp/**
+          **/__pycache__/**
+          **/node_modules/**
+          .obsidian/**
+          .claude/**
+          *.sqlite
+          *.db
+          *.pyc
+          .env
+          PATTERNS
+          exit $status
+
+      - name: Assert .env.example stays in sync with the code
+        run: |
+          missing=0
+          vars=$(grep -rhoE '(os\.getenv|os\.environ\.get)\(\s*"DSPM_[A-Z_0-9]+"' \
+            --include='*.py' . | grep -oE '"[A-Z_0-9]+"' | tr -d '"' | sort -u)
+          for v in $vars; do
+            if ! grep -qE "^#?\s*$v=" .env.example; then
+              echo "::error::$v is read by the code but absent from .env.example"
+              missing=1
+            fi
+          done
+          exit $missing
+
+      # H1 recurrence guard (security roadmap 0.2): a credential must never reach
+      # a subprocess command line - it must be passed via the child env block.
+      - name: Assert no credential reaches a command line
+        run: python3 scripts/check_no_cmdline_secrets.py
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # Fails the build if a credential/secret is committed. The repo ships
+      # deliberate secret-like test fixtures under enterprise_test_data/, but
+      # that path is gitignored and never tracked, so it is not scanned.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  supply-chain:
+    name: Lock + SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SBOM tooling
+        run: python -m pip install cyclonedx-bom
+
+      # Reproducibility gate: every runtime dependency installs from the pinned,
+      # hash-verified lock. A stale or tampered lock fails here.
+      - name: Hash-verified install from requirements.lock
+        run: python -m pip install --require-hashes -r requirements.lock
+
+      - name: Generate CycloneDX SBOM from the locked tree
+        run: python -m cyclonedx_py requirements requirements.lock --of JSON --output-reproducible -o sbom.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom
+          path: sbom.json
+
+  dependency-audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # M16: fail the build on a known-vulnerable pinned Python dependency.
+      - name: pip-audit the hash-locked tree (blocking)
+        run: |
+          python -m pip install pip-audit
+          python -m pip_audit -r requirements.lock
+
+  lock-drift:
+    name: requirements.lock drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          # M17: the lock must be generated on the FLOOR Python (3.10) so it is
+          # valid across the whole 3.10-3.13 matrix.
+          python-version: "3.10"
+
+      # M17: regenerate the lock from requirements.txt and fail if the committed
+      # lock drifted (requirements.txt edited without re-locking). The comparison
+      # ignores the autogenerated header/annotation comments (which carry the
+      # generating Python version) and checks the pins + hashes.
+      - name: Regenerate and assert no lock drift
+        run: |
+          python -m pip install pip-tools
+          cp requirements.lock requirements.lock.committed
+          python -m piptools compile --quiet --generate-hashes --output-file=requirements.lock requirements.txt
+          if ! diff <(grep -vE '^\s*#' requirements.lock.committed) <(grep -vE '^\s*#' requirements.lock) >/dev/null; then
+            echo "::error::requirements.lock is out of sync with requirements.txt. Regenerate it on Python 3.10 with 'pip-compile --generate-hashes' and commit."
+            diff <(grep -vE '^\s*#' requirements.lock.committed) <(grep -vE '^\s*#' requirements.lock) || true
+            exit 1
+          fi

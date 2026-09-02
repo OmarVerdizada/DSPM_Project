@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import uvicorn
 
+from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from scripts.logger import get_logger
 from scripts.report import generate_report
@@ -13,6 +15,11 @@ logger = get_logger(__name__)
 
 
 def run_scan(args: argparse.Namespace) -> None:
+    allowed_extensions = [
+        item.strip()
+        for item in (args.extensions or "").split(",")
+        if item.strip()
+    ]
     config = ScanConfig(
         server=args.server,
         username=args.username,
@@ -20,18 +27,30 @@ def run_scan(args: argparse.Namespace) -> None:
         domain=args.domain,
         local_path=args.local_path,
         max_depth=args.max_depth,
+        allowed_extensions=allowed_extensions,
+        extension_filter_enabled=bool(allowed_extensions),
+        include_hidden=args.include_hidden,
+        include_system=args.include_system,
+        hidden_filter_enabled=args.only_hidden,
+        system_filter_enabled=args.only_system,
+        compliance_enabled=args.compliance,
+        compliance_frameworks=normalize_framework_ids(args.frameworks.split(",")) if args.frameworks else [],
     )
     engine = DSPMDiscoveryEngine(config)
     report = engine.run()
+    data = enrich_report_with_compliance(report.to_dict(), args.compliance, config.compliance_frameworks)
 
     output_path = Path(args.output)
-    generate_report(report, output_path)
+    generate_report(data, output_path)
 
     logger.info("Scan completed: %s files analyzed", report.summary.total_files)
     logger.info("Report saved to %s", output_path)
 
 
 def serve(args: argparse.Namespace) -> None:
+    is_production = os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}
+    if args.reload and is_production:
+        raise SystemExit("--reload is disabled when DSPM_ENV=production")
     uvicorn.run("backend.app:app", host=args.host, port=args.port, reload=args.reload)
 
 
@@ -46,6 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--domain", default="WORKGROUP", help="AD domain or workgroup.")
     scan_parser.add_argument("--local-path", default="enterprise_test_data", help="Local folder fallback/sample data path.")
     scan_parser.add_argument("--max-depth", type=int, default=4, help="Maximum recursive SMB folder depth.")
+    scan_parser.add_argument("--extensions", default="", help="Comma-separated extensions to scan, e.g. .py,.docx,.pdf.")
+    scan_parser.add_argument("--include-hidden", action="store_true", help="Include hidden files in an unrestricted scan.")
+    scan_parser.add_argument("--include-system", action="store_true", help="Include system files in an unrestricted scan.")
+    scan_parser.add_argument("--only-hidden", action="store_true", help="Scan only hidden files, optionally combined with --extensions.")
+    scan_parser.add_argument("--only-system", action="store_true", help="Scan only system files, optionally combined with --extensions.")
+    scan_parser.add_argument("--compliance", action="store_true", help="Enable compliance classifiers and mapping.")
+    scan_parser.add_argument("--frameworks", default="", help="Comma-separated compliance frameworks, e.g. gdpr,pci_dss.")
     scan_parser.add_argument("--output", default="report.json", help="Output report JSON path.")
     scan_parser.set_defaults(func=run_scan)
 

@@ -1,0 +1,21 @@
+# Normalize line endings for reproducible, cross-platform checkouts.
+# Text files are stored with LF in the repo; Git converts to the platform
+# default on checkout. This keeps diffs and build inputs stable regardless of
+# whether a developer is on Windows or Linux/CI.
+* text=auto eol=lf
+
+# Explicitly binary assets (never normalize / never diff as text).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+*.zip binary
+*.kdbx binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
