@@ -1,12 +1,33 @@
 # Enterprise Database Roadmap
 
-**Status:** Roadmap — sequenced engineering plan derived from the
+**Status:** In implementation — see §0 for what is live. Sequenced engineering plan derived from the
 [Enterprise Database Readiness Assessment (2026-08-30)](ENTERPRISE_DATABASE_ASSESSMENT_2026-08-30.md).
 **Verdict being remediated:** NO-GO for enterprise production; strong PostgreSQL
 foundation; hardening and operating-model gaps, not a technology problem.
 **Strategy:** Harden PostgreSQL as the single system of record. No rewrite.
 
 ---
+
+## 0. Implementation status (2026-09-02)
+
+Every claim below is backed by a committed evidence artifact under
+[`docs/database/evidence/`](evidence/) or by tests in `tests/`.
+
+| Phase | Status | Proof |
+| --- | --- | --- |
+| **0 — One authority** | **Done** | Production refuses SQLite; `DSPM_DB_EXPECTED_IDENTITY` pin; `/api/health` carries backend + identity (`tests/test_database_authority.py`) |
+| **1 — Recovery is real** | **Done** | Chunked-Fernet encrypted `pg_dump` + manifest; WAL archiving live (`archived_count=126, failed_count=0`); timed restore drills PASS (latest 25.4 s / 125,476 rows, `restore_drill_20260902T060821Z.json`) |
+| **2 — Versioned schema control** | **Done** | `backend/migrations.py`: recorded revisions 0001–0004, advisory-locked upgrade, production verify-or-refuse gate, `status/upgrade/stamp` CLI; suite DB builds through the runner |
+| **3 — Migration v2 + cutover** | **Done** | Schema discovery (21 tables; v1's list lost 4 with real rows), FK-topological copy order, per-table AND per-tenant reconciliation, evidence artifact; standing `sentro_dev` cut over at revision 4 (`migration_20260902T060654Z.json`) |
+| **4 — Integrity & tenancy** | **Done** | 0003: validated tenant FKs, ON DELETE RESTRICT, orphan refusal (fired live: 80 test-artifact rows, `orphan_repair_*.json`); found+fixed scan_profiles erasure gap. Roles: owner/app/backup/readonly matrix verified (`db_roles_*.json`), backup role BYPASSRLS. 0004: FORCE RLS + `db.tenant_scope()` SET LOCAL seam; hostile rehearsal 8/8 PASS as the unprivileged runtime role (`rls_rehearsal_*.json`); PG suite tests in `tests/test_tenant_rls.py` |
+| **5 — Authoritative model + artifact tier** | **Partial** | Normalized inventory reads are the gated default (readiness-gated, parity-tested). **Open:** transactional normalized writes as a hard failure, `report_json` → encrypted content-addressed artifacts (must extend backup/erasure coverage to the artifact tier before cutover — do not ship half), blob-path retirement after a parity soak |
+| **6 — Operate, observe, certify** | **Core done** | `/api/ready` read+write probe + revision gate (503 when unservable); PostgreSQL CI job (migrations from empty + full suite on postgres:18); `pg_stat_statements` + `track_io_timing` live on the cluster; `scripts/db_retention.py` per-data-class pruning. **Open (infra-bound):** streaming standby/failover exercises, patch SLA cadence, a quarter of green exercises |
+| **7 — Scale & regulated tiers** | Not started | Demand-driven by design; nothing on this host justifies it yet |
+
+Standing follow-ups, in order: (1) Phase 5 artifact tier with backup +
+erasure coverage designed in from the start; (2) tighten the RLS unset-scope
+default from `'*'` to fail-closed once background writers are scoped;
+(3) HA standby when a second host exists.
 
 ## 1. What changed since the assessment (verified 2026-09-01)
 
