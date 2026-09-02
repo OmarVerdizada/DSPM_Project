@@ -343,6 +343,10 @@ const EXTENSION_GROUP_ORDER = [
 
 let accessToken = safeSessionGet("dspm-access-token") || "";
 let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
+// Every asynchronous tenant-owned render captures this generation. Switching
+// tenant increments it, so a slower response from the old tenant can never
+// repopulate a dashboard, chart, inventory page, profile deck, or audit table.
+let tenantContextVersion = 0;
 let currentUser = safeSessionGet("dspm-user") || "admin";
 let currentRole = safeSessionGet("dspm-role") || "admin";
 let customExtensions = loadCustomExtensions();
@@ -513,6 +517,21 @@ let inventorySourceFacet = "ALL";
 let inventoryFindingFacet = "ALL";
 let inventoryFrameworkFacets = new Set();
 let fileSearchIndex = new WeakMap();
+
+function captureTenantContext() {
+  return { tenantId: currentTenant, version: tenantContextVersion };
+}
+
+function isCurrentTenantContext(context, payload = null) {
+  if (!context || context.version !== tenantContextVersion || context.tenantId !== currentTenant) {
+    return false;
+  }
+  // Tenant-owned API responses echo the effective backend scope. Keep the
+  // generation check for endpoints without an echo, and fail closed if an
+  // echoed scope ever disagrees with the request context.
+  const responseTenant = payload && typeof payload === "object" ? String(payload.tenant_id || "") : "";
+  return !responseTenant || responseTenant === context.tenantId;
+}
 
 const ROW_PAGE_SIZE = 200;
 const INVENTORY_SERVER_PAGE_SIZE = 100;
@@ -1080,6 +1099,9 @@ function setBusy(isBusy) {
   testBtn.disabled = isBusy;
   scanBtn.disabled = isBusy;
   generateDemoDataBtn.disabled = isBusy;
+  // A scan request captures one tenant for its entire lifecycle. Do not let a
+  // manual switch retarget polling/rendering while that operation is active.
+  if (tenantSwitcher) tenantSwitcher.disabled = isBusy;
   if (scanCancelBtn) scanCancelBtn.disabled = !activeScanJobId;
   if (localWinrmActivateBtn) localWinrmActivateBtn.disabled = isBusy;
   if (endpointActivateBtn) endpointActivateBtn.disabled = isBusy;
@@ -1611,12 +1633,16 @@ function facetsToEstateSummary(facets = {}) {
 
 async function refreshEstateSummary() {
   if (!accessToken) return;
+  const context = captureTenantContext();
   try {
     const facets = await api("/api/inventory/facets", null, "GET");
+    if (!isCurrentTenantContext(context, facets)) return;
     estateSummary = facetsToEstateSummary(facets);
   } catch {
+    if (!isCurrentTenantContext(context)) return;
     estateSummary = null;
   }
+  if (!isCurrentTenantContext(context)) return;
   // Repaint the dashboard-facing views now that the estate numbers are known.
   updateSummary(latestReport?.summary || buildCurrentSummary());
   renderExecutiveExperience();
@@ -1725,6 +1751,7 @@ function applyScanReport(report, scanKind = "file-server") {
 let workspaceSliceRequest = 0;
 async function hydrateWorkspaceSlice() {
   if (!latestReport?.files_omitted) return;
+  const context = captureTenantContext();
   const requestId = ++workspaceSliceRequest;
   const resultsBody = document.getElementById("results-body");
   if (resultsBody && resultsBody.querySelector(".inventory-empty-cell")) {
@@ -1737,7 +1764,7 @@ async function hydrateWorkspaceSlice() {
   }
   try {
     const data = await api("/api/inventory?sort=risk_score&limit=200", null, "GET");
-    if (requestId !== workspaceSliceRequest || !latestReport?.files_omitted) return;
+    if (!isCurrentTenantContext(context, data) || requestId !== workspaceSliceRequest || !latestReport?.files_omitted) return;
     const items = (data?.items || []).map((item) => hydrateInventoryPageItem(item));
     if (!items.length) return;
     latestFiles = items;
@@ -2484,18 +2511,19 @@ async function streamInventoryExport(format) {
 
 async function refreshInventoryFacets() {
   if (!canUseInventoryPageWindow()) return;
+  const context = captureTenantContext();
   const selectedSource = inventorySourceFacet;
   const requestId = ++inventoryFacetRequest;
   try {
     const params = new URLSearchParams();
     if (selectedSource !== "ALL") params.set("source", selectedSource);
     const facets = await api(`/api/inventory/facets${params.size ? `?${params}` : ""}`, null, "GET");
-    if (requestId !== inventoryFacetRequest || inventorySourceFacet !== selectedSource) return;
+    if (!isCurrentTenantContext(context, facets) || requestId !== inventoryFacetRequest || inventorySourceFacet !== selectedSource) return;
     inventoryFacets = facets;
     const page = currentInventoryPage();
     if (page) renderRows(page.items, { serverPage: page });
   } catch (error) {
-    if (requestId === inventoryFacetRequest) {
+    if (isCurrentTenantContext(context) && requestId === inventoryFacetRequest) {
       inventoryFacets = null;
       setStatus(`Inventory facets unavailable: ${error.message}`);
     }
@@ -2522,6 +2550,7 @@ function renderInventoryPageLoading() {
 
 async function loadInventoryWindowPage(pageIndex = 0) {
   if (!inventoryPageWindow.active) return;
+  const context = captureTenantContext();
   inventoryPageAbortController?.abort();
   inventoryPageAbortController = null;
   const requestId = ++inventoryPageRequest;
@@ -2541,7 +2570,7 @@ async function loadInventoryWindowPage(pageIndex = 0) {
   renderInventoryPageLoading();
   try {
     const data = await api(`/api/inventory?${inventoryPageQuery(cursor)}`, null, "GET", { signal: controller.signal });
-    if (requestId !== inventoryPageRequest || !inventoryPageWindow.active) return;
+    if (!isCurrentTenantContext(context, data) || requestId !== inventoryPageRequest || !inventoryPageWindow.active) return;
     const page = {
       items: (data.items || []).map(hydrateInventoryPageItem),
       nextCursor: data.next_cursor || "",
@@ -2557,7 +2586,7 @@ async function loadInventoryWindowPage(pageIndex = 0) {
     trimInventoryPageCache();
     renderRows(page.items, { serverPage: page });
   } catch (error) {
-    if (error?.name === "AbortError" || requestId !== inventoryPageRequest) return;
+    if (error?.name === "AbortError" || !isCurrentTenantContext(context) || requestId !== inventoryPageRequest) return;
     inventoryPageWindow.loading = false;
     resultsBody.setAttribute("aria-busy", "false");
     inventoryPageWindow.error = error.message;
@@ -2738,6 +2767,7 @@ function renderRows(files, options = {}) {
 // path without the per-page attachment), one batched request fills them all
 // in - the cells never sit on an ellipsis.
 function resolveLazyDetailCounts(files = []) {
+  const context = captureTenantContext();
   const pendingByKey = new Map();
   files.forEach((file) => {
     if (file?.__inventory_page_item && !file.__inventory_detail_loaded && file.id
@@ -2759,6 +2789,7 @@ function resolveLazyDetailCounts(files = []) {
   const ids = [...new Set(pending.map((file) => String(file.id)))].slice(0, 500);
   api(`/api/inventory-detail-counts?ids=${encodeURIComponent(ids.join(","))}`, null, "GET")
     .then((data) => {
+      if (!isCurrentTenantContext(context, data)) return;
       const counts = data?.counts || {};
       let unpatched = 0;
       pending.forEach((file) => {
@@ -2878,13 +2909,23 @@ document.addEventListener("keydown", (event) => {
 });
 
 function completedInventoryScanNames() {
-  // A Data Inventory source must have data behind it. Saved configurations
-  // that have never run belong on the scan decks, not in a results filter.
-  return [...new Set([
-    ...latestHistoryItems.map((item) => String(item?.scan_label || "").trim()),
-    ...(inventoryFacets?.scans || []).map((item) => String(item?.value || "").trim()),
-  ].filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b));
+  // Tenants can contain a mix of current named scans, legacy reports that only
+  // carry a collector source, and newly saved profiles that have not run yet.
+  // Union all three so the selector never goes empty, with names shadowing
+  // protocols: a run or asset covered by a scan name is listed by that name
+  // only, and protocol values remain solely for data nothing named covers.
+  const candidates = [
+    ...latestHistoryItems.map((item) => item?.scan_label || item?.source),
+    ...(inventoryFacets?.scans || []).map((item) => item?.value),
+    ...(inventoryFacets?.sources || []).map((item) => item?.value),
+    ...scanProfilesState.map((profile) => profile?.name),
+  ];
+  const unique = new Map();
+  candidates.forEach((candidate) => {
+    const value = String(candidate || "").trim().slice(0, 80);
+    if (value && !unique.has(value.toLocaleLowerCase())) unique.set(value.toLocaleLowerCase(), value);
+  });
+  return [...unique.values()].sort((a, b) => a.localeCompare(b));
 }
 
 function renderInventoryScanOptions() {
@@ -3342,12 +3383,14 @@ function hashString(value) {
 
 async function ensureInventoryAssetDetail(file) {
   if (!file?.__inventory_page_item || file.__inventory_detail_loaded || !file.id) return file;
+  const context = captureTenantContext();
   const scanId = String(file.scan_id || "");
-  const requestKey = `${scanId}|${String(file.id)}`;
+  const requestKey = `${context.tenantId}|${scanId}|${String(file.id)}`;
   if (!inventoryDetailRequests.has(requestKey)) {
     const scanQuery = scanId ? `?scan_id=${encodeURIComponent(scanId)}` : "";
     const request = api(`/api/inventory/${encodeURIComponent(file.id)}${scanQuery}`, null, "GET")
       .then((data) => {
+        if (!isCurrentTenantContext(context, data)) return null;
         const asset = data.asset || {};
         const cachedItems = [...inventoryPageWindow.pages.values()].flatMap((page) => page.items || []);
         const targets = [...new Set([file, ...latestFiles, ...cachedItems])]
@@ -3680,6 +3723,7 @@ function setAssetModalTab(tab) {
 }
 
 async function openAssetDetailModal(keyOrControl, tab = "essential") {
+  const context = captureTenantContext();
   const key = typeof keyOrControl === "string"
     ? keyOrControl
     : keyOrControl.dataset.inventoryExpand || keyOrControl.closest("tr")?.dataset.fileKey || "";
@@ -3700,7 +3744,7 @@ async function openAssetDetailModal(keyOrControl, tab = "essential") {
   requestAnimationFrame(() => modal.querySelector(".asset-tab.active")?.focus());
   try {
     file = await ensureInventoryAssetDetail(file);
-    if (modal.classList.contains("hidden")) return;
+    if (!file || !isCurrentTenantContext(context) || modal.classList.contains("hidden")) return;
     assetModalFile = file;
     setAssetModalTab(tab);
   } catch (error) {
@@ -4603,19 +4647,24 @@ function renderRiskRulesCache() {
   }
 }
 
-async function loadComplianceKeywordLibrary(framework = "gdpr") {
+async function loadComplianceKeywordLibrary(framework = "gdpr", context = captureTenantContext()) {
   if (!accessToken) return;
   try {
-    latestComplianceKeywordLibrary = await api(`/api/compliance-keywords?framework=${encodeURIComponent(framework)}`, null, "GET");
-    latestComplianceKeywordLibraries[framework] = latestComplianceKeywordLibrary;
+    const library = await api(`/api/compliance-keywords?framework=${encodeURIComponent(framework)}`, null, "GET");
+    if (!isCurrentTenantContext(context, library)) return;
+    latestComplianceKeywordLibrary = library;
+    latestComplianceKeywordLibraries[framework] = library;
     renderRiskRulesCache();
   } catch (error) {
+    if (!isCurrentTenantContext(context)) return;
     try {
       if (framework !== "gdpr") throw error;
       const response = await fetch("/static/compliance_keywords_gdpr_builtin.json", { cache: "no-store" });
       if (!response.ok) throw new Error(`Static fallback failed: ${response.status}`);
-      latestComplianceKeywordLibrary = await response.json();
-      latestComplianceKeywordLibraries[framework] = latestComplianceKeywordLibrary;
+      const library = await response.json();
+      if (!isCurrentTenantContext(context)) return;
+      latestComplianceKeywordLibrary = library;
+      latestComplianceKeywordLibraries[framework] = library;
       renderRiskRulesCache();
       setKeywordImportStatus("Showing built-in GDPR keywords from static fallback. Restart backend to enable import/preview API.", "warning");
     } catch {
@@ -4625,16 +4674,21 @@ async function loadComplianceKeywordLibrary(framework = "gdpr") {
 }
 
 async function loadAllComplianceKeywordLibraries() {
+  const context = captureTenantContext();
   for (const item of COMPLIANCE_LOGIC) {
-    await loadComplianceKeywordLibrary(item.id);
+    if (!isCurrentTenantContext(context)) return;
+    await loadComplianceKeywordLibrary(item.id, context);
   }
 }
 
 async function reloadComplianceKeywordLibraryInPlace(framework = "gdpr") {
+  const context = captureTenantContext();
   const scrollX = window.scrollX;
   const scrollY = window.scrollY;
-  latestComplianceKeywordLibrary = await api(`/api/compliance-keywords?framework=${encodeURIComponent(framework)}`, null, "GET");
-  latestComplianceKeywordLibraries[framework] = latestComplianceKeywordLibrary;
+  const library = await api(`/api/compliance-keywords?framework=${encodeURIComponent(framework)}`, null, "GET");
+  if (!isCurrentTenantContext(context, library)) return;
+  latestComplianceKeywordLibrary = library;
+  latestComplianceKeywordLibraries[framework] = library;
   window.requestAnimationFrame(() => {
     window.scrollTo(scrollX, scrollY);
     window.requestAnimationFrame(() => window.scrollTo(scrollX, scrollY));
@@ -7408,18 +7462,24 @@ async function loadHistory() {
   if (!accessToken) {
     return;
   }
+  const context = captureTenantContext();
   const [history, dashboard, hashComparison, estateFacets] = await Promise.all([
     api("/api/history", null, "GET"),
     api("/api/executive-dashboard", null, "GET"),
     loadHashComparison(),
     api("/api/inventory/facets", null, "GET").catch(() => null),
   ]);
-  loadScanProfiles().catch(() => {});
+  if (!isCurrentTenantContext(context, history)
+      || !isCurrentTenantContext(context, dashboard)
+      || (hashComparison && !isCurrentTenantContext(context, hashComparison))
+      || (estateFacets && !isCurrentTenantContext(context, estateFacets))) return;
+  loadScanProfiles(context).catch(() => {});
   latestDashboard = dashboard;
   latestHashComparison = hashComparison;
   estateSummary = estateFacets ? facetsToEstateSummary(estateFacets) : null;
   renderHistory(history.history || []);
-  await restoreLatestSavedReport(history.history || []);
+  await restoreLatestSavedReport(history.history || [], context);
+  if (!isCurrentTenantContext(context)) return;
   renderExecutiveExperience();
   loadTenants().catch(() => {});
 }
@@ -7433,10 +7493,13 @@ async function loadHashComparison() {
 }
 
 async function refreshHashComparison() {
+  const context = captureTenantContext();
   const [dashboard, hashComparison] = await Promise.all([
     api("/api/executive-dashboard", null, "GET").catch(() => latestDashboard),
     loadHashComparison(),
   ]);
+  if (!isCurrentTenantContext(context, dashboard)
+      || (hashComparison && !isCurrentTenantContext(context, hashComparison))) return;
   latestDashboard = dashboard;
   latestHashComparison = hashComparison;
   if (latestFiles.length || currentInventoryPage()) {
@@ -7448,16 +7511,19 @@ async function refreshHashComparison() {
   renderExecutiveExperience();
 }
 
-async function restoreLatestSavedReport(historyItems = latestHistoryItems) {
+async function restoreLatestSavedReport(historyItems = latestHistoryItems, context = captureTenantContext()) {
+  if (!isCurrentTenantContext(context)) return;
   if (latestReport?.scan_id || !Array.isArray(historyItems) || !historyItems.length) {
     return;
   }
   const candidates = [...historyItems].reverse();
   for (const item of candidates) {
+    if (!isCurrentTenantContext(context)) return;
     const scanId = item?.scan_id;
     if (!scanId) continue;
     try {
       const report = await loadSavedReportById(scanId) || {};
+      if (!isCurrentTenantContext(context)) return;
       if (!activeCompactReportCount(report) || isDemoSampleReport(report)) {
         continue;
       }
@@ -7633,10 +7699,13 @@ async function loadAudit() {
   if (!accessToken) {
     return;
   }
+  const context = captureTenantContext();
   try {
     const data = await api("/api/audit", null, "GET");
+    if (!isCurrentTenantContext(context, data)) return;
     renderAudit(data.events || []);
   } catch (error) {
+    if (!isCurrentTenantContext(context)) return;
     auditBody.innerHTML = `<tr><td colspan="4" class="empty">Audit unavailable: ${escapeHtml(error.message)}</td></tr>`;
   }
 }
@@ -8542,18 +8611,48 @@ document.addEventListener("click", (event) => {
   }
 });
 tenantSwitcher.addEventListener("change", async () => {
-  currentTenant = tenantSwitcher.value || "default";
+  const nextTenant = tenantSwitcher.value || "default";
+  if (activeScanJobId || activeEndpointJobId || activeProfileRun) {
+    tenantSwitcher.value = currentTenant;
+    showToast("Scan in progress", "Wait for the active scan to finish before switching tenant.", "info");
+    return;
+  }
+  if (nextTenant === currentTenant) return;
+  tenantContextVersion += 1;
+  currentTenant = nextTenant;
+  const context = captureTenantContext();
   safeSessionSet("dspm-tenant-id", currentTenant);
+  workspaceSliceRequest += 1;
   resetInventoryPageWindow();
   latestFiles = [];
   fileSearchIndex = new WeakMap();
   latestReport = null;
   latestScanKind = "";
   latestDashboard = null;
+  latestHashComparison = null;
   latestHistoryItems = [];
+  latestAuditEvents = [];
   estateSummary = null;
   inventoryFacetRequest += 1;
   inventoryFacets = null;
+  scanProfilesState = [];
+  latestComplianceKeywordLibrary = null;
+  latestComplianceKeywordLibraries = {};
+  inventoryRiskFilter = "ALL";
+  inventorySourceFacet = "ALL";
+  inventoryFindingFacet = "ALL";
+  inventoryFrameworkFacets = new Set();
+  expandedInventoryKeys.clear();
+  inventoryDetailRequests.clear();
+  lastRenderedFileKeys = new Set();
+  hasRenderedScanRows = false;
+  renderedRowsLimit = ROW_PAGE_SIZE;
+  lastInventoryQuery = "";
+  activeScanLabel = "";
+  if (filterInput) filterInput.value = "";
+  closeAssetDetailModal();
+  assetModalFile = null;
+  closeAnyOpenScanWizard();
   rowOverrides = loadRowOverrides();
   assetRules = loadAssetRules();
   customExtensions = loadCustomExtensions();
@@ -8562,12 +8661,23 @@ tenantSwitcher.addEventListener("change", async () => {
   renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
   applyDefaultSimpleExtensionPolicies();
   renderAssetRules();
+  renderInventoryRiskSelection();
+  renderInventoryScanOptions();
+  updateInventoryFilterOptions([]);
+  renderScanDecks();
+  renderHistory([]);
+  renderAudit([]);
   renderRows([]);
   updateSummaryFromFiles([]);
   scanMeta.textContent = "No scan has been run yet.";
   setStatus(`Switched MSSP customer to ${currentTenant}.`);
-  await loadAllComplianceKeywordLibraries().catch(() => {});
-  await loadHistory().catch((error) => setStatus(`Tenant switch failed: ${error.message}`));
+  await Promise.all([
+    loadAllComplianceKeywordLibraries().catch(() => {}),
+    loadAudit().catch(() => {}),
+    loadHistory().catch((error) => {
+      if (isCurrentTenantContext(context)) setStatus(`Tenant switch failed: ${error.message}`);
+    }),
+  ]);
 });
 
 msspPortfolio.addEventListener("click", async (event) => {
@@ -8752,12 +8862,14 @@ function wizardEl(kind, key) {
   return document.querySelector(SCAN_WIZARD_KINDS[kind][key]);
 }
 
-async function loadScanProfiles() {
+async function loadScanProfiles(context = captureTenantContext()) {
   if (!accessToken) return;
   try {
     const data = await api("/api/scan-profiles", null, "GET");
+    if (!isCurrentTenantContext(context, data)) return;
     scanProfilesState = Array.isArray(data.profiles) ? data.profiles : [];
   } catch {
+    if (!isCurrentTenantContext(context)) return;
     scanProfilesState = [];
   }
   renderScanDecks();

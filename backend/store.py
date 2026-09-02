@@ -2517,10 +2517,14 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
         asset_source = str(row.get("source") or "workspace")
         if risk:
             risk_counts[risk] = risk_counts.get(risk, 0) + 1
-        source_counts[asset_source] = source_counts.get(asset_source, 0) + 1
         scan_label = str(row.get("scan_label") or "").strip()
         if scan_label:
             scan_label_counts[scan_label] = scan_label_counts.get(scan_label, 0) + 1
+        else:
+            # Protocol sources are the fallback for assets no named scan
+            # covers; a labeled asset is reachable by its scan name, so its
+            # protocol must not reappear as a duplicate filter option.
+            source_counts[asset_source] = source_counts.get(asset_source, 0) + 1
         protected_count += 1 if row.get("is_protected") else 0
         hidden_count += 1 if row.get("is_hidden") else 0
         score_total += float(row.get("risk_score") or 0)
@@ -2579,8 +2583,11 @@ def inventory_facets(tenant_id: str, source: str = "") -> dict:
                     "SELECT risk_level, COUNT(*) AS n FROM assets WHERE tenant_id = ? GROUP BY risk_level",
                     (tenant_id,),
                 ).fetchall()
+                # Protocol sources cover only assets without a named scan;
+                # labeled assets are represented by the scans facet instead.
                 source_rows = conn.execute(
-                    "SELECT source, COUNT(*) AS n FROM assets WHERE tenant_id = ? GROUP BY source",
+                    "SELECT source, COUNT(*) AS n FROM assets "
+                    "WHERE tenant_id = ? AND COALESCE(scan_label, '') = '' GROUP BY source",
                     (tenant_id,),
                 ).fetchall()
                 # Operator-facing scan names for the inventory Source filter.

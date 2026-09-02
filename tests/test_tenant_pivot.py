@@ -68,6 +68,58 @@ class TenantPivotTests(unittest.TestCase):
         self.assertEqual(back_to_default.status_code, 200, back_to_default.text)
         self.assertIn(created, {item["tenant_id"] for item in back_to_default.json()["tenants"]})
 
+    def test_dashboard_history_and_inventory_are_isolated_per_pivot(self) -> None:
+        """A fresh tenant must not inherit any informational dashboard state.
+
+        The platform admin deliberately reuses one token while changing the
+        effective tenant header, which is the same path exercised by the UI
+        switcher and the Posture trend regression.
+        """
+        populated = f"dashboard-a-{uuid4().hex[:8]}"
+        fresh = f"dashboard-b-{uuid4().hex[:8]}"
+        store.create_tenant(populated, "Populated dashboard")
+        store.create_tenant(fresh, "Fresh dashboard")
+        self.addCleanup(store.delete_tenant_with_data, populated)
+        self.addCleanup(store.delete_tenant_with_data, fresh)
+        store.save_scan_history(populated, {
+            "scan_id": f"{populated}-scan",
+            "timestamp": "2026-09-01T12:00:00+00:00",
+            "source": "smb",
+            "scan_label": "Finance source",
+            "summary": {"total_files": 1, "critical": 1, "high": 0, "medium": 0, "low": 0},
+            "files": [{
+                "path": "/finance/exposure.txt",
+                "name": "exposure.txt",
+                "risk": {"level": "CRITICAL", "score": 95},
+                "findings": [{"type": "secret", "risk": "CRITICAL"}],
+            }],
+        })
+
+        token = create_token("admin", "admin", "default")
+        client = TestClient(app)
+
+        def get(path: str, tenant_id: str):
+            return client.get(path, headers={
+                "Authorization": f"Bearer {token}",
+                "X-Tenant-ID": tenant_id,
+            })
+
+        populated_dashboard = get("/api/executive-dashboard", populated).json()
+        fresh_dashboard = get("/api/executive-dashboard", fresh).json()
+        self.assertEqual(populated_dashboard["tenant_id"], populated)
+        self.assertEqual([item["scan_id"] for item in populated_dashboard["trend"]], [f"{populated}-scan"])
+        self.assertEqual(fresh_dashboard["tenant_id"], fresh)
+        self.assertEqual(fresh_dashboard["trend"], [])
+        self.assertEqual(fresh_dashboard["risk_posture_score"], 100)
+
+        for path in ("/api/history", "/api/history/hash-changes", "/api/inventory/facets", "/api/inventory"):
+            response = get(path, fresh)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["tenant_id"], fresh, path)
+        self.assertEqual(get("/api/history", fresh).json()["history"], [])
+        self.assertEqual(get("/api/inventory/facets", fresh).json()["total"], 0)
+        self.assertEqual(get("/api/inventory", fresh).json()["items"], [])
+
     def test_tenant_admin_may_not_pivot(self) -> None:
         home = f"tenant-a-{uuid4().hex[:8]}"
         victim = f"victim-{uuid4().hex[:8]}"

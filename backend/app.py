@@ -1489,7 +1489,10 @@ class ScanProfileRequest(BaseModel):
 
 @app.get("/api/scan-profiles")
 def scan_profiles_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
-    return {"profiles": list_scan_profiles(principal.tenant_id)}
+    return {
+        "tenant_id": principal.tenant_id,
+        "profiles": list_scan_profiles(principal.tenant_id),
+    }
 
 
 @app.post("/api/scan-profiles")
@@ -1709,7 +1712,10 @@ def scan_history(
     principal: Principal = Depends(require_role("viewer")),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict:
-    return {"history": read_scan_history(principal.tenant_id, limit=limit)}
+    return {
+        "tenant_id": principal.tenant_id,
+        "history": read_scan_history(principal.tenant_id, limit=limit),
+    }
 
 
 @app.get("/api/history/latest/report")
@@ -1779,6 +1785,10 @@ def inventory_index(
                 item["reason_count"], item["dlp_count"] = pair
     except Exception:
         pass
+    # Echo the effective server-side scope so the browser can reject a stale
+    # response if an MSSP administrator changes tenant while this request is in
+    # flight. The data query itself is already tenant-predicated above.
+    result["tenant_id"] = principal.tenant_id
     return result
 
 
@@ -1833,7 +1843,10 @@ def inventory_facet_index(
     principal: Principal = Depends(require_role("viewer")),
     source: str = Query(default="", max_length=80),
 ) -> dict:
-    return inventory_facets(principal.tenant_id, source=source)
+    return {
+        **inventory_facets(principal.tenant_id, source=source),
+        "tenant_id": principal.tenant_id,
+    }
 
 
 @app.get("/api/inventory-detail-counts")
@@ -1848,7 +1861,10 @@ def inventory_detail_counts(
 
     wanted = [item.strip() for item in ids.split(",") if item.strip()][:500]
     counts = inventory_reason_action_counts(principal.tenant_id, wanted)
-    return {"counts": {key: {"reasons": pair[0], "fixes": pair[1]} for key, pair in counts.items()}}
+    return {
+        "tenant_id": principal.tenant_id,
+        "counts": {key: {"reasons": pair[0], "fixes": pair[1]} for key, pair in counts.items()},
+    }
 
 
 @app.get("/api/inventory/{asset_id}")
@@ -1860,7 +1876,7 @@ def inventory_asset_detail(
     asset = get_inventory_asset(principal.tenant_id, asset_id, scan_id=scan_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="Inventory asset not found")
-    return {"asset": asset}
+    return {"tenant_id": principal.tenant_id, "asset": asset}
 
 
 @app.get("/api/findings/{finding_id}")
@@ -2053,6 +2069,7 @@ def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) ->
         latest_report = read_scan_report(principal.tenant_id, history[-1].get("scan_id")) if history else None
         duplicate_hash_paths = _duplicate_hash_paths(latest_report)
         return {
+            "tenant_id": principal.tenant_id,
             "algorithm": "SHA-256",
             "latest_scan_id": history[-1].get("scan_id") if history else "",
             "previous_scan_id": "",
@@ -2092,6 +2109,7 @@ def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) ->
 
     changed.sort(key=lambda item: str(item.get("path") or item.get("name") or "").lower())
     return {
+        "tenant_id": principal.tenant_id,
         "algorithm": "SHA-256",
         "latest_scan_id": latest_item.get("scan_id") or "",
         "previous_scan_id": previous_item.get("scan_id") or "",
@@ -2115,7 +2133,10 @@ def audit_log(
     principal: Principal = Depends(require_role("admin")),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict:
-    return {"events": read_audit_log(principal.tenant_id, limit)}
+    return {
+        "tenant_id": principal.tenant_id,
+        "events": read_audit_log(principal.tenant_id, limit),
+    }
 
 
 @app.get("/api/executive-dashboard")

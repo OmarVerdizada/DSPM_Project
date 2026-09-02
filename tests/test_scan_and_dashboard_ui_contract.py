@@ -141,15 +141,36 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         apply_body = self.app_js[apply_start:apply_start + 700]
         self.assertIn("resetInventoryPageWindow()", apply_body)
         self.assertIn("refreshInventoryPageWindow()", apply_body)
-        # A results filter lists completed named runs, not configurations that
-        # have never produced data (which used to create guaranteed blank views).
+        # Different tenants can have named runs, legacy source-only runs, or
+        # configured profiles. The selector must remain populated for all three.
         self.assertIn("function completedInventoryScanNames(", self.app_js)
         names_start = self.app_js.index("function completedInventoryScanNames(")
-        names_body = self.app_js[names_start:names_start + 400]
+        names_body = self.app_js[names_start:names_start + 1000]
         self.assertIn("latestHistoryItems", names_body)
-        self.assertIn("scan_label", names_body)
-        self.assertNotIn("scanProfilesState", names_body)
+        # A named run is listed by its name ONLY - its protocol must not come
+        # back as a duplicate option; protocols remain for legacy data alone.
+        self.assertIn("item?.scan_label || item?.source", names_body)
+        self.assertIn("inventoryFacets?.sources", names_body)
+        self.assertIn("scanProfilesState", names_body)
         self.assertIn("All scans", self.index_html)
+
+    def test_tenant_switch_invalidates_every_async_dashboard_surface(self) -> None:
+        self.assertIn("let tenantContextVersion = 0", self.app_js)
+        self.assertIn("function isCurrentTenantContext(", self.app_js)
+        switch_start = self.app_js.index('tenantSwitcher.addEventListener("change"')
+        switch_body = self.app_js[switch_start:switch_start + 3000]
+        for reset in (
+            "tenantContextVersion += 1", "latestDashboard = null", "latestHashComparison = null",
+            "latestHistoryItems = []", "latestAuditEvents = []", "estateSummary = null",
+            "inventoryFacets = null", "scanProfilesState = []", "latestComplianceKeywordLibraries = {}",
+            "inventoryDetailRequests.clear()", "closeAssetDetailModal()", "renderHistory([])",
+            "renderAudit([])", "loadAudit()",
+        ):
+            self.assertIn(reset, switch_body)
+        history_start = self.app_js.index("async function loadHistory()")
+        history_body = self.app_js[history_start:history_start + 1800]
+        self.assertIn("captureTenantContext()", history_body)
+        self.assertIn("isCurrentTenantContext(context, dashboard)", history_body)
 
     def test_inventory_empty_states_distinguish_first_run_from_no_matches(self) -> None:
         # First run gets one composed CTA; a completed scan with filters that
