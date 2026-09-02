@@ -17,9 +17,9 @@ What changed from v1 and why:
 - **Bounded memory.** Rows stream in batches instead of fetchall() on the
   largest tables.
 
-Copy order is alphabetical; the schema has no FK constraints yet. When Phase 4
-introduces them, ordering must become a topological sort (or constraints go
-NOT VALID for the load) - discovery makes that a local change here.
+Copy order is a topological sort over the destination's foreign keys
+(parents before children), computed from the catalog - revision 0003's tenant
+FKs made load order matter, and discovery keeps it correct automatically.
 
 Usage (DSNs via env, never on the command line - they carry credentials):
     set DSPM_DB_URL=postgresql://...          # destination
@@ -72,6 +72,39 @@ def discover_tables(src: sqlite3.Connection) -> list[str]:
         and not str(name).startswith(EXCLUDED_PREFIXES)
         and not _is_fts(str(name))
     ]
+
+
+def _copy_order(dst, tables: list[str]) -> list[str]:
+    """Order tables parents-first using the destination's FK graph (Kahn's
+    algorithm, alphabetical tiebreak). Revision 0003's tenant foreign keys
+    made alphabetical order fail: alert_events loaded before tenants."""
+    with dst.cursor() as cur:
+        cur.execute(
+            "SELECT c.conrelid::regclass::text, c.confrelid::regclass::text "
+            "FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace "
+            "WHERE c.contype = 'f' AND n.nspname = current_schema()",
+        )
+        edges = [(str(child), str(parent)) for child, parent in cur.fetchall()]
+    in_scope = set(tables)
+    depends_on: dict[str, set[str]] = {t: set() for t in tables}
+    for child, parent in edges:
+        if child in in_scope and parent in in_scope and child != parent:
+            depends_on[child].add(parent)
+    ordered: list[str] = []
+    ready = sorted(t for t, deps in depends_on.items() if not deps)
+    while ready:
+        table = ready.pop(0)
+        ordered.append(table)
+        for other, deps in depends_on.items():
+            if table in deps:
+                deps.discard(table)
+                if not deps and other not in ordered and other not in ready:
+                    ready.append(other)
+        ready.sort()
+    # A cycle (impossible today) falls back to appending the remainder so the
+    # copy still runs; the FK violation would then name the real problem.
+    ordered.extend(sorted(t for t in tables if t not in ordered))
+    return ordered
 
 
 def _sqlite_columns(src: sqlite3.Connection, table: str) -> list[str]:
@@ -148,12 +181,13 @@ def migrate(source: Path, dest_dsn: str, truncate: bool, evidence_dir: Path | No
     tenant_mismatches: dict[str, dict] = {}
 
     with psycopg.connect(dest_dsn) as dst:
+        present: list[str] = []
         for table in tables:
             with dst.cursor() as cur:
                 cur.execute("SELECT to_regclass(%s)", (table,))
-                if cur.fetchone()[0] is None:
-                    skipped.append(table)
-                    continue
+                (present if cur.fetchone()[0] is not None else skipped).append(table)
+
+        for table in _copy_order(dst, present):
 
             cols = _sqlite_columns(src, table)
             collist = ", ".join(cols)

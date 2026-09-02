@@ -34,10 +34,14 @@ class TenantErasureTests(unittest.TestCase):
             tenant_id, "api-key-hash", "automation", "analyst", "admin", None
         )
         store.save_search_reconciliation("sentro_assets_v1", {"orphaned": 1})
+        # Saved scan configurations reference vaulted credentials - erasure
+        # regression found by the revision-0003 tenant foreign keys.
+        store.save_scan_profile(tenant_id, profile_id=None, kind="file-server", name="HR share", config={"host": "10.0.0.9"})
 
         store.delete_tenant_with_data(tenant_id)
 
         self.assertFalse(store.tenant_exists(tenant_id))
+        self.assertEqual(store.list_scan_profiles(tenant_id), [])
         self.assertEqual(store.list_registration_invites(tenant_id), [])
         self.assertEqual(store.list_api_keys(tenant_id), [])
         self.assertIsNone(store.get_active_api_key("api-key-hash"))

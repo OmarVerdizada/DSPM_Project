@@ -337,6 +337,67 @@ def add_scan_report_labels(conn) -> None:
     )
 
 
+def add_tenant_integrity(conn) -> None:
+    """Revision 0003: referential integrity for tenant scoping (Phase 4, DB-03).
+
+    PostgreSQL only - production is PostgreSQL by the Phase 0 authority gate,
+    and SQLite (development) cannot add constraints to existing tables without
+    a rebuild. Every tenant-scoped table (discovered from the catalog, so a
+    new table is covered automatically) gains a validated foreign key to
+    tenants. ON DELETE RESTRICT: erasure must stay the deliberate, audited
+    delete_tenant_with_data() path - the database refuses a tenant row delete
+    that would silently strand or drop scoped data.
+
+    Orphaned rows make VALIDATE fail; the migration surfaces them per table
+    and refuses, so repair is an explicit operator decision, never silent
+    data loss inside a schema upgrade.
+    """
+    if not db.is_postgres():
+        return  # recorded no-op: SQLite is a development backend
+
+    tables = [
+        str(r["table_name"]) for r in conn.execute(
+            "SELECT DISTINCT table_name FROM information_schema.columns "
+            "WHERE column_name = 'tenant_id' AND table_schema = current_schema() "
+            "AND table_name <> 'tenants' ORDER BY table_name"
+        ).fetchall()
+    ]
+
+    orphans: dict[str, int] = {}
+    for table in tables:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM {table} t "
+            "WHERE NOT EXISTS (SELECT 1 FROM tenants x WHERE x.tenant_id = t.tenant_id)"
+        ).fetchone()
+        if int(row["n"]):
+            orphans[table] = int(row["n"])
+    if orphans:
+        detail = ", ".join(f"{table}: {count}" for table, count in sorted(orphans.items()))
+        raise RuntimeError(
+            "Refusing to add tenant foreign keys: orphaned rows reference "
+            f"missing tenants ({detail}). Repair or re-home these rows first - "
+            "a schema migration never deletes data."
+        )
+
+    for table in tables:
+        constraint = f"fk_{table}_tenant"
+        exists = conn.execute(
+            "SELECT 1 FROM pg_constraint WHERE conname = ? "
+            "AND conrelid = to_regclass(?)::oid",
+            (constraint, table),
+        ).fetchone()
+        if exists:
+            continue
+        # NOT VALID keeps the lock window minimal on a live table; the
+        # separate VALIDATE takes only a SHARE UPDATE EXCLUSIVE lock.
+        conn.execute(
+            f"ALTER TABLE {table} ADD CONSTRAINT {constraint} "
+            "FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id) "
+            "ON DELETE RESTRICT NOT VALID"
+        )
+        conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+
+
 def apply_baseline_schema(conn) -> None:
     """Revision 0001: the convergent baseline DDL, factored out so the
     versioned migration runner (roadmap Phase 2, DB-05) applies it as the
@@ -3204,6 +3265,10 @@ def delete_tenant(tenant_id: str) -> bool:
 _TENANT_ERASURE_TABLES = (
     "registration_invites",
     "api_keys",
+    # Saved scan configurations reference vaulted credentials; leaving them
+    # behind after erasure kept a dead tenant's connection settings alive
+    # (found by the revision-0003 tenant foreign keys).
+    "scan_profiles",
     "scan_reports",
     "audit_events",
     "alert_events",
