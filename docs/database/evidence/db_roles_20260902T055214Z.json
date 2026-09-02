@@ -1,0 +1,32 @@
+{
+  "applied_at": "2026-09-02T05:52:14.021761+00:00",
+  "database": "sentro_dev",
+  "roles_created": [],
+  "tables": 19,
+  "sequences": 2,
+  "verification": {
+    "sentro_app": {
+      "SELECT": true,
+      "INSERT": true,
+      "UPDATE": true,
+      "DELETE": true,
+      "schema CREATE denied": true
+    },
+    "sentro_backup": {
+      "SELECT": true,
+      "INSERT": true,
+      "UPDATE": true,
+      "DELETE": true,
+      "schema CREATE denied": true
+    },
+    "sentro_readonly": {
+      "SELECT": true,
+      "INSERT": true,
+      "UPDATE": true,
+      "DELETE": true,
+      "schema CREATE denied": true
+    }
+  },
+  "failures": [],
+  "result": "PASS"
+}
