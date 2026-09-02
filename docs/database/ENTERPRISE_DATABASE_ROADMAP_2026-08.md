@@ -1,6 +1,8 @@
 # Enterprise Database Roadmap
 
-**Status:** In implementation — see §0 for what is live. Sequenced engineering plan derived from the
+**Status:** In implementation — Phases 0-4 closed, 6 substantially closed, 5 partial,
+7 not started. §0 is the implementation record; §3 keeps the original plan with
+per-phase status. Sequenced engineering plan derived from the
 [Enterprise Database Readiness Assessment (2026-08-30)](ENTERPRISE_DATABASE_ASSESSMENT_2026-08-30.md).
 **Verdict being remediated:** NO-GO for enterprise production; strong PostgreSQL
 foundation; hardening and operating-model gaps, not a technology problem.
@@ -8,26 +10,249 @@ foundation; hardening and operating-model gaps, not a technology problem.
 
 ---
 
-## 0. Implementation status (2026-09-02)
+## 0. Implementation record (as of 2026-09-02)
 
-Every claim below is backed by a committed evidence artifact under
-[`docs/database/evidence/`](evidence/) or by tests in `tests/`.
+Written after the work, not before it. Every claim names the commit, the
+artifact under [`docs/database/evidence/`](evidence/), or the test that proves
+it. Where the implementation deliberately departed from the plan in §3, §0.3
+says so and why.
 
-| Phase | Status | Proof |
+### 0.1 Status at a glance
+
+| Phase | Status | Commits | Principal proof |
+| --- | --- | --- | --- |
+| **0 — One authority** | **Closed** | `5721279` | Production refuses SQLite and identity mismatch; `tests/test_database_authority.py` |
+| **1 — Recovery is real** | **Closed for the pilot tier** | `1b94d02` | Encrypted backup + manifest; WAL archiving live; timed restore drills PASS |
+| **2 — Versioned schema control** | **Closed** | `5d238a0` | `backend/migrations.py`; revisions 0001-0004 recorded; production verify-or-refuse |
+| **3 — Migration v2 + cutover** | **Closed (dev cluster)** | `d230bf3` | Schema discovery; 21 tables / 125,472 rows reconciled PASS |
+| **4 — Integrity & tenancy** | **Closed for FK + roles + RLS** | `132a1c7`, `a13a038`, `b1083fb` | 16 validated FKs; role matrix verified; 16 FORCE-RLS tables; hostile rehearsal 8/8 |
+| **5 — Authoritative model + artifacts** | **Partial** | (pre-existing) | Normalized reads are the gated default; artifact tier not started |
+| **6 — Operate, observe, certify** | **Core closed; HA outstanding** | `d0ce540` | `/api/ready`; PostgreSQL CI job; `pg_stat_statements`; retention tool |
+| **7 — Scale & regulated tiers** | **Not started** | — | Demand-driven by design |
+
+Live state of `sentro_dev` on the provisioned cluster (PostgreSQL 18.4, port
+5442) after the cutover: **259 MB, 21 application tables plus
+`schema_migrations`, schema revision 4, 19 primary keys, 16 tenant foreign
+keys, and 16 tables under FORCE row-level security with one isolation policy
+each.** The suite is **755 tests**, green on SQLite; the PostgreSQL CI job runs
+the same suite against a disposable cluster.
+
+### 0.2 What shipped, phase by phase
+
+**Phase 0 — One authority** (`5721279`)
+`backend/db.py` gained `database_identity()` (PostgreSQL: cluster system
+identifier + database name via `pg_control_system()`; SQLite: resolved path)
+and `enforce_database_authority()`, called from `backend/app.py` at import.
+Production (`DSPM_ENV=production`) plus a SQLite DSN is a refusal with an
+operator message; a mismatch against `DSPM_DB_EXPECTED_IDENTITY` is a refusal
+in **any** environment. `/api/health` reports backend and non-secret identity.
+
+**Phase 1 — Recovery is real** (`1b94d02`)
+`backend/backup.py` (192 lines) writes `pg_dump -Fc` archives encrypted with a
+**dedicated** Fernet key — never the vault key, so a stolen backup does not
+also unlock stored scan credentials — chunked at 8 MiB with length-prefixed
+tokens so backups larger than memory stream in both directions. Each backup
+writes a manifest: UTC timestamp, sizes, SHA-256 of plaintext **and**
+ciphertext, and per-table row counts captured at dump time.
+`scripts/db_restore_drill.py` decrypts, verifies the hash, restores into a
+scratch database, reconciles every table against the manifest, times each
+stage, drops the scratch database, and emits evidence. WAL archiving is live
+(`archive_mode=on`, `archive_timeout=300`, archiving to
+`C:\SentroPostgres\wal_archive`); the archiver has since survived a service
+restart at `archived_count=126, failed_count=0`.
+
+**Phase 2 — Versioned schema control** (`5d238a0`)
+`backend/migrations.py` (205 lines) records every applied revision in
+`schema_migrations` (revision, name, source **checksum**, applied_at), so an
+edit to an already-applied revision is detectable rather than silently
+divergent. Concurrent starters serialize on a PostgreSQL advisory lock.
+`store.init_db`'s DDL was extracted verbatim into
+`store.apply_baseline_schema(conn)` and registered as revision 0001, so a
+database built by migrations is byte-for-byte the schema the product has
+always built. Startup policy moved into `store.ensure_schema_ready()`:
+development auto-applies pending revisions, **production never runs DDL** — it
+verifies the recorded revision equals the build's and refuses to serve
+otherwise. Two details that matter operationally: `current_revision()` is a
+**pure read** (it does not create its own table), so the runtime role needs no
+DDL privilege to pass the gate; and the CLI sets `DSPM_MIGRATIONS_CLI=1` before
+importing the store, because otherwise that import would refuse on the exact
+unmigrated state the CLI exists to fix. Revision 0002 (`saved_scan_labels`)
+added the indexed `scan_reports.scan_label` with a one-time JSON backfill.
+
+**Phase 3 — Migration v2** (`d230bf3`)
+`scripts/migrate_sqlite_to_postgres.py` was rebuilt (310 lines) around **schema
+discovery**: tables come from `sqlite_master`, FTS5 virtual tables and their
+shadow tables are excluded *structurally* (by finding the virtual tables, not
+by name prefix, so a renamed index cannot leak), and the destination schema is
+built by the migration runner so the copy passes the production revision gate.
+Rows stream in 5,000-row batches; identity columns are discovered from the
+destination catalog; reconciliation covers per-table **and per-tenant** counts
+and writes a JSON artifact. The v1 hardcoded list was losing 4 of 21 tables
+carrying **3,021 real rows** (`scan_object_baselines` 3,015, `scan_profiles` 5,
+`app_settings` 1, `search_reconciliation_state` 0). Pinned by
+`tests/test_migration_discovery.py`.
+
+**Phase 4a — Referential integrity** (`132a1c7`, revision 0003)
+Every tenant-scoped table — discovered from `information_schema`, so a new
+table is covered automatically — gained a foreign key to `tenants` with **`ON
+DELETE RESTRICT`**, added `NOT VALID` (short lock) then `VALIDATE` (weak lock).
+Erasure stays the deliberate, audited `delete_tenant_with_data()` path; the
+database now refuses a tenant delete that would strand data. The migration
+**refuses to run** when orphans exist, naming them per table: a schema upgrade
+never deletes data, so repair is an explicit operator decision.
+
+**Phase 4b — Role separation** (`a13a038`)
+`scripts/db_roles.py` (256 lines) establishes and *verifies* four roles:
+`sentro_owner` (owns every table, runs migrations), `sentro_app` (DML only),
+`sentro_backup` and `sentro_readonly` (SELECT only). `ALTER DEFAULT PRIVILEGES`
+makes tables created by future migrations inherit the matrix automatically,
+which is what stops the Phase 1 grant gap from reopening. Verification proves
+the matrix from the catalog with `has_table_privilege()` and fails on any
+deviation. Idempotent; generated passwords are appended to the operator
+credentials file and never printed.
+
+**Phase 4c — Row-level security** (`b1083fb`, revision 0004)
+Sixteen tenant-scoped tables got `ENABLE` + **`FORCE`** row-level security with
+one `tenant_isolation` policy each (`USING` and `WITH CHECK`), keyed on
+`current_setting('app.tenant_id')`. The application side is a connection seam:
+`db.tenant_scope(tenant)` sets a `ContextVar`, and `db.connect()` issues
+`set_config('app.tenant_id', ..., true)` — a **`SET LOCAL`** that dies with the
+transaction, so a pooled connection cannot leak one request's scope into the
+next checkout. A `store._tenant_scoped` decorator wraps the ten user-facing
+store functions (inventory list/facets/detail/export, scan report reads, scan
+persistence). Result: inside a scoped transaction, a query with a missing *or
+hostile* predicate returns nothing and writes nothing for another tenant.
+
+**Cutover onto the provisioned cluster** (in `b1083fb`)
+Executed as a real operation, in order: orphan repair (80 rows, evidence) ->
+migrate v2 from the live SQLite (21 tables, 125,472 rows, PASS) -> revisions
+1-4 recorded -> role matrix converged and verified -> encrypted backup taken as
+`sentro_backup` -> restore drill of that backup (**25.4 s**, 125,476 rows, zero
+count mismatches, hash match).
+
+**Phase 6 — Operate and certify** (`d0ce540`)
+`/api/ready` is the serving gate: a bounded database **read *and* write** probe
+plus a schema-revision match, returning 503 with reasons when it cannot serve;
+backup staleness is a *warning* so an advisory signal never pulls a healthy
+instance out of rotation. CI gained a PostgreSQL job that builds the schema
+from empty via migrations on a disposable `postgres:18` service and runs the
+whole suite against it. On the cluster, `pg_stat_statements` and
+`track_io_timing` are enabled, with `pg_read_all_stats` granted to
+`sentro_readonly` so operators diagnose without superuser (query text stays
+privileged). `scripts/db_retention.py` prunes alert and audit history per
+data-class policy, dry-run by default.
+
+### 0.3 Deliberate deviations from the plan
+
+| Plan said | What was built | Why |
 | --- | --- | --- |
-| **0 — One authority** | **Done** | Production refuses SQLite; `DSPM_DB_EXPECTED_IDENTITY` pin; `/api/health` carries backend + identity (`tests/test_database_authority.py`) |
-| **1 — Recovery is real** | **Done** | Chunked-Fernet encrypted `pg_dump` + manifest; WAL archiving live (`archived_count=126, failed_count=0`); timed restore drills PASS (latest 25.4 s / 125,476 rows, `restore_drill_20260902T060821Z.json`) |
-| **2 — Versioned schema control** | **Done** | `backend/migrations.py`: recorded revisions 0001–0004, advisory-locked upgrade, production verify-or-refuse gate, `status/upgrade/stamp` CLI; suite DB builds through the runner |
-| **3 — Migration v2 + cutover** | **Done** | Schema discovery (21 tables; v1's list lost 4 with real rows), FK-topological copy order, per-table AND per-tenant reconciliation, evidence artifact; standing `sentro_dev` cut over at revision 4 (`migration_20260902T060654Z.json`) |
-| **4 — Integrity & tenancy** | **Done** | 0003: validated tenant FKs, ON DELETE RESTRICT, orphan refusal (fired live: 80 test-artifact rows, `orphan_repair_*.json`); found+fixed scan_profiles erasure gap. Roles: owner/app/backup/readonly matrix verified (`db_roles_*.json`), backup role BYPASSRLS. 0004: FORCE RLS + `db.tenant_scope()` SET LOCAL seam; hostile rehearsal 8/8 PASS as the unprivileged runtime role (`rls_rehearsal_*.json`); PG suite tests in `tests/test_tenant_rls.py` |
-| **5 — Authoritative model + artifact tier** | **Partial** | Normalized inventory reads are the gated default (readiness-gated, parity-tested). **Open:** transactional normalized writes as a hard failure, `report_json` → encrypted content-addressed artifacts (must extend backup/erasure coverage to the artifact tier before cutover — do not ship half), blob-path retirement after a parity soak |
-| **6 — Operate, observe, certify** | **Core done** | `/api/ready` read+write probe + revision gate (503 when unservable); PostgreSQL CI job (migrations from empty + full suite on postgres:18); `pg_stat_statements` + `track_io_timing` live on the cluster; `scripts/db_retention.py` per-data-class pruning. **Open (infra-bound):** streaming standby/failover exercises, patch SLA cadence, a quarter of green exercises |
-| **7 — Scale & regulated tiers** | Not started | Demand-driven by design; nothing on this host justifies it yet |
+| Adopt **Alembic** | A purpose-built runner (`backend/migrations.py`) | The store is a hand-rolled DB-API seam over `sqlite3` and `psycopg` with `?`->`%s` translation; Alembic assumes SQLAlchemy, which this codebase does not use anywhere. Adopting it would introduce a second connection and typing model for migrations alone. The runner keeps revisions as plain functions on the existing seam. **Cost accepted:** no autogenerate. |
+| **Up/down scripts** | Forward-only revisions plus `stamp` | The rehearsed recovery path is restore-from-backup (Phase 1), proven in 25 s. A down-migration against a database holding data is usually more dangerous than that restore. `stamp` covers adopting an existing database. |
+| RLS policies **default-deny** | Deny when a scope is set; unset scope (`'*'`) is permissive | Background writers — scan workers, search reconciliation, login and tenant lookup, migrations, backups — are not yet scoped. Flipping to default-deny today would break them. The policy already enforces on every path carrying user input; tightening the default is ranked follow-up #2. |
+| Full **constraint graph** (child FKs, unique, check) | 16 tenant FKs only | Child FKs (`findings`->`assets`, `occurrences`->`findings`, `asset_versions`->`assets`) need composite unique keys that do not exist yet; the uniqueness work and those FKs are one unit, deferred together (§0.5 #4). |
+| Production **cutover** | Cutover onto the development cluster | The user-facing server on `:8000` still serves SQLite by design — this host is the lab. Migration, reconciliation, roles, RLS, and restore are all proven against real data at production scale; flipping `DSPM_DB_URL` is a deployment decision, and Phase 0's gate keeps it honest once flipped. |
 
-Standing follow-ups, in order: (1) Phase 5 artifact tier with backup +
-erasure coverage designed in from the start; (2) tighten the RLS unset-scope
-default from `'*'` to fail-closed once background writers are scoped;
-(3) HA standby when a second host exists.
+### 0.4 Defects found by the work (none were in the plan)
+
+Building the controls surfaced real bugs. Each is fixed and regression-tested.
+
+1. **Saved scan profiles survived tenant erasure.** `scan_profiles` rows -
+   which reference vaulted credentials — were missing from
+   `_TENANT_ERASURE_TABLES`, so deleting a tenant left its connection settings
+   behind. Found by revision 0003's foreign keys; fixed with a regression test.
+2. **The runtime role could create objects.** `sentro_app` held `CREATE` on
+   schema `public` from the original single-role setup. Revoked; the role
+   matrix now asserts its absence.
+3. **`pg_dump` cannot dump under RLS.** It refuses rather than risk a silently
+   partial dump, so the read-only backup role was granted `BYPASSRLS` — the
+   correct resolution, since a backup must be complete or it is not a backup.
+4. **The Phase 1 grant gap is closed.** `sentro_app` could not read
+   `scan_object_baselines`; backups now run as a dedicated `sentro_backup` role
+   instead of a superuser, and default privileges keep new tables covered.
+5. **80 orphaned `scan_jobs` rows** referencing deleted tenants (test artifacts
+   from suite runs predating session isolation) blocked FK validation on the
+   real database. Repaired as a recorded operator action.
+6. **The test suite built its database with legacy `init_db`**, so it carried
+   no schema revisions — which masked the readiness gate. `tests/conftest.py`
+   now builds through the migration runner, exactly like a real install.
+7. **Alphabetical copy order violated the new foreign keys** (`alert_events`
+   loaded before `tenants`). The migration now topologically sorts tables by
+   the destination's FK graph.
+
+### 0.5 Open work, ranked
+
+1. **Phase 5 artifact tier.** Move `scan_reports.report_json` to an immutable,
+   encrypted, content-addressed store. **Design backup coverage and tenant
+   erasure coverage of the artifact tier before cutover** — a database backup
+   that no longer contains report bodies is a *regression* in recoverability
+   unless the artifact store is backed up with it.
+2. **Tighten the RLS unset scope to fail-closed** once background writers carry
+   an explicit scope. Sequence: scope the writers, add a scoped-writer test,
+   then flip the policy default in a new revision.
+3. **Transactional normalized writes** (Phase 5): a scan save that cannot write
+   assets/findings/index must fail the save, not mirror best-effort.
+4. **Unique + check constraints and the child FK graph** (rest of Phase 4a).
+5. **Identity model decision** (Phase 4): `users.username` is still a **global**
+   primary key, so usernames collide across tenants. Recommended: surrogate
+   user id + unique `(tenant_id, username)`. Product decision, not code.
+6. **TLS `sslmode=verify-full` enforcement** for non-local DSNs — currently
+   documented in `.env.example`, not enforced in code. Local-only today.
+7. **HA standby, failover/failback exercises, patch SLA** — infrastructure
+   bound: this host has one cluster. Documented as such rather than faked.
+8. **Metrics surface** (pool saturation, query latency, WAL/archive lag,
+   storage headroom) beyond the current health and readiness payloads.
+9. **Off-host immutable backup copy** (object lock) and backup-age alerting in
+   a real monitor — `/api/ready` warns, but nothing pages.
+
+### 0.6 Evidence index
+
+| Artifact | What it proves |
+| --- | --- |
+| `restore_drill_20260901T062753Z.json` | First timed restore: 19 tables, 196,818 rows, 27.3 s, PASS |
+| `restore_drill_20260902T060821Z.json` | Restore of the revision-4 backup: 22 tables, 125,476 rows, hash match, 25.4 s, PASS |
+| `migration_20260902T052604Z.json` | Migration v2 rehearsal with schema discovery, 21 tables |
+| `migration_20260902T054714Z.json` | Rehearsal with revision 0003 FKs and topological copy order |
+| `migration_20260902T060654Z.json` | **The cutover**: 125,472 rows, revision 4, zero per-tenant mismatches |
+| `orphan_repair_20260902T060448Z.json` | Operator repair of 80 orphaned rows, per-tenant breakdown |
+| `db_roles_20260902T060709Z.json` | Role privilege matrix verified across 22 tables, PASS |
+| `rls_rehearsal_20260902T060123Z.json` | 8/8 isolation checks as the unprivileged runtime role against real data |
+
+Test coverage: `test_database_authority.py` (authority + readiness),
+`test_database_backup.py` (encryption round-trip, truncation refusal, key
+policy), `test_schema_migrations.py` (fresh upgrade, idempotence, verify gate
+both directions, stamp, startup policy), `test_migration_discovery.py`
+(discovery contract), `test_tenant_rls.py` (hostile isolation, PostgreSQL
+only), `test_tenant_erasure.py` (erasure completeness).
+
+### 0.7 Operator runbook
+
+```bash
+python -m backend.migrations status
+```
+```bash
+python -m backend.migrations upgrade
+```
+```bash
+python scripts/db_roles.py --dbname sentro_dev --evidence-dir docs/database/evidence
+```
+```bash
+python scripts/db_backup.py --keep 7
+```
+```bash
+python scripts/db_restore_drill.py
+```
+```bash
+python scripts/db_retention.py
+```
+```bash
+python -m scripts.migrate_sqlite_to_postgres --evidence-dir docs/database/evidence
+```
+
+`status` reports applied vs expected revision; `upgrade` applies pending
+revisions and must run as `sentro_owner`; `stamp` adopts an existing database
+without executing DDL. `db_retention.py` is a dry run until `--apply`.
+DSNs and passwords are read from the environment or
+`C:\SentroPostgres\credentials.env` — never passed as flags, never printed.
 
 ## 1. What changed since the assessment (verified 2026-09-01)
 
@@ -70,6 +295,8 @@ engineering effort classes (S ≈ days, M ≈ 1–2 weeks, L ≈ 3+ weeks).
 
 ### Phase 0 — One authority *(DB-01, part of DB-10)* — size S
 
+> **Status: CLOSED** (`5721279`). Implemented as planned. See §0.2.
+
 The most dangerous current property: two supported launch paths serve
 different data (SQLite fresh, PostgreSQL 24 days stale).
 
@@ -87,6 +314,10 @@ different data (SQLite fresh, PostgreSQL 24 days stale).
 PostgreSQL refuses to serve; evidence is the startup log + a test.
 
 ### Phase 1 — Recovery is real *(DB-02, backup half of DB-09)* — size M
+
+> **Status: CLOSED for the pilot tier** (`1b94d02`). Backups, WAL archiving and
+> timed restore drills are live. Outstanding: off-host immutable copy and
+> paging alerts (§0.5 #9); RPO/RTO owner sign-off.
 
 Recovery is a release gate, not an operations follow-up. Nothing else in this
 roadmap matters if the estate cannot be restored.
@@ -106,6 +337,9 @@ roadmap matters if the estate cannot be restored.
 
 ### Phase 2 — Versioned schema control *(DB-05)* — size M
 
+> **Status: CLOSED** (`5d238a0`), with one deviation: a purpose-built runner
+> instead of Alembic, forward-only. Rationale in §0.3.
+
 Startup-driven DDL (`CREATE TABLE IF NOT EXISTS` + ad hoc `ALTER` in
 `backend/store.py init_db`) cannot support multi-node upgrades.
 
@@ -123,6 +357,10 @@ Startup-driven DDL (`CREATE TABLE IF NOT EXISTS` + ad hoc `ALTER` in
 CI via migrations only; `init_db` performs no DDL in production mode.
 
 ### Phase 3 — Migration v2 and the one-time cutover *(DB-06)* — size M
+
+> **Status: CLOSED on the development cluster** (`d230bf3`, cutover in `b1083fb`).
+> Reconciliation covers per-table and per-tenant counts. Outstanding: row-hash and
+> business-invariant reconciliation, and the filesystem-state manifest.
 
 - Rebuild `scripts/migrate_sqlite_to_postgres.py` around **schema
   discovery**: enumerate tables from the live SQLite catalog (minus FTS
@@ -142,6 +380,11 @@ CI via migrations only; `init_db` performs no DDL in production mode.
 Phase 0's identity check now points at the migrated cluster.
 
 ### Phase 4 — Integrity and tenancy in the schema *(DB-03, DB-04, rest of DB-10)* — size L
+
+> **Status: CLOSED for tenant FKs, role separation and RLS**
+> (`132a1c7`, `a13a038`, `b1083fb`). Outstanding: unique/check constraints and the
+> child FK graph (§0.5 #4), the user-identity decision (#5), TLS verify-full (#6),
+> and the fail-closed RLS default (#2).
 
 The riskiest phase; runs only on PostgreSQL, after cutover, via Phase 2
 migrations.
@@ -172,6 +415,10 @@ tenant's rows (test artifact); TLS enforced remotely.
 
 ### Phase 5 — Authoritative normalized model and the artifact tier *(DB-07, residual DB-08)* — size L
 
+> **Status: PARTIAL.** Normalized inventory reads are already the gated,
+> parity-tested default. Not started: transactional authoritative writes and the
+> encrypted content-addressed artifact tier. This is the largest remaining item.
+
 79.9% of the 361 MB SQLite file is four JSON surfaces; the largest report is
 12.5 MB. The normalized model must stop being a mirror.
 
@@ -197,6 +444,10 @@ count, not report size.
 
 ### Phase 6 — Operate, observe, certify *(DB-09, DB-11, DB-12, DB-13, DB-14 + P1 HA)* — size L, parallelizable
 
+> **Status: CORE CLOSED** (`d0ce540`): readiness gate, PostgreSQL CI,
+> `pg_stat_statements`, retention tooling. Outstanding and infrastructure-bound:
+> HA standby and failover exercises, patch SLA cadence, the metrics surface.
+
 - **Truthful health:** liveness vs readiness split; readiness performs a
   bounded read+write probe and schema-revision check. Metrics: pool
   saturation, query latency, transaction errors, DB size, locks, WAL/archive
@@ -220,6 +471,9 @@ count, not report size.
 green backup/restore/failover exercises.
 
 ### Phase 7 — Scale and regulated tiers *(P2)* — size L, demand-driven
+
+> **Status: NOT STARTED**, by design — demand-driven, and nothing on this host
+> justifies it yet.
 
 Capacity/soak/lock-contention tests at projected 12–24-month scale;
 corruption game days; regional recovery or multi-region per contract;
@@ -249,15 +503,24 @@ schema changes, patch compliance).
 
 ## 5. Risk-to-phase map
 
-| Risk | Phase | | Risk | Phase |
-| --- | --- | --- | --- | --- |
-| DB-01 authority split | 0 | | DB-08 fragmented state | 1 (inventory) + 5 (artifacts) — *partially retired by Copilot removal* |
-| DB-02 no recovery | 1 | | DB-09 observability | 1 + 6 |
-| DB-03 no foreign keys | 4 | | DB-10 TLS / ownership | 0 + 4 |
-| DB-04 no RLS | 4 | | DB-11 retention | 6 |
-| DB-05 unversioned schema | 2 | | DB-12 query diagnostics | 6 |
-| DB-06 incomplete migration | 3 | | DB-13 PG CI | 2 + 6 |
-| DB-07 report-JSON authority | 5 | | DB-14 patch discipline | 6 |
+Status column added 2026-09-02: **[x]** closed, **[~]** partial, **[ ]** open.
+
+| Risk | Phase | Status | Where it stands |
+| --- | --- | :---: | --- |
+| DB-01 authority split | 0 | **[x]** | Production refuses SQLite and wrong identity |
+| DB-02 no recovery | 1 | **[x]** | Encrypted backups, WAL archiving, drills PASS; off-host copy open |
+| DB-03 no foreign keys | 4 | **[~]** | 16 validated tenant FKs; child FK graph + unique/check open |
+| DB-04 no RLS | 4 | **[x]** | 16 FORCE-RLS tables, transaction-local scope, hostile rehearsal 8/8 |
+| DB-05 unversioned schema | 2 | **[x]** | Recorded revisions 0001-0004; production runs no DDL |
+| DB-06 incomplete migration | 3 | **[x]** | Schema discovery; v1 was losing 4 tables / 3,021 rows |
+| DB-07 report-JSON authority | 5 | **[ ]** | Artifact tier not started — largest remaining item |
+| DB-08 fragmented state | 1 + 5 | **[~]** | Copilot store retired; `data/reports*` still outside the DB |
+| DB-09 observability | 1 + 6 | **[~]** | `/api/health` + `/api/ready` live; metrics surface open |
+| DB-10 TLS / ownership | 0 + 4 | **[~]** | Ownership and roles done; `sslmode=verify-full` not enforced |
+| DB-11 retention | 6 | **[~]** | `db_retention.py` for alert/audit; artifacts + legal hold open |
+| DB-12 query diagnostics | 6 | **[x]** | `pg_stat_statements` + `track_io_timing` live |
+| DB-13 PG CI | 2 + 6 | **[x]** | Migrations-from-empty + full suite on `postgres:18` per change |
+| DB-14 patch discipline | 6 | **[ ]** | Needs an owner and a cadence, not code |
 
 ## 6. Service objectives (carried from the assessment, pending owner sign-off)
 
@@ -271,35 +534,57 @@ Objectives cover PostgreSQL **and** artifacts, keys, and configuration.
 
 ## 7. Milestones and acceptance gates
 
-**M1 — Enterprise pilot** = Phases 0–4 exit gates, plus:
-production refuses SQLite; migration manifest covers 100% of durable state
-with invariant reconciliation; timed PITR restore inside pilot RPO/RTO;
-RLS forced with passing hostile tests; runtime role cannot DDL; TLS
-verify-full for non-local clients.
+**M1 — Enterprise pilot** = Phases 0–4 exit gates, plus the gate list below.
+Status as of 2026-09-02: **6 of 8 met.**
+
+| M1 gate | Met | Evidence / what is missing |
+| --- | :---: | --- |
+| Production refuses SQLite | **yes** | Phase 0 gate + `tests/test_database_authority.py` |
+| Migration covers 100% of durable **database** state | **yes** | Schema discovery, 21/21 tables, zero mismatches |
+| Migration manifest covers durable **filesystem** state | no | `data/reports/`, `data/reports_artifacts/`, `data/scan_cache/` still undeclared |
+| Invariant reconciliation beyond counts | partial | Per-table and per-tenant counts done; row hashes and business invariants (assets per scan, findings per asset) open |
+| Timed restore inside pilot RPO/RTO | **yes** | 25.4 s restore, 125,476 rows, hash match — far inside the 4 h RTO |
+| RLS forced, hostile tests pass | **yes** | 16 FORCE-RLS tables; rehearsal 8/8; `tests/test_tenant_rls.py` |
+| Runtime role cannot DDL | **yes** | `CREATE` revoked and asserted in the role matrix |
+| TLS `verify-full` for non-local clients | no | Not enforced in the connection seam (§0.5 #6). Local-only deployment today, so not yet exposed |
+
+The two unmet gates are both small and well understood; neither blocks the
+work in §8, and both should close before any off-host pilot.
 
 **M2 — General availability** = M1 + Phase 5–6 gates:
 atomic normalized writes; artifact tier live; standby with exercised
 failover; retention/erasure/legal hold automated and tested; PG CI
 certifying every change; a quarter of operating evidence.
 
+M2's outstanding items are the artifact tier, atomic normalized writes, HA
+standby with exercised failover, and a quarter of operating evidence.
+
 **M3 — Regulated / high-scale tiers** = M2 + Phase 7 evidence packages.
 
-## 8. Immediate next actions (the first backlog slice)
+## 8. Next actions (refreshed 2026-09-02)
 
-1. Add the production SQLite-refusal + database-identity check to startup
-   (Phase 0 — small, high leverage, unblocks nothing-but-protects-everything).
-2. Stand up WAL archiving + encrypted base backup on the provisioned
-   instance and run the first restore drill (Phase 1).
-3. Introduce Alembic with the baseline revision; freeze `init_db` DDL
-   (Phase 2).
-4. Rewrite the migration script around schema discovery and add the
-   invariant reconciliation report (Phase 3 prep).
-5. Draft the FK/unique/check constraint graph and the RLS policy set from
-   the live 21-table schema, as migration files awaiting Phase 4.
-6. Decide the tenant-scoped user-identity model (product decision with a
-   date, not code).
+The original list is complete: items 1-5 shipped, item 6 remains a product
+decision. The current backlog slice, in dependency order:
+
+1. **Design the artifact tier end to end before writing it** (§0.5 #1):
+   object layout, encryption, the `scan_reports` reference columns, **and** how
+   `db_backup.py`, the restore drill, and `delete_tenant_with_data()` cover it.
+   Recoverability and erasure must not regress the moment report bodies leave
+   the database.
+2. **Make normalized scan writes transactional** (§0.5 #3) — a save that cannot
+   write assets/findings/index fails the save. This is a prerequisite for
+   retiring the blob read path.
+3. **Scope the background writers, then flip RLS to fail-closed** (§0.5 #2).
+4. **Land unique and check constraints, then the child FK graph** as one
+   revision pair (§0.5 #4).
+5. **Decide the tenant-scoped user identity model** (§0.5 #5) — `users.username`
+   is still globally unique, so two tenants cannot both have an `admin`.
+6. **Enforce `sslmode=verify-full` for non-local DSNs** in the connection seam
+   (§0.5 #6), with a test that a non-local DSN without it is refused.
 
 ---
 
-*Roadmap only — no changes have been made to the database, schema, or
-runtime as part of this document.*
+*This document is no longer roadmap-only. Phases 0-4 and the core of Phase 6
+are implemented, and the `sentro_dev` database on the provisioned cluster has
+been migrated, constrained, role-separated, and placed under row-level
+security. §0 is the record of what changed and what remains.*
