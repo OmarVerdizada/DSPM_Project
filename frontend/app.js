@@ -1727,7 +1727,7 @@ async function hydrateWorkspaceSlice() {
   if (!latestReport?.files_omitted) return;
   const requestId = ++workspaceSliceRequest;
   const resultsBody = document.getElementById("results-body");
-  if (resultsBody && resultsBody.querySelector("td.empty")) {
+  if (resultsBody && resultsBody.querySelector(".inventory-empty-cell")) {
     // Table-shaped skeleton: one shimmer per column so the load state looks
     // like the data it becomes, not a banner over an empty-state CTA.
     const widths = [86, 62, 48, 40, 46, 78, 78];
@@ -1819,6 +1819,20 @@ function renderScanRunningContext(scanKind, message) {
 
 function renderFindingsWorkspace() {
   if (!findingsSignalSummary || !findingsPrioritySummary) return;
+  const findingsTab = document.querySelector("#tab-findings");
+  const hasCompletedScan = hasCompletedInventoryScan();
+  findingsTab?.classList.toggle("findings-pristine", !hasCompletedScan);
+  findingsSignalSummary.closest(".executive-grid")?.classList.toggle("hidden", !hasCompletedScan);
+  if (!hasCompletedScan) {
+    // The single, actionable first-run state lives in Data Inventory. Keeping
+    // placeholder KPIs and a pretend priority queue above it made the empty
+    // Findings page noisy and visually disconnected.
+    findingsSignalSummary.className = "summary-list";
+    findingsPrioritySummary.className = "summary-list";
+    findingsSignalSummary.innerHTML = "";
+    findingsPrioritySummary.innerHTML = "";
+    return;
+  }
   const stats = buildFindingStats(Number.POSITIVE_INFINITY);
   if (!latestFiles.length) {
     const summary = displaySummary(buildCurrentSummary());
@@ -2323,7 +2337,16 @@ function canUseInventoryPageWindow() {
   // S-E.2 represents every inventory facet on the server. Browser-local risk
   // overrides may still change a displayed row, but they never force the
   // browser to hydrate the unbounded saved report.
-  return Boolean(accessToken && latestReport?.scan_id);
+  return Boolean(accessToken && hasCompletedInventoryScan());
+}
+
+function hasCompletedInventoryScan() {
+  return Boolean(
+    latestReport?.scan_id
+    || latestHistoryItems.length
+    || Number(inventoryFacets?.total || 0)
+    || Number(estateSummary?.total_files || 0)
+  );
 }
 
 function inventoryDetailKey(file = {}) {
@@ -2359,7 +2382,12 @@ function parseInventoryListField(value) {
 
 function hydrateInventoryPageItem(item = {}) {
   const detailKey = inventoryDetailKey(item);
-  const detail = latestFiles.find((file) => inventoryDetailKey(file) === detailKey);
+  // A named-scan page can intentionally show an older snapshot. Never merge
+  // its rows with similarly-pathed assets from the currently loaded report.
+  const itemScanId = String(item.scan_id || "");
+  const detail = (!itemScanId || itemScanId === String(latestReport?.scan_id || ""))
+    ? latestFiles.find((file) => inventoryDetailKey(file) === detailKey)
+    : null;
   return {
     ...(detail || {}),
     ...item,
@@ -2456,11 +2484,13 @@ async function streamInventoryExport(format) {
 
 async function refreshInventoryFacets() {
   if (!canUseInventoryPageWindow()) return;
-  const scanId = latestReport?.scan_id;
+  const selectedSource = inventorySourceFacet;
   const requestId = ++inventoryFacetRequest;
   try {
-    const facets = await api("/api/inventory/facets", null, "GET");
-    if (requestId !== inventoryFacetRequest || latestReport?.scan_id !== scanId) return;
+    const params = new URLSearchParams();
+    if (selectedSource !== "ALL") params.set("source", selectedSource);
+    const facets = await api(`/api/inventory/facets${params.size ? `?${params}` : ""}`, null, "GET");
+    if (requestId !== inventoryFacetRequest || inventorySourceFacet !== selectedSource) return;
     inventoryFacets = facets;
     const page = currentInventoryPage();
     if (page) renderRows(page.items, { serverPage: page });
@@ -2484,7 +2514,7 @@ function trimInventoryPageCache() {
 
 function renderInventoryPageLoading() {
   resultsBody.setAttribute("aria-busy", "true");
-  resultsBody.innerHTML = `<tr><td colspan="7" class="empty inventory-window-status">
+  resultsBody.innerHTML = `<tr><td colspan="7" class="inventory-window-status">
     <strong>Loading inventory page...</strong>
     <span>The browser keeps only a bounded page window while the database filters and sorts.</span>
   </td></tr>`;
@@ -2583,11 +2613,16 @@ function renderRows(files, options = {}) {
   renderInventoryControlState(serverPage ? latestFiles : files, visible, serverPage);
 
   if (visible.length === 0) {
-    const hasAnyFiles = Boolean(serverPage ? latestFiles.length || serverPage.total : files?.length);
-    resultsBody.innerHTML = `<tr><td colspan="7" class="empty inventory-empty-state">
-      <strong>${hasAnyFiles ? "No files match the current filters." : "Run a scan to see file risk assessment."}</strong>
-      <span>${hasAnyFiles ? "Try clearing risk, source, finding, or search filters." : "File-server and endpoint results will appear here with findings, risk, reasons, and DLP actions."}</span>
-    </td></tr>`;
+    const hasCompletedScan = hasCompletedInventoryScan();
+    document.querySelector("#tab-findings")?.classList.toggle("findings-pristine", !hasCompletedScan);
+    resultsBody.innerHTML = hasCompletedScan
+      ? `<tr><td colspan="7" class="inventory-empty-cell"><div class="inventory-empty-panel is-filtered" role="status"><strong>No findings found</strong></div></td></tr>`
+      : `<tr><td colspan="7" class="inventory-empty-cell"><div class="inventory-empty-panel is-pristine">
+          <span class="inventory-empty-icon" aria-hidden="true"></span>
+          <strong>See your sensitive data clearly</strong>
+          <p>Run a file-server or endpoint scan to build a readable inventory of findings, risk reasons, and recommended actions.</p>
+          <button type="button" class="mc-empty-cta" data-tab-jump="file-servers">Start your first scan</button>
+        </div></td></tr>`;
     lastRenderedFileKeys = currentKeys;
     hasRenderedScanRows = true;
     return;
@@ -2842,18 +2877,19 @@ document.addEventListener("keydown", (event) => {
   applyInventorySort(th.dataset.inventorySort);
 });
 
-function configuredInventoryScanNames() {
-  // The scan selector represents configurations the operator created, not
-  // collector protocols or generic/template sources found in old results.
-  return [...new Set(scanProfilesState
-    .map((profile) => String(profile?.name || "").trim())
-    .filter(Boolean))]
+function completedInventoryScanNames() {
+  // A Data Inventory source must have data behind it. Saved configurations
+  // that have never run belong on the scan decks, not in a results filter.
+  return [...new Set([
+    ...latestHistoryItems.map((item) => String(item?.scan_label || "").trim()),
+    ...(inventoryFacets?.scans || []).map((item) => String(item?.value || "").trim()),
+  ].filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
 }
 
 function renderInventoryScanOptions() {
   if (inventorySourceFilter) {
-    const scanNames = configuredInventoryScanNames();
+    const scanNames = completedInventoryScanNames();
     const current = scanNames.includes(inventorySourceFacet) ? inventorySourceFacet : "ALL";
     inventorySourceFacet = current;
     inventorySourceFilter.innerHTML = ["ALL", ...scanNames]
@@ -3306,14 +3342,20 @@ function hashString(value) {
 
 async function ensureInventoryAssetDetail(file) {
   if (!file?.__inventory_page_item || file.__inventory_detail_loaded || !file.id) return file;
-  const requestKey = String(file.id);
+  const scanId = String(file.scan_id || "");
+  const requestKey = `${scanId}|${String(file.id)}`;
   if (!inventoryDetailRequests.has(requestKey)) {
-    const request = api(`/api/inventory/${encodeURIComponent(file.id)}`, null, "GET")
+    const scanQuery = scanId ? `?scan_id=${encodeURIComponent(scanId)}` : "";
+    const request = api(`/api/inventory/${encodeURIComponent(file.id)}${scanQuery}`, null, "GET")
       .then((data) => {
         const asset = data.asset || {};
         const cachedItems = [...inventoryPageWindow.pages.values()].flatMap((page) => page.items || []);
         const targets = [...new Set([file, ...latestFiles, ...cachedItems])]
-          .filter((item) => item && (item === file || String(item.id || "") === requestKey || fileKey(item) === fileKey(file)));
+          .filter((item) => item && (
+            item === file
+            || (String(item.id || "") === String(file.id) && String(item.scan_id || "") === scanId)
+            || (fileKey(item) === fileKey(file) && String(item.scan_id || "") === scanId)
+          ));
         targets.forEach((item) => Object.assign(item, asset, {
           __inventory_page_item: true,
           __inventory_detail_loaded: true,
@@ -7509,6 +7551,7 @@ function renderTenantsTable(tenants) {
 
 function renderHistory(items) {
   latestHistoryItems = items || [];
+  renderInventoryScanOptions();
   const visibleItems = filterHistoryItems(latestHistoryItems);
   updateRangeStatus(historyRange, visibleItems.length, latestHistoryItems.length);
   renderExecutiveDashboard(latestDashboard, visibleItems);
@@ -8168,6 +8211,8 @@ inventoryRiskFilters.forEach((button) => {
 
 inventorySourceFilter?.addEventListener("change", () => {
   inventorySourceFacet = inventorySourceFilter.value || "ALL";
+  inventoryFacetRequest += 1;
+  inventoryFacets = null;
   renderedRowsLimit = ROW_PAGE_SIZE;
   refreshInventoryPageWindow();
 });
@@ -8192,6 +8237,10 @@ inventoryClearFiltersBtn?.addEventListener("click", () => {
   inventoryFindingFacet = "ALL";
   inventoryFrameworkFacets = new Set();
   if (filterInput) filterInput.value = "";
+  if (inventorySourceFilter) inventorySourceFilter.value = "ALL";
+  if (inventoryFindingFilter) inventoryFindingFilter.value = "ALL";
+  inventoryFacetRequest += 1;
+  inventoryFacets = null;
   renderedRowsLimit = ROW_PAGE_SIZE;
   refreshInventoryPageWindow();
   renderFindingsWorkspace();
@@ -8501,6 +8550,10 @@ tenantSwitcher.addEventListener("change", async () => {
   latestReport = null;
   latestScanKind = "";
   latestDashboard = null;
+  latestHistoryItems = [];
+  estateSummary = null;
+  inventoryFacetRequest += 1;
+  inventoryFacets = null;
   rowOverrides = loadRowOverrides();
   assetRules = loadAssetRules();
   customExtensions = loadCustomExtensions();

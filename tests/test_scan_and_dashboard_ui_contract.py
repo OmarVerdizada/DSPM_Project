@@ -22,6 +22,7 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         cls.app_js = Path("frontend/app.js").read_text(encoding="utf-8")
         cls.index_html = Path("frontend/index.html").read_text(encoding="utf-8")
         cls.styles_css = Path("frontend/styles.css").read_text(encoding="utf-8")
+        cls.sentro_fx = Path("frontend/sentro-fx.js").read_text(encoding="utf-8")
 
     def test_pollscan_tolerates_transient_errors(self) -> None:
         # A single poll error must not abandon monitoring; the poller retries a
@@ -140,23 +141,27 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         apply_body = self.app_js[apply_start:apply_start + 700]
         self.assertIn("resetInventoryPageWindow()", apply_body)
         self.assertIn("refreshInventoryPageWindow()", apply_body)
-        # The Scan facet lists the scans the operator CONFIGURED (the saved
-        # profile cards), not collector protocols or whatever source strings
-        # old results happen to carry.
-        self.assertIn("function configuredInventoryScanNames(", self.app_js)
-        names_start = self.app_js.index("function configuredInventoryScanNames(")
+        # A results filter lists completed named runs, not configurations that
+        # have never produced data (which used to create guaranteed blank views).
+        self.assertIn("function completedInventoryScanNames(", self.app_js)
+        names_start = self.app_js.index("function completedInventoryScanNames(")
         names_body = self.app_js[names_start:names_start + 400]
-        self.assertIn("scanProfilesState", names_body)
-        # Saving/deleting a profile refreshes the selector via the deck render.
-        deck_start = self.app_js.index("function renderScanDecks(")
-        deck_body = self.app_js[deck_start:self.app_js.index("function refreshDeckBusyState(")]
-        self.assertIn("renderInventoryScanOptions()", deck_body)
-        # scanProfilesState is read by the inventory module during boot, long
-        # before the appended scan-deck module runs - it must be declared in
-        # the top-of-file state block, not in the appended module (TDZ).
-        self.assertLess(self.app_js.index("let scanProfilesState"),
-                        self.app_js.index("function configuredInventoryScanNames("))
+        self.assertIn("latestHistoryItems", names_body)
+        self.assertIn("scan_label", names_body)
+        self.assertNotIn("scanProfilesState", names_body)
         self.assertIn("All scans", self.index_html)
+
+    def test_inventory_empty_states_distinguish_first_run_from_no_matches(self) -> None:
+        # First run gets one composed CTA; a completed scan with filters that
+        # match nothing gets only the requested status message.
+        self.assertIn("hasCompletedInventoryScan()", self.app_js)
+        self.assertIn("Start your first scan", self.app_js)
+        self.assertIn("No findings found", self.app_js)
+        self.assertIn("inventory-empty-panel is-filtered", self.app_js)
+        # The generic effects enhancer must not append the first-scan CTA to
+        # loading, load-more, or filtered-empty rows.
+        empty_ctas = self.sentro_fx[self.sentro_fx.index("var emptyCtas"):self.sentro_fx.index("emptyCtas.forEach")]
+        self.assertNotIn("#results-body", empty_ctas)
 
     def test_setup_view_uses_the_full_window_with_one_scrollbar(self) -> None:
         # The wizard spans the content area (a centred max-width column left

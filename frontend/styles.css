@@ -4665,6 +4665,117 @@ td, th { border-color: var(--line) !important; }
   }
 }
 
+/* Findings empty states: first-run guidance is one composed surface, while an
+   empty filtered result is deliberately just one quiet status message.  The
+   content sits inside a real table cell; the cell itself is never changed to a
+   flex box, so colspan sizing and alignment remain valid in every browser. */
+:root:root #results-body .inventory-empty-cell {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  text-align: center;
+  vertical-align: middle;
+}
+:root:root #results-body .inventory-empty-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  box-sizing: border-box;
+  color: var(--muted);
+  text-align: center;
+}
+:root:root #results-body .inventory-empty-panel.is-pristine {
+  min-height: clamp(360px, 58vh, 620px);
+  padding: 54px 28px;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 50% 36%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 34%),
+    linear-gradient(180deg, color-mix(in srgb, var(--card-2) 72%, transparent), transparent);
+}
+:root:root #results-body .inventory-empty-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 62px;
+  height: 62px;
+  margin-bottom: 20px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  box-shadow: 0 16px 42px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+:root:root #results-body .inventory-empty-icon::before {
+  content: "";
+  width: 34px;
+  height: 34px;
+  background-color: var(--accent);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.55' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='8' ry='3'/%3E%3Cpath d='M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5'/%3E%3Cpath d='M4 11v6c0 1.66 3.58 3 8 3 1.03 0 2.01-.07 2.9-.2'/%3E%3Cpath d='m17 16 1.5 1.5L22 14'/%3E%3C/svg%3E") center / 34px 34px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.55' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='8' ry='3'/%3E%3Cpath d='M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5'/%3E%3Cpath d='M4 11v6c0 1.66 3.58 3 8 3 1.03 0 2.01-.07 2.9-.2'/%3E%3Cpath d='m17 16 1.5 1.5L22 14'/%3E%3C/svg%3E") center / 34px 34px no-repeat;
+}
+:root:root #results-body .inventory-empty-panel.is-pristine > strong {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(22px, 2.1vw, 30px);
+  line-height: 1.2;
+  letter-spacing: -.025em;
+}
+:root:root #results-body .inventory-empty-panel.is-pristine > p {
+  max-width: 560px;
+  margin: 13px auto 0;
+  font-size: 14px;
+  line-height: 1.7;
+}
+:root:root #results-body .inventory-empty-panel.is-pristine .mc-empty-cta {
+  margin-top: 24px;
+}
+:root:root #results-body .inventory-empty-panel.is-filtered {
+  min-height: clamp(240px, 44vh, 460px);
+  padding: 48px 24px;
+}
+:root:root #results-body .inventory-empty-panel.is-filtered strong {
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+}
+:root:root #inventory-workspace .inventory-window-status {
+  padding: 64px 24px !important;
+  color: var(--muted);
+  text-align: center;
+}
+:root:root #inventory-workspace .inventory-window-status strong,
+:root:root #inventory-workspace .inventory-window-status span {
+  display: block;
+}
+:root:root #inventory-workspace .inventory-window-status strong { color: var(--text); }
+
+/* On a truly fresh tenant, remove inactive controls and placeholder analytics;
+   every explanatory line and the next action are grouped in the surface above. */
+:root:root #tab-findings.findings-pristine #inventory-workspace .inventory-toolbar,
+:root:root #tab-findings.findings-pristine #inventory-workspace .inventory-command-bar,
+:root:root #tab-findings.findings-pristine #inventory-workspace .inventory-table thead {
+  display: none !important;
+}
+:root:root #tab-findings.findings-pristine #inventory-workspace .inventory-table {
+  min-width: 0 !important;
+}
+:root:root #tab-findings.findings-pristine #inventory-workspace .inventory-table-wrap {
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  resize: none !important;
+  border-color: color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 18px;
+}
+
+@media (max-width: 700px) {
+  :root:root #results-body .inventory-empty-panel.is-pristine {
+    min-height: 390px;
+    padding: 42px 20px;
+  }
+}
+
 /* v80: DSPM production polish - inventory facets, safer data density, and animated triage UI */
 .inventory-toolbar {
   gap: 18px;

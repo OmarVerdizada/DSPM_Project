@@ -270,8 +270,6 @@
   /* ── Empty-state CTAs: a next step inside curated empties.
      Buttons only click the same nav tabs a user would. ───── */
   var emptyCtas = [
-    { root: "#results-body", label: "Start your first scan", tab: "file-servers" },
-    { root: "#findings-signal-summary", label: "Run a file scan", tab: "file-servers" },
     { root: "#exposure-permissions-summary", label: "Run an endpoint scan", tab: "endpoint" },
     { root: "#report-preview", label: "Start a scan", tab: "file-servers" }
   ];

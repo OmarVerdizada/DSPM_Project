@@ -38,8 +38,11 @@ class InventoryWindowFrontendTests(unittest.TestCase):
 
     def test_all_facets_stay_on_the_bounded_server_path(self) -> None:
         start = self.script.index("function canUseInventoryPageWindow()")
-        body = self.script[start:start + 400]
-        self.assertIn("Boolean(accessToken && latestReport?.scan_id)", body)
+        body = self.script[start:start + 700]
+        self.assertIn("Boolean(accessToken && hasCompletedInventoryScan())", body)
+        # Named historical/demo runs can be queried even when no report was
+        # restored into the current-estate workspace.
+        self.assertIn("latestHistoryItems.length", body)
         self.assertIn('params.set("protected", "true")', self.script)
         self.assertIn('params.set("finding_type", inventoryFindingFacet)', self.script)
         self.assertIn('[...inventoryFrameworkFacets].join(",")', self.script)
