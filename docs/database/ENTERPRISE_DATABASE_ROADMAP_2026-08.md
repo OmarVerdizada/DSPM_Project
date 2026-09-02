@@ -1,7 +1,7 @@
 # Enterprise Database Roadmap
 
-**Status:** In implementation — Phases 0-4 closed, 6 substantially closed, 5 partial,
-7 not started. §0 is the implementation record; §3 keeps the original plan with
+**Status:** In implementation — Phases 0-5 closed, 6 closed except HA, 7 not
+started. Audited end to end on 2026-09-02; §0.4b records what that found. §0 is the implementation record; §3 keeps the original plan with
 per-phase status. Sequenced engineering plan derived from the
 [Enterprise Database Readiness Assessment (2026-08-30)](ENTERPRISE_DATABASE_ASSESSMENT_2026-08-30.md).
 **Verdict being remediated:** NO-GO for enterprise production; strong PostgreSQL
@@ -35,7 +35,7 @@ Live state of `sentro_dev` on the provisioned cluster (PostgreSQL 18.4, port
 `schema_migrations`, schema revision 7, 19 primary keys, 16 tenant foreign
 keys, and 16 tables under FORCE row-level security with one isolation policy
 each**, alongside a **37.3 MB artifact store holding 24 report bodies**. The
-suite is **806 tests**, green on SQLite; the PostgreSQL CI job runs the same
+suite is **816 tests**, green on SQLite; the PostgreSQL CI job runs the same
 suite against a disposable cluster.
 
 ### 0.2 What shipped, phase by phase
@@ -311,6 +311,38 @@ Unlike the three above, report bodies were **not** bounded — 24 rows, 251.6 MB
 a single 45 MB value, growing with report size rather than estate size. That
 asymmetry is why they moved and these did not.
 
+### 0.4b Cross-phase audit (2026-09-02)
+
+Phases 0-6 were re-read against their own claims and probed on a live
+database. Six gaps surfaced. All are fixed; each one is the kind that only
+appears when a later phase changes an assumption an earlier phase made.
+
+| # | Gap | Why it existed | Fix |
+| --- | --- | --- | --- |
+| 1 | **`reset_default_tenant_data` left report bodies on disk** | Phase 5b moved bodies out of the database and taught *tenant erasure* to follow them. Reset is a second erasure path and was not updated, so "reset this tenant" deleted the rows and left findings, paths and owners readable. | Both paths now share `_erase_tenant_artifacts()`, which raises rather than swallowing — an erasure that half-succeeds is worse than one that fails loudly. |
+| 2 | **The migration checksum was recorded but never compared** | The module docstring claimed it made edits to an applied revision "detectable". Nothing ever read the column back. | `checksum_drift()` implements the comparison. Running it immediately found drift on revisions 0001 and 0004 — see the note below, because the finding changed the design. |
+| 3 | **Tenant isolation coverage was a point-in-time fact** | Revisions 0003 and 0004 enumerate the tables that exist *when they run*. A table added by a later revision would silently have neither a tenant foreign key nor RLS, and nothing would say so. | `store.tenant_isolation_coverage()` reports the gap; a PostgreSQL test fails the build on it, and readiness warns at runtime. Proven by adding an uncovered table to a scratch database and watching the gate catch it. |
+| 4 | **A missing report body surfaced as an opaque 500** | Phase 5b introduced a new failure mode — a database restored without its artifact tier — with no handler. | `ArtifactMissing` and `ArtifactCorrupted` map to 503 with the operator's next step in the body, not a stack trace. |
+| 5 | **The migration copied artifact *references* but never checked the bodies** | Bodies live on the filesystem. A row-perfect migration to another host loses every report unless the object store travels too, and nothing said so. | The migration reconciles referenced bodies and reports them; the module header states the requirement. |
+| 6 | **The migration died mid-copy on source referential problems** | SQLite runs with foreign keys off, so the source can hold rows whose tenant is gone. Revision 0003's foreign keys then reject them — halfway through, with a driver traceback and a half-populated destination. | `preflight_source()` refuses up front, naming the tables, counts and tenants, exactly as revision 0003 does. It fired immediately on 13 real orphaned `scan_jobs` rows. |
+
+**The checksum finding changed its own design.** Comparing sources reported
+drift on revisions 0001 and 0004 — both correct. `apply_baseline_schema` is a
+deliberately *convergent* baseline whose `CREATE IF NOT EXISTS` gains the
+columns that later revisions `ALTER` in, and revision 0006 re-runs 0004 on
+purpose. Every revision in this project is idempotent by design, so a strict
+checksum alarm would fire permanently on healthy installations. It is therefore
+recorded and reported as **information** — `status` prints it, the metrics
+payload carries it, and `status --strict` exits non-zero for anyone who wants
+it enforced — with the docstring stating plainly that drift matters for a
+revision performing a one-way data change, and is expected otherwise. A control
+that cries wolf is worse than no control, and the honest version of this one is
+a diagnostic rather than a gate.
+
+Also closed in the audit: every `DSPM_*` variable the code reads is now
+documented in `.env.example` (five were not, including
+`DSPM_BACKUP_MAX_AGE_HOURS` and `DSPM_SLOW_QUERY_MEAN_MS`).
+
 ### 0.5 Open work, ranked
 
 1. **Tighten the RLS unset scope to fail-closed** once background writers carry
@@ -352,8 +384,11 @@ asymmetry is why they moved and these did not.
 | `report_bodies_20260902T065106Z.json` | Report-body migration: 24 bodies, 251.6 MB moved out of the database |
 | `migration_20260902T065511Z.json` | Post-artifact cutover into PostgreSQL at revision 5 |
 | `restore_drill_20260902T065545Z.json` | Restore drill **including the artifact tier**: 24/24 objects, inventory match, 15.8 s |
+| `orphan_repair_20260902T082407Z.json` | Source-side repair of 13 orphaned `scan_jobs` rows the new migration pre-flight refused |
+| `migration_20260902T082517Z.json` | Post-audit cutover: 125,477 rows at revision 7, **24/24 report bodies reconciled present** |
 
-Test coverage: `test_observability.py` (metric families, guarded collectors,
+Test coverage: `test_phase_audit_fixes.py` (the six gaps in §0.4b),
+`test_observability.py` (metric families, guarded collectors,
 warning rules), `test_migration_deployment.py` (every revision a serving
 state, upgrade from a prior release, older build refuses a newer database,
 concurrent starters, advisory lock released), `test_legal_hold.py` (hold
@@ -371,6 +406,9 @@ only), `test_tenant_erasure.py` (erasure completeness).
 
 ```bash
 python -m backend.migrations status
+```
+```bash
+python -m backend.migrations status --strict
 ```
 ```bash
 python -m backend.migrations upgrade
@@ -406,7 +444,9 @@ curl -s localhost:8000/api/admin/db-metrics
 curl -s localhost:8000/api/admin/db-slow-queries
 ```
 
-`db_artifacts.py verify` is the one to run after any restore: it reads every
+`migrations status --strict` exits non-zero on checksum drift (informational
+by default — see §0.4b). `db_artifacts.py verify` is the one to run after any
+restore: it reads every
 body the database references, through the same path the application uses.
 `status` reports applied vs expected revision; `upgrade` applies pending
 revisions and must run as `sentro_owner`; `stamp` adopts an existing database

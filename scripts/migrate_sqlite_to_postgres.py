@@ -107,6 +107,38 @@ def _copy_order(dst, tables: list[str]) -> list[str]:
     return ordered
 
 
+class SourceIntegrityError(RuntimeError):
+    """The source database cannot satisfy the destination's constraints."""
+
+
+def preflight_source(src: sqlite3.Connection, tables: list[str]) -> dict[str, dict]:
+    """Find rows the destination's tenant foreign keys would reject.
+
+    SQLite runs with foreign keys off, so the source can hold rows referencing
+    tenants that no longer exist. Without this check the copy dies part-way
+    through with a raw driver traceback and a half-populated destination; the
+    operator's first signal is a stack trace rather than a statement of what is
+    wrong. Revision 0003 refuses the same condition for the same reason.
+    """
+    if "tenants" not in tables:
+        return {}
+    problems: dict[str, dict] = {}
+    for table in tables:
+        if table == "tenants" or "tenant_id" not in _sqlite_columns(src, table):
+            continue
+        rows = src.execute(
+            f"SELECT tenant_id, COUNT(*) AS n FROM {table} x "
+            "WHERE NOT EXISTS (SELECT 1 FROM tenants t WHERE t.tenant_id = x.tenant_id) "
+            "GROUP BY tenant_id ORDER BY n DESC"
+        ).fetchall()
+        if rows:
+            problems[table] = {
+                "rows": sum(int(r[1]) for r in rows),
+                "tenants": [str(r[0]) for r in rows][:10],
+            }
+    return problems
+
+
 def _sqlite_columns(src: sqlite3.Connection, table: str) -> list[str]:
     return [row[1] for row in src.execute(f"PRAGMA table_info({table})").fetchall()]
 
@@ -138,6 +170,32 @@ def _tenant_counts_pg(dst, table: str) -> dict[str, int]:
     with dst.cursor() as cur:
         cur.execute(f"SELECT tenant_id, COUNT(*) FROM {table} GROUP BY tenant_id")
         return {str(r[0]): int(r[1]) for r in cur.fetchall()}
+
+
+def _reconcile_artifacts(dest_dsn: str) -> dict:
+    """Check that every report body the destination references is readable.
+
+    Content-addressed bodies live on the filesystem, not in the database, so a
+    row-perfect migration to another host still loses every report unless the
+    object store came with it. Reporting this as part of the migration is the
+    difference between finding out now and finding out when someone opens a
+    report.
+    """
+    import psycopg
+
+    from backend import artifacts
+
+    with psycopg.connect(dest_dsn, connect_timeout=15) as conn:
+        rows = conn.execute(
+            "SELECT tenant_id, report_ref FROM scan_reports "
+            "WHERE COALESCE(report_ref, '') <> ''"
+        ).fetchall()
+    missing = [
+        f"{row[0]}/{str(row[1])[:12]}"
+        for row in rows
+        if not artifacts.exists(str(row[0]), str(row[1]))
+    ]
+    return {"referenced": len(rows), "missing": missing}
 
 
 def _as_url_dsn(dsn: str) -> str:
@@ -176,6 +234,20 @@ def migrate(source: Path, dest_dsn: str, truncate: bool, evidence_dir: Path | No
     src.row_factory = sqlite3.Row
 
     tables = discover_tables(src)
+
+    orphans = preflight_source(src, tables)
+    if orphans:
+        detail = "; ".join(
+            f"{table}: {info['rows']} row(s) referencing {', '.join(info['tenants'][:3])}"
+            for table, info in sorted(orphans.items())
+        )
+        raise SourceIntegrityError(
+            "Refusing to migrate: the source holds rows whose tenant no longer "
+            f"exists, which the destination's foreign keys reject ({detail}). "
+            "Re-home or remove them first - a migration must not decide on its "
+            "own which of a customer's rows to discard."
+        )
+
     report: dict[str, dict] = {}
     skipped: list[str] = []
     tenant_mismatches: dict[str, dict] = {}
@@ -238,8 +310,14 @@ def migrate(source: Path, dest_dsn: str, truncate: bool, evidence_dir: Path | No
 
     src.close()
 
+    # Referenced report bodies live outside the database. A migration that
+    # moved every row but left the bodies behind is not a completed migration,
+    # so it is reconciled here rather than discovered on the first report read.
+    artifact_check = _reconcile_artifacts(dest_dsn)
+
     mismatched = [t for t, c in report.items() if c["source"] != c["dest"]]
-    result = "PASS" if not mismatched and not tenant_mismatches else "FAIL"
+    result = ("PASS" if not mismatched and not tenant_mismatches
+              and not artifact_check["missing"] else "FAIL")
 
     print(f"{'table':<30} {'source':>9} {'dest':>9}")
     for table, counts in report.items():
@@ -248,6 +326,14 @@ def migrate(source: Path, dest_dsn: str, truncate: bool, evidence_dir: Path | No
     for table in skipped:
         print(f"{table:<30} {'skipped: no destination table':>30}")
     total_rows = sum(c["source"] for c in report.values())
+    if artifact_check["referenced"]:
+        state = ("all present" if not artifact_check["missing"]
+                 else f"{len(artifact_check['missing'])} MISSING")
+        print(f"\nreport bodies: {artifact_check['referenced']} referenced, {state}")
+        for ref in artifact_check["missing"][:5]:
+            print(f"  missing body: {ref}")
+        if artifact_check["missing"]:
+            print("  copy DSPM_ARTIFACT_DIR to this host and carry DSPM_ARTIFACT_KEY with it.")
     print(f"\nschema revision: {final_revision}")
     print(f"migrated {len(report)} tables, {total_rows} source rows -> {result}")
     if tenant_mismatches:
@@ -257,6 +343,7 @@ def migrate(source: Path, dest_dsn: str, truncate: bool, evidence_dir: Path | No
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         evidence = {
             "migrated_at": datetime.now(timezone.utc).isoformat(),
+            "artifacts": artifact_check,
             "source_file": source.name,
             "schema_revision": final_revision,
             "tables": report,
@@ -302,8 +389,12 @@ def main(argv: list[str] | None = None) -> int:
               "(env, not a flag - DSNs carry credentials)", file=sys.stderr)
         return 2
 
-    return migrate(source, dest, truncate=not args.no_truncate,
-                   evidence_dir=Path(args.evidence_dir) if args.evidence_dir else None)
+    try:
+        return migrate(source, dest, truncate=not args.no_truncate,
+                       evidence_dir=Path(args.evidence_dir) if args.evidence_dir else None)
+    except SourceIntegrityError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

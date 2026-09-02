@@ -3,8 +3,14 @@
 Replaces anonymous startup DDL with a recorded, ordered revision history:
 
 - ``schema_migrations`` records every applied revision (number, name, source
-  checksum, applied_at). The checksum makes silent edits to an already-applied
-  revision detectable instead of quietly divergent.
+  checksum, applied_at). The checksum is a forensic record of *which source*
+  built this database, comparable via ``checksum_drift()``. It is reported,
+  not enforced: every revision here is idempotent DDL (``IF NOT EXISTS`` and
+  catalog checks) over a deliberately convergent baseline, so its source is
+  expected to evolve - revision 0001 gains the columns that later revisions
+  ALTER in, and 0006 re-runs 0004 on purpose. Drift means "this database was
+  built by an older source", which is normal for convergent revisions and
+  worth investigating for a revision that performs a one-way data change.
 - Revisions are Python callables applied in order inside the standard
   transaction-per-connection seam. PostgreSQL applications serialize on an
   advisory lock so concurrent starters cannot race the same revision.
@@ -94,11 +100,58 @@ def current_revision(conn) -> int:
     return int(row["r"] or 0) if row and row["r"] is not None else 0
 
 
+def checksum_drift(conn) -> list[dict]:
+    """Applied revisions whose source no longer matches what was recorded.
+
+    Answers "was this database built by the source that is here now?" - a
+    question worth being able to ask when diagnosing an install, and one the
+    recorded checksum could not previously answer because nothing compared it.
+
+    **Informational, not an alarm.** Every revision in this project is
+    idempotent DDL layered on a convergent baseline, so drift is the normal
+    result of a later revision adding columns that revision 0001 now creates
+    directly. It is a signal to read, not a fault: `python -m backend.migrations
+    status --strict` exits non-zero on drift for anyone who wants it enforced,
+    and the metrics payload reports it as data rather than as a warning.
+
+    A revision that performs a **one-way data change** is the case where drift
+    does matter, because that step cannot re-converge. Such a revision should
+    say so in its docstring.
+    """
+    if not _table_exists(conn):
+        return []
+    recorded = {
+        int(row["revision"]): (str(row["name"]), str(row["checksum"]))
+        for row in conn.execute(
+            "SELECT revision, name, checksum FROM schema_migrations"
+        ).fetchall()
+    }
+    drift: list[dict] = []
+    for number, name, func in _revisions():
+        if number not in recorded:
+            continue
+        applied_name, applied_checksum = recorded[number]
+        # A stamped revision was never executed, so its source was never the
+        # thing that built the schema; comparing it would be meaningless.
+        if applied_name.endswith("(stamped)"):
+            continue
+        current = _checksum(func)
+        if current != applied_checksum:
+            drift.append({
+                "revision": number,
+                "name": name,
+                "applied_checksum": applied_checksum[:12],
+                "current_checksum": current[:12],
+            })
+    return drift
+
+
 def status() -> dict:
     from backend import store, db
 
     with store._connect() as conn:
         applied = current_revision(conn)
+        drift = checksum_drift(conn)
     return {
         "backend": db.backend_name(),
         "applied_revision": applied,
@@ -107,6 +160,7 @@ def status() -> dict:
             {"revision": number, "name": name}
             for number, name, _ in _revisions() if number > applied
         ],
+        "checksum_drift": drift,
     }
 
 
@@ -185,6 +239,12 @@ def main(argv: list[str]) -> int:
         print(f"expected: {info['expected_revision']}")
         for item in info["pending"]:
             print(f"pending:  {item['revision']:04d} {item['name']}")
+        for item in info["checksum_drift"]:
+            print(f"drift:    {item['revision']:04d} {item['name']} "
+                  f"(applied {item['applied_checksum']}, source now "
+                  f"{item['current_checksum']}) - expected for convergent revisions")
+        if info["checksum_drift"] and "--strict" in argv:
+            return 1
         return 0
     if command == "upgrade":
         final = upgrade()
@@ -195,7 +255,8 @@ def main(argv: list[str]) -> int:
         stamp(target)
         print(f"stamped through revision {target}")
         return 0
-    print("usage: python -m backend.migrations [status|upgrade|stamp [N]]", file=sys.stderr)
+    print("usage: python -m backend.migrations [status [--strict]|upgrade|stamp [N]]",
+          file=sys.stderr)
     return 2
 
 

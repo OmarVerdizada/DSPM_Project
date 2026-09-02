@@ -444,6 +444,47 @@ def add_tenant_rls(conn) -> None:
         )
 
 
+def tenant_isolation_coverage() -> dict:
+    """Which tenant-scoped tables lack a tenant foreign key or RLS.
+
+    Revisions 0003 and 0004 enumerate the tables that exist *when they run*, so
+    a table added by a later revision inherits neither control unless its
+    revision asks for them. Nothing in the schema forces that, so this reports
+    the gap instead: a test fails the build on it, and the readiness payload
+    surfaces it at runtime. PostgreSQL-only - SQLite has no RLS, and production
+    is PostgreSQL by the Phase 0 authority gate.
+    """
+    if not db.is_postgres():
+        return {"applicable": False, "scoped_tables": 0,
+                "missing_foreign_key": [], "missing_rls": []}
+    with _connect() as conn:
+        scoped = [
+            str(row["table_name"]) for row in conn.execute(
+                "SELECT DISTINCT table_name FROM information_schema.columns "
+                "WHERE column_name = 'tenant_id' AND table_schema = current_schema() "
+                "AND table_name <> 'tenants' ORDER BY table_name"
+            ).fetchall()
+        ]
+        with_fk = {
+            str(row["t"]) for row in conn.execute(
+                "SELECT conrelid::regclass::text AS t FROM pg_constraint "
+                "WHERE contype = 'f' AND conname LIKE 'fk\\_%\\_tenant'"
+            ).fetchall()
+        }
+        with_rls = {
+            str(row["relname"]) for row in conn.execute(
+                "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = current_schema() AND c.relrowsecurity AND c.relforcerowsecurity"
+            ).fetchall()
+        }
+    return {
+        "applicable": True,
+        "scoped_tables": len(scoped),
+        "missing_foreign_key": sorted(set(scoped) - with_fk),
+        "missing_rls": sorted(set(scoped) - with_rls),
+    }
+
+
 def repair_tenant_rls_predicate(conn) -> None:
     """Revision 0006: rebuild the RLS policies with the empty-string guard.
 
@@ -3562,6 +3603,23 @@ def tenants_under_legal_hold() -> set[str]:
     return {str(row["tenant_id"]) for row in rows}
 
 
+def _erase_tenant_artifacts(tenant_id: str) -> int:
+    """Remove a tenant's stored report bodies. Raises rather than swallowing.
+
+    Every path that erases a tenant's scan data must call this. An erasure
+    that half-succeeds - rows gone, contents still on disk - is worse than one
+    that fails loudly, because it reports success while leaving the data it
+    claimed to destroy.
+    """
+    try:
+        from backend import artifacts
+
+        return artifacts.delete_tenant(tenant_id)
+    except Exception as exc:
+        logger.error("Artifact erasure failed for tenant %s: %s", tenant_id, type(exc).__name__)
+        raise
+
+
 def delete_tenant_with_data(tenant_id: str) -> dict:
     # A legal hold outranks erasure: the whole point is that a scheduled or
     # requested deletion must not proceed while data is under preservation.
@@ -3577,13 +3635,7 @@ def delete_tenant_with_data(tenant_id: str) -> dict:
             # Erasure is only whole if it reaches the bodies too: once reports
             # live in the artifact tier, deleting the rows alone would leave the
             # customer's report contents on disk (Phase 5, DB-07).
-            try:
-                from backend import artifacts
-
-                usage["artifacts_removed"] = artifacts.delete_tenant(tenant_id)
-            except Exception as exc:  # pragma: no cover - erasure must not half-fail silently
-                logger.error("Artifact erasure failed for tenant %s: %s", tenant_id, type(exc).__name__)
-                raise
+            usage["artifacts_removed"] = _erase_tenant_artifacts(tenant_id)
             # Reconciliation state covers the shared optional search projection,
             # not one tenant. Invalidate it after any erasure so the next pass
             # detects and removes documents that no longer exist in the DB.
@@ -3612,6 +3664,11 @@ def reset_default_tenant_data() -> dict:
             if admin is None:
                 raise RuntimeError("Cannot reset the default tenant without its built-in admin user")
             _delete_tenant_scoped_data(conn, tenant_id)
+            # A reset erases every scan this tenant owns, so its report bodies
+            # must go with them. Deleting only the rows left the contents -
+            # findings, paths, owners - readable on disk, which is the same
+            # remanence bug the tenant-erasure path had before Phase 5b.
+            usage["artifacts_removed"] = _erase_tenant_artifacts(tenant_id)
             conn.execute(
                 "DELETE FROM users WHERE tenant_id = ? AND username <> ?",
                 (tenant_id, "admin"),

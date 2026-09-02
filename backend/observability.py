@@ -207,7 +207,19 @@ def schema_metrics() -> dict:
 
     with store._connect() as conn:
         applied = migrations.current_revision(conn)
-    return {"applied": applied, "expected": migrations.expected_revision()}
+        drift = migrations.checksum_drift(conn)
+    return {
+        "applied": applied,
+        "expected": migrations.expected_revision(),
+        "checksum_drift": [item["revision"] for item in drift],
+    }
+
+
+def tenant_isolation_metrics() -> dict:
+    """Whether every tenant-scoped table still carries its FK and RLS."""
+    from backend import store
+
+    return store.tenant_isolation_coverage()
 
 
 def collect() -> dict:
@@ -223,6 +235,7 @@ def collect() -> dict:
         ("replication", replication_metrics),
         ("activity", activity_metrics),
         ("schema_revision", schema_metrics),
+        ("tenant_isolation", tenant_isolation_metrics),
     ):
         _safe(collector, name, metrics, unavailable)
     metrics["unavailable"] = unavailable
@@ -280,6 +293,13 @@ def _warnings(metrics: dict) -> list[str]:
     revision = metrics.get("schema_revision") or {}
     if revision.get("applied") != revision.get("expected"):
         out.append(f"schema revision {revision.get('applied')} != expected {revision.get('expected')}")
+    isolation = metrics.get("tenant_isolation") or {}
+    if isolation.get("applicable"):
+        for label, key in (("tenant foreign key", "missing_foreign_key"), ("row-level security", "missing_rls")):
+            missing = isolation.get(key) or []
+            if missing:
+                out.append(f"{len(missing)} tenant-scoped table(s) without {label}: "
+                           + ", ".join(missing[:5]))
     return out
 
 

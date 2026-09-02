@@ -187,6 +187,7 @@ IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
 # wrong deployment never serves a single request.
 from backend import db as _db
 from backend import store as store_module
+from backend.artifacts import ArtifactCorrupted, ArtifactMissing
 
 DATABASE_IDENTITY = _db.enforce_database_authority(IS_PRODUCTION)
 REPORT_DIR = Path(os.getenv("DSPM_REPORT_DIR", BASE_DIR / "data" / "reports")).resolve()
@@ -384,6 +385,36 @@ async def inventory_unavailable_handler(_: Request, __: InventoryReadUnavailable
         status_code=503,
         content={"detail": "Normalized inventory is temporarily unavailable. Retry shortly."},
         headers={"Retry-After": "5", "Cache-Control": "no-store"},
+    )
+
+
+@app.exception_handler(ArtifactMissing)
+async def artifact_missing_handler(_: Request, __: ArtifactMissing) -> JSONResponse:
+    """A referenced report body is not in the store (Phase 5, DB-07).
+
+    This is an infrastructure condition, not a bad request: the row is intact
+    and the body is elsewhere - typically a database restored without its
+    artifact tier. A bare 500 would send the operator hunting through a stack
+    trace for a fact this can simply state.
+    """
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "A stored report body is missing from the artifact tier. "
+                           "Restore the artifact store alongside the database, then run "
+                           "`python scripts/db_artifacts.py verify`."},
+        headers={"Retry-After": "30", "Cache-Control": "no-store"},
+    )
+
+
+@app.exception_handler(ArtifactCorrupted)
+async def artifact_corrupted_handler(_: Request, __: ArtifactCorrupted) -> JSONResponse:
+    """A stored body no longer hashes to its content id - it is not served."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "A stored report body failed its integrity check and was not "
+                           "served. Run `python scripts/db_artifacts.py verify` and restore "
+                           "the affected object."},
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -802,6 +833,29 @@ def readiness() -> "JSONResponse":
     except Exception as exc:
         failures.append(f"database probe failed: {type(exc).__name__}")
     probe["probe_seconds"] = round(time.perf_counter() - started, 3)
+
+    # Phase 4 polish: revisions 0003/0004 enumerate the tables that exist when
+    # they run, so a table added later inherits neither its tenant foreign key
+    # nor RLS unless its own revision asks. Nothing in the schema forces that,
+    # so the gap is reported. It is a warning rather than a failure: the
+    # application still filters by tenant, and taking a serving instance out of
+    # rotation over a defence-in-depth gap would be the larger harm.
+    # (Checksum drift is deliberately NOT reported here - see
+    # migrations.checksum_drift: it is expected for convergent revisions.)
+    try:
+        from backend import store
+
+        coverage = store.tenant_isolation_coverage()
+        for label, key in (("tenant foreign key", "missing_foreign_key"),
+                           ("row-level security", "missing_rls")):
+            missing = coverage.get(key) or []
+            if missing:
+                warnings.append(
+                    f"{len(missing)} tenant-scoped table(s) without {label}: "
+                    + ", ".join(missing[:5])
+                )
+    except Exception as exc:
+        warnings.append(f"tenant isolation check unavailable: {type(exc).__name__}")
 
     age = _backup_age_or_none()
     probe["backup_age_seconds"] = age
