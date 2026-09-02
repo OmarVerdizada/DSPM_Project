@@ -819,6 +819,39 @@ def readiness() -> "JSONResponse":
     return JSONResponse(status_code=200 if not failures else 503, content=body)
 
 
+@app.get("/api/admin/db-metrics")
+def database_metrics(principal: Principal = Depends(require_role("admin"))) -> dict:
+    """Operational metrics for the database tier (Phase 6, DB-09).
+
+    Admin-only: pool saturation, storage headroom, backup age, WAL archive
+    health, replication lag, long transactions and lock waits describe the
+    deployment, not one tenant, so they are platform diagnostics rather than
+    tenant data. `warnings` is the short list an operator should act on.
+    """
+    from backend import observability
+
+    return observability.collect()
+
+
+@app.get("/api/admin/db-slow-queries")
+def database_slow_queries(
+    principal: Principal = Depends(require_role("admin")),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """Top statements by total execution time (Phase 6, DB-12).
+
+    Query text is sensitive even normalized - it describes the schema and the
+    estate - so this is admin-only and deliberately absent from health,
+    readiness and logs.
+    """
+    from backend import observability
+
+    result = observability.slow_queries(limit)
+    audit(principal.tenant_id, principal.subject, "db.slow_queries.viewed",
+          {"returned": len(result.get("statements") or [])})
+    return result
+
+
 def _schema_revision_or_none():
     try:
         from backend import migrations, store

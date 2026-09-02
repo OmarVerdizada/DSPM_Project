@@ -76,6 +76,36 @@ class TenantRlsTests(unittest.TestCase):
             }
         self.assertEqual(tenants, {self.tenant_a, self.tenant_b})
 
+    def test_an_ended_scope_leaves_the_connection_unscoped(self) -> None:
+        """Regression: after a SET LOCAL scope ends, PostgreSQL reverts the GUC
+        to its session value, which for a never-set custom GUC is the EMPTY
+        STRING - not NULL. A policy that only treated NULL as "no scope" left
+        pooled connections denying every later unscoped statement, and the bug
+        hid on any database where a role default of '*' had been set."""
+        with db.tenant_scope(self.tenant_a):
+            with store._connect() as conn:
+                conn.execute("SELECT 1 AS one").fetchone()
+
+        # The next transaction on that pooled connection must span tenants again.
+        with store._connect() as conn:
+            setting = conn.execute(
+                "SELECT current_setting('app.tenant_id', true) AS s"
+            ).fetchone()["s"]
+            tenants = {
+                str(row["tenant_id"]) for row in conn.execute(
+                    "SELECT DISTINCT tenant_id FROM assets WHERE tenant_id IN (?, ?)",
+                    (self.tenant_a, self.tenant_b),
+                ).fetchall()
+            }
+            # And an unrelated write must still be permitted.
+            conn.execute(
+                "INSERT INTO audit_events (tenant_id, timestamp, actor, action, detail_json) "
+                "VALUES (?, '2026-09-02T00:00:00+00:00', 'test', 'unscoped-write', '{}')",
+                (self.tenant_b,),
+            )
+        self.assertIn(setting, (None, "", "*"), "scope must not persist past the transaction")
+        self.assertEqual(tenants, {self.tenant_a, self.tenant_b})
+
     def test_store_reads_are_scoped_by_decorator(self) -> None:
         # list_inventory(A) runs inside tenant_scope(A); its result can only
         # ever contain A. This asserts the wiring, not just the policy.

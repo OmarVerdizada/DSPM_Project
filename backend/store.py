@@ -422,8 +422,16 @@ def add_tenant_rls(conn) -> None:
             "AND table_name <> 'tenants' ORDER BY table_name"
         ).fetchall()
     ]
+    # NULLIF before COALESCE is load-bearing. When a SET LOCAL scope ends,
+    # PostgreSQL reverts the GUC to its SESSION value, and for a custom GUC
+    # that was never set at session level that value is the EMPTY STRING, not
+    # NULL. COALESCE alone therefore left '' - which matches neither '*' nor
+    # any tenant - so every later unscoped statement on that pooled connection
+    # was denied. The bug was invisible on any database where db_roles.py had
+    # set a role default of '*', which is exactly the wrong thing for a
+    # security control to depend on.
     predicate = (
-        "COALESCE(current_setting('app.tenant_id', true), '*') "
+        "COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), '*') "
         "IN ('*', tenant_id)"
     )
     for table in tables:
@@ -434,6 +442,18 @@ def add_tenant_rls(conn) -> None:
             f"CREATE POLICY tenant_isolation ON {table} FOR ALL "
             f"USING ({predicate}) WITH CHECK ({predicate})"
         )
+
+
+def repair_tenant_rls_predicate(conn) -> None:
+    """Revision 0006: rebuild the RLS policies with the empty-string guard.
+
+    Revision 0004's predicate treated only NULL as "no scope". After any
+    scoped transaction the session value of a custom GUC is the empty string,
+    so a pooled connection that had once carried a tenant scope refused every
+    subsequent unscoped statement. ``add_tenant_rls`` drops and recreates each
+    policy, so re-running it is the whole repair.
+    """
+    add_tenant_rls(conn)
 
 
 def _tenant_scoped(func):
