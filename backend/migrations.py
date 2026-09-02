@@ -41,6 +41,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (2, "saved_scan_labels", store.add_scan_report_labels),
         (3, "tenant_referential_integrity", store.add_tenant_integrity),
         (4, "tenant_row_level_security", store.add_tenant_rls),
+        (5, "report_artifact_references", store.add_report_artifact_refs),
     ]
 
 

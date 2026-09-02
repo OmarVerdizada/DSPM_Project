@@ -2,8 +2,10 @@
 
 Restores the newest encrypted backup into a scratch database on the same
 cluster, reconciles per-table row counts against the manifest captured at
-dump time, times every stage, and writes a sanitized evidence artifact
-(counts, hashes, durations - no credentials, no data).
+dump time, restores and reconciles the artifact tier (Phase 5: report bodies
+live outside the database, so a database-only drill would prove the wrong
+thing), times every stage, and writes a sanitized evidence artifact (counts,
+hashes, durations - no credentials, no data).
 
 Usage (admin DSN via env, never on the command line):
     set DSPM_DB_URL=...app dsn...            # source identity for the report
@@ -20,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,6 +96,31 @@ def main() -> int:
             if expected.get(table) != restored_counts.get(table)
         }
         timings["reconcile_seconds"] = round(time.perf_counter() - t0, 3)
+
+        # 4. Restore the artifact tier and reconcile it against the manifest.
+        # A restore that brings back rows referencing bodies that did not come
+        # back is not a recovery, so this is a drill failure, not a warning.
+        t0 = time.perf_counter()
+        expected_artifacts = manifest.get("artifacts") or {}
+        artifact_result: dict = {"expected": expected_artifacts.get("objects", 0)}
+        archive_name = expected_artifacts.get("file")
+        if archive_name:
+            with tempfile.TemporaryDirectory(prefix="sentro-artifact-drill-") as scratch:
+                restored = backup.restore_artifacts(
+                    manifest_path.parent / str(archive_name), Path(scratch)
+                )
+            artifact_result["restored"] = restored["objects"]
+            artifact_result["inventory_match"] = (
+                restored["inventory_sha256"] == expected_artifacts.get("inventory_sha256")
+            )
+        else:
+            artifact_result["restored"] = 0
+            artifact_result["inventory_match"] = expected_artifacts.get("objects", 0) == 0
+        artifacts_ok = (
+            artifact_result["restored"] == artifact_result["expected"]
+            and artifact_result["inventory_match"]
+        )
+        timings["artifact_restore_seconds"] = round(time.perf_counter() - t0, 3)
     finally:
         plain.unlink(missing_ok=True)
         if not args.keep_drill_db:
@@ -111,8 +139,9 @@ def main() -> int:
         "tables_expected": len(manifest["table_counts"]),
         "rows_expected": sum(int(v) for v in manifest["table_counts"].values()),
         "count_mismatches": mismatches,
+        "artifacts": artifact_result,
         "timings": {**timings, "total_seconds": total},
-        "result": "PASS" if integrity_ok and not mismatches else "FAIL",
+        "result": "PASS" if integrity_ok and not mismatches and artifacts_ok else "FAIL",
     }
     evidence_dir = Path(args.evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)

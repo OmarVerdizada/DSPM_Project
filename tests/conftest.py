@@ -62,8 +62,14 @@ def pytest_configure(config: pytest.Config) -> None:
         from pathlib import Path as _Path
         from backend import store as _store
         from backend import security as _security
-        _session_db = _Path(tempfile.mkdtemp(prefix="sentro-test-session-")) / "suite.sqlite"
+        _session_root = _Path(tempfile.mkdtemp(prefix="sentro-test-session-"))
+        _session_db = _session_root / "suite.sqlite"
         os.environ["DSPM_DB_PATH"] = str(_session_db)
+        # Phase 5: scan saves now write report bodies to the artifact store.
+        # Without this the suite writes real objects into data/artifacts/ -
+        # the same leak the session database above fixes, one tier down.
+        os.environ.setdefault("DSPM_ARTIFACT_DIR", str(_session_root / "artifacts"))
+        os.environ.setdefault("DSPM_LOCAL_ARTIFACT_KEY_PATH", str(_session_root / "artifact_key"))
         _store.DB_PATH = _session_db
         # Build through the versioned runner (not legacy init_db) so the suite
         # database carries recorded revisions exactly like a real install -

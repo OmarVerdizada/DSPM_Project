@@ -5,6 +5,11 @@ Design:
 - Backups are ``pg_dump`` custom-format archives, encrypted at rest with a
   dedicated Fernet key (never the vault key - a backup escaping the host must
   not also unlock stored scan credentials).
+- **The backup set covers the artifact tier too.** Once report bodies live
+  outside the database (Phase 5), a database-only backup is no longer a
+  product backup: it would restore an estate whose reports are all missing.
+  Every backup therefore also captures the artifact store, and the manifest
+  records its object count and digest so the restore drill can reconcile it.
 - Every backup writes a manifest: UTC timestamp, database identity, sizes,
   SHA-256 of plaintext and ciphertext, and per-table row counts captured at
   dump time. The restore drill reconciles against these, so "the backup
@@ -60,44 +65,63 @@ def backup_key() -> bytes:
     return key
 
 
+# ---------------------------------------------------------------------------
+# Chunked-Fernet framing. One Fernet token per CHUNK_BYTES of plaintext, each
+# preceded by a 4-byte big-endian token length, so payloads larger than memory
+# stream in both directions and a truncated file is detected rather than
+# silently short-read. This framing is shared with the artifact store
+# (backend/artifacts.py) - it is defined once, here.
+# ---------------------------------------------------------------------------
+
+
+def encrypt_stream(fernet: Fernet, src, out) -> tuple[str, str]:
+    """Encrypt a readable into a writable; returns (plaintext, ciphertext) SHA-256."""
+    plain_hash, cipher_hash = hashlib.sha256(), hashlib.sha256()
+    while True:
+        chunk = src.read(CHUNK_BYTES)
+        if not chunk:
+            break
+        plain_hash.update(chunk)
+        token = fernet.encrypt(chunk)
+        header = struct.pack(">I", len(token))
+        out.write(header)
+        out.write(token)
+        cipher_hash.update(header)
+        cipher_hash.update(token)
+    return plain_hash.hexdigest(), cipher_hash.hexdigest()
+
+
+def decrypt_stream(fernet: Fernet, src, out) -> str:
+    """Decrypt a readable into a writable; returns the plaintext SHA-256."""
+    plain_hash = hashlib.sha256()
+    while True:
+        header = src.read(4)
+        if not header:
+            break
+        if len(header) != 4:
+            raise ValueError("Truncated payload: bad chunk header")
+        (token_len,) = struct.unpack(">I", header)
+        token = src.read(token_len)
+        if len(token) != token_len:
+            raise ValueError("Truncated payload: incomplete chunk")
+        chunk = fernet.decrypt(token)
+        plain_hash.update(chunk)
+        out.write(chunk)
+    return plain_hash.hexdigest()
+
+
 def encrypt_file(source: Path, dest: Path) -> tuple[str, str]:
     """Chunked-Fernet encrypt; returns (plaintext_sha256, ciphertext_sha256)."""
     fernet = Fernet(backup_key())
-    plain_hash, cipher_hash = hashlib.sha256(), hashlib.sha256()
     with open(source, "rb") as src, open(dest, "wb") as out:
-        while True:
-            chunk = src.read(CHUNK_BYTES)
-            if not chunk:
-                break
-            plain_hash.update(chunk)
-            token = fernet.encrypt(chunk)
-            header = struct.pack(">I", len(token))
-            out.write(header)
-            out.write(token)
-            cipher_hash.update(header)
-            cipher_hash.update(token)
-    return plain_hash.hexdigest(), cipher_hash.hexdigest()
+        return encrypt_stream(fernet, src, out)
 
 
 def decrypt_file(source: Path, dest: Path) -> str:
     """Decrypt a chunked-Fernet file; returns the plaintext SHA-256."""
     fernet = Fernet(backup_key())
-    plain_hash = hashlib.sha256()
     with open(source, "rb") as src, open(dest, "wb") as out:
-        while True:
-            header = src.read(4)
-            if not header:
-                break
-            if len(header) != 4:
-                raise ValueError("Truncated backup: bad chunk header")
-            (token_len,) = struct.unpack(">I", header)
-            token = src.read(token_len)
-            if len(token) != token_len:
-                raise ValueError("Truncated backup: incomplete chunk")
-            chunk = fernet.decrypt(token)
-            plain_hash.update(chunk)
-            out.write(chunk)
-    return plain_hash.hexdigest()
+        return decrypt_stream(fernet, src, out)
 
 
 def _pg_bin(tool: str) -> str:
@@ -124,6 +148,87 @@ def capture_table_counts(dsn: str) -> dict[str, int]:
                 f'SELECT COUNT(*) FROM "{table}"'
             ).fetchone()[0]
     return counts
+
+
+def capture_artifacts(archive_base: Path) -> dict:
+    """Capture the artifact tier into the backup set.
+
+    Objects are already individually encrypted with the artifact key, so the
+    archive is a plain tar of ciphertext - it adds no plaintext exposure, and
+    re-encrypting it would only mean a restore needs two keys where one will
+    do. The manifest records the object count, byte total and a digest over the
+    (tenant, content-id) set so a restore drill can prove the tier came back
+    whole rather than merely present.
+    """
+    from backend import artifacts as _artifacts
+
+    inventory: list[str] = []
+    total = 0
+    members: list[tuple[str, Path]] = []
+    for tenant, content_id, path in _artifacts.iter_objects():
+        inventory.append(f"{tenant}/{content_id}")
+        total += path.stat().st_size
+        members.append((f"{tenant}/{content_id}{_artifacts.OBJECT_SUFFIX}", path))
+
+    digest = hashlib.sha256("\n".join(sorted(inventory)).encode("utf-8")).hexdigest()
+    if not members:
+        return {"objects": 0, "ciphertext_bytes": 0, "inventory_sha256": digest, "file": None}
+
+    import tarfile
+
+    archive = archive_base.with_suffix(archive_base.suffix + ".enc")
+    plain_archive = archive_base
+    try:
+        with tarfile.open(plain_archive, "w") as tar:
+            for name, path in members:
+                tar.add(path, arcname=name)
+        # The tar is encrypted like the dump so the whole backup set is uniform.
+        _plain_sha, cipher_sha = encrypt_file(plain_archive, archive)
+    finally:
+        plain_archive.unlink(missing_ok=True)
+
+    return {
+        "objects": len(members),
+        "ciphertext_bytes": total,
+        "inventory_sha256": digest,
+        "file": archive.name,
+        "archive_sha256": cipher_sha,
+    }
+
+
+def restore_artifacts(archive: Path, destination: Path) -> dict:
+    """Decrypt and unpack an artifact archive into ``destination``.
+
+    Used by the restore drill and by a real recovery. Returns the object count
+    and the inventory digest, so the caller can reconcile against the manifest.
+    """
+    import tarfile
+
+    destination.mkdir(parents=True, exist_ok=True)
+    plain = destination / "artifacts.tar.tmp"
+    try:
+        decrypt_file(archive, plain)
+        inventory: list[str] = []
+        with tarfile.open(plain, "r") as tar:
+            for member in tar.getmembers():
+                if not member.isfile():
+                    continue
+                name = member.name.replace("\\", "/")
+                if name.startswith("/") or ".." in name.split("/"):
+                    raise ValueError(f"Refusing unsafe archive member: {member.name!r}")
+                inventory.append(name.rsplit(".", 1)[0])
+            try:
+                # Belt and braces: members were validated above, and the "data"
+                # filter refuses absolute paths, traversal and special files at
+                # extraction time. The filter argument does not exist before
+                # Python 3.12, where the manual check above stands alone.
+                tar.extractall(destination, filter="data")
+            except TypeError:
+                tar.extractall(destination)
+    finally:
+        plain.unlink(missing_ok=True)
+    digest = hashlib.sha256("\n".join(sorted(inventory)).encode("utf-8")).hexdigest()
+    return {"objects": len(inventory), "inventory_sha256": digest}
 
 
 def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
@@ -155,6 +260,7 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
             "plaintext_sha256": plain_sha,
             "ciphertext_sha256": cipher_sha,
             "table_counts": counts,
+            "artifacts": capture_artifacts(directory / f"sentro_{stamp}.artifacts.tar"),
         }
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     finally:
@@ -187,6 +293,9 @@ def prune_backups(keep: int = 7, directory: Path | None = None) -> int:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
         payload = manifest_path.parent / str(data.get("file") or "")
         payload.unlink(missing_ok=True)
+        artifact_file = (data.get("artifacts") or {}).get("file")
+        if artifact_file:
+            (manifest_path.parent / str(artifact_file)).unlink(missing_ok=True)
         manifest_path.unlink(missing_ok=True)
         removed += 1
     return removed

@@ -451,6 +451,24 @@ def _tenant_scoped(func):
     return wrapper
 
 
+def add_report_artifact_refs(conn) -> None:
+    """Revision 0005: reference report bodies instead of storing them (Phase 5).
+
+    Expand step only - it adds the reference columns and touches no data. The
+    bodies themselves are moved by ``scripts/migrate_report_bodies.py``, which
+    is a data migration with its own evidence, deliberately separate from the
+    schema change: a migration that both alters a table and rewrites 250 MB
+    across an object store is one that cannot be reasoned about when it fails
+    halfway. Dropping ``report_json`` is the contract step, in a later release,
+    once every install has been backfilled.
+    """
+    columns = db.table_columns(conn, "scan_reports")
+    if "report_ref" not in columns:
+        conn.execute("ALTER TABLE scan_reports ADD COLUMN report_ref TEXT NOT NULL DEFAULT ''")
+    if "report_bytes" not in columns:
+        conn.execute("ALTER TABLE scan_reports ADD COLUMN report_bytes INTEGER NOT NULL DEFAULT 0")
+
+
 def apply_baseline_schema(conn) -> None:
     """Revision 0001: the convergent baseline DDL, factored out so the
     versioned migration runner (roadmap Phase 2, DB-05) applies it as the
@@ -466,6 +484,8 @@ def apply_baseline_schema(conn) -> None:
             scan_label TEXT NOT NULL DEFAULT '',
             summary_json TEXT NOT NULL DEFAULT '{}',
             report_json TEXT NOT NULL,
+            report_ref TEXT NOT NULL DEFAULT '',
+            report_bytes INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             PRIMARY KEY (tenant_id, scan_id)
         );
@@ -756,6 +776,7 @@ def apply_baseline_schema(conn) -> None:
     # Kept outside the CREATE script so a legacy scan_reports table can gain the
     # column before its label index is created.
     add_scan_report_labels(conn)
+    add_report_artifact_refs(conn)
     now = datetime.now(timezone.utc).isoformat()
     columns = db.table_columns(conn, "tenants")
     if "registration_code" not in columns:
@@ -1129,6 +1150,54 @@ def audit(tenant_id: str, actor: str, action: str, detail: dict | None = None) -
             )
 
 
+def report_artifacts_enabled() -> bool:
+    """Store report bodies in the artifact tier (Phase 5, DB-07).
+
+    On by default. ``DSPM_REPORT_ARTIFACTS=0`` keeps bodies inline in the
+    database - the pre-Phase-5 behaviour - for an install that has not yet
+    added the artifact directory to its backup set.
+    """
+    return os.getenv("DSPM_REPORT_ARTIFACTS", "1") != "0"
+
+
+def _store_report_body(tenant_id: str, body: str) -> tuple[str, int, str]:
+    """Persist a report body; returns (report_ref, report_bytes, inline_body).
+
+    The object is durable before the row that references it. The reverse order
+    would risk a reference to a body that does not exist; this order risks only
+    an unreferenced object, which ``artifacts.prune()`` collects.
+    """
+    if not report_artifacts_enabled():
+        return "", len(body.encode("utf-8")), body
+    from backend import artifacts
+
+    ref = artifacts.put_text(tenant_id, body)
+    return ref.content_id, ref.size_bytes, ""
+
+
+def _report_body(tenant_id: str, row) -> dict:
+    """Resolve a scan_reports row to its report, from wherever the body lives.
+
+    Reads the artifact tier when the row carries a reference and falls back to
+    the inline blob otherwise, so an install mid-backfill serves both.
+    """
+    if row is None:
+        return {}
+    try:
+        content_id = str(row["report_ref"] or "")
+    except (KeyError, IndexError, TypeError):
+        content_id = ""
+    if content_id:
+        from backend import artifacts
+
+        return json.loads(artifacts.get_text(tenant_id, content_id) or "{}")
+    try:
+        inline = row["report_json"]
+    except (KeyError, IndexError, TypeError):
+        inline = ""
+    return json.loads(inline or "{}")
+
+
 @_tenant_scoped
 def save_scan_history(tenant_id: str, report: dict) -> str:
     scan_id = report.get("scan_id") or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
@@ -1156,11 +1225,14 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                 if isinstance(incremental, dict) and incremental.get("enabled"):
                     incremental["baseline_committed"] = False
                     incremental["baseline_commit_reason"] = "normalized_asset_write_unavailable"
+            body = json.dumps(report, ensure_ascii=False)
+            report_ref, report_bytes, inline_body = _store_report_body(tenant_id, body)
             conn.execute(
                 """
                 INSERT OR REPLACE INTO scan_reports
-                    (tenant_id, scan_id, timestamp, source, scan_label, summary_json, report_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
+                     report_json, report_ref, report_bytes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tenant_id,
@@ -1169,7 +1241,9 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                     report.get("source"),
                     str(report.get("scan_label") or "").strip()[:80],
                     json.dumps(report.get("summary", {}), ensure_ascii=False),
-                    json.dumps(report, ensure_ascii=False),
+                    inline_body,
+                    report_ref,
+                    report_bytes,
                     created_at,
                 ),
             )
@@ -1662,15 +1736,20 @@ def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
             for key in keys:
                 scanned += 1
                 blob = conn.execute(
-                    "SELECT report_json FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+                    "SELECT report_json, report_ref FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
                     (key["tenant_id"], key["scan_id"]),
                 ).fetchone()
-                if not blob or not blob["report_json"]:
+                if blob is None:
                     failed += 1
                     continue
                 try:
-                    report = json.loads(blob["report_json"])
-                except (json.JSONDecodeError, TypeError):
+                    # The body may be inline or in the artifact tier; either way
+                    # the backfill reads it through the same resolver.
+                    report = _report_body(key["tenant_id"], blob)
+                except Exception:
+                    failed += 1
+                    continue
+                if not report:
                     failed += 1
                     continue
                 if isinstance(report, dict):
@@ -1856,14 +1935,14 @@ def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
 def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
     if scan_id:
         query = """
-                SELECT report_json
+                SELECT report_json, report_ref
                 FROM scan_reports
                 WHERE tenant_id = ? AND scan_id = ?
                 """
         params: tuple = (tenant_id, scan_id)
     else:
         query = """
-                SELECT report_json
+                SELECT report_json, report_ref
                 FROM scan_reports
                 WHERE tenant_id = ?
                 ORDER BY created_at DESC, scan_id DESC
@@ -1872,7 +1951,7 @@ def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
         params = (tenant_id,)
     with _connect() as conn:
         row = conn.execute(query, params).fetchone()
-    return json.loads(row["report_json"] or "{}") if row else None
+    return _report_body(tenant_id, row) if row else None
 
 
 @_tenant_scoped
@@ -1889,7 +1968,7 @@ def read_latest_scan_report_by_label(tenant_id: str, scan_label: str) -> dict | 
         return None
     with _connect() as conn:
         row = conn.execute(
-            "SELECT report_json FROM scan_reports "
+            "SELECT report_json, report_ref FROM scan_reports "
             "WHERE tenant_id = ? AND scan_label = ? "
             "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
             (tenant_id, label),
@@ -1898,12 +1977,12 @@ def read_latest_scan_report_by_label(tenant_id: str, scan_label: str) -> dict | 
             # Be forgiving of a case-only profile rename while keeping the
             # indexed, exact-name lookup as the normal fast path.
             row = conn.execute(
-                "SELECT report_json FROM scan_reports "
+                "SELECT report_json, report_ref FROM scan_reports "
                 "WHERE tenant_id = ? AND lower(scan_label) = ? "
                 "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
                 (tenant_id, label.lower()),
             ).fetchone()
-    return json.loads(row["report_json"] or "{}") if row else None
+    return _report_body(tenant_id, row) if row else None
 
 
 def update_finding_workflow(tenant_id: str, scan_id: str, selector: dict, update: dict, actor: str) -> dict | None:
@@ -3390,6 +3469,16 @@ def delete_tenant_with_data(tenant_id: str) -> dict:
             conn.execute("DELETE FROM users WHERE tenant_id = ?", (tenant_id,))
             _delete_tenant_scoped_data(conn, tenant_id)
             conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))
+            # Erasure is only whole if it reaches the bodies too: once reports
+            # live in the artifact tier, deleting the rows alone would leave the
+            # customer's report contents on disk (Phase 5, DB-07).
+            try:
+                from backend import artifacts
+
+                usage["artifacts_removed"] = artifacts.delete_tenant(tenant_id)
+            except Exception as exc:  # pragma: no cover - erasure must not half-fail silently
+                logger.error("Artifact erasure failed for tenant %s: %s", tenant_id, type(exc).__name__)
+                raise
             # Reconciliation state covers the shared optional search projection,
             # not one tenant. Invalidate it after any erasure so the next pass
             # detects and removes documents that no longer exist in the DB.

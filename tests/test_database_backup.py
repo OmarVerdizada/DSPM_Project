@@ -53,7 +53,9 @@ class BackupCryptoTests(unittest.TestCase):
         clipped = self.dir / "p.enc.cut"
         clipped.write_bytes(encrypted.read_bytes()[:-20])
 
-        with self.assertRaisesRegex(ValueError, "Truncated backup"):
+        # The chunk framing is shared with the artifact store, so the
+        # message says "payload" rather than "backup".
+        with self.assertRaisesRegex(ValueError, "Truncated payload"):
             backup.decrypt_file(clipped, self.dir / "p.out")
 
     def test_manifest_age_and_prune(self) -> None:
