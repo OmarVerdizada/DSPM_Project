@@ -26,16 +26,17 @@ says so and why.
 | **2 — Versioned schema control** | **Closed** | `5d238a0` | `backend/migrations.py`; revisions 0001-0004 recorded; production verify-or-refuse |
 | **3 — Migration v2 + cutover** | **Closed (dev cluster)** | `d230bf3` | Schema discovery; 21 tables / 125,472 rows reconciled PASS |
 | **4 — Integrity & tenancy** | **Closed for FK + roles + RLS** | `132a1c7`, `a13a038`, `b1083fb` | 16 validated FKs; role matrix verified; 16 FORCE-RLS tables; hostile rehearsal 8/8 |
-| **5 — Authoritative model + artifacts** | **Partial** | (pre-existing) | Normalized reads are the gated default; artifact tier not started |
+| **5 — Authoritative model + artifacts** | **Closed** | `dba41b7`, `df6af2a` | Authoritative writes; report bodies in an encrypted content-addressed tier; SQLite 679→414 MB, PostgreSQL 259→185 MB |
 | **6 — Operate, observe, certify** | **Core closed; HA outstanding** | `d0ce540` | `/api/ready`; PostgreSQL CI job; `pg_stat_statements`; retention tool |
 | **7 — Scale & regulated tiers** | **Not started** | — | Demand-driven by design |
 
 Live state of `sentro_dev` on the provisioned cluster (PostgreSQL 18.4, port
-5442) after the cutover: **259 MB, 21 application tables plus
-`schema_migrations`, schema revision 4, 19 primary keys, 16 tenant foreign
+5442) after the Phase 5 cutover: **185 MB, 21 application tables plus
+`schema_migrations`, schema revision 5, 19 primary keys, 16 tenant foreign
 keys, and 16 tables under FORCE row-level security with one isolation policy
-each.** The suite is **755 tests**, green on SQLite; the PostgreSQL CI job runs
-the same suite against a disposable cluster.
+each**, alongside a **37.3 MB artifact store holding 24 report bodies**. The
+suite is **773 tests**, green on SQLite; the PostgreSQL CI job runs the same
+suite against a disposable cluster.
 
 ### 0.2 What shipped, phase by phase
 
@@ -130,6 +131,51 @@ migrate v2 from the live SQLite (21 tables, 125,472 rows, PASS) -> revisions
 `sentro_backup` -> restore drill of that backup (**25.4 s**, 125,476 rows, zero
 count mismatches, hash match).
 
+**Phase 5a — Authoritative normalized writes** (`dba41b7`)
+A scan save wrote the report row and then mirrored the normalized surfaces
+best-effort: a failure was logged and swallowed, so the database could hold a
+report whose assets/findings projection did not exist, and the inventory read
+path would then serve an estate silently missing that scan. The projection now
+shares the report's transaction — if it cannot be written, the whole save fails
+and nothing is persisted, in either direction.
+``DSPM_NORMALIZED_WRITE_BEST_EFFORT=1`` restores the old behaviour for
+emergency operation only.
+
+**Phase 5b — The artifact tier** (`df6af2a`)
+Revision 0005 adds reference columns to ``scan_reports``; bodies move to
+``backend/artifacts.py``, an immutable store of gzip-compressed, encrypted
+objects named by the SHA-256 of their plaintext. Reads verify that hash, so
+corruption on disk surfaces as an error rather than as wrong data, and a body
+re-saved unchanged (which finding-lifecycle updates do constantly) is stored
+once. Three properties were built in from the start rather than bolted on,
+because without them this change would have been a *recoverability
+regression*:
+
+1. **Backups cover the tier.** A backup set is now the dump plus an artifact
+   archive, with object count and an inventory digest in the manifest. The
+   restore drill reconciles them and fails if they disagree — a restore that
+   brings back rows referencing bodies that did not come back is not a
+   recovery.
+2. **Erasure reaches the bodies.** ``delete_tenant_with_data()`` removes the
+   tenant's subtree. Paths are tenant-scoped *precisely so* erasure is
+   expressible; global content dedup would have made "delete this customer's
+   data" a reference-counting problem the filesystem layout cannot state.
+3. **Compression is not optional.** Fernet base64-inflates by a third, so the
+   uncompressed store was **335 MB for 251 MB of JSON** — larger than the rows
+   it replaced. Compressed it is **37 MB**.
+
+Measured result of the live migration: ``scan_reports.report_json`` went from
+251.6 MB to 0, SQLite from **679.4 MB to 414.2 MB**, the PostgreSQL database
+from 259 MB to **185 MB**, and the restore drill got **38% faster** (25.4 s →
+15.8 s) while now also restoring and reconciling 24 artifact objects. The
+migration verifies every body by read-back and hash before clearing the
+inline column, so a row is only emptied once its body is provably retrievable.
+
+The work also exposed that the **test suite was writing real objects into
+``data/artifacts/``** — the same leak ``conftest`` already fixed for the
+database, one tier down. 513 leaked objects were collected by the new
+``prune``, and the suite now gets its own artifact root.
+
 **Phase 6 — Operate and certify** (`d0ce540`)
 `/api/ready` is the serving gate: a bounded database **read *and* write** probe
 plus a schema-revision match, returning 503 with reasons when it cannot serve;
@@ -150,6 +196,7 @@ data-class policy, dry-run by default.
 | **Up/down scripts** | Forward-only revisions plus `stamp` | The rehearsed recovery path is restore-from-backup (Phase 1), proven in 25 s. A down-migration against a database holding data is usually more dangerous than that restore. `stamp` covers adopting an existing database. |
 | RLS policies **default-deny** | Deny when a scope is set; unset scope (`'*'`) is permissive | Background writers — scan workers, search reconciliation, login and tenant lookup, migrations, backups — are not yet scoped. Flipping to default-deny today would break them. The policy already enforces on every path carrying user input; tightening the default is ranked follow-up #2. |
 | Full **constraint graph** (child FKs, unique, check) | 16 tenant FKs only | Child FKs (`findings`->`assets`, `occurrences`->`findings`, `asset_versions`->`assets`) need composite unique keys that do not exist yet; the uniqueness work and those FKs are one unit, deferred together (§0.5 #4). |
+| Compress the other **JSON surfaces** | Left as row values, with the measurement recorded (§0.4a) | PostgreSQL already compresses them via TOAST at 1.9–3.3x. Application-level gzip would add roughly 30 MB of saving on a 185 MB database while making the columns opaque to SQL — revision 0002's own backfill reads `report_json::jsonb ->> 'scan_label'` — costing CPU per read and a 57,000-row migration. Measured, then declined. |
 | Production **cutover** | Cutover onto the development cluster | The user-facing server on `:8000` still serves SQLite by design — this host is the lab. Migration, reconciliation, roles, RLS, and restore are all proven against real data at production scale; flipping `DSPM_DB_URL` is a deployment decision, and Phase 0's gate keeps it honest once flipped. |
 
 ### 0.4 Defects found by the work (none were in the plan)
@@ -179,19 +226,55 @@ Building the controls surfaced real bugs. Each is fixed and regression-tested.
    loaded before `tenants`). The migration now topologically sorts tables by
    the destination's FK graph.
 
+### 0.4a Measured decision on the remaining JSON surfaces
+
+Phase 5 asked for the other large JSON columns to be re-evaluated with
+measurements recorded rather than assumed. Measured on this installation
+(2026-09-02), *after* report bodies moved out:
+
+| Surface | Rows | Logical | Stored (PostgreSQL) | TOAST ratio | gzip would give | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `finding_index.response_json` | 52,657 | 152.6 MB | 78.8 MB | 1.9× | 2.2× | **Keep** |
+| `scan_object_baselines.snapshot_json` | 3,015 | 105.2 MB | 32.2 MB | 3.3× | 5.5× | **Keep** |
+| `assets.detail_json` | 1,369 | 59.1 MB | 18.5 MB | 3.2× | 5.2× | **Keep** |
+
+Reasoning, which is why the measurement mattered:
+
+- **PostgreSQL already compresses them.** These are TOAST-eligible values and
+  the production engine stores them compressed. The 679 MB SQLite figure that
+  motivated this item is a *development* number; the same data is 185 MB on
+  the backend Phase 0 makes mandatory in production.
+- **The marginal gain is small and the cost is not.** Application-level gzip
+  would save roughly 30 MB more, at the price of columns SQL can no longer
+  read (revision 0002's backfill does exactly that), a CPU cost on every read,
+  and a migration across 57,000 rows.
+- **All three are already bounded.** `finding_index` is deleted and rewritten
+  per scan and holds zero orphans; `assets.detail_json` is current-estate, one
+  row per asset. Their growth tracks findings and assets — which is the
+  property the exit gate asks for.
+- **The real lever is retention, not encoding.** `finding_index` is the
+  largest table (95 MB) because scan history is retained indefinitely.
+  Choosing how long to keep scan history is a policy number an owner sets, so
+  `scripts/db_retention.py` deliberately does not invent one; it does now
+  collect unreferenced artifact objects, which is garbage collection rather
+  than retention.
+
+Unlike the three above, report bodies were **not** bounded — 24 rows, 251.6 MB,
+a single 45 MB value, growing with report size rather than estate size. That
+asymmetry is why they moved and these did not.
+
 ### 0.5 Open work, ranked
 
-1. **Phase 5 artifact tier.** Move `scan_reports.report_json` to an immutable,
-   encrypted, content-addressed store. **Design backup coverage and tenant
-   erasure coverage of the artifact tier before cutover** — a database backup
-   that no longer contains report bodies is a *regression* in recoverability
-   unless the artifact store is backed up with it.
-2. **Tighten the RLS unset scope to fail-closed** once background writers carry
+1. **Tighten the RLS unset scope to fail-closed** once background writers carry
    an explicit scope. Sequence: scope the writers, add a scoped-writer test,
    then flip the policy default in a new revision.
-3. **Transactional normalized writes** (Phase 5): a scan save that cannot write
-   assets/findings/index must fail the save, not mirror best-effort.
-4. **Unique + check constraints and the child FK graph** (rest of Phase 4a).
+2. **Unique + check constraints and the child FK graph** (rest of Phase 4a).
+3. **Retire `report_json`** (the contract step of revision 0005) once every
+   install has run `scripts/migrate_report_bodies.py`, and retire the blob
+   inventory read path after a parity soak.
+4. **Add the artifact key and store to the documented recovery inventory** and
+   to whatever off-host copy exists — the tier is in the backup set, but the
+   key that decrypts it must be held separately and deliberately.
 5. **Identity model decision** (Phase 4): `users.username` is still a **global**
    primary key, so usernames collide across tenants. Recommended: surrogate
    user id + unique `(tenant_id, username)`. Product decision, not code.
@@ -216,8 +299,14 @@ Building the controls surfaced real bugs. Each is fixed and regression-tested.
 | `orphan_repair_20260902T060448Z.json` | Operator repair of 80 orphaned rows, per-tenant breakdown |
 | `db_roles_20260902T060709Z.json` | Role privilege matrix verified across 22 tables, PASS |
 | `rls_rehearsal_20260902T060123Z.json` | 8/8 isolation checks as the unprivileged runtime role against real data |
+| `report_bodies_20260902T065106Z.json` | Report-body migration: 24 bodies, 251.6 MB moved out of the database |
+| `migration_20260902T065511Z.json` | Post-artifact cutover into PostgreSQL at revision 5 |
+| `restore_drill_20260902T065545Z.json` | Restore drill **including the artifact tier**: 24/24 objects, inventory match, 15.8 s |
 
-Test coverage: `test_database_authority.py` (authority + readiness),
+Test coverage: `test_report_artifacts.py` (round trip, content addressing,
+ciphertext opacity, corruption detection, path-traversal refusal, erasure,
+backup/restore of the tier), `test_normalized_write_authority.py` (atomic
+saves in both directions), `test_database_authority.py` (authority + readiness),
 `test_database_backup.py` (encryption round-trip, truncation refusal, key
 policy), `test_schema_migrations.py` (fresh upgrade, idempotence, verify gate
 both directions, stamp, startup policy), `test_migration_discovery.py`
@@ -247,7 +336,18 @@ python scripts/db_retention.py
 ```bash
 python -m scripts.migrate_sqlite_to_postgres --evidence-dir docs/database/evidence
 ```
+```bash
+python scripts/migrate_report_bodies.py --dry-run
+```
+```bash
+python scripts/db_artifacts.py verify
+```
+```bash
+python scripts/db_artifacts.py prune --apply
+```
 
+`db_artifacts.py verify` is the one to run after any restore: it reads every
+body the database references, through the same path the application uses.
 `status` reports applied vs expected revision; `upgrade` applies pending
 revisions and must run as `sentro_owner`; `stamp` adopts an existing database
 without executing DDL. `db_retention.py` is a dry run until `--apply`.
@@ -415,9 +515,11 @@ tenant's rows (test artifact); TLS enforced remotely.
 
 ### Phase 5 — Authoritative normalized model and the artifact tier *(DB-07, residual DB-08)* — size L
 
-> **Status: PARTIAL.** Normalized inventory reads are already the gated,
-> parity-tested default. Not started: transactional authoritative writes and the
-> encrypted content-addressed artifact tier. This is the largest remaining item.
+> **Status: CLOSED** (`dba41b7`, `df6af2a`). Normalized writes are authoritative;
+> report bodies live in an encrypted content-addressed tier covered by backup,
+> restore and erasure. The other JSON surfaces were measured and deliberately
+> kept — see §0.4a. Remaining: dropping `report_json` (the contract step) and
+> retiring the blob read path after a parity soak.
 
 79.9% of the 361 MB SQLite file is four JSON surfaces; the largest report is
 12.5 MB. The normalized model must stop being a mirror.
@@ -513,11 +615,11 @@ Status column added 2026-09-02: **[x]** closed, **[~]** partial, **[ ]** open.
 | DB-04 no RLS | 4 | **[x]** | 16 FORCE-RLS tables, transaction-local scope, hostile rehearsal 8/8 |
 | DB-05 unversioned schema | 2 | **[x]** | Recorded revisions 0001-0004; production runs no DDL |
 | DB-06 incomplete migration | 3 | **[x]** | Schema discovery; v1 was losing 4 tables / 3,021 rows |
-| DB-07 report-JSON authority | 5 | **[ ]** | Artifact tier not started — largest remaining item |
-| DB-08 fragmented state | 1 + 5 | **[~]** | Copilot store retired; `data/reports*` still outside the DB |
+| DB-07 report-JSON authority | 5 | **[x]** | Authoritative writes; bodies in the artifact tier; 251.6 MB out of the database |
+| DB-08 fragmented state | 1 + 5 | **[~]** | Copilot store retired; report bodies now a managed, backed-up tier; `data/reports*` and `scan_cache` still undeclared |
 | DB-09 observability | 1 + 6 | **[~]** | `/api/health` + `/api/ready` live; metrics surface open |
 | DB-10 TLS / ownership | 0 + 4 | **[~]** | Ownership and roles done; `sslmode=verify-full` not enforced |
-| DB-11 retention | 6 | **[~]** | `db_retention.py` for alert/audit; artifacts + legal hold open |
+| DB-11 retention | 6 | **[~]** | `db_retention.py` covers alert/audit + artifact GC; scan-history policy and legal hold open |
 | DB-12 query diagnostics | 6 | **[x]** | `pg_stat_statements` + `track_io_timing` live |
 | DB-13 PG CI | 2 + 6 | **[x]** | Migrations-from-empty + full suite on `postgres:18` per change |
 | DB-14 patch discipline | 6 | **[ ]** | Needs an owner and a cadence, not code |
@@ -566,17 +668,16 @@ standby with exercised failover, and a quarter of operating evidence.
 The original list is complete: items 1-5 shipped, item 6 remains a product
 decision. The current backlog slice, in dependency order:
 
-1. **Design the artifact tier end to end before writing it** (§0.5 #1):
-   object layout, encryption, the `scan_reports` reference columns, **and** how
-   `db_backup.py`, the restore drill, and `delete_tenant_with_data()` cover it.
-   Recoverability and erasure must not regress the moment report bodies leave
-   the database.
-2. **Make normalized scan writes transactional** (§0.5 #3) — a save that cannot
-   write assets/findings/index fails the save. This is a prerequisite for
-   retiring the blob read path.
-3. **Scope the background writers, then flip RLS to fail-closed** (§0.5 #2).
-4. **Land unique and check constraints, then the child FK graph** as one
-   revision pair (§0.5 #4).
+1. **Scope the background writers, then flip RLS to fail-closed** (§0.5 #1).
+   This is now the largest remaining correctness item.
+2. **Land unique and check constraints, then the child FK graph** as one
+   revision pair (§0.5 #2).
+3. **Run `migrate_report_bodies.py` on every install, then drop `report_json`**
+   in a contract revision (§0.5 #3). Until the column is gone, both shapes are
+   served and the change stays reversible.
+4. **Put the artifact key in the recovery inventory** and the artifact store in
+   the off-host copy (§0.5 #4). The tier is inside the backup set; the key that
+   decrypts it must not be.
 5. **Decide the tenant-scoped user identity model** (§0.5 #5) — `users.username`
    is still globally unique, so two tenants cannot both have an `admin`.
 6. **Enforce `sslmode=verify-full` for non-local DSNs** in the connection seam
@@ -584,7 +685,9 @@ decision. The current backlog slice, in dependency order:
 
 ---
 
-*This document is no longer roadmap-only. Phases 0-4 and the core of Phase 6
-are implemented, and the `sentro_dev` database on the provisioned cluster has
-been migrated, constrained, role-separated, and placed under row-level
-security. §0 is the record of what changed and what remains.*
+*This document is no longer roadmap-only. Phases 0-5 and the core of Phase 6
+are implemented. The `sentro_dev` database on the provisioned cluster has been
+migrated, constrained, role-separated, placed under row-level security, and
+relieved of the report bodies that made up most of its size — which now live in
+an encrypted content-addressed tier that backup, restore and erasure all reach.
+§0 is the record of what changed and what remains.*

@@ -62,6 +62,33 @@ def main() -> int:
         print(f"{table:<14} older than {days:>4}d: {action} {stale}")
         total_removed += stale if args.apply else 0
 
+    # Unreferenced artifact objects: garbage collection, not retention.
+    # Nothing reachable from a row is ever removed here.
+    try:
+        from backend import artifacts
+
+        with store._connect() as conn:
+            referenced = {
+                (str(row["tenant_id"]), str(row["report_ref"]))
+                for row in conn.execute(
+                    "SELECT tenant_id, report_ref FROM scan_reports "
+                    "WHERE COALESCE(report_ref, '') <> ''"
+                ).fetchall()
+            }
+        stats = artifacts.store_stats()
+        if args.apply:
+            collected = artifacts.prune(referenced)
+            print(f"{'artifacts':<14} unreferenced objects: removed {collected} of {stats['objects']}")
+        else:
+            unreferenced = sum(
+                1 for tenant, cid, _path in artifacts.iter_objects()
+                if (tenant, cid) not in referenced
+            )
+            print(f"{'artifacts':<14} unreferenced objects: would remove {unreferenced} "
+                  f"of {stats['objects']}")
+    except Exception as exc:  # pragma: no cover - artifact tier may be disabled
+        print(f"{'artifacts':<14} skipped ({type(exc).__name__})")
+
     if not args.apply:
         print("\ndry run - re-run with --apply to prune.")
     else:
