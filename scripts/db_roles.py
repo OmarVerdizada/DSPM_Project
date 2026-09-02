@@ -109,6 +109,22 @@ def converge(db_conn) -> dict:
     db_conn.execute("GRANT CONNECT ON DATABASE {} TO sentro_owner, sentro_app, sentro_backup, sentro_readonly".format(
         db_conn.execute("SELECT quote_ident(current_database())").fetchone()[0]))
 
+    # Backups must never be silently partial: pg_dump refuses to run when a
+    # row-level-security policy could filter its COPY, so the read-only
+    # backup role bypasses RLS outright (it already can only SELECT).
+    db_conn.execute("ALTER ROLE sentro_backup BYPASSRLS")
+
+    # RLS default scope (revision 0004): sessions start unscoped ('*') so
+    # cross-tenant paths (login, backups, platform admin) keep working; the
+    # connection seam narrows to one tenant per transaction via SET LOCAL.
+    for role in ROLES:
+        db_conn.execute(
+            "ALTER ROLE {} IN DATABASE {} SET app.tenant_id = '*'".format(
+                role,
+                db_conn.execute("SELECT quote_ident(current_database())").fetchone()[0],
+            )
+        )
+
     # Future tables/sequences created by the owner (migrations) inherit the
     # matrix automatically - this is what keeps the backup gap closed.
     db_conn.execute(

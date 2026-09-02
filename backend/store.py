@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import math
 import os
@@ -396,6 +397,58 @@ def add_tenant_integrity(conn) -> None:
             "ON DELETE RESTRICT NOT VALID"
         )
         conn.execute(f"ALTER TABLE {table} VALIDATE CONSTRAINT {constraint}")
+
+
+def add_tenant_rls(conn) -> None:
+    """Revision 0004: row-level security on tenant-scoped tables (Phase 4c).
+
+    Policies confine a transaction to ``current_setting('app.tenant_id')``
+    when the connection seam has set one (db.tenant_scope). An unset or '*'
+    scope behaves exactly as before - login, platform administration,
+    migrations, and backups all span tenants legitimately - so this ships as
+    pure defense-in-depth on the request paths that carry user input: even a
+    query with a missing or hostile predicate cannot read or write another
+    tenant inside a scoped transaction. FORCE applies the policy to the table
+    owner as well; only superusers bypass. Tightening the unset case to
+    fail-closed is the documented follow-up once every code path is scoped.
+    """
+    if not db.is_postgres():
+        return  # recorded no-op: SQLite is a development backend
+
+    tables = [
+        str(r["table_name"]) for r in conn.execute(
+            "SELECT DISTINCT table_name FROM information_schema.columns "
+            "WHERE column_name = 'tenant_id' AND table_schema = current_schema() "
+            "AND table_name <> 'tenants' ORDER BY table_name"
+        ).fetchall()
+    ]
+    predicate = (
+        "COALESCE(current_setting('app.tenant_id', true), '*') "
+        "IN ('*', tenant_id)"
+    )
+    for table in tables:
+        conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+        conn.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
+        conn.execute(
+            f"CREATE POLICY tenant_isolation ON {table} FOR ALL "
+            f"USING ({predicate}) WITH CHECK ({predicate})"
+        )
+
+
+def _tenant_scoped(func):
+    """Run a store function inside db.tenant_scope(<first argument>).
+
+    On PostgreSQL every transaction the function opens is then confined by
+    the revision-0004 RLS policies to that tenant; on SQLite this is a no-op.
+    Apply to functions whose first positional argument is tenant_id and whose
+    queries serve user-shaped input.
+    """
+    @functools.wraps(func)
+    def wrapper(tenant_id, *args, **kwargs):
+        with db.tenant_scope(str(tenant_id)):
+            return func(tenant_id, *args, **kwargs)
+    return wrapper
 
 
 def apply_baseline_schema(conn) -> None:
@@ -1076,6 +1129,7 @@ def audit(tenant_id: str, actor: str, action: str, detail: dict | None = None) -
             )
 
 
+@_tenant_scoped
 def save_scan_history(tenant_id: str, report: dict) -> str:
     scan_id = report.get("scan_id") or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     report["scan_id"] = scan_id
@@ -1727,6 +1781,7 @@ def prune_job_records(max_age_seconds: int) -> int:
             return cursor.rowcount
 
 
+@_tenant_scoped
 def count_scan_history(tenant_id: str) -> int:
     """Total number of persisted scans for a tenant (DATA-003).
 
@@ -1741,6 +1796,7 @@ def count_scan_history(tenant_id: str) -> int:
     return int(row[0]) if row else 0
 
 
+@_tenant_scoped
 def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
     query = """
             SELECT scan_id, timestamp, source, scan_label, summary_json
@@ -1768,6 +1824,7 @@ def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
     ]
 
 
+@_tenant_scoped
 def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
     if scan_id:
         query = """
@@ -1790,6 +1847,7 @@ def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
     return json.loads(row["report_json"] or "{}") if row else None
 
 
+@_tenant_scoped
 def read_latest_scan_report_by_label(tenant_id: str, scan_label: str) -> dict | None:
     """Return the newest persisted run for one configured scan name.
 
@@ -2268,6 +2326,7 @@ def _inventory_normalized_where(tenant_id: str, filt: dict) -> tuple[list[str], 
     return where, params
 
 
+@_tenant_scoped
 def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
                    q: str = "", extension: str = "", protected: bool | None = None,
                    finding_type: str = "", sort: str = "risk_score",
@@ -2356,6 +2415,7 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
     )
 
 
+@_tenant_scoped
 def inventory_reason_action_counts(tenant_id: str, ids: list) -> dict:
     """Reason/DLP-action counts for one inventory page, keyed by asset id.
 
@@ -2383,6 +2443,7 @@ def inventory_reason_action_counts(tenant_id: str, ids: list) -> dict:
     return counts
 
 
+@_tenant_scoped
 def iter_inventory_export_rows(
     tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
     q: str = "", extension: str = "", protected: bool | None = None,
@@ -2628,6 +2689,7 @@ def _normalized_json_facet_rows(conn, tenant_id: str, column: str):
     ).fetchall()
 
 
+@_tenant_scoped
 def inventory_facets(tenant_id: str, source: str = "") -> dict:
     """Aggregate inventory filters without transferring asset rows to the browser.
 
@@ -2777,6 +2839,7 @@ def get_search_reconciliation(index_uid: str) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
+@_tenant_scoped
 def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dict | None:
     """Return one full asset, optionally from a specific saved scan run."""
     if scan_id:
@@ -3292,7 +3355,9 @@ def _delete_tenant_scoped_data(conn, tenant_id: str) -> None:
 
 def delete_tenant_with_data(tenant_id: str) -> dict:
     usage = tenant_usage(tenant_id)
-    with _lock:
+    # Erasure is a platform operation on an arbitrary tenant: scope the
+    # transaction to the target so RLS permits exactly these rows.
+    with _lock, db.tenant_scope(tenant_id):
         with _connect() as conn:
             conn.execute("DELETE FROM users WHERE tenant_id = ?", (tenant_id,))
             _delete_tenant_scoped_data(conn, tenant_id)

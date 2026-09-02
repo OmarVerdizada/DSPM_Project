@@ -47,6 +47,7 @@ import re
 import sqlite3
 import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -467,6 +468,37 @@ def close_pool() -> None:
 # Public connect() - the seam store._connect() delegates to
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Request-scoped tenant context (roadmap Phase 4c, DB-03). When a scope is
+# active, every PostgreSQL transaction opened through connect() runs
+# SET LOCAL app.tenant_id, and the row-level-security policies installed by
+# revision 0004 confine that transaction to the scoped tenant - a query with
+# a missing or hostile predicate cannot cross tenants. Sessions default to
+# the sentinel '*' (set per role), which the policies treat as unscoped, so
+# paths that legitimately span tenants (login, platform administration,
+# migrations, backups) behave exactly as before.
+# ---------------------------------------------------------------------------
+
+_tenant_scope_var: ContextVar[str | None] = ContextVar("dspm_tenant_scope", default=None)
+
+TENANT_SCOPE_ALL = "*"
+
+
+@contextmanager
+def tenant_scope(tenant_id: str):
+    """Confine PostgreSQL transactions opened inside this block to one tenant
+    (or explicitly broaden with TENANT_SCOPE_ALL). No-op on SQLite."""
+    token = _tenant_scope_var.set(str(tenant_id))
+    try:
+        yield
+    finally:
+        _tenant_scope_var.reset(token)
+
+
+def current_tenant_scope() -> str | None:
+    return _tenant_scope_var.get()
+
+
 @contextmanager
 def connect(sqlite_path: Path):
     """Yield a connection for the active backend, commit on clean exit, always close.
@@ -482,11 +514,13 @@ def connect(sqlite_path: Path):
             # resets it; we commit explicitly on clean exit (matching the
             # connect-per-op semantics) and rely on its rollback-on-exception.
             with pool.connection() as raw:
+                _apply_tenant_scope(raw)
                 yield _PgConn(raw)
                 raw.commit()
         else:  # no psycopg_pool -> connect-per-op
             conn = _pg_connect()
             try:
+                _apply_tenant_scope(conn._raw)
                 yield conn
                 conn.commit()
             finally:
@@ -501,6 +535,12 @@ def connect(sqlite_path: Path):
             conn.commit()
         finally:
             conn.close()
+
+
+def _apply_tenant_scope(raw) -> None:
+    scope = _tenant_scope_var.get()
+    if scope is not None:
+        raw.execute("SELECT set_config('app.tenant_id', %s, true)", (str(scope),))
 
 
 def collate_c(sql_expr: str) -> str:

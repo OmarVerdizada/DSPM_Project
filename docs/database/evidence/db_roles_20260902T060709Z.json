@@ -1,8 +1,8 @@
 {
-  "applied_at": "2026-09-02T05:52:14.021761+00:00",
+  "applied_at": "2026-09-02T06:07:09.624722+00:00",
   "database": "sentro_dev",
   "roles_created": [],
-  "tables": 19,
+  "tables": 22,
   "sequences": 2,
   "verification": {
     "sentro_app": {
