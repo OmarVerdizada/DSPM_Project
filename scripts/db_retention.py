@@ -46,18 +46,31 @@ def main() -> int:
 
     from backend import store
 
+    # A legal hold suspends scheduled deletion for that tenant. Tables pruned
+    # here are tenant-scoped, so held tenants are excluded from the delete
+    # rather than the whole run being refused.
+    held = store.tenants_under_legal_hold()
+    if held:
+        print(f"legal hold active for {len(held)} tenant(s); their rows are preserved")
+
     now = datetime.now(timezone.utc)
     total_removed = 0
     for table, column, env_var, default_days in POLICIES:
         days = overrides.get(table) or int(os.getenv(env_var, str(default_days)))
         cutoff = (now - timedelta(days=days)).isoformat()
+        exclude = ""
+        params: tuple = (cutoff,)
+        if held:
+            placeholders = ", ".join("?" for _ in held)
+            exclude = f" AND tenant_id NOT IN ({placeholders})"
+            params = (cutoff, *sorted(held))
         with store._connect() as conn:
             row = conn.execute(
-                f"SELECT COUNT(*) AS n FROM {table} WHERE {column} < ?", (cutoff,)
+                f"SELECT COUNT(*) AS n FROM {table} WHERE {column} < ?{exclude}", params
             ).fetchone()
             stale = int(row["n"])
             if args.apply and stale:
-                conn.execute(f"DELETE FROM {table} WHERE {column} < ?", (cutoff,))
+                conn.execute(f"DELETE FROM {table} WHERE {column} < ?{exclude}", params)
         action = "removed" if args.apply else "would remove"
         print(f"{table:<14} older than {days:>4}d: {action} {stale}")
         total_removed += stale if args.apply else 0

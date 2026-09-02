@@ -27,15 +27,15 @@ says so and why.
 | **3 — Migration v2 + cutover** | **Closed (dev cluster)** | `d230bf3` | Schema discovery; 21 tables / 125,472 rows reconciled PASS |
 | **4 — Integrity & tenancy** | **Closed for FK + roles + RLS** | `132a1c7`, `a13a038`, `b1083fb` | 16 validated FKs; role matrix verified; 16 FORCE-RLS tables; hostile rehearsal 8/8 |
 | **5 — Authoritative model + artifacts** | **Closed** | `dba41b7`, `df6af2a` | Authoritative writes; report bodies in an encrypted content-addressed tier; SQLite 679→414 MB, PostgreSQL 259→185 MB |
-| **6 — Operate, observe, certify** | **Core closed; HA outstanding** | `d0ce540` | `/api/ready`; PostgreSQL CI job; `pg_stat_statements`; retention tool |
+| **6 — Operate, observe, certify** | **Closed except HA** | `d0ce540`, `a260e55`, `+` | Readiness gate; metrics surface; slow-query review; deployment + concurrency tests; retention with legal hold |
 | **7 — Scale & regulated tiers** | **Not started** | — | Demand-driven by design |
 
 Live state of `sentro_dev` on the provisioned cluster (PostgreSQL 18.4, port
 5442) after the Phase 5 cutover: **185 MB, 21 application tables plus
-`schema_migrations`, schema revision 5, 19 primary keys, 16 tenant foreign
+`schema_migrations`, schema revision 7, 19 primary keys, 16 tenant foreign
 keys, and 16 tables under FORCE row-level security with one isolation policy
 each**, alongside a **37.3 MB artifact store holding 24 report bodies**. The
-suite is **773 tests**, green on SQLite; the PostgreSQL CI job runs the same
+suite is **806 tests**, green on SQLite; the PostgreSQL CI job runs the same
 suite against a disposable cluster.
 
 ### 0.2 What shipped, phase by phase
@@ -188,6 +188,42 @@ whole suite against it. On the cluster, `pg_stat_statements` and
 privileged). `scripts/db_retention.py` prunes alert and audit history per
 data-class policy, dry-run by default.
 
+**Phase 6 — Operate, observe, certify** (`d0ce540`, `a260e55`, and the legal-hold
+revision)
+`/api/ready` was the first half: a bounded read **and write** probe plus a
+schema-revision match, 503 with reasons when it cannot serve, and backup
+staleness reported as a *warning* so an advisory signal never pulls a healthy
+instance from rotation. The second half is `/api/admin/db-metrics`, which
+reports the signals whose absence is how this product fails silently — pool
+saturation measured against capacity, database and artifact size with disk
+headroom, backup age, WAL archive health, replication lag, long transactions
+and lock waits, schema revision. Every collector is individually guarded: a
+metrics endpoint that dies because one optional signal is unavailable is worse
+than one that reports the rest and names what it could not read. The
+`warnings` list is the actionable part, and it is deliberately quiet on a
+healthy installation.
+
+`/api/admin/db-slow-queries` exposes `pg_stat_statements` timings against a
+review threshold. Query text stays privileged: where PostgreSQL redacts it for
+a role without `pg_read_all_stats`, the endpoint says so and points at
+`sentro_readonly` **rather than widening the runtime role** — the cosmetic fix
+would have been a real privilege increase.
+
+CI gained the two deployment-shaped tests the plan asked for: every revision is
+verified to be a serving state on its own (so upgrading from *any* older build
+lands somewhere that works), an upgrade applies only what is missing, an older
+build refuses a newer database, and concurrent starters serialize — including a
+PostgreSQL test that the advisory lock is *released* rather than left held,
+which would block every later deployment on the cluster.
+
+Governance closed with **legal hold** (revision 0007): a tenant under hold
+cannot be erased or pruned. It lives in the database rather than a runbook
+because the code paths that delete data are the ones that must honour it —
+`delete_tenant_with_data()` refuses, the retention tool excludes held tenants,
+placing a hold requires a stated reason, and both directions are audited.
+Verified live: the delete returns **409 while held** and succeeds only once the
+hold is lifted.
+
 ### 0.3 Deliberate deviations from the plan
 
 | Plan said | What was built | Why |
@@ -225,6 +261,18 @@ Building the controls surfaced real bugs. Each is fixed and regression-tested.
 7. **Alphabetical copy order violated the new foreign keys** (`alert_events`
    loaded before `tenants`). The migration now topologically sorts tables by
    the destination's FK graph.
+8. **Revision 0004's RLS predicate denied every unscoped statement on a reused
+   connection.** When a `SET LOCAL` scope ends, PostgreSQL reverts the GUC to
+   its *session* value, which for a custom GUC that was never set at session
+   level is the **empty string**, not NULL. The policy's `COALESCE` replaced
+   only NULL, so `''` matched neither `'*'` nor any tenant. The bug was
+   invisible on `sentro_dev` **because `db_roles.py` had set a role default of
+   `'*'`** — a security control silently depending on a separate script having
+   run. Found by writing the Phase 6 deployment tests against a fresh database;
+   fixed in revision 0006 with a `NULLIF` guard and a regression test.
+9. **The test suite wrote real objects into `data/artifacts/`** (Phase 5b), and
+   **`scan_profiles` bled between tests on PostgreSQL** — both are the same
+   class of isolation gap `conftest` already closed for the database.
 
 ### 0.4a Measured decision on the remaining JSON surfaces
 
@@ -281,11 +329,13 @@ asymmetry is why they moved and these did not.
 6. **TLS `sslmode=verify-full` enforcement** for non-local DSNs — currently
    documented in `.env.example`, not enforced in code. Local-only today.
 7. **HA standby, failover/failback exercises, patch SLA** — infrastructure
-   bound: this host has one cluster. Documented as such rather than faked.
-8. **Metrics surface** (pool saturation, query latency, WAL/archive lag,
-   storage headroom) beyond the current health and readiness payloads.
-9. **Off-host immutable backup copy** (object lock) and backup-age alerting in
-   a real monitor — `/api/ready` warns, but nothing pages.
+   bound: this host has one cluster, so a standby cannot be stood up or
+   exercised here. `/api/admin/db-metrics` reports the absence explicitly
+   (`configured: false`) rather than letting "no lag" read as healthy.
+8. **Off-host immutable backup copy** (object lock) and backup-age alerting in
+   a real monitor — the metrics surface reports staleness, but nothing pages.
+9. **Partitioning for high-growth tables**, once production growth is measured.
+   Nothing on this host justifies it (§0.4a).
 
 ### 0.6 Evidence index
 
@@ -303,7 +353,11 @@ asymmetry is why they moved and these did not.
 | `migration_20260902T065511Z.json` | Post-artifact cutover into PostgreSQL at revision 5 |
 | `restore_drill_20260902T065545Z.json` | Restore drill **including the artifact tier**: 24/24 objects, inventory match, 15.8 s |
 
-Test coverage: `test_report_artifacts.py` (round trip, content addressing,
+Test coverage: `test_observability.py` (metric families, guarded collectors,
+warning rules), `test_migration_deployment.py` (every revision a serving
+state, upgrade from a prior release, older build refuses a newer database,
+concurrent starters, advisory lock released), `test_legal_hold.py` (hold
+blocks erasure and retention), `test_report_artifacts.py` (round trip, content addressing,
 ciphertext opacity, corruption detection, path-traversal refusal, erasure,
 backup/restore of the tier), `test_normalized_write_authority.py` (atomic
 saves in both directions), `test_database_authority.py` (authority + readiness),
@@ -344,6 +398,12 @@ python scripts/db_artifacts.py verify
 ```
 ```bash
 python scripts/db_artifacts.py prune --apply
+```
+```bash
+curl -s localhost:8000/api/admin/db-metrics
+```
+```bash
+curl -s localhost:8000/api/admin/db-slow-queries
 ```
 
 `db_artifacts.py verify` is the one to run after any restore: it reads every
@@ -546,9 +606,12 @@ count, not report size.
 
 ### Phase 6 — Operate, observe, certify *(DB-09, DB-11, DB-12, DB-13, DB-14 + P1 HA)* — size L, parallelizable
 
-> **Status: CORE CLOSED** (`d0ce540`): readiness gate, PostgreSQL CI,
-> `pg_stat_statements`, retention tooling. Outstanding and infrastructure-bound:
-> HA standby and failover exercises, patch SLA cadence, the metrics surface.
+> **Status: CLOSED EXCEPT HA** (`d0ce540`, `a260e55`, legal hold). Readiness
+> gate, metrics surface, slow-query review, PostgreSQL CI with
+> migration-from-prior-release and concurrent-deployment tests, retention with
+> legal hold. Outstanding and infrastructure-bound: a streaming standby and its
+> failover exercises, and a patch SLA cadence — both need a second host and an
+> owner, not code.
 
 - **Truthful health:** liveness vs readiness split; readiness performs a
   bounded read+write probe and schema-revision check. Metrics: pool
@@ -617,12 +680,13 @@ Status column added 2026-09-02: **[x]** closed, **[~]** partial, **[ ]** open.
 | DB-06 incomplete migration | 3 | **[x]** | Schema discovery; v1 was losing 4 tables / 3,021 rows |
 | DB-07 report-JSON authority | 5 | **[x]** | Authoritative writes; bodies in the artifact tier; 251.6 MB out of the database |
 | DB-08 fragmented state | 1 + 5 | **[~]** | Copilot store retired; report bodies now a managed, backed-up tier; `data/reports*` and `scan_cache` still undeclared |
-| DB-09 observability | 1 + 6 | **[~]** | `/api/health` + `/api/ready` live; metrics surface open |
+| DB-09 observability | 1 + 6 | **[x]** | Health, readiness and a guarded metrics surface with an actionable warnings list |
 | DB-10 TLS / ownership | 0 + 4 | **[~]** | Ownership and roles done; `sslmode=verify-full` not enforced |
-| DB-11 retention | 6 | **[~]** | `db_retention.py` covers alert/audit + artifact GC; scan-history policy and legal hold open |
+| DB-11 retention | 6 | **[~]** | Alert/audit retention, artifact GC and legal hold done; scan-history policy needs an owner's number |
 | DB-12 query diagnostics | 6 | **[x]** | `pg_stat_statements` + `track_io_timing` live |
 | DB-13 PG CI | 2 + 6 | **[x]** | Migrations-from-empty + full suite on `postgres:18` per change |
 | DB-14 patch discipline | 6 | **[ ]** | Needs an owner and a cadence, not code |
+| P1 HA standby | 6 | **[ ]** | Single host; absence is reported explicitly rather than as healthy |
 
 ## 6. Service objectives (carried from the assessment, pending owner sign-off)
 
@@ -669,7 +733,9 @@ The original list is complete: items 1-5 shipped, item 6 remains a product
 decision. The current backlog slice, in dependency order:
 
 1. **Scope the background writers, then flip RLS to fail-closed** (§0.5 #1).
-   This is now the largest remaining correctness item.
+   This is now the largest remaining correctness item — and revision 0006
+   showed why the unscoped case deserves care: its behaviour was resting on a
+   role default set by a separate script.
 2. **Land unique and check constraints, then the child FK graph** as one
    revision pair (§0.5 #2).
 3. **Run `migrate_report_bodies.py` on every install, then drop `report_json`**
@@ -685,8 +751,9 @@ decision. The current backlog slice, in dependency order:
 
 ---
 
-*This document is no longer roadmap-only. Phases 0-5 and the core of Phase 6
-are implemented. The `sentro_dev` database on the provisioned cluster has been
+*This document is no longer roadmap-only. Phases 0-5 are implemented, and
+Phase 6 is closed except for the high-availability work a single host cannot
+carry. The `sentro_dev` database on the provisioned cluster has been
 migrated, constrained, role-separated, placed under row-level security, and
 relieved of the report bodies that made up most of its size — which now live in
 an encrypted content-addressed tier that backup, restore and erasure all reach.

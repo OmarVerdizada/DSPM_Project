@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import base64
@@ -186,6 +186,7 @@ IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
 # configured expected identity refuses a mis-pointed DSN. Runs at import so a
 # wrong deployment never serves a single request.
 from backend import db as _db
+from backend import store as store_module
 
 DATABASE_IDENTITY = _db.enforce_database_authority(IS_PRODUCTION)
 REPORT_DIR = Path(os.getenv("DSPM_REPORT_DIR", BASE_DIR / "data" / "reports")).resolve()
@@ -1514,10 +1515,55 @@ def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_r
         raise HTTPException(status_code=400, detail="Default tenant cannot be removed")
     if not tenant_exists(target):
         raise HTTPException(status_code=404, detail="Tenant not found")
-    deleted_usage = delete_tenant_with_data(target)
+    try:
+        deleted_usage = delete_tenant_with_data(target)
+    except store_module.LegalHoldActive as exc:
+        # 409: the request is well formed, the state forbids it.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     audit_tenant = principal.tenant_id if principal.tenant_id != target else "default"
     audit(audit_tenant, principal.subject, "tenant.deleted", {"tenant_id": target, "deleted": deleted_usage})
     return {"deleted": True, "tenant_id": target, "deleted_data": deleted_usage}
+
+
+class LegalHoldRequest(BaseModel):
+    active: bool
+    reason: str = Field(default="", max_length=500)
+
+
+@app.get("/api/tenants/{tenant_id}/legal-hold")
+def read_legal_hold(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+    _require_platform_admin(principal)
+    target = _safe_tenant(tenant_id)
+    if not tenant_exists(target):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return store_module.get_legal_hold(target)
+
+
+@app.put("/api/tenants/{tenant_id}/legal-hold")
+def write_legal_hold(
+    tenant_id: str,
+    payload: LegalHoldRequest,
+    principal: Principal = Depends(require_role("admin")),
+) -> dict:
+    """Place or lift a legal hold (Phase 6, DB-11).
+
+    A hold makes the tenant's data undeletable - erasure and retention both
+    refuse it - so placing one requires a stated reason and both directions
+    are audited.
+    """
+    _require_platform_admin(principal)
+    target = _safe_tenant(tenant_id)
+    if not tenant_exists(target):
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    try:
+        hold = store_module.set_legal_hold(target, payload.active, payload.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_tenant = principal.tenant_id if principal.tenant_id != target else "default"
+    audit(audit_tenant, principal.subject,
+          "tenant.legal_hold.set" if payload.active else "tenant.legal_hold.lifted",
+          {"tenant_id": target, "reason": hold["reason"]})
+    return hold
 
 
 @app.post("/api/api-keys")

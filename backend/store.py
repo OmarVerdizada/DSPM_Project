@@ -489,6 +489,25 @@ def add_report_artifact_refs(conn) -> None:
         conn.execute("ALTER TABLE scan_reports ADD COLUMN report_bytes INTEGER NOT NULL DEFAULT 0")
 
 
+def add_legal_hold(conn) -> None:
+    """Revision 0007: legal hold on a tenant (Phase 6, DB-11).
+
+    Retention deletes data on a schedule; a legal hold is the instruction that
+    overrides it for one tenant, for as long as an investigation or dispute
+    requires. It has to live in the database rather than in a runbook, because
+    the code paths that delete data are the ones that must honour it -
+    ``delete_tenant_with_data`` and the retention tool both refuse a held
+    tenant rather than trusting an operator to remember.
+    """
+    columns = db.table_columns(conn, "tenants")
+    if "legal_hold" not in columns:
+        conn.execute("ALTER TABLE tenants ADD COLUMN legal_hold INTEGER NOT NULL DEFAULT 0")
+    if "legal_hold_reason" not in columns:
+        conn.execute("ALTER TABLE tenants ADD COLUMN legal_hold_reason TEXT NOT NULL DEFAULT ''")
+    if "legal_hold_set_at" not in columns:
+        conn.execute("ALTER TABLE tenants ADD COLUMN legal_hold_set_at TEXT NOT NULL DEFAULT ''")
+
+
 def apply_baseline_schema(conn) -> None:
     """Revision 0001: the convergent baseline DDL, factored out so the
     versioned migration runner (roadmap Phase 2, DB-05) applies it as the
@@ -573,6 +592,9 @@ def apply_baseline_schema(conn) -> None:
             tenant_id TEXT PRIMARY KEY,
             display_name TEXT NOT NULL,
             registration_code TEXT NOT NULL DEFAULT '',
+            legal_hold INTEGER NOT NULL DEFAULT 0,
+            legal_hold_reason TEXT NOT NULL DEFAULT '',
+            legal_hold_set_at TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -797,6 +819,7 @@ def apply_baseline_schema(conn) -> None:
     # column before its label index is created.
     add_scan_report_labels(conn)
     add_report_artifact_refs(conn)
+    add_legal_hold(conn)
     now = datetime.now(timezone.utc).isoformat()
     columns = db.table_columns(conn, "tenants")
     if "registration_code" not in columns:
@@ -3428,7 +3451,9 @@ def get_tenant(tenant_id: str) -> dict | None:
     with _connect() as conn:
         row = conn.execute(
             """
-            SELECT tenant_id, display_name, registration_code, created_at, updated_at
+            SELECT tenant_id, display_name, registration_code,
+                   legal_hold, legal_hold_reason, legal_hold_set_at,
+                   created_at, updated_at
             FROM tenants
             WHERE tenant_id = ?
             """,
@@ -3480,7 +3505,67 @@ def _delete_tenant_scoped_data(conn, tenant_id: str) -> None:
         conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (tenant_id,))
 
 
+class LegalHoldActive(RuntimeError):
+    """A destructive operation was refused because the tenant is under hold."""
+
+
+def get_legal_hold(tenant_id: str) -> dict:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT legal_hold, legal_hold_reason, legal_hold_set_at "
+            "FROM tenants WHERE tenant_id = ?",
+            (tenant_id,),
+        ).fetchone()
+    if row is None:
+        return {"tenant_id": tenant_id, "active": False, "reason": "", "set_at": ""}
+    return {
+        "tenant_id": tenant_id,
+        "active": bool(row["legal_hold"]),
+        "reason": str(row["legal_hold_reason"] or ""),
+        "set_at": str(row["legal_hold_set_at"] or ""),
+    }
+
+
+def set_legal_hold(tenant_id: str, active: bool, reason: str = "") -> dict:
+    """Place or lift a legal hold. Placing one requires a stated reason."""
+    reason = str(reason or "").strip()[:500]
+    if active and not reason:
+        raise ValueError("A legal hold requires a reason.")
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute(
+                "UPDATE tenants SET legal_hold = ?, legal_hold_reason = ?, "
+                "legal_hold_set_at = ?, updated_at = ? WHERE tenant_id = ?",
+                (1 if active else 0, reason if active else "", now if active else "", now, tenant_id),
+            )
+            if not result.rowcount:
+                raise ValueError(f"Unknown tenant: {tenant_id}")
+    return get_legal_hold(tenant_id)
+
+
+def assert_no_legal_hold(tenant_id: str, operation: str) -> None:
+    """Refuse a destructive operation on a held tenant."""
+    hold = get_legal_hold(tenant_id)
+    if hold["active"]:
+        raise LegalHoldActive(
+            f"Refusing to {operation} tenant {tenant_id!r}: a legal hold is in force"
+            f" (set {hold['set_at']}: {hold['reason']}). Lift the hold deliberately first."
+        )
+
+
+def tenants_under_legal_hold() -> set[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT tenant_id FROM tenants WHERE legal_hold = 1"
+        ).fetchall()
+    return {str(row["tenant_id"]) for row in rows}
+
+
 def delete_tenant_with_data(tenant_id: str) -> dict:
+    # A legal hold outranks erasure: the whole point is that a scheduled or
+    # requested deletion must not proceed while data is under preservation.
+    assert_no_legal_hold(tenant_id, "erase")
     usage = tenant_usage(tenant_id)
     # Erasure is a platform operation on an arbitrary tenant: scope the
     # transaction to the target so RLS permits exactly these rows.
