@@ -42,24 +42,27 @@ class FreshDatabaseUpgrade(_TempStore):
         final = migrations.upgrade()
         self.assertEqual(final, migrations.expected_revision())
         rows = self._recorded()
-        self.assertEqual([r["revision"] for r in rows], [1])
+        self.assertEqual([r["revision"] for r in rows], [1, 2])
         self.assertEqual(rows[0]["name"], "baseline_convergent_schema")
+        self.assertEqual(rows[1]["name"], "saved_scan_labels")
         # Checksum is the SHA-256 of the revision's source - 64 hex chars.
-        self.assertRegex(rows[0]["checksum"], r"^[0-9a-f]{64}$")
+        for row in rows:
+            self.assertRegex(row["checksum"], r"^[0-9a-f]{64}$")
         # The baseline actually ran: a core table exists and accepts reads.
         with store._connect() as conn:
             conn.execute("SELECT COUNT(*) AS c FROM tenants").fetchone()
+            self.assertIn("scan_label", db.table_columns(conn, "scan_reports"))
 
     def test_upgrade_is_idempotent(self) -> None:
         migrations.upgrade()
         again = migrations.upgrade()
         self.assertEqual(again, migrations.expected_revision())
-        self.assertEqual(len(self._recorded()), 1)
+        self.assertEqual(len(self._recorded()), 2)
 
     def test_status_reports_pending_then_clean(self) -> None:
         before = migrations.status()
         self.assertEqual(before["applied_revision"], 0)
-        self.assertEqual([p["revision"] for p in before["pending"]], [1])
+        self.assertEqual([p["revision"] for p in before["pending"]], [1, 2])
         migrations.upgrade()
         after = migrations.status()
         self.assertEqual(after["applied_revision"], after["expected_revision"])
@@ -108,7 +111,7 @@ class AdoptExistingDatabase(_TempStore):
         self.assertEqual(migrations.status()["applied_revision"], 0)
         migrations.stamp(migrations.expected_revision())
         rows = self._recorded()
-        self.assertEqual([r["revision"] for r in rows], [1])
+        self.assertEqual([r["revision"] for r in rows], [1, 2])
         self.assertIn("(stamped)", rows[0]["name"])
         migrations.verify_or_raise()  # adopted DB now passes the gate
 

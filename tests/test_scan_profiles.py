@@ -161,6 +161,65 @@ class ScanProfileApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
 
+    def test_named_scan_reads_its_saved_run_after_current_assets_are_overwritten(self) -> None:
+        """A scan source is a saved run, not the mutable label on an asset.
+
+        A later scan of the same path used to overwrite ``assets.scan_label``;
+        selecting the first scan then returned no rows even though its report
+        still held the complete result.
+        """
+        from backend.store import get_inventory_asset, inventory_facets, list_inventory, save_scan_history
+
+        tenant = f"historical-label-{uuid4().hex[:8]}"
+        create_tenant(tenant, "Historical label")
+        path = "/shared/customer-record.txt"
+        save_scan_history(tenant, {
+            "scan_id": "named-run",
+            "source": "smb",
+            "scan_label": "Customer records",
+            "summary": {"total_files": 1, "high": 1},
+            "files": [{
+                "path": path,
+                "name": "customer-record.txt",
+                "findings": [{"type": "email", "risk": "HIGH", "count": 2}],
+                "risk": {
+                    "level": "HIGH",
+                    "score": 80,
+                    "reasons": ["Personal data"],
+                    "dlp_recommendations": ["Restrict sharing"],
+                },
+            }],
+        })
+        # Same stable asset, newer unlabeled run: this is the regression trigger.
+        save_scan_history(tenant, {
+            "scan_id": "newer-run",
+            "source": "smb",
+            "summary": {"total_files": 1, "low": 1},
+            "files": [{
+                "path": path,
+                "name": "customer-record.txt",
+                "findings": [],
+                "risk": {"level": "LOW", "score": 10, "reasons": [], "dlp_recommendations": []},
+            }],
+        })
+
+        selected = list_inventory(tenant, source="Customer records")
+        self.assertEqual(selected["source"], "scan-report")
+        self.assertEqual(selected["scan_id"], "named-run")
+        self.assertEqual(selected["total"], 1)
+        item = selected["items"][0]
+        self.assertEqual(item["risk_level"], "HIGH")
+        self.assertEqual(item["finding_count"], 1)
+        self.assertEqual((item["reason_count"], item["dlp_count"]), (1, 1))
+
+        facets = inventory_facets(tenant, source="Customer records")
+        self.assertEqual(facets["total"], 1)
+        self.assertEqual(facets["risk_counts"], {"HIGH": 1})
+
+        detail = get_inventory_asset(tenant, item["id"], scan_id=selected["scan_id"])
+        self.assertEqual(detail["risk"]["level"], "HIGH")
+        self.assertEqual(detail["scan_id"], "named-run")
+
     def test_sorting_orders_the_whole_inventory_not_one_page(self) -> None:
         """A column header sorts every asset in the tenant. The API orders the
         full table and returns one keyset page, so a 3-row page must match the

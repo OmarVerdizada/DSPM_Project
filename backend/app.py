@@ -1775,7 +1775,7 @@ def inventory_index(
         )
         for item in result.get("items", []):
             pair = counts.get(str(item.get("id") or ""))
-            if pair is not None:
+            if pair is not None and ("reason_count" not in item or "dlp_count" not in item):
                 item["reason_count"], item["dlp_count"] = pair
     except Exception:
         pass
@@ -1829,8 +1829,11 @@ def inventory_export(
 
 
 @app.get("/api/inventory/facets")
-def inventory_facet_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
-    return inventory_facets(principal.tenant_id)
+def inventory_facet_index(
+    principal: Principal = Depends(require_role("viewer")),
+    source: str = Query(default="", max_length=80),
+) -> dict:
+    return inventory_facets(principal.tenant_id, source=source)
 
 
 @app.get("/api/inventory-detail-counts")
@@ -1849,8 +1852,12 @@ def inventory_detail_counts(
 
 
 @app.get("/api/inventory/{asset_id}")
-def inventory_asset_detail(asset_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
-    asset = get_inventory_asset(principal.tenant_id, asset_id)
+def inventory_asset_detail(
+    asset_id: str,
+    principal: Principal = Depends(require_role("viewer")),
+    scan_id: str = Query(default="", max_length=100),
+) -> dict:
+    asset = get_inventory_asset(principal.tenant_id, asset_id, scan_id=scan_id)
     if asset is None:
         raise HTTPException(status_code=404, detail="Inventory asset not found")
     return {"asset": asset}

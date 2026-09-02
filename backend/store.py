@@ -304,6 +304,39 @@ def init_db() -> None:
             apply_baseline_schema(conn)
 
 
+def add_scan_report_labels(conn) -> None:
+    """Revision 0002: index the operator-facing scan name on saved runs.
+
+    ``assets.scan_label`` is only the label of the newest observation of an
+    asset, so it cannot identify an older named scan after another run touches
+    the same path.  The immutable report row needs its own label in order to
+    resolve the latest result for a selected scan without searching/parsing all
+    report blobs on every inventory request.
+    """
+    columns = db.table_columns(conn, "scan_reports")
+    if "scan_label" not in columns:
+        conn.execute("ALTER TABLE scan_reports ADD COLUMN scan_label TEXT NOT NULL DEFAULT ''")
+
+    # Existing reports already carry scan_label inside their authoritative JSON
+    # blob.  Backfill once during the schema migration; new writes populate the
+    # indexed column directly.  Both supported databases provide native JSON
+    # extraction, and every report_json value is produced by json.dumps().
+    if db.is_postgres():
+        conn.execute(
+            "UPDATE scan_reports SET scan_label = LEFT(COALESCE(report_json::jsonb ->> 'scan_label', ''), 80) "
+            "WHERE scan_label = '' AND report_json LIKE '%\"scan_label\"%'"
+        )
+    else:
+        conn.execute(
+            "UPDATE scan_reports SET scan_label = SUBSTR(COALESCE(json_extract(report_json, '$.scan_label'), ''), 1, 80) "
+            "WHERE scan_label = '' AND json_valid(report_json) AND report_json LIKE '%\"scan_label\"%'"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_label_created "
+        "ON scan_reports (tenant_id, scan_label, created_at, scan_id)"
+    )
+
+
 def apply_baseline_schema(conn) -> None:
     """Revision 0001: the convergent baseline DDL, factored out so the
     versioned migration runner (roadmap Phase 2, DB-05) applies it as the
@@ -316,6 +349,7 @@ def apply_baseline_schema(conn) -> None:
             scan_id TEXT NOT NULL,
             timestamp TEXT,
             source TEXT,
+            scan_label TEXT NOT NULL DEFAULT '',
             summary_json TEXT NOT NULL DEFAULT '{}',
             report_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
@@ -605,6 +639,9 @@ def apply_baseline_schema(conn) -> None:
         );
         """
     )
+    # Kept outside the CREATE script so a legacy scan_reports table can gain the
+    # column before its label index is created.
+    add_scan_report_labels(conn)
     now = datetime.now(timezone.utc).isoformat()
     columns = db.table_columns(conn, "tenants")
     if "registration_code" not in columns:
@@ -1007,14 +1044,15 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO scan_reports
-                    (tenant_id, scan_id, timestamp, source, summary_json, report_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (tenant_id, scan_id, timestamp, source, scan_label, summary_json, report_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tenant_id,
                     scan_id,
                     report.get("timestamp"),
                     report.get("source"),
+                    str(report.get("scan_label") or "").strip()[:80],
                     json.dumps(report.get("summary", {}), ensure_ascii=False),
                     json.dumps(report, ensure_ascii=False),
                     created_at,
@@ -1644,7 +1682,7 @@ def count_scan_history(tenant_id: str) -> int:
 
 def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
     query = """
-            SELECT scan_id, timestamp, source, summary_json
+            SELECT scan_id, timestamp, source, scan_label, summary_json
             FROM scan_reports
             WHERE tenant_id = ?
             ORDER BY created_at DESC, scan_id DESC
@@ -1662,6 +1700,7 @@ def read_scan_history(tenant_id: str, limit: int | None = None) -> list[dict]:
             "scan_id": row["scan_id"],
             "timestamp": row["timestamp"],
             "source": row["source"],
+            "scan_label": row["scan_label"],
             "summary": json.loads(row["summary_json"] or "{}"),
         }
         for row in rows
@@ -1687,6 +1726,36 @@ def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
         params = (tenant_id,)
     with _connect() as conn:
         row = conn.execute(query, params).fetchone()
+    return json.loads(row["report_json"] or "{}") if row else None
+
+
+def read_latest_scan_report_by_label(tenant_id: str, scan_label: str) -> dict | None:
+    """Return the newest persisted run for one configured scan name.
+
+    A scan label is attached to a run, while the normalized ``assets`` table is
+    a current-estate projection.  Looking up the report is therefore the only
+    correct way to show a selected scan after a newer run has updated the same
+    assets (or when demo assets are intentionally excluded from the estate).
+    """
+    label = str(scan_label or "").strip()[:80]
+    if not label:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT report_json FROM scan_reports "
+            "WHERE tenant_id = ? AND scan_label = ? "
+            "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
+            (tenant_id, label),
+        ).fetchone()
+        if row is None:
+            # Be forgiving of a case-only profile rename while keeping the
+            # indexed, exact-name lookup as the normal fast path.
+            row = conn.execute(
+                "SELECT report_json FROM scan_reports "
+                "WHERE tenant_id = ? AND lower(scan_label) = ? "
+                "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
+                (tenant_id, label.lower()),
+            ).fetchone()
     return json.loads(row["report_json"] or "{}") if row else None
 
 
@@ -2149,6 +2218,17 @@ def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framewor
     sort = sort if sort in INVENTORY_SORTS else _DEFAULT_INVENTORY_SORT
     limit = max(1, min(int(limit or 100), 500))
     filt = _inventory_filters(risk, source, framework, q, extension, protected, finding_type)
+    # A selected operator-facing scan means "show that scan's latest saved
+    # result", not "show current assets whose most recent observation still
+    # happens to carry this label".  Resolve the immutable run before choosing
+    # the current-estate normalized/search paths.
+    selected_report = read_latest_scan_report_by_label(tenant_id, source) if source else None
+    if selected_report is not None:
+        result = _list_inventory_scan_report(tenant_id, selected_report, filt, sort, cursor, limit)
+        result["source"] = "scan-report"
+        result["scan_id"] = str(selected_report.get("scan_id") or "")
+        result["scan_label"] = str(selected_report.get("scan_label") or "")
+        return result
     # S-F valve: only text searches opt into the dedicated engine. Placeholder
     # inventory browsing keeps S-C keyset pagination. A separate read-enable
     # switch supports backfill/shadow operation before cutover.
@@ -2296,25 +2376,40 @@ def iter_inventory_export_rows(
         cursor_id = str(rows[-1]["id"] or "")
 
 
-def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
+def _scan_report_inventory_rows(tenant_id: str, report: dict) -> list[dict]:
+    """Project one authoritative report into inventory rows with run context."""
     from backend.domain import normalize_scan_report
 
-    latest: dict[str, dict] = {}
-    for item in read_scan_history(tenant_id, limit=1000):  # oldest-first -> newest scan overwrites
-        report = read_scan_report(tenant_id, item.get("scan_id"))
-        if not report:
-            continue
-        for asset in normalize_scan_report(tenant_id, report).assets:
-            latest[asset.id] = {c: getattr(asset, c) for c in _INVENTORY_COLS} | {"search_text": asset.search_text}
+    scan_id = str(report.get("scan_id") or "")
+    rows: list[dict] = []
+    for asset in normalize_scan_report(tenant_id, report).assets:
+        row = {column: getattr(asset, column) for column in _INVENTORY_COLS}
+        row["search_text"] = asset.search_text
+        row["scan_id"] = scan_id
+        try:
+            detail = json.loads(asset.detail_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            detail = {}
+        risk_detail = detail.get("risk") if isinstance(detail, dict) else {}
+        risk_detail = risk_detail if isinstance(risk_detail, dict) else {}
+        row["reason_count"] = len(risk_detail.get("reasons") or [])
+        row["dlp_count"] = len(risk_detail.get("dlp_recommendations") or [])
+        rows.append(row)
+    return rows
 
+
+def _inventory_page_from_rows(
+    rows: list[dict], filt: dict, sort: str, cursor: str, limit: int, *, source_already_matched: bool = False,
+) -> dict:
+    """Apply the parity-safe inventory filters/sort/cursor to projected rows."""
     col, is_text, direction = INVENTORY_SORTS[sort]
     reverse = direction == "DESC"
 
     def _matches(row: dict) -> bool:
         if filt["risk"] and str(row.get("risk_level") or "") != filt["risk"]:
             return False
-        if filt["source"] and filt["source"] not in {
-            str(row.get("source") or ""), str(row.get("scan_label") or "").lower(),
+        if filt["source"] and not source_already_matched and filt["source"] not in {
+            str(row.get("source") or "").lower(), str(row.get("scan_label") or "").lower(),
         }:
             return False
         if filt["extension"] and str(row.get("extension") or "") != filt["extension"]:
@@ -2327,27 +2422,52 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
         framework_keys = {str(value).lower() for value in _decode_string_list(row.get("framework_keys"))}
         if filt["frameworks"] and not any(value in framework_keys for value in filt["frameworks"]):
             return False
-        if filt["q"] and filt["q"] not in str(row.get("search_text") or ""):
+        if filt["q"] and filt["q"] not in str(row.get("search_text") or "").lower():
             return False
         return True
 
     def _key(row: dict):
-        v = row.get(col)
-        return ((v or "") if is_text else (v or 0), str(row.get("id") or ""))
+        value = row.get(col)
+        return ((value or "") if is_text else (value or 0), str(row.get("id") or ""))
 
-    rows = sorted((r for r in latest.values() if _matches(r)), key=_key, reverse=reverse)
-    total = len(rows)
-
+    matched = sorted((row for row in rows if _matches(row)), key=_key, reverse=reverse)
+    total = len(matched)
     decoded = _decode_cursor(cursor, sort, is_text)
     if decoded is not None:
-        cv, cid = decoded
-        pivot = ((cv or "") if is_text else (cv or 0), str(cid))
-        rows = [r for r in rows if (_key(r) < pivot if reverse else _key(r) > pivot)]
+        cursor_value, cursor_id = decoded
+        pivot = ((cursor_value or "") if is_text else (cursor_value or 0), str(cursor_id))
+        matched = [row for row in matched if (_key(row) < pivot if reverse else _key(row) > pivot)]
 
-    # strip the internal search_text from the returned items
-    for r in rows:
-        r.pop("search_text", None)
-    return _inventory_page(rows, sort, col, is_text, limit, total)
+    # search_text is an internal projection and is never returned to clients.
+    for row in matched:
+        row.pop("search_text", None)
+    return _inventory_page(matched, sort, col, is_text, limit, total)
+
+
+def _list_inventory_scan_report(
+    tenant_id: str, report: dict, filt: dict, sort: str, cursor: str, limit: int,
+) -> dict:
+    return _inventory_page_from_rows(
+        _scan_report_inventory_rows(tenant_id, report),
+        filt,
+        sort,
+        cursor,
+        limit,
+        source_already_matched=True,
+    )
+
+
+def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
+    from backend.domain import normalize_scan_report
+
+    latest: dict[str, dict] = {}
+    for item in read_scan_history(tenant_id, limit=1000):  # oldest-first -> newest scan overwrites
+        report = read_scan_report(tenant_id, item.get("scan_id"))
+        if not report:
+            continue
+        for asset in normalize_scan_report(tenant_id, report).assets:
+            latest[asset.id] = {c: getattr(asset, c) for c in _INVENTORY_COLS} | {"search_text": asset.search_text}
+    return _inventory_page_from_rows(list(latest.values()), filt, sort, cursor, limit)
 
 
 def _decode_string_list(raw) -> list[str]:
@@ -2443,8 +2563,15 @@ def _normalized_json_facet_rows(conn, tenant_id: str, column: str):
     ).fetchall()
 
 
-def inventory_facets(tenant_id: str) -> dict:
-    """Aggregate inventory filters without transferring asset rows to the browser."""
+def inventory_facets(tenant_id: str, source: str = "") -> dict:
+    """Aggregate inventory filters without transferring asset rows to the browser.
+
+    With a configured scan name, facets describe that scan's newest persisted
+    run.  Without one, they continue to describe the tenant's current estate.
+    """
+    selected_report = read_latest_scan_report_by_label(tenant_id, source) if source else None
+    if selected_report is not None:
+        return _facets_from_rows(_scan_report_inventory_rows(tenant_id, selected_report), "scan-report")
     if _read_inventory_from_normalized(tenant_id):
         try:
             with _connect() as conn:
@@ -2582,8 +2709,31 @@ def get_search_reconciliation(index_uid: str) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def get_inventory_asset(tenant_id: str, asset_id: str) -> dict | None:
-    """One full asset from the materialized detail row; never a full report read."""
+def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dict | None:
+    """Return one full asset, optionally from a specific saved scan run."""
+    if scan_id:
+        from backend.domain import normalize_scan_report
+
+        report = read_scan_report(tenant_id, scan_id)
+        if report is None:
+            return None
+        for asset in normalize_scan_report(tenant_id, report).assets:
+            if str(asset.id or "") != str(asset_id or ""):
+                continue
+            try:
+                detail = json.loads(asset.detail_json or "{}")
+            except (json.JSONDecodeError, TypeError):
+                detail = {}
+            risk_detail = detail.get("risk") if isinstance(detail, dict) else {}
+            risk_detail = risk_detail if isinstance(risk_detail, dict) else {}
+            return detail | {column: getattr(asset, column) for column in _INVENTORY_COLS} | {
+                "scan_id": str(scan_id),
+                "reason_count": len(risk_detail.get("reasons") or []),
+                "dlp_count": len(risk_detail.get("dlp_recommendations") or []),
+            }
+        return None
+
+    # The default current-estate path remains a single materialized-row read.
     if _read_inventory_from_normalized(tenant_id):
         try:
             with _connect() as conn:

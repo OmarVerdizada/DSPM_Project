@@ -38,6 +38,7 @@ def _revisions() -> list[tuple[int, str, object]]:
 
     return [
         (1, "baseline_convergent_schema", store.apply_baseline_schema),
+        (2, "saved_scan_labels", store.add_scan_report_labels),
     ]
 
 
