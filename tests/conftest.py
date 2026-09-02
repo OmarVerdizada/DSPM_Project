@@ -65,7 +65,11 @@ def pytest_configure(config: pytest.Config) -> None:
         _session_db = _Path(tempfile.mkdtemp(prefix="sentro-test-session-")) / "suite.sqlite"
         os.environ["DSPM_DB_PATH"] = str(_session_db)
         _store.DB_PATH = _session_db
-        _store.init_db()
+        # Build through the versioned runner (not legacy init_db) so the suite
+        # database carries recorded revisions exactly like a real install -
+        # the /api/ready schema gate is tested against truth, not a stub.
+        from backend import migrations as _migrations
+        _migrations.upgrade()
         try:
             _store.create_tenant("default", "Default")
         except Exception:

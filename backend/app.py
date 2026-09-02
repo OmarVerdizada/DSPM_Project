@@ -767,6 +767,58 @@ def health() -> dict:
     }
 
 
+@app.get("/api/ready")
+def readiness() -> "JSONResponse":
+    """Readiness (roadmap Phase 6, DB-09): can this instance actually serve?
+
+    Liveness (/api/health) answers "is the process up"; readiness performs a
+    bounded database READ and WRITE probe and verifies the schema revision
+    matches this build, returning 503 with reasons when it cannot serve.
+    Advisory signals that must not take a healthy instance out of rotation
+    (backup age) are reported as warnings, never failures.
+    """
+    from fastapi.responses import JSONResponse
+
+    failures: list[str] = []
+    warnings: list[str] = []
+    probe: dict = {}
+    started = time.perf_counter()
+    try:
+        from backend import migrations, store
+
+        with store._connect() as conn:
+            row = conn.execute("SELECT 1 AS one").fetchone()
+            if row is None or int(row["one"]) != 1:
+                failures.append("database read probe returned no row")
+            applied = migrations.current_revision(conn)
+        expected = migrations.expected_revision()
+        probe["schema_revision"] = {"applied": applied, "expected": expected}
+        if applied != expected:
+            failures.append(f"schema revision {applied} != expected {expected}")
+        store.set_app_setting(
+            "ops.readiness_probe", datetime.now(timezone.utc).isoformat()
+        )
+    except Exception as exc:
+        failures.append(f"database probe failed: {type(exc).__name__}")
+    probe["probe_seconds"] = round(time.perf_counter() - started, 3)
+
+    age = _backup_age_or_none()
+    probe["backup_age_seconds"] = age
+    max_age_hours = float(os.getenv("DSPM_BACKUP_MAX_AGE_HOURS", "26"))
+    if age is None:
+        warnings.append("no backup manifest found")
+    elif age > max_age_hours * 3600:
+        warnings.append(f"newest backup is {age / 3600:.1f}h old (threshold {max_age_hours:g}h)")
+
+    body = {
+        "ready": not failures,
+        "database": probe,
+        "failures": failures,
+        "warnings": warnings,
+    }
+    return JSONResponse(status_code=200 if not failures else 503, content=body)
+
+
 def _schema_revision_or_none():
     try:
         from backend import migrations, store

@@ -48,6 +48,33 @@ class DatabaseAuthorityTests(unittest.TestCase):
         self.assertIn(payload["database"]["backend"], ("sqlite", "postgres"))
         self.assertTrue(payload["database"]["identity"])
 
+    def test_readiness_probes_the_database_and_schema_revision(self) -> None:
+        """/api/ready (Phase 6, DB-09) is the truthful gate: a bounded DB
+        read+write probe plus a schema-revision match, 503 when unservable."""
+        from fastapi.testclient import TestClient
+        from backend.app import app
+        from backend import migrations
+
+        response = TestClient(app).get("/api/ready")
+        payload = response.json()
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertTrue(payload["ready"])
+        self.assertEqual(payload["failures"], [])
+        revision = payload["database"]["schema_revision"]
+        self.assertEqual(revision["applied"], revision["expected"])
+        self.assertEqual(revision["expected"], migrations.expected_revision())
+        self.assertLess(payload["database"]["probe_seconds"], 5)
+
+    def test_readiness_refuses_on_schema_mismatch(self) -> None:
+        from fastapi.testclient import TestClient
+        from backend.app import app
+
+        with mock.patch("backend.migrations.expected_revision", return_value=99):
+            response = TestClient(app).get("/api/ready")
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.json()["ready"])
+        self.assertTrue(any("schema revision" in item for item in response.json()["failures"]))
+
 
 if __name__ == "__main__":
     unittest.main()

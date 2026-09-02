@@ -1,0 +1,73 @@
+"""Per-data-class retention (roadmap Phase 6, DB-13).
+
+Operational history grows without bound today. This tool prunes the two
+append-only event tables by age, per tenant-agnostic policy, and reports
+exactly what it would (or did) remove. Scan reports, findings, assets, and
+the audit trail of the CURRENT retention window are never touched by
+default - shortening `--audit-days` below the compliance window is an
+explicit operator decision.
+
+Dry-run by default; `--apply` deletes. Ages come from env or flags:
+
+    DSPM_RETAIN_ALERT_DAYS  (default 365)
+    DSPM_RETAIN_AUDIT_DAYS  (default 730)
+
+Usage:
+    python scripts/db_retention.py               # report only
+    python scripts/db_retention.py --apply       # prune per policy
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+POLICIES = (
+    # (table, timestamp column, env var, default days)
+    ("alert_events", "created_at", "DSPM_RETAIN_ALERT_DAYS", 365),
+    ("audit_events", "timestamp", "DSPM_RETAIN_AUDIT_DAYS", 730),
+)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apply", action="store_true",
+                        help="actually delete (default is a dry-run report)")
+    parser.add_argument("--alert-days", type=int, default=None)
+    parser.add_argument("--audit-days", type=int, default=None)
+    args = parser.parse_args()
+
+    overrides = {"alert_events": args.alert_days, "audit_events": args.audit_days}
+
+    from backend import store
+
+    now = datetime.now(timezone.utc)
+    total_removed = 0
+    for table, column, env_var, default_days in POLICIES:
+        days = overrides.get(table) or int(os.getenv(env_var, str(default_days)))
+        cutoff = (now - timedelta(days=days)).isoformat()
+        with store._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE {column} < ?", (cutoff,)
+            ).fetchone()
+            stale = int(row["n"])
+            if args.apply and stale:
+                conn.execute(f"DELETE FROM {table} WHERE {column} < ?", (cutoff,))
+        action = "removed" if args.apply else "would remove"
+        print(f"{table:<14} older than {days:>4}d: {action} {stale}")
+        total_removed += stale if args.apply else 0
+
+    if not args.apply:
+        print("\ndry run - re-run with --apply to prune.")
+    else:
+        print(f"\npruned {total_removed} rows.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
