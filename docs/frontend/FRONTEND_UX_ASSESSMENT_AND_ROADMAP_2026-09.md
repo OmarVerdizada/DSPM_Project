@@ -661,6 +661,56 @@ and out reflows the content under it every time the mouse crosses a card, so
 only the thumb's colour changes. Measured: the gutter holds at 10px in both
 states.
 
+### 0.4r The board fills the window, and the lists fill the board
+
+Two wrong answers preceded the right one. Sizing the grid rows to their
+content left a band of page under all six cards. Sizing them to the window put
+the band back **inside** whichever card ran out of rows first. Neither works
+alone, because the amount of content was fixed and the amount of room was not.
+
+So the room is fixed and the content adapts:
+
+- the rows take the window (`minmax(0, 1fr)` twice), so the board always ends
+  where the viewport does;
+- the two lists long enough to matter render **as many rows as their card can
+  hold** - `dashListCapacity()` divides the body's height by the row height,
+  and the body's height comes from the grid rather than from its own contents,
+  so reading it back after a render cannot feed a loop;
+- every list's rows then **share whatever is left over** (`flex: 1 1 auto`
+  between a min and a max), so the remainder never collects at the bottom.
+
+Measured on a fresh load at four sizes, with the deepest rendered element in
+each card compared against that card's bottom edge:
+
+| viewport | data classes | places | gap in any card | page scroll |
+| --- | ---: | ---: | ---: | ---: |
+| 1280x720 | 4 | 13 | 0 | 0 |
+| 1366x768 | 5 | 15 | 0 | 0 |
+| 1600x900 | 7 | 20 | 0 | 0 |
+| 1920x1030 | 9 | 25 | 0 | 0 |
+
+The row heights in `pages.css` are the numbers `dashListCapacity()` divides
+by; the contract test asserts the two agree, because a disagreement shows up
+as a card that overflows by one row.
+
+**A resize needs two triggers.** `window.resize` is the common case and always
+fires; a `ResizeObserver` on the board additionally catches it changing size
+without the window doing so, such as the sidebar collapsing. Both funnel into
+one guarded function that returns immediately if the capacity has not changed,
+so dragging a window edge does not re-render on every frame. Worth recording:
+**ResizeObserver does not deliver at all inside the harness's embedded
+browser** - it fired zero times on a real height change - so the resize path
+was verified by dispatching the event and confirming the counts and gaps
+changed (4 / 13 / gap 0 at 1280x720).
+
+The hero's wave is capped at 132px. Uncapped it took every pixel the score and
+the risk list left and became a dome half the card high; the risk list takes
+that slack instead, and has more to say than three rows.
+
+Card shadows are removed - six cards each lifted off the page is six shadows
+on one screen, and the hairline border already separates a card from its
+ground. Confirmed with the user: no liquid glass, no emoji.
+
 ### 0.4a The regression F3 shipped, and the fragility it exposed
 
 Deleting Remediation's second dashboard left one reference behind:

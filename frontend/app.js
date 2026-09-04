@@ -5725,6 +5725,9 @@ function renderExecutiveExperience() {
   renderCoverageCard();
   renderStaleCard();
   renderLocationsCard();
+  // The lists were just rendered at last frame's capacity; if the window
+  // has changed since, this re-renders the two that adapt.
+  refitDashboardLists();
   renderFrameworksCard();
   renderRemediationLoad(summary);
 
@@ -5932,7 +5935,7 @@ function renderPostureCard(summary, score) {
   const points = posturePoints();
   const comparable = comparablePosturePoints(points);
   const delta = comparable ? comparable.latest.score - comparable.earlier.score : null;
-  const risks = riskCategories();
+  const risks = riskCategories(dashListCapacity("#posture-card", 36, { min: 3, max: 7, reserve: 196 }));
 
   setCardMeta("#posture-card-meta", summary.total_files
     ? `${Number(summary.total_files).toLocaleString()} files`
@@ -5973,6 +5976,38 @@ function renderPostureCard(summary, score) {
             </button>`).join("")
         : '<p class="dash-empty">No exposed data in this workspace.</p>'}
     </div>`;
+}
+
+// A window resize changes how many rows fit, so the two adaptive cards are
+// re-rendered - but only when the number actually changes, which keeps a drag
+// on the window edge from re-rendering on every frame.
+let dashFit = "";
+
+function refitDashboardLists() {
+  const board = document.querySelector(".dash-board");
+  if (!board || !board.clientHeight) return;
+  const next = [
+    dashListCapacity("#data-classes-card", 36, { min: 4, max: 14 }),
+    dashListCapacity("#locations-card", 29, { min: 6, max: 25 }),
+    dashListCapacity("#posture-card", 36, { min: 3, max: 7, reserve: 196 }),
+  ].join(":");
+  if (next === dashFit) return;
+  dashFit = next;
+  renderDataClassesCard();
+  renderLocationsCard();
+  renderPostureCard(latestReport?.summary || buildCurrentSummary(), getCurrentPostureScore());
+}
+
+// Two triggers, because neither is sufficient alone. A window resize is the
+// common case and always fires; a ResizeObserver additionally catches the
+// board changing size without the window doing so - collapsing the sidebar,
+// for instance. Both funnel into the same guarded function, so whichever
+// arrives first does the work and the other returns immediately.
+window.addEventListener("resize", debounce(() => refitDashboardLists(), 150));
+
+if (typeof ResizeObserver === "function") {
+  const board = document.querySelector(".dash-board");
+  if (board) new ResizeObserver(() => refitDashboardLists()).observe(board);
 }
 
 function setCardMeta(selector, text) {
@@ -6023,6 +6058,18 @@ function dataClassKind(name) {
   return hit ? { glyph: hit[1], cat: hit[2] } : { glyph: "li-file-text", cat: "record" };
 }
 
+// ---- Lists that size themselves to the card ------------------------------
+// The card's height comes from the grid, not from what is inside it, so the
+// body's clientHeight is a fixed target to fill and reading it back after a
+// render cannot feed a loop. `min` keeps a card honest on a very short window
+// - it is better to clip one row than to render a list of two.
+function dashListCapacity(bodySelector, rowHeight, { min, max, reserve = 0 }) {
+  const body = document.querySelector(bodySelector);
+  if (!body || !body.clientHeight) return min;
+  const room = body.clientHeight - reserve;
+  return Math.max(min, Math.min(max, Math.floor(room / rowHeight)));
+}
+
 function renderDataClassesCard() {
   const card = document.querySelector("#data-classes-card");
   if (!card) return;
@@ -6037,7 +6084,10 @@ function renderDataClassesCard() {
       low: Number(severityCounts.LOW || 0),
     };
   }).filter((item) => item.count > 0).sort((left, right) => right.count - left.count);
-  const stats = allStats.slice(0, 5);
+  // 36px is the row height declared in pages.css; the two have to agree, and
+  // the contract test asserts they do.
+  const shown = dashListCapacity("#data-classes-card", 36, { min: 4, max: 14 });
+  const stats = allStats.slice(0, shown);
   stats.total = allStats.length;
   setCardMeta("#classes-card-meta", stats.length
     ? `Top ${stats.length} of ${stats.total}`
@@ -6079,7 +6129,7 @@ function renderDataClassesCard() {
 function renderLocationsCard() {
   const card = document.querySelector("#locations-card");
   if (!card) return;
-  const rows = (estateFacets?.locations || [])
+  let rows = (estateFacets?.locations || [])
     .map((item) => {
       const severity = item.severity_file_counts || {};
       return {
@@ -6108,8 +6158,11 @@ function renderLocationsCard() {
   }
   const shares = rows.filter((entry) => !entry.depth);
   const pressing = rows.filter((entry) => entry.critical || entry.high).length;
+  // Counted over the whole estate, then trimmed to what the card can hold:
+  // the meta describes the tenant, not the visible slice.
   setCardMeta("#locations-card-meta", `${shares.length} shares · ${pressing} need attention`);
   const max = Math.max(...rows.map((entry) => entry.total), 1);
+  rows = rows.slice(0, dashListCapacity("#locations-card", 29, { min: 6, max: 25 }));
   // A tree, because "Shares" and "Shares/IT" are not siblings and the flat
   // list said they were. Each row keeps a compact severity meter on its own
   // line rather than a bar underneath, which is what lets eighteen rows fit

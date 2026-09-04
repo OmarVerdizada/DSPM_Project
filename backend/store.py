@@ -3655,8 +3655,8 @@ def _location_tree(
     child_counts: dict[tuple[str, str], int],
     child_severity: dict[tuple[str, str], dict[str, int]],
     *,
-    shares: int = 6,
-    children: int = 2,
+    shares: int = 7,
+    children: int = 3,
 ) -> list[dict]:
     """Shares, each followed by its heaviest folders.
 

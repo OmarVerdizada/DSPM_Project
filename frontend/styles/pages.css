@@ -180,8 +180,9 @@ button.ledger-cell:hover { background: var(--band-wash); }
   display: grid;
   grid-template-columns:
     minmax(252px, 0.84fr) minmax(0, 0.92fr) minmax(0, 0.62fr) minmax(0, 1.02fr);
-  grid-template-rows: minmax(0, auto) minmax(0, auto);
-  align-content: start;
+  /* The rows take the window. Sized to their content instead, the board
+     ended early and left a band of page under all six cards. */
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-3);
 }
 
@@ -598,7 +599,6 @@ button.ledger-cell:hover { background: var(--band-wash); }
   height: 1px;
   background: var(--line);
 }
-.tree-rows .place-row[data-depth="0"] { margin-top: 2px; }
 .tree-rows .place-row[data-depth="0"] .place-row-name { font-weight: var(--weight-semibold); }
 .tree-rows .place-row[data-depth="1"] .place-mark {
   width: 20px;
@@ -916,9 +916,20 @@ button.ledger-cell:hover { background: var(--band-wash); }
   min-height: 0;   /* styles.css puts a 40px touch floor on every button */
   line-height: 1.35;
 }
-#tab-overview .class-row { height: 36px; }
-#tab-overview .risk-row  { height: 36px; }
-#tab-overview .tree-rows .place-row { height: 29px; }
+/* These heights are the FLOOR, and dashListCapacity() divides by them to work
+   out how many rows a card can hold. The rows then share whatever is left
+   over, so the remainder never collects at the bottom of the card - and the
+   cap stops five rows on a tall screen from becoming five banners. */
+#tab-overview .class-row {
+  height: auto;
+  min-height: 36px;
+  max-height: 50px;
+}
+#tab-overview .tree-rows .place-row {
+  height: auto;
+  min-height: 29px;
+  max-height: 38px;
+}
 #tab-overview .dash-sub { margin-bottom: var(--space-2); font-size: 10.5px; line-height: 1.4; }
 #tab-overview .posture-band { line-height: 1.35; }
 #tab-overview .posture-delta { margin-top: 1px; line-height: 1.35; }
@@ -956,12 +967,8 @@ button.ledger-cell:hover { background: var(--band-wash); }
 
 
 /* ── Card edges ───────────────────────────────────────────────
-   A soft lift instead of a hard 1px box. The accent rule that was here is
-   removed: the card's own edge is what the rest of the console uses. */
-#tab-overview .dash-card {
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent),
-              0 8px 24px color-mix(in srgb, var(--ink) 4%, transparent);
-}
+   No shadow. Six cards each lifted off the page is six shadows on one screen,
+   and the hairline border already separates a card from its ground. */
 
 /* Colour changes on this page are state changes, so they take the same
    duration as everything else rather than snapping. */
@@ -981,3 +988,66 @@ button.ledger-cell:hover { background: var(--band-wash); }
   .col-bar,
   .gauge-fill { transition: none; }
 }
+
+
+/* ── Cards fill their row ─────────────────────────────────────
+   The board takes the window, so each card has a height it did not choose.
+   Nothing inside one is a fixed block any more: the hero's wave takes the
+   slack the score and the risks leave, the framework rows share theirs, and
+   the two long lists render as many rows as they were given room for
+   (dashListCapacity in app.js - the row heights below are the numbers it
+   divides by, so the two have to agree). */
+.dash-card-posture .dash-card-body { display: flex; flex-direction: column; }
+/* The wave is supporting evidence, not the subject: uncapped it took every
+   pixel the score and the risks left and became a dome half the card high.
+   The risk list takes the slack instead - it has more to say than three rows. */
+.dash-card-posture .posture-wave-wrap {
+  flex: 0 1 132px;
+  min-height: 84px;
+  height: auto;
+}
+.dash-card-posture .posture-wave { height: 100%; }
+.dash-card-posture .posture-risks {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.dash-card-posture .posture-risks .dash-sub { flex: 0 0 auto; }
+#tab-overview .risk-row {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 36px;
+  max-height: 68px;
+}
+
+.dash-card-frameworks .dash-card-body { display: flex; flex-direction: column; }
+.dash-card-frameworks .dash-rows {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+/* Capped, or three frameworks on a tall screen become three banners. */
+.dash-card-frameworks .fw-row {
+  flex: 1 1 auto;
+  min-height: 44px;
+  max-height: 74px;
+}
+
+/* The dashboard never scrolls: a list that would overflow renders fewer rows
+   instead. The overflow rule is a backstop, not the plan. */
+#tab-overview .dash-card-body { overflow: hidden; }
+
+
+.dash-card-classes .dash-card-body,
+.dash-card-locations .dash-card-body { display: flex; flex-direction: column; }
+.dash-card-classes .dash-rows,
+.dash-card-locations .dash-rows {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+#tab-overview .class-row,
+#tab-overview .tree-rows .place-row { flex: 1 1 auto; }

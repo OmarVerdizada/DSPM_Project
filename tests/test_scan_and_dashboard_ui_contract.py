@@ -506,12 +506,29 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn(".dash-card-frameworks { grid-area: 2 / 2; }", pages)
         self.assertIn(".dash-card-coverage   { grid-area: 1 / 3; }", pages)
         self.assertIn(".dash-card-stale      { grid-area: 2 / 3; }", pages)
-        # Rows are sized by their content, so a card never carries a band of
-        # empty card under the last thing it has to say.
-        self.assertIn("grid-template-rows: minmax(0, auto) minmax(0, auto);", pages)
+        # The rows take the window and the lists fill the rows: content-sized
+        # rows left a band of page under the whole board, and a fixed row count
+        # left a band inside whichever card ran out of rows first. Both ends
+        # are handled - the two long lists render as many rows as they were
+        # given room for, and the rows share whatever is left over.
+        self.assertIn("grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);", pages)
+        self.assertIn("function dashListCapacity(", self.app_js)
+        self.assertIn("function refitDashboardLists(", self.app_js)
+        # A window resize is the common trigger and always fires; the observer
+        # additionally catches the board resizing without the window doing so.
+        self.assertIn('window.addEventListener("resize", debounce(() => refitDashboardLists()', self.app_js)
+        self.assertIn("new ResizeObserver(() => refitDashboardLists())", self.app_js)
+        # The capacity divides by these heights, so the two have to agree.
+        self.assertIn('dashListCapacity("#data-classes-card", 36', self.app_js)
+        self.assertIn("min-height: 36px;", pages)
+        self.assertIn('dashListCapacity("#locations-card", 29', self.app_js)
+        self.assertIn("min-height: 29px;", pages)
+        # No accent rule, and no shadow: six lifted cards is six shadows.
         self.assertNotIn("#tab-overview .dash-card::before", pages)
-        # The data-class card is shorter: five rows, not eight.
-        self.assertIn("allStats.slice(0, 5)", self.app_js)
+        self.assertNotIn("0 8px 24px color-mix(in srgb, var(--ink) 4%, transparent)", pages)
+        # The data-class card shows what fits rather than a fixed count: five
+        # rows on a 768px screen, nine on a 1030px one.
+        self.assertIn("allStats.slice(0, shown)", self.app_js)
 
         # Every card is an estate-wide fact, not preview-file arithmetic.
         for renderer in ("function renderLocationsCard()", "function renderCoverageCard()",
