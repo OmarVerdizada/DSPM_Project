@@ -50,6 +50,9 @@ def _revisions() -> list[tuple[int, str, object]]:
         (5, "report_artifact_references", store.add_report_artifact_refs),
         (6, "tenant_rls_unscoped_guard", store.repair_tenant_rls_predicate),
         (7, "tenant_legal_hold", store.add_legal_hold),
+        (8, "inventory_filtered_search_scale_index", store.add_inventory_filtered_search_index),
+        (9, "remediation_operational_index", store.add_remediation_operational_index),
+        (10, "remediation_filter_indexes", store.add_remediation_filter_indexes),
     ]
 
 

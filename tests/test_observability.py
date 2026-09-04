@@ -13,6 +13,7 @@ endpoint down.
 
 from __future__ import annotations
 
+import json
 import unittest
 from unittest import mock
 
@@ -23,7 +24,8 @@ class MetricCollection(unittest.TestCase):
     def test_collect_returns_every_family_and_never_raises(self) -> None:
         metrics = observability.collect()
         for family in ("pool", "storage", "backup", "wal_archive",
-                       "replication", "activity", "schema_revision"):
+                       "replication", "activity", "database_activity_monitoring",
+                       "schema_revision"):
             self.assertIn(family, metrics)
         self.assertIn("warnings", metrics)
         self.assertIsInstance(metrics["unavailable"], list)
@@ -144,7 +146,11 @@ class MetricsRoutes(unittest.TestCase):
         self.admin = {"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"}
 
     def test_metrics_require_admin(self) -> None:
-        for path in ("/api/admin/db-metrics", "/api/admin/db-slow-queries"):
+        for path in (
+            "/api/admin/db-metrics",
+            "/api/admin/db-slow-queries",
+            "/api/admin/db-activity",
+        ):
             anonymous = self.client.get(path)
             self.assertIn(anonymous.status_code, (401, 403), path)
 
@@ -159,6 +165,15 @@ class MetricsRoutes(unittest.TestCase):
         response = self.client.get("/api/admin/db-slow-queries?limit=5", headers=self.admin)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn("available", response.json())
+
+    def test_activity_route_is_aggregate_and_admin_only(self) -> None:
+        response = self.client.get("/api/admin/db-activity", headers=self.admin)
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertIn("enabled", payload)
+        rendered = json.dumps(payload).lower()
+        for sensitive_field in ("query", "client_addr", "tenant_id", "role_name"):
+            self.assertNotIn(sensitive_field, rendered)
 
 
 if __name__ == "__main__":

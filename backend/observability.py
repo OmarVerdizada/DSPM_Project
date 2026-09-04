@@ -156,7 +156,7 @@ def replication_metrics() -> dict:
         return {"applicable": False}
     with db.connect(Path("unused")) as conn:
         rows = conn.execute(
-            "SELECT application_name, state, "
+            "SELECT application_name, state, sync_state, "
             "EXTRACT(EPOCH FROM COALESCE(replay_lag, '0 seconds'::interval)) AS lag "
             "FROM pg_stat_replication"
         ).fetchall()
@@ -167,11 +167,79 @@ def replication_metrics() -> dict:
             {
                 "name": str(r["application_name"] or ""),
                 "state": str(r["state"] or ""),
+                "sync_state": str(r["sync_state"] or ""),
                 "replay_lag_seconds": round(float(r["lag"] or 0), 3),
             }
             for r in rows
         ],
     }
+
+
+def database_activity_monitoring() -> dict:
+    """Aggregate database activity for regulated deployments (Phase 7).
+
+    This collector deliberately omits query text, role names, client addresses,
+    application names and tenant identifiers.  Those values can expose the
+    estate.  The counters are enough for a SIEM/monitor to detect unusual
+    connection, rollback, temporary-file and deadlock activity without turning
+    the monitoring feed into a second sensitive-data store.
+
+    The feature is opt-in because the roadmap requires it only where a customer
+    contract does.  Disabled is reported explicitly rather than looking like an
+    empty, healthy activity stream.
+    """
+    enabled = os.getenv("DSPM_DB_ACTIVITY_MONITORING", "0").strip() == "1"
+    if not enabled:
+        return {"applicable": db_is_postgres(), "enabled": False}
+
+    from backend import db
+
+    if not db.is_postgres():
+        return {
+            "applicable": False,
+            "enabled": True,
+            "reason": "PostgreSQL only",
+        }
+    with db.connect(Path("unused")) as conn:
+        counters = conn.execute(
+            "SELECT numbackends, xact_commit, xact_rollback, blks_read, blks_hit, "
+            "temp_files, temp_bytes, deadlocks, conflicts, stats_reset "
+            "FROM pg_stat_database WHERE datname = current_database()"
+        ).fetchone()
+        session_rows = conn.execute(
+            "SELECT COALESCE(state, 'unknown') AS state, COUNT(*) AS n "
+            "FROM pg_stat_activity WHERE datname = current_database() "
+            "GROUP BY COALESCE(state, 'unknown') ORDER BY 1"
+        ).fetchall()
+        wait_rows = conn.execute(
+            "SELECT COALESCE(wait_event_type, 'none') AS wait_type, COUNT(*) AS n "
+            "FROM pg_stat_activity WHERE datname = current_database() "
+            "GROUP BY COALESCE(wait_event_type, 'none') ORDER BY 1"
+        ).fetchall()
+    return {
+        "applicable": True,
+        "enabled": True,
+        "privacy": "aggregate-only; query/client/role/tenant fields omitted",
+        "counters": {
+            key: int(counters[key] or 0)
+            for key in (
+                "numbackends", "xact_commit", "xact_rollback", "blks_read",
+                "blks_hit", "temp_files", "temp_bytes", "deadlocks", "conflicts",
+            )
+        },
+        "stats_reset": str(counters["stats_reset"] or ""),
+        "sessions_by_state": {str(row["state"]): int(row["n"]) for row in session_rows},
+        "sessions_by_wait_type": {
+            str(row["wait_type"]): int(row["n"]) for row in wait_rows
+        },
+    }
+
+
+def db_is_postgres() -> bool:
+    """Tiny import-safe seam used by the disabled activity-monitoring path."""
+    from backend import db
+
+    return db.is_postgres()
 
 
 def activity_metrics() -> dict:
@@ -234,6 +302,7 @@ def collect() -> dict:
         ("wal_archive", wal_metrics),
         ("replication", replication_metrics),
         ("activity", activity_metrics),
+        ("database_activity_monitoring", database_activity_monitoring),
         ("schema_revision", schema_metrics),
         ("tenant_isolation", tenant_isolation_metrics),
     ):
@@ -285,6 +354,10 @@ def _warnings(metrics: dict) -> list[str]:
                    f"{activity.get('long_transaction_threshold_seconds')}s")
     if int(activity.get("waiting_locks") or 0) > 0:
         out.append(f"{activity['waiting_locks']} lock request(s) waiting")
+
+    monitored = metrics.get("database_activity_monitoring") or {}
+    if os.getenv("DSPM_DB_ACTIVITY_MONITORING_REQUIRED", "0").strip() == "1" and not monitored.get("enabled"):
+        out.append("required database activity monitoring is disabled")
 
     replication = metrics.get("replication") or {}
     if replication.get("applicable") and not replication.get("configured"):

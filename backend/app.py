@@ -84,6 +84,7 @@ from backend.store import (
     inventory_export_ready,
     incremental_baseline_exists,
     list_findings,
+    list_remediation_findings,
     list_inventory,
     probe_incremental_object,
     update_finding_lifecycle,
@@ -904,6 +905,23 @@ def database_slow_queries(
     result = observability.slow_queries(limit)
     audit(principal.tenant_id, principal.subject, "db.slow_queries.viewed",
           {"returned": len(result.get("statements") or [])})
+    return result
+
+
+@app.get("/api/admin/db-activity")
+def database_activity(principal: Principal = Depends(require_role("admin"))) -> dict:
+    """Privacy-bounded database activity monitoring for regulated tiers.
+
+    The payload is aggregate-only: it never returns statement text, client
+    addresses, roles or tenant identifiers.  Access itself is audited.
+    """
+    from backend import observability
+
+    result = observability.database_activity_monitoring()
+    audit(principal.tenant_id, principal.subject, "db.activity.viewed", {
+        "enabled": bool(result.get("enabled")),
+        "applicable": bool(result.get("applicable")),
+    })
     return result
 
 
@@ -1929,10 +1947,44 @@ def saved_scan_report(
 @app.get("/api/findings")
 def findings_index(
     principal: Principal = Depends(require_role("viewer")),
-    status: str = Query(default="", max_length=40),
-    limit: int = Query(default=200, ge=1, le=1000),
+    scope: str = Query(default="current", max_length=20),
+    status: str = Query(default="active", max_length=40),
+    severity: str = Query(default="", max_length=20),
+    owner: str = Query(default="", max_length=160),
+    framework: str = Query(default="", max_length=120),
+    data_type: str = Query(default="", max_length=160),
+    asset: str = Query(default="", max_length=240),
+    sla: str = Query(default="", max_length=40),
+    q: str = Query(default="", max_length=200),
+    sort: str = Query(default="risk_score", max_length=30),
+    direction: str = Query(default="", max_length=4),
+    after: str = Query(default="", max_length=2048),
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
-    return {"findings": list_findings(principal.tenant_id, status=status, limit=limit)}
+    """Bounded remediation page.
+
+    ``items`` is only the current page. Exact global counts come from
+    ``summary`` and therefore never equal page length by inference.
+    """
+    return {
+        **list_remediation_findings(
+            principal.tenant_id,
+            scope=scope,
+            status=status,
+            severity=severity,
+            owner=owner,
+            framework=framework,
+            data_type=data_type,
+            asset=asset,
+            sla=sla,
+            q=q,
+            sort=sort,
+            direction=direction,
+            after=after,
+            limit=limit,
+        ),
+        "tenant_id": principal.tenant_id,
+    }
 
 
 @app.get("/api/inventory")
@@ -1946,6 +1998,7 @@ def inventory_index(
     q: str = Query(default="", max_length=200),
     extension: str = Query(default="", max_length=20),
     sort: str = Query(default="risk_score", max_length=20),
+    direction: str = Query(default="", max_length=4),
     after: str = Query(default="", max_length=512),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict:
@@ -1954,7 +2007,7 @@ def inventory_index(
     result = list_inventory(
         principal.tenant_id, risk=risk, source=source, framework=framework,
         finding_type=finding_type, protected=protected, q=q, extension=extension,
-        sort=sort, cursor=after, limit=limit,
+        sort=sort, direction=direction, cursor=after, limit=limit,
     )
     # The collapsed table shows real reason/action numbers without a detail
     # fetch per row.

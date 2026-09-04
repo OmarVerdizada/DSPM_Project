@@ -1,7 +1,10 @@
 # Enterprise Database Roadmap
 
-**Status:** In implementation — Phases 0-5 closed, 6 closed except HA, 7 not
-started. Audited end to end on 2026-09-02; §0.4b records what that found. §0 is the implementation record; §3 keeps the original plan with
+**Status:** In implementation — Phases 0-5 closed, 6 closed except HA, and 7
+closed for the checked-in single-host engineering baseline. This is not an M3
+claim: M2's HA/operating-history prerequisites and any customer-specific
+regional contract still require deployment evidence. Audited end to end on
+2026-09-02; §0.4b records what that found. §0 is the implementation record; §3 keeps the original plan with
 per-phase status. Sequenced engineering plan derived from the
 [Enterprise Database Readiness Assessment (2026-08-30)](ENTERPRISE_DATABASE_ASSESSMENT_2026-08-30.md).
 **Verdict being remediated:** NO-GO for enterprise production; strong PostgreSQL
@@ -28,14 +31,14 @@ says so and why.
 | **4 — Integrity & tenancy** | **Closed for FK + roles + RLS** | `132a1c7`, `a13a038`, `b1083fb` | 16 validated FKs; role matrix verified; 16 FORCE-RLS tables; hostile rehearsal 8/8 |
 | **5 — Authoritative model + artifacts** | **Closed** | `dba41b7`, `df6af2a` | Authoritative writes; report bodies in an encrypted content-addressed tier; SQLite 679→414 MB, PostgreSQL 259→185 MB |
 | **6 — Operate, observe, certify** | **Closed except HA** | `d0ce540`, `a260e55`, `+` | Readiness gate; metrics surface; slow-query review; deployment + concurrency tests; retention with legal hold |
-| **7 — Scale & regulated tiers** | **Not started** | — | Demand-driven by design |
+| **7 — Scale & regulated tiers** | **Closed for engineering baseline** | revision `0008` | 5M-row capacity/soak PASS; corruption game day PASS; ten-category evidence package PASS |
 
 Live state of `sentro_dev` on the provisioned cluster (PostgreSQL 18.4, port
 5442) after the Phase 5 cutover: **185 MB, 21 application tables plus
-`schema_migrations`, schema revision 7, 19 primary keys, 16 tenant foreign
+`schema_migrations`, schema revision 8, 19 primary keys, 16 tenant foreign
 keys, and 16 tables under FORCE row-level security with one isolation policy
 each**, alongside a **37.3 MB artifact store holding 24 report bodies**. The
-suite is **816 tests**, green on SQLite; the PostgreSQL CI job runs the same
+suite is **831 collected tests**, green on SQLite; the PostgreSQL CI job runs the same
 suite against a disposable cluster.
 
 ### 0.2 What shipped, phase by phase
@@ -224,6 +227,45 @@ placing a hold requires a stated reason, and both directions are audited.
 Verified live: the delete returns **409 while held** and succeeds only once the
 hold is lifted.
 
+**Phase 7 — Scale and regulated tiers** (revision `0008` plus the evidence set
+in §0.6)
+The demand trigger was accepted on 2026-09-02 and converted into an explicit,
+versioned contract profile: `P7_CERTIFICATION_PROFILE.json`. Its current
+engineering baseline is 5,000,000 inventory rows, eight concurrent readers, a
+300-second soak, 300 ms p95, and a one-second lock timeout. The first full run
+failed honestly: filtered text search was **894.9 ms p95**, because at 5M rows
+PostgreSQL stopped intersecting the standalone tenant/filter B-tree and trigram
+GIN. Revision `0008` adds `btree_gin` and one multicolumn GIN over tenant, risk,
+source and the trigram expression. The identical rerun passed: filtered search
+**260.8 ms p95**, all other scenarios **≤ 7.1 ms p95**, and the five-minute
+eight-worker soak completed **1,613,268 operations, zero errors, 2.69 ms p95 /
+3.67 ms p99**. The forced lock wait timed out at 1.026 s as configured while an
+unrelated tenant read completed in 148 ms. The disposable 5M-row database and
+all benchmark tables were removed after each run.
+
+`scripts/db_corruption_drill.py` now performs two isolated game-day injections:
+encrypted-backup ciphertext tampering and substitution of a valid but wrong
+content-addressed report object. Both corruptions were refused and both clean
+copies recovered. `database_activity_monitoring()` and
+`/api/admin/db-activity` add opt-in, admin-only aggregate monitoring without
+query text, clients, roles or tenant identifiers. `scripts/db_control_snapshot.py`
+captures schema history, PostgreSQL patch-baseline conformance, topology and
+the activity-monitoring decision. `scripts/db_evidence_package.py` verifies
+freshness and results for ten control categories, hashes every included JSON,
+optionally HMAC-signs the manifest, excludes the large encrypted backup payload,
+and fails closed on missing, stale or failed evidence.
+
+The final package was rebuilt only after a new revision-8 backup and restore
+drill: **22 tables / 125,485 rows**, ciphertext hash match, **148/148 artifact
+objects**, zero count mismatches, **18.84 s total**, PASS. The role matrix was
+also re-converged and re-verified immediately before packaging.
+
+Regional recovery and database activity monitoring are explicitly
+`NOT_APPLICABLE` in the present profile because neither is contracted for this
+single-host engineering baseline. This is not silent success: changing either
+profile flag to `required` makes the snapshot and package fail until a
+synchronous streaming topology or enabled monitoring feed is observed.
+
 ### 0.3 Deliberate deviations from the plan
 
 | Plan said | What was built | Why |
@@ -343,6 +385,18 @@ Also closed in the audit: every `DSPM_*` variable the code reads is now
 documented in `.env.example` (five were not, including
 `DSPM_BACKUP_MAX_AGE_HOURS` and `DSPM_SLOW_QUERY_MEAN_MS`).
 
+### 0.4c Defect found by Phase 7 scale certification (2026-09-02)
+
+The pre-existing 5M-row benchmark had no sustained concurrency or lock probe,
+and its first Phase 7 run exposed a more important gap: the filtered substring
+scenario missed the 300 ms gate at **894.9 ms p95** even though the same plan
+looked fast on small fixtures. PostgreSQL chose the trigram GIN alone and then
+filtered tens of thousands of other tenant/risk/source candidates. Revision
+`0008` installs a multicolumn GIN whose exact and trigram terms are one access
+path. The repeat at the same 5M rows passed at **260.8 ms p95**. Both the failed
+and passing artifacts are retained; deleting the failed result would make the
+certification less trustworthy, not more.
+
 ### 0.5 Open work, ranked
 
 1. **Tighten the RLS unset scope to fail-closed** once background writers carry
@@ -360,14 +414,19 @@ documented in `.env.example` (five were not, including
    user id + unique `(tenant_id, username)`. Product decision, not code.
 6. **TLS `sslmode=verify-full` enforcement** for non-local DSNs — currently
    documented in `.env.example`, not enforced in code. Local-only today.
-7. **HA standby, failover/failback exercises, patch SLA** — infrastructure
+7. **HA standby, failover/failback exercises, and production patch-SLA ownership** — infrastructure
    bound: this host has one cluster, so a standby cannot be stood up or
    exercised here. `/api/admin/db-metrics` reports the absence explicitly
    (`configured: false`) rather than letting "no lag" read as healthy.
 8. **Off-host immutable backup copy** (object lock) and backup-age alerting in
    a real monitor — the metrics surface reports staleness, but nothing pages.
-9. **Partitioning for high-growth tables**, once production growth is measured.
-   Nothing on this host justifies it (§0.4a).
+9. **Partitioning for high-growth tables**, once production write and retention
+   growth justify it. The 5M-row Phase 7 read/soak gate passes without
+   partitioning, so adding it now would be complexity without measured benefit.
+10. **Replace the engineering Phase 7 profile for each contracted higher-assurance
+    tier.** A contract that requires regional recovery or database activity
+    monitoring flips those gates from explicit N/A to required; the package then
+    fails until the deployment supplies real evidence.
 
 ### 0.6 Evidence index
 
@@ -386,6 +445,14 @@ documented in `.env.example` (five were not, including
 | `restore_drill_20260902T065545Z.json` | Restore drill **including the artifact tier**: 24/24 objects, inventory match, 15.8 s |
 | `orphan_repair_20260902T082407Z.json` | Source-side repair of 13 orphaned `scan_jobs` rows the new migration pre-flight refused |
 | `migration_20260902T082517Z.json` | Post-audit cutover: 125,477 rows at revision 7, **24/24 report bodies reconciled present** |
+| `capacity_soak_20260903T055000Z.json` | First 5M-row Phase 7 run: **FAIL**, filtered text search 894.9 ms p95; the defect that led to revision 0008 |
+| `capacity_soak_20260903T061000Z.json` | Repeat after revision 0008: **PASS**; 5M rows, 1,613,268 soak operations, zero errors, all latency and lock gates met |
+| `corruption_game_day_20260903T054708Z.json` | Backup-tamper and artifact-substitution injections both detected; clean recovery copies both readable, PASS |
+| `retention_20260903T054744Z.json` | Structured retention dry run: legal holds counted, per-class eligibility and artifact GC recorded, PASS |
+| `db_controls_20260903T062322Z.json` | Live revision 8/8, PostgreSQL 18.4 patch baseline PASS; regional/DAM decisions explicitly N/A for this profile |
+| `restore_drill_20260903T063140Z.json` | Revision-8 restore: 22 tables / 125,485 rows and 148/148 artifact objects, zero mismatches, 18.84 s, PASS |
+| `db_roles_20260903T063209Z.json` | Packaging-time access review: all 22 tables conform; runtime/backup/read-only roles cannot CREATE, PASS |
+| `packages/p7_evidence_20260903T063300Z.zip` | Final automated ten-category bundle using revision-8 backup/restore/access proof: source SHA-256s, freshness gates, no backup payload, **PASS** |
 
 Test coverage: `test_phase_audit_fixes.py` (the six gaps in §0.4b),
 `test_observability.py` (metric families, guarded collectors,
@@ -401,6 +468,10 @@ policy), `test_schema_migrations.py` (fresh upgrade, idempotence, verify gate
 both directions, stamp, startup policy), `test_migration_discovery.py`
 (discovery contract), `test_tenant_rls.py` (hostile isolation, PostgreSQL
 only), `test_tenant_erasure.py` (erasure completeness).
+Phase 7 adds `test_phase7_database_certification.py` (profile validation,
+fail-closed packaging, corruption drills and contract-aware control snapshots),
+extends `test_observability.py` for the aggregate activity route, and extends
+the migration/PostgreSQL suites for revision `0008` and `btree_gin`.
 
 ### 0.7 Operator runbook
 
@@ -426,6 +497,9 @@ python scripts/db_restore_drill.py
 python scripts/db_retention.py
 ```
 ```bash
+python scripts/db_retention.py --evidence-dir docs/database/evidence
+```
+```bash
 python -m scripts.migrate_sqlite_to_postgres --evidence-dir docs/database/evidence
 ```
 ```bash
@@ -443,6 +517,27 @@ curl -s localhost:8000/api/admin/db-metrics
 ```bash
 curl -s localhost:8000/api/admin/db-slow-queries
 ```
+```bash
+curl -s localhost:8000/api/admin/db-activity
+```
+```bash
+python scripts/db_corruption_drill.py --evidence-dir docs/database/evidence
+```
+```bash
+# DSPM_DB_URL must target a disposable database whose name contains test/bench.
+# The separate write opt-in is intentional.
+DSPM_INVENTORY_BENCHMARK_ALLOW_WRITE=1 python scripts/inventory_benchmark.py \
+  --profile docs/database/P7_CERTIFICATION_PROFILE.json \
+  --output docs/database/evidence/capacity_soak_YYYYMMDDTHHMMSSZ.json
+```
+```bash
+python scripts/db_control_snapshot.py \
+  --profile docs/database/P7_CERTIFICATION_PROFILE.json
+```
+```bash
+python scripts/db_evidence_package.py \
+  --profile docs/database/P7_CERTIFICATION_PROFILE.json
+```
 
 `migrations status --strict` exits non-zero on checksum drift (informational
 by default — see §0.4b). `db_artifacts.py verify` is the one to run after any
@@ -451,6 +546,14 @@ body the database references, through the same path the application uses.
 `status` reports applied vs expected revision; `upgrade` applies pending
 revisions and must run as `sentro_owner`; `stamp` adopts an existing database
 without executing DDL. `db_retention.py` is a dry run until `--apply`.
+Revision `0008` requires the admin-provisioned `pg_trgm` and `btree_gin`
+extensions; `scripts/provision_postgres.py` installs both before the owner runs
+the migration. The capacity harness has three independent write guards: the
+environment opt-in, a destination name containing `test` or `bench`, and
+unconditional table cleanup in `finally`. The Phase 7 package is allowed to
+exist when controls fail so auditors can see why, but exits non-zero and records
+`FAIL`; it reports `PASS` only when all ten categories are present, fresh and
+passing or explicitly not applicable under the profile.
 DSNs and passwords are read from the environment or
 `C:\SentroPostgres\credentials.env` — never passed as flags, never printed.
 
@@ -677,14 +780,35 @@ green backup/restore/failover exercises.
 
 ### Phase 7 — Scale and regulated tiers *(P2)* — size L, demand-driven
 
-> **Status: NOT STARTED**, by design — demand-driven, and nothing on this host
-> justifies it yet.
+> **Status: CLOSED FOR THE CHECKED-IN SINGLE-HOST ENGINEERING BASELINE.** The
+> user request supplied the demand trigger. This closes the product-controlled
+> implementation and its current profile; it does **not** certify M3 or claim a
+> regional topology that does not exist.
 
-Capacity/soak/lock-contention tests at projected 12–24-month scale;
-corruption game days; regional recovery or multi-region per contract;
-database activity monitoring where customers require it; automated evidence
-packages (backup success, restore results, access reviews, retention runs,
-schema changes, patch compliance).
+- **Capacity, soak and contention:** the versioned profile projects 5M inventory
+  rows, eight concurrent readers, a five-minute soak, 300 ms p95 and a bounded
+  one-second lock wait. The first full run failed filtered search; revision
+  `0008` corrected the access path and the identical rerun passed every gate.
+- **Corruption game day:** backup ciphertext tampering and valid-ciphertext
+  artifact substitution are injected only into temporary copies. Both are
+  detected and the clean originals recover.
+- **Regional/multi-region per contract:** the profile must say whether this is
+  required. If true, the snapshot requires the configured number of synchronous
+  streaming standbys. This host's profile says false with a reason, so the result
+  is `NOT_APPLICABLE`, never a misleading zero-lag success.
+- **Database activity monitoring where required:** opt-in aggregate database,
+  session and wait counters are available through an admin-only API; query text,
+  client addresses, role names and tenant identifiers are excluded. A profile
+  that requires the feed fails when it is disabled.
+- **Automated package:** backup integrity, restore, access review, retention,
+  schema history, patch compliance, capacity/soak, corruption, regional and
+  activity decisions are freshness-gated and hash-manifested into one ZIP.
+  Optional HMAC signing uses a dedicated environment secret.
+
+**Exit gate for a profile:** the evidence-package command reports `PASS`, and
+no required control is N/A. The engineering-baseline package passes. A future
+customer profile is a new certification run, not permission to reuse this
+host's N/A decisions.
 
 ---
 
@@ -725,8 +849,9 @@ Status column added 2026-09-02: **[x]** closed, **[~]** partial, **[ ]** open.
 | DB-11 retention | 6 | **[~]** | Alert/audit retention, artifact GC and legal hold done; scan-history policy needs an owner's number |
 | DB-12 query diagnostics | 6 | **[x]** | `pg_stat_statements` + `track_io_timing` live |
 | DB-13 PG CI | 2 + 6 | **[x]** | Migrations-from-empty + full suite on `postgres:18` per change |
-| DB-14 patch discipline | 6 | **[ ]** | Needs an owner and a cadence, not code |
+| DB-14 patch discipline | 6 + 7 | **[~]** | Profile-based version/freshness evidence shipped; production owner and patch cadence still required |
 | P1 HA standby | 6 | **[ ]** | Single host; absence is reported explicitly rather than as healthy |
+| P2 scale / regulated evidence | 7 | **[x]** baseline | 5M capacity/soak and corruption PASS; ten-category engineering package PASS; customer profiles remain contract-specific |
 
 ## 6. Service objectives (carried from the assessment, pending owner sign-off)
 
@@ -762,10 +887,16 @@ atomic normalized writes; artifact tier live; standby with exercised
 failover; retention/erasure/legal hold automated and tested; PG CI
 certifying every change; a quarter of operating evidence.
 
-M2's outstanding items are the artifact tier, atomic normalized writes, HA
-standby with exercised failover, and a quarter of operating evidence.
+M2's outstanding items are the two M1 gaps, an HA standby with exercised
+failover, and a quarter of operating evidence. The artifact tier and atomic
+normalized writes are implemented.
 
 **M3 — Regulated / high-scale tiers** = M2 + Phase 7 evidence packages.
+
+Status as of 2026-09-02 PDT: the Phase 7 engineering package is **PASS**, but
+**M3 is not yet certified** because M2 is a prerequisite and remains open. Any
+customer-specific profile requiring regional recovery or database activity
+monitoring must also replace and rerun the engineering baseline.
 
 ## 8. Next actions (refreshed 2026-09-02)
 
@@ -788,13 +919,18 @@ decision. The current backlog slice, in dependency order:
    is still globally unique, so two tenants cannot both have an `admin`.
 6. **Enforce `sslmode=verify-full` for non-local DSNs** in the connection seam
    (§0.5 #6), with a test that a non-local DSN without it is refused.
+7. **Provision and exercise M2 HA**, accumulate the required operating quarter,
+   then rerun the Phase 7 package against the signed customer contract profile.
 
 ---
 
-*This document is no longer roadmap-only. Phases 0-5 are implemented, and
-Phase 6 is closed except for the high-availability work a single host cannot
-carry. The `sentro_dev` database on the provisioned cluster has been
+*This document is no longer roadmap-only. Phases 0-5 are implemented, Phase 6
+is closed except for the high-availability work a single host cannot carry,
+and Phase 7's product-controlled engineering baseline is implemented and
+evidenced. The `sentro_dev` database on the provisioned cluster has been
 migrated, constrained, role-separated, placed under row-level security, and
 relieved of the report bodies that made up most of its size — which now live in
 an encrypted content-addressed tier that backup, restore and erasure all reach.
-§0 is the record of what changed and what remains.*
+Revision 0008 is live and the ten-category Phase 7 package passes. M3 still
+depends on M2 HA/operating evidence and the requirements of an actual customer
+contract. §0 is the record of what changed and what remains.*

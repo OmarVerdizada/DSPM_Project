@@ -160,7 +160,11 @@ def build_filter(tenant_id: str, filt: dict) -> str:
     ]
     if filt.get("risk"):
         clauses.append(f"risk_level = {_filter_value(filt['risk'])}")
-    if filt.get("source"):
+    if filt.get("source_group"):
+        clauses.append(
+            "(" + " OR ".join(f"source = {_filter_value(source)}" for source in filt["source_group"]) + ")"
+        )
+    elif filt.get("source"):
         clauses.append(f"source = {_filter_value(filt['source'])}")
     if filt.get("extension"):
         clauses.append(f"extension = {_filter_value(filt['extension'])}")

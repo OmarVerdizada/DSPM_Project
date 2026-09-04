@@ -81,6 +81,8 @@ jobs:
 
       - name: Migrations build the schema from empty (revisions recorded)
         run: |
+          psql "$DSPM_DB_URL" -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+          psql "$DSPM_DB_URL" -c "CREATE EXTENSION IF NOT EXISTS btree_gin"
           python -m backend.migrations upgrade
           python -m backend.migrations status
 
@@ -106,6 +108,26 @@ jobs:
             echo "checking $f"
             node --check "$f"
           done
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      # Roadmap F0: the design-token contract. Checks only the CSS lines a
+      # change ADDS, so the existing debt is frozen rather than blocking work,
+      # and the page-by-page refit in F3 can remove it safely. A deliberate
+      # exception is written on the line as `/* token-gate: allow - reason */`.
+      - name: Frontend token gate
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_BASE_REF" 2>/dev/null || true
+          base="origin/$GITHUB_BASE_REF"
+          git rev-parse --verify "$base" >/dev/null 2>&1 || base="HEAD~1"
+          echo "comparing added CSS against $base"
+          python scripts/check_frontend_tokens.py --base "$base"
+
+      - name: Report frontend debt counters
+        if: always()
+        run: python scripts/check_frontend_tokens.py --stats
 
   hygiene:
     name: Repository hygiene

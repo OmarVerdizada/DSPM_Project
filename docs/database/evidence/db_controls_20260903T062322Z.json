@@ -1,0 +1,99 @@
+{
+  "activity_monitoring": {
+    "reason": "No customer contract requiring database activity monitoring is in scope for this engineering baseline.",
+    "required": false,
+    "result": "NOT_APPLICABLE",
+    "snapshot": {
+      "applicable": true,
+      "enabled": false
+    }
+  },
+  "database_identity": {
+    "backend": "postgres",
+    "database": "sentro_dev",
+    "identity": "7670045377974317320/sentro_dev",
+    "system_identifier": "7670045377974317320"
+  },
+  "evidence_kind": "db_control_snapshot",
+  "generated_at": "2026-09-03T06:23:22.796047+00:00",
+  "patch_compliance": {
+    "approved_major": 18,
+    "baseline_reviewed_at": "2026-09-02T00:00:00+00:00",
+    "installed_version": "18.4",
+    "minimum_version": "18.4",
+    "result": "PASS",
+    "review_age_days": 1.266,
+    "review_max_age_days": 90
+  },
+  "profile": "single-host engineering baseline (2026-09-02)",
+  "regional_recovery": {
+    "observed_topology": {
+      "applicable": true,
+      "configured": false,
+      "standbys": []
+    },
+    "reason": "No regional-recovery customer contract is in scope for this single-host engineering baseline.",
+    "required": false,
+    "result": "NOT_APPLICABLE"
+  },
+  "result": "PASS",
+  "schema_changes": {
+    "applied": 8,
+    "checksum_drift": [
+      1,
+      4
+    ],
+    "expected": 8,
+    "history": [
+      {
+        "applied_at": "2026-09-02T06:04:59.483417+00:00",
+        "checksum": "75714dddf3a2bc66f17eb95a1d1d58a1bfdd7e3aeacb6d698dbf5571e45c8b7b",
+        "name": "baseline_convergent_schema",
+        "revision": 1
+      },
+      {
+        "applied_at": "2026-09-02T06:05:01.597307+00:00",
+        "checksum": "ebf8e4bdd73710aba7f3619e3d9cc100e9aff6247fc4bad4b64969f18bdf6821",
+        "name": "saved_scan_labels",
+        "revision": 2
+      },
+      {
+        "applied_at": "2026-09-02T06:05:01.807957+00:00",
+        "checksum": "5b4fdafb370cf72d29f8c078dafed545cf817bc7f936ea619702495acefc311d",
+        "name": "tenant_referential_integrity",
+        "revision": 3
+      },
+      {
+        "applied_at": "2026-09-02T06:05:01.842350+00:00",
+        "checksum": "ca778e794309f2d01e60a73e7e6fcf75fad699f7a3e01c7be4736c01529f91de",
+        "name": "tenant_row_level_security",
+        "revision": 4
+      },
+      {
+        "applied_at": "2026-09-02T06:54:54.433692+00:00",
+        "checksum": "01886768e7dc7268ee42f6b3a86544f525f9a1b1bb1d7ebf64c8cd3959ebde7c",
+        "name": "report_artifact_references",
+        "revision": 5
+      },
+      {
+        "applied_at": "2026-09-02T07:42:07.252280+00:00",
+        "checksum": "6d34b12c82a4edf9d6b359bf352bf2d54277fba3f0d8b368f7d112f46045aa6a",
+        "name": "tenant_rls_unscoped_guard",
+        "revision": 6
+      },
+      {
+        "applied_at": "2026-09-02T07:57:46.430398+00:00",
+        "checksum": "2f199facbae7d1f32a7c658e727ef78032fc9d2edff984b886513a6405a1d066",
+        "name": "tenant_legal_hold",
+        "revision": 7
+      },
+      {
+        "applied_at": "2026-09-03T06:07:48.921415+00:00",
+        "checksum": "acbe21f4c806b716a771bb5c4a3c3ca3fb70181b82db9cd248bd94a8c0376ce6",
+        "name": "inventory_filtered_search_scale_index",
+        "revision": 8
+      }
+    ],
+    "result": "PASS"
+  }
+}

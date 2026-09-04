@@ -187,6 +187,7 @@ class PostgresBackendTests(unittest.TestCase):
         substring predicate is eligible for the matching GIN expression index."""
         with store._connect() as conn:
             self.assertTrue(db.postgres_extension_available(conn, "pg_trgm"))
+            self.assertTrue(db.postgres_extension_available(conn, "btree_gin"))
             row = conn.execute(
                 "SELECT indexdef FROM pg_indexes "
                 "WHERE schemaname = current_schema() AND indexname = ?",
@@ -195,6 +196,14 @@ class PostgresBackendTests(unittest.TestCase):
             self.assertIsNotNone(row)
             self.assertIn("gin", str(row[0]).lower())
             self.assertIn("gin_trgm_ops", str(row[0]).lower())
+            combined = conn.execute(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname = current_schema() AND indexname = ?",
+                ("idx_assets_tenant_filter_search_trgm",),
+            ).fetchone()
+            self.assertIsNotNone(combined)
+            self.assertIn("tenant_id", str(combined[0]).lower())
+            self.assertIn("gin_trgm_ops", str(combined[0]).lower())
 
             # A tiny test table normally makes a sequential scan cheaper. Disable
             # it for this transaction so EXPLAIN proves the predicate and index

@@ -126,7 +126,7 @@ class InventoryKeysetTests(_SeededStore):
         filt = store._inventory_filters("", "", "", "", "")
         first = store._list_inventory_normalized(self.tid, filt, "risk_score", "", 4)
         decoded = json.loads(base64.urlsafe_b64decode(first["next_cursor"]).decode("utf-8"))
-        self.assertEqual(decoded[:2], ["sc-v2", "risk_score"])
+        self.assertEqual(decoded[:3], ["sc-v3", "risk_score", "DESC"])
 
         wrong_sort = store._list_inventory_normalized(self.tid, filt, "size", first["next_cursor"], 4)
         size_first = store._list_inventory_normalized(self.tid, filt, "size", "", 4)
@@ -142,6 +142,18 @@ class InventoryFilterTests(_SeededStore):
         n, _ = self._both(source="local")
         self.assertTrue(all(i["source"] == "local" for i in n["items"]))
         self.assertEqual(n["total"], 15)
+
+    def test_common_file_server_source_group_matches_local_and_smb_only(self) -> None:
+        normalized, blob = self._both(source="scan-kind:file-server")
+        self.assertEqual(normalized, blob)
+        self.assertEqual(normalized["total"], 25)
+        self.assertTrue(all(item["source"] in {"local", "smb"} for item in normalized["items"]))
+
+        store.save_scan_history(self.tid, _report("endpoint-1", "endpoint-local", _files("endpoint", 3)))
+        normalized, blob = self._both(source="scan-kind:endpoint")
+        self.assertEqual(normalized, blob)
+        self.assertEqual(normalized["total"], 3)
+        self.assertTrue(all(item["source"] == "endpoint-local" for item in normalized["items"]))
 
     def test_risk_filter_case_insensitive(self) -> None:
         n, _ = self._both(risk="critical")
@@ -293,6 +305,21 @@ class InventoryFilterTests(_SeededStore):
         n, _ = self._both(sort="risk_score", limit=100)
         scores = [i["risk_score"] for i in n["items"]]
         self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_sort_risk_score_ascending_is_server_wide_and_cursor_bound(self) -> None:
+        normalized = store.list_inventory(self.tid, sort="risk_score", direction="asc", limit=4)
+        blob = None
+        with mock.patch.dict(os.environ, {"DSPM_INVENTORY_FROM_NORMALIZED": "0"}):
+            blob = store.list_inventory(self.tid, sort="risk_score", direction="asc", limit=4)
+        self.assertEqual(normalized["items"], blob["items"])
+        scores = [item["risk_score"] for item in normalized["items"]]
+        self.assertEqual(scores, sorted(scores))
+        # A cursor generated for Most Critical cannot be reused for Low first.
+        descending = store.list_inventory(self.tid, sort="risk_score", direction="desc", limit=4)
+        reversed_with_old_cursor = store.list_inventory(
+            self.tid, sort="risk_score", direction="asc", cursor=descending["next_cursor"], limit=4,
+        )
+        self.assertEqual(reversed_with_old_cursor["items"], normalized["items"])
 
 
 class InventoryReadSwitchTests(_SeededStore):

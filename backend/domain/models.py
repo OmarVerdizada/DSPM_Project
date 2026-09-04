@@ -382,7 +382,11 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
 
         for finding in record.get("findings") or []:
             rule = str(finding.get("type") or "sensitive_data")
-            finding_id = finding_identity(tenant_id, asset_id, rule, path)
+            # Canonical classifiers already emit a stable public Finding ID.
+            # Preserve it so normalized lifecycle/occurrence rows address the
+            # same object as /api/findings/{finding_id}; legacy findings still
+            # receive the deterministic tenant+asset+rule+path identity.
+            finding_id = str(finding.get("finding_id") or finding_identity(tenant_id, asset_id, rule, path))
             if finding_id not in seen_findings:
                 obj = Finding(
                     id=finding_id,

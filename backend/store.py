@@ -549,6 +549,184 @@ def add_legal_hold(conn) -> None:
         conn.execute("ALTER TABLE tenants ADD COLUMN legal_hold_set_at TEXT NOT NULL DEFAULT ''")
 
 
+def add_inventory_filtered_search_index(conn) -> None:
+    """Revision 0008: keep filtered substring search indexed at Phase 7 scale.
+
+    A standalone trigram GIN and standalone tenant/filter B-tree combine on
+    small estates, but PostgreSQL stopped intersecting them at five million
+    rows. One multicolumn GIN makes tenant, risk, source and trigram terms a
+    single access path. ``btree_gin`` supplies equality operator classes for
+    the first three columns; installing extensions remains an admin action.
+    """
+    if not db.is_postgres():
+        return
+    missing = [
+        name
+        for name in ("pg_trgm", "btree_gin")
+        if not db.postgres_extension_available(conn, name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "Phase 7 filtered-search index requires PostgreSQL extension(s): "
+            + ", ".join(missing)
+            + ". Rerun scripts/provision_postgres.py as the database admin."
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assets_tenant_filter_search_trgm "
+        "ON assets USING GIN (tenant_id, risk_level, source, "
+        "(lower(COALESCE(search_text, ''))) gin_trgm_ops)"
+    )
+
+
+def add_remediation_operational_index(conn) -> None:
+    """Revision 0009: queryable current-state finding projection.
+
+    ``finding_index`` remains the immutable per-scan detail/history projection.
+    The ``findings`` aggregate becomes the lightweight operational read model:
+    one stable finding row, an explicit current/historical bit, and only the
+    columns needed for filtering, sorting, pagination and global metrics.
+    """
+    asset_columns = db.table_columns(conn, "assets")
+    for column, definition in (
+        ("current_scan_id", "TEXT NOT NULL DEFAULT ''"),
+        ("observed_at", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if column not in asset_columns:
+            conn.execute(f"ALTER TABLE assets ADD COLUMN {column} {definition}")
+
+    finding_columns = db.table_columns(conn, "findings")
+    for column, definition in (
+        ("scan_id", "TEXT NOT NULL DEFAULT ''"),
+        ("seq", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_current", "INTEGER NOT NULL DEFAULT 0"),
+        ("risk_score", "INTEGER NOT NULL DEFAULT 0"),
+        ("owner", "TEXT NOT NULL DEFAULT ''"),
+        ("sla_due", "TEXT NOT NULL DEFAULT ''"),
+        ("display_name", "TEXT NOT NULL DEFAULT ''"),
+        ("data_type", "TEXT NOT NULL DEFAULT ''"),
+        ("exposure", "TEXT NOT NULL DEFAULT ''"),
+        ("affected_asset", "TEXT NOT NULL DEFAULT ''"),
+        ("file_name", "TEXT NOT NULL DEFAULT ''"),
+        ("file_path", "TEXT NOT NULL DEFAULT ''"),
+        ("source", "TEXT NOT NULL DEFAULT ''"),
+        ("occurrence_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("confidence", "INTEGER NOT NULL DEFAULT 0"),
+        ("frameworks_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("search_text", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        if column not in finding_columns:
+            conn.execute(f"ALTER TABLE findings ADD COLUMN {column} {definition}")
+
+    for index in (
+        "idx_findings_tenant_current_risk_id ON findings (tenant_id, is_current, risk_score, id)",
+        "idx_findings_tenant_current_status_risk_id ON findings (tenant_id, is_current, status, risk_score, id)",
+        "idx_findings_tenant_current_severity_risk_id ON findings (tenant_id, is_current, severity, risk_score, id)",
+        "idx_findings_tenant_current_framework ON findings (tenant_id, is_current, framework)",
+        "idx_findings_tenant_current_asset ON findings (tenant_id, is_current, asset_id)",
+        "idx_findings_tenant_current_last_seen_id ON findings (tenant_id, is_current, last_seen, id)",
+        "idx_findings_tenant_current_sla_id ON findings (tenant_id, is_current, sla_due, id)",
+        "idx_finding_index_tenant_finding_scan ON finding_index (tenant_id, finding_id, scan_id)",
+    ):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {index}")
+
+    if db.is_postgres():
+        missing = [name for name in ("pg_trgm",) if not db.postgres_extension_available(conn, name)]
+        if missing:
+            raise RuntimeError("Remediation search requires PostgreSQL extension: pg_trgm")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_findings_tenant_search_trgm "
+            "ON findings USING GIN ((lower(COALESCE(search_text, ''))) gin_trgm_ops)"
+        )
+
+    # Existing installs already have the latest per-asset snapshot in
+    # assets.detail_json. Rebuild only the current marker from that canonical
+    # inventory instead of declaring every historical aggregate current.
+    conn.execute("UPDATE findings SET is_current = 0")
+    assets = conn.execute(
+        "SELECT tenant_id, id, source, path, name, owner, modified_at, detail_json "
+        "FROM assets WHERE detail_json <> '{}'"
+    ).fetchall()
+    for asset in assets:
+        try:
+            file_obj = json.loads(asset["detail_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        tenant_id = str(asset["tenant_id"] or "")
+        asset_id = str(asset["id"] or "")
+        path = str(file_obj.get("path") or asset["path"] or "")
+        source = str(file_obj.get("source") or asset["source"] or "")
+        for seq, finding in enumerate(file_obj.get("findings") or []):
+            rule = str(finding.get("type") or finding.get("rule_id") or "sensitive_data")
+            finding_id = str(finding.get("finding_id") or hashlib.sha256(
+                "|".join((tenant_id, asset_id, rule, path)).encode("utf-8", errors="replace")
+            ).hexdigest()[:24])
+            raw_frameworks = [finding.get("framework")]
+            additional_frameworks = finding.get("frameworks") or []
+            if isinstance(additional_frameworks, (list, tuple, set)):
+                raw_frameworks.extend(additional_frameworks)
+            else:
+                raw_frameworks.append(additional_frameworks)
+            frameworks = []
+            for value in raw_frameworks:
+                key = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+                key = {"pci": "pci_dss", "pcidss": "pci_dss", "nist": "nist_sp800_60_enterprise"}.get(key, key)
+                if key and key not in frameworks:
+                    frameworks.append(key)
+            if not frameworks:
+                frameworks = ["standard_scan"]
+            risk = finding.get("risk")
+            severity = str(risk.get("level") if isinstance(risk, dict) else risk or finding.get("severity") or "LOW").upper()
+            risk_score = int(finding.get("risk_score") or (risk.get("score") if isinstance(risk, dict) else 0) or 0)
+            display_name = str(finding.get("display_name") or finding.get("label") or rule).replace("_", " ").strip()
+            data_type = str(finding.get("data_type") or finding.get("finding_category") or finding.get("data_category") or finding.get("category") or "Unclassified")
+            affected_asset = str(finding.get("asset_name") or finding.get("resource_name") or file_obj.get("host_id") or file_obj.get("server") or file_obj.get("share") or source or asset_id)
+            owner = str(finding.get("owner") or finding.get("assignee") or finding.get("data_owner") or file_obj.get("owner") or asset["owner"] or "")
+            occurrence_count = int(finding.get("occurrence_count") or finding.get("count") or len(finding.get("occurrences") or []) or 1)
+            status = str(finding.get("status") or finding.get("review_status") or "OPEN").upper()
+            last_seen = str(finding.get("last_seen") or asset["modified_at"] or "")
+            search_text = " ".join((finding_id, display_name, rule, path, affected_asset, owner, data_type, " ".join(frameworks))).lower()
+            conn.execute(
+                "INSERT INTO findings (tenant_id, id, asset_id, rule, severity, category, framework, status, "
+                "first_seen, last_seen, scan_id, seq, is_current, risk_score, owner, sla_due, display_name, "
+                "data_type, exposure, affected_asset, file_name, file_path, source, occurrence_count, confidence, "
+                "frameworks_json, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (tenant_id, id) DO UPDATE SET asset_id = excluded.asset_id, rule = excluded.rule, "
+                "severity = excluded.severity, category = excluded.category, framework = excluded.framework, "
+                "status = excluded.status, last_seen = excluded.last_seen, seq = excluded.seq, is_current = 1, "
+                "risk_score = excluded.risk_score, owner = excluded.owner, sla_due = excluded.sla_due, "
+                "display_name = excluded.display_name, data_type = excluded.data_type, exposure = excluded.exposure, "
+                "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
+                "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
+                "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text",
+                (
+                    tenant_id, finding_id, asset_id, rule, severity, data_type, frameworks[0], status,
+                    str(finding.get("first_seen") or last_seen), last_seen, seq, risk_score, owner,
+                    str(finding.get("sla_due") or ""), display_name, data_type,
+                    str(finding.get("exposure") or finding.get("exposure_state") or ""), affected_asset,
+                    str(file_obj.get("name") or asset["name"] or path.replace("\\", "/").rsplit("/", 1)[-1]), path, source,
+                    occurrence_count, int(finding.get("confidence") or 0),
+                    json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")), search_text,
+                ),
+            )
+
+
+def add_remediation_filter_indexes(conn) -> None:
+    """Revision 0010: indexes matching the shipped queue filters and sorts."""
+    for index in (
+        "idx_findings_tenant_current_owner_id ON findings (tenant_id, is_current, owner, id)",
+        "idx_findings_tenant_current_data_type_id ON findings (tenant_id, is_current, data_type, id)",
+        "idx_findings_tenant_current_affected_asset_id ON findings (tenant_id, is_current, affected_asset, id)",
+        "idx_findings_tenant_current_status_sla_id ON findings (tenant_id, is_current, status, sla_due, id)",
+        "idx_findings_tenant_current_name_id ON findings (tenant_id, is_current, display_name, id)",
+    ):
+        conn.execute(f"CREATE INDEX IF NOT EXISTS {index}")
+    if db.is_postgres():
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_findings_frameworks_gin "
+            "ON findings USING GIN ((COALESCE(frameworks_json, '[]')::jsonb))"
+        )
+
+
 def apply_baseline_schema(conn) -> None:
     """Revision 0001: the convergent baseline DDL, factored out so the
     versioned migration runner (roadmap Phase 2, DB-05) applies it as the
@@ -734,6 +912,8 @@ def apply_baseline_schema(conn) -> None:
             framework_keys TEXT NOT NULL DEFAULT '[]',
             detail_json TEXT NOT NULL DEFAULT '{}',
             scan_label TEXT NOT NULL DEFAULT '',
+            current_scan_id TEXT NOT NULL DEFAULT '',
+            observed_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (tenant_id, id)
         );
 
@@ -778,6 +958,23 @@ def apply_baseline_schema(conn) -> None:
             status TEXT,
             first_seen TEXT,
             last_seen TEXT,
+            scan_id TEXT NOT NULL DEFAULT '',
+            seq INTEGER NOT NULL DEFAULT 0,
+            is_current INTEGER NOT NULL DEFAULT 0,
+            risk_score INTEGER NOT NULL DEFAULT 0,
+            owner TEXT NOT NULL DEFAULT '',
+            sla_due TEXT NOT NULL DEFAULT '',
+            display_name TEXT NOT NULL DEFAULT '',
+            data_type TEXT NOT NULL DEFAULT '',
+            exposure TEXT NOT NULL DEFAULT '',
+            affected_asset TEXT NOT NULL DEFAULT '',
+            file_name TEXT NOT NULL DEFAULT '',
+            file_path TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            occurrence_count INTEGER NOT NULL DEFAULT 0,
+            confidence INTEGER NOT NULL DEFAULT 0,
+            frameworks_json TEXT NOT NULL DEFAULT '[]',
+            search_text TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (tenant_id, id)
         );
 
@@ -829,6 +1026,32 @@ def apply_baseline_schema(conn) -> None:
             ON finding_occurrences (finding_id);
         CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan
             ON finding_index (tenant_id, scan_id);
+        CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_finding_scan
+            ON finding_index (tenant_id, finding_id, scan_id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_risk_id
+            ON findings (tenant_id, is_current, risk_score, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_status_risk_id
+            ON findings (tenant_id, is_current, status, risk_score, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_severity_risk_id
+            ON findings (tenant_id, is_current, severity, risk_score, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_framework
+            ON findings (tenant_id, is_current, framework);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_asset
+            ON findings (tenant_id, is_current, asset_id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_last_seen_id
+            ON findings (tenant_id, is_current, last_seen, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_sla_id
+            ON findings (tenant_id, is_current, sla_due, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_owner_id
+            ON findings (tenant_id, is_current, owner, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_data_type_id
+            ON findings (tenant_id, is_current, data_type, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_affected_asset_id
+            ON findings (tenant_id, is_current, affected_asset, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_status_sla_id
+            ON findings (tenant_id, is_current, status, sla_due, id);
+        CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_name_id
+            ON findings (tenant_id, is_current, display_name, id);
         CREATE INDEX IF NOT EXISTS idx_scan_object_baselines_generation
             ON scan_object_baselines (tenant_id, scope_key, last_scan_id);
 
@@ -1301,7 +1524,7 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
             ).fetchone()
             if existing and existing["created_at"]:
                 created_at = existing["created_at"]
-            normalized_written = _dual_write_normalized(conn, tenant_id, report)
+            normalized_written = _dual_write_normalized(conn, tenant_id, report, is_new_scan=existing is None)
             if normalized_written:
                 _write_incremental_baseline(conn, tenant_id, report, is_new_scan=existing is None)
             else:
@@ -1332,6 +1555,7 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                 ),
             )
     _invalidate_inventory_query_cache(tenant_id)
+    _invalidate_remediation_query_cache(tenant_id)
     # S-F dual-write is an optional, best-effort projection and deliberately
     # runs after the authoritative DB transaction/lock has completed. Search
     # outages must never roll back or delay ownership of the saved scan.
@@ -1368,7 +1592,7 @@ def _normalized_write_is_best_effort() -> bool:
     return os.getenv("DSPM_NORMALIZED_WRITE_BEST_EFFORT", "0") == "1"
 
 
-def _dual_write_normalized(conn, tenant_id: str, report: dict) -> bool:
+def _dual_write_normalized(conn, tenant_id: str, report: dict, *, is_new_scan: bool = True) -> bool:
     """Write the scan's normalized surfaces (roadmap Phase 5, DB-07).
 
     **Authoritative:** assets, findings, occurrences and the finding index are
@@ -1384,7 +1608,7 @@ def _dual_write_normalized(conn, tenant_id: str, report: dict) -> bool:
     """
     try:
         conn.execute("SAVEPOINT dspm_norm")
-        _write_normalized_rows(conn, tenant_id, report)
+        _write_normalized_rows(conn, tenant_id, report, refresh_current=is_new_scan)
         conn.execute("RELEASE SAVEPOINT dspm_norm")
         return True
     except Exception as exc:
@@ -1680,6 +1904,12 @@ def purge_demo_sample_assets(tenant_id: str | None = None) -> int:
                 conn.execute(f"DELETE FROM assets WHERE id = ?{scope_sql}", args)
     if demo_ids:
         logger.info("Purged %d demo-sample assets from the estate%s", len(demo_ids), f" (tenant {tenant_id})" if tenant_id else "")
+        invalidate_inventory = globals().get("_invalidate_inventory_query_cache")
+        invalidate_remediation = globals().get("_invalidate_remediation_query_cache")
+        if callable(invalidate_inventory):
+            invalidate_inventory(tenant_id)
+        if callable(invalidate_remediation):
+            invalidate_remediation(tenant_id)
     return len(demo_ids)
 
 
@@ -1692,7 +1922,124 @@ except Exception as exc:  # pragma: no cover - never block startup on hygiene
     logger.warning("Demo-sample estate purge skipped: %s", type(exc).__name__)
 
 
-def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
+def _operational_frameworks(finding: dict) -> list[str]:
+    values = [finding.get("framework")]
+    additional = finding.get("frameworks")
+    if isinstance(additional, (list, tuple, set)):
+        values.extend(additional)
+    elif additional:
+        values.append(additional)
+    aliases = {
+        "pci": "pci_dss", "pcidss": "pci_dss", "pci_dss_4_0": "pci_dss",
+        "nist": "nist_sp800_60_enterprise", "nist_sp_800_60": "nist_sp800_60_enterprise",
+        "nist_sp800_60": "nist_sp800_60_enterprise",
+    }
+    result: list[str] = []
+    for value in values:
+        key = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+        key = aliases.get(key, key)
+        if key and key not in result:
+            result.append(key)
+    return result or ["standard_scan"]
+
+
+def _upsert_operational_finding(
+    conn, tenant_id: str, scan_id: str, seq: int, asset_id: str,
+    file_obj: dict, finding: dict, *, is_current: bool,
+) -> None:
+    """Write one lightweight finding row without evidence/history payloads."""
+    from backend.domain import finding_identity
+    from backend.finding_contracts import get_finding_display_name
+
+    path = str(file_obj.get("path") or file_obj.get("name") or "")
+    rule = str(finding.get("type") or finding.get("rule_id") or "sensitive_data")
+    finding_id = str(finding.get("finding_id") or finding_identity(tenant_id, asset_id, rule, path))
+    risk = finding.get("risk")
+    severity = str(
+        (risk.get("level") if isinstance(risk, dict) else risk)
+        or finding.get("severity") or finding.get("impact_severity") or "LOW"
+    ).upper()
+    risk_score = int(
+        finding.get("risk_score") or finding.get("operational_priority_score")
+        or (risk.get("score") if isinstance(risk, dict) else 0) or 0
+    )
+    frameworks = _operational_frameworks(finding)
+    display_name = str(finding.get("display_name") or get_finding_display_name(finding) or rule)
+    data_type = str(
+        finding.get("data_type") or finding.get("data_element") or finding.get("personal_data_type")
+        or finding.get("finding_category") or finding.get("data_category") or finding.get("category")
+        or finding.get("entity_type") or "Unclassified"
+    )
+    source = str(file_obj.get("source") or "")
+    affected_asset = str(
+        finding.get("asset_name") or finding.get("resource_name") or file_obj.get("host_id")
+        or file_obj.get("server") or file_obj.get("share") or source or asset_id
+    )
+    owner = str(
+        finding.get("owner") or finding.get("assignee") or finding.get("data_owner")
+        or file_obj.get("owner") or ""
+    )
+    occurrence_count = int(
+        finding.get("occurrence_count") or finding.get("count")
+        or len(finding.get("occurrences") or []) or 1
+    )
+    status = _finding_status(finding)
+    sla_due = str(finding.get("sla_due") or finding.get("due_date") or "")
+    if is_current:
+        existing = conn.execute(
+            "SELECT status, owner, sla_due FROM findings WHERE tenant_id = ? AND id = ?",
+            (tenant_id, finding_id),
+        ).fetchone()
+        if existing is not None:
+            if not any(finding.get(key) for key in ("status", "review_status", "workflow_status")):
+                status = str(existing["status"] or status)
+            if not any(finding.get(key) for key in ("owner", "assignee", "data_owner")):
+                owner = str(existing["owner"] or owner)
+            if not any(finding.get(key) for key in ("sla_due", "due_date")):
+                sla_due = str(existing["sla_due"] or "")
+    # The same enriched object is indexed into the lazy detail surface below;
+    # keep list and drawer lifecycle values identical after a re-scan.
+    finding["status"] = status
+    if owner:
+        finding["owner"] = owner
+    if sla_due:
+        finding["sla_due"] = sla_due
+    first_seen = str(finding.get("first_seen") or "")
+    last_seen = str(finding.get("last_seen") or "")
+    file_name = str(file_obj.get("name") or path.replace("\\", "/").rsplit("/", 1)[-1])
+    exposure = str(finding.get("exposure") or finding.get("exposure_state") or "")
+    search_text = " ".join(
+        (finding_id, display_name, rule, path, file_name, affected_asset, owner, data_type, exposure, " ".join(frameworks))
+    ).lower()
+    conn.execute(
+        "INSERT INTO findings (tenant_id, id, asset_id, rule, severity, category, framework, status, "
+        "first_seen, last_seen, scan_id, seq, is_current, risk_score, owner, sla_due, display_name, "
+        "data_type, exposure, affected_asset, file_name, file_path, source, occurrence_count, confidence, "
+        "frameworks_json, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (tenant_id, id) DO UPDATE SET asset_id = excluded.asset_id, rule = excluded.rule, "
+        "severity = excluded.severity, category = excluded.category, framework = excluded.framework, status = excluded.status, "
+        "first_seen = COALESCE(NULLIF(findings.first_seen, ''), excluded.first_seen), last_seen = excluded.last_seen, "
+        "scan_id = CASE WHEN excluded.is_current = 1 THEN excluded.scan_id ELSE findings.scan_id END, "
+        "seq = CASE WHEN excluded.is_current = 1 THEN excluded.seq ELSE findings.seq END, "
+        "is_current = CASE WHEN excluded.is_current = 1 THEN 1 ELSE findings.is_current END, "
+        "risk_score = excluded.risk_score, owner = excluded.owner, sla_due = excluded.sla_due, "
+        "display_name = excluded.display_name, data_type = excluded.data_type, exposure = excluded.exposure, "
+        "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
+        "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
+        "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text",
+        (
+            tenant_id, finding_id, asset_id, rule, severity,
+            str(finding.get("category") or finding.get("finding_category") or ""), frameworks[0], status,
+            first_seen, last_seen, scan_id, seq, 1 if is_current else 0, risk_score, owner,
+            sla_due, display_name, data_type,
+            exposure, affected_asset, file_name, path, source, occurrence_count,
+            int(finding.get("confidence") or 0), json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")),
+            search_text,
+        ),
+    )
+
+
+def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_current: bool = True) -> None:
     from backend.domain import normalize_scan_report
 
     scan = normalize_scan_report(tenant_id, report)
@@ -1721,14 +2068,40 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
         """,
         (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at, run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
     )
-    for asset in scan.assets if write_estate else []:
+    observed_at = str(report.get("completed_at") or report.get("timestamp") or scan.scan_run.ended_at or "")
+    scan_label = str(report.get("scan_label") or "").strip()[:80]
+    diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
+    incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
+    complete_scope = not isinstance(incremental, dict) or bool(incremental.get("complete"))
+    # A named scan is an authoritative inventory scope. On a complete newer
+    # run, unseen assets leave the current estate and their findings become
+    # historical before this run's rows are inserted. Unnamed scans are not
+    # pruned because source alone is not a reliable scope identity.
+    if write_estate and refresh_current and scan_label and complete_scope:
+        stale_sql = (
+            "SELECT id FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?"
+        )
+        stale_params = (tenant_id, scan_label, scan_id)
+        conn.execute(
+            f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
+            (tenant_id, *stale_params),
+        )
+        conn.execute(
+            f"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
+            (tenant_id, *stale_params),
+        )
+        conn.execute(
+            "DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?",
+            stale_params,
+        )
+    for asset in scan.assets if write_estate and refresh_current else []:
         conn.execute(
             "INSERT INTO assets "
             "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
             "risk_level, risk_score, size, owner, modified_at, finding_count, "
             "top_frameworks, is_hidden, is_system, is_protected, search_text, "
-            "finding_types, framework_keys, detail_json, scan_label) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "finding_types, framework_keys, detail_json, scan_label, current_scan_id, observed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (tenant_id, id) DO UPDATE SET "
             "source = excluded.source, stable_object_id = excluded.stable_object_id, "
             "path = excluded.path, name = excluded.name, extension = excluded.extension, "
@@ -1738,29 +2111,43 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict) -> None:
             "is_hidden = excluded.is_hidden, is_system = excluded.is_system, "
             "is_protected = excluded.is_protected, search_text = excluded.search_text, "
             "finding_types = excluded.finding_types, framework_keys = excluded.framework_keys, "
-            "detail_json = excluded.detail_json, scan_label = excluded.scan_label",
+            "detail_json = excluded.detail_json, scan_label = excluded.scan_label, "
+            "current_scan_id = excluded.current_scan_id, observed_at = excluded.observed_at",
             (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
              asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
              asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
              asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
-             asset.finding_types, asset.framework_keys, asset.detail_json, asset.scan_label),
+             asset.finding_types, asset.framework_keys, asset.detail_json, asset.scan_label,
+             scan_id, observed_at),
         )
-    for version in scan.asset_versions if write_estate else []:
+    for version in scan.asset_versions if write_estate and refresh_current else []:
         conn.execute(
             "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage),
         )
-    for finding in scan.findings if write_estate else []:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO findings
-                (tenant_id, id, asset_id, rule, severity, category, framework, status, first_seen, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?,
-                    COALESCE((SELECT first_seen FROM findings WHERE tenant_id = ? AND id = ?), ?), ?)
-            """,
-            (tenant_id, finding.id, finding.asset_id, finding.rule, finding.severity, finding.category, finding.framework, finding.status,
-             tenant_id, finding.id, finding.first_seen, finding.last_seen),
-        )
+    asset_ids_by_path = {asset.path: asset.id for asset in scan.assets}
+    if write_estate and refresh_current:
+        for asset_id in asset_ids_by_path.values():
+            conn.execute(
+                "UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id = ?",
+                (tenant_id, asset_id),
+            )
+    if write_estate:
+        seq = 0
+        for row in _iter_report_findings(report):
+            file_obj = row["file"]
+            path = str(file_obj.get("path") or file_obj.get("name") or "")
+            asset_id = asset_ids_by_path.get(path)
+            if not asset_id:
+                continue
+            finding = row["finding"]
+            finding.setdefault("first_seen", str(report.get("timestamp") or ""))
+            finding.setdefault("last_seen", str(report.get("timestamp") or ""))
+            _upsert_operational_finding(
+                conn, tenant_id, scan_id, seq, asset_id, file_obj, finding,
+                is_current=refresh_current,
+            )
+            seq += 1
     for occurrence in scan.occurrences:
         conn.execute(
             "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2164,79 +2551,398 @@ FINDING_LIFECYCLE_STATUSES = {
     "RISK_ACCEPTED",
 }
 
+REMEDIATION_STATUS_GROUPS: dict[str, tuple[str, ...]] = {
+    "open": ("NEW", "OPEN", "UNDER_REVIEW", "CONFIRMED", "REOPENED"),
+    "in_progress": ("ASSIGNED", "IN_PROGRESS"),
+    "validation": ("PENDING_VALIDATION",),
+    "resolved": ("RESOLVED",),
+    "exceptions": ("RISK_ACCEPTED", "SUPPRESSED", "FALSE_POSITIVE"),
+}
+REMEDIATION_ACTIVE_STATUSES = (
+    *REMEDIATION_STATUS_GROUPS["open"],
+    *REMEDIATION_STATUS_GROUPS["in_progress"],
+    *REMEDIATION_STATUS_GROUPS["validation"],
+)
+REMEDIATION_SORTS: dict[str, tuple[str, bool, str]] = {
+    "risk_score": ("risk_score", False, "DESC"),
+    "severity": ("CASE severity WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 ELSE 0 END", False, "DESC"),
+    "last_seen": ("COALESCE(last_seen, '')", True, "DESC"),
+    "sla_due": ("COALESCE(NULLIF(sla_due, ''), '9999-12-31T23:59:59+00:00')", True, "ASC"),
+    "status": ("COALESCE(status, '')", True, "ASC"),
+    "finding_name": ("COALESCE(display_name, '')", True, "ASC"),
+}
+_REMEDIATION_CURSOR_VERSION = "rf-v1"
+_remediation_cache: dict[tuple, tuple[float, dict]] = {}
+_remediation_total_cache: dict[tuple, tuple[float, int]] = {}
+_remediation_cache_lock = threading.Lock()
+
+
+def _invalidate_remediation_query_cache(tenant_id: str | None = None) -> None:
+    with _remediation_cache_lock:
+        if tenant_id is None:
+            _remediation_cache.clear()
+            _remediation_total_cache.clear()
+            return
+        for key in [item for item in _remediation_cache if item[1] == tenant_id]:
+            _remediation_cache.pop(key, None)
+        for key in [item for item in _remediation_total_cache if item[1] == tenant_id]:
+            _remediation_total_cache.pop(key, None)
+
+
+def remediation_statuses(value: str = "") -> tuple[str, ...]:
+    """One canonical lifecycle grouping used by queries, metrics and clients."""
+    key = str(value or "").strip().lower().replace("-", "_")
+    if not key or key == "all":
+        return ()
+    if key == "active":
+        return REMEDIATION_ACTIVE_STATUSES
+    if key in REMEDIATION_STATUS_GROUPS:
+        return REMEDIATION_STATUS_GROUPS[key]
+    exact = key.upper()
+    return (exact,) if exact in FINDING_LIFECYCLE_STATUSES else ()
+
+
+def _remediation_scope(scope: str) -> str:
+    value = str(scope or "current").strip().lower()
+    return value if value in {"current", "historical", "all"} else "current"
+
+
+def _remediation_scope_sql(scope: str) -> tuple[list[str], list]:
+    clauses: list[str] = []
+    params: list = []
+    normalized = _remediation_scope(scope)
+    if normalized == "current":
+        clauses.append("is_current = 1")
+    elif normalized == "historical":
+        clauses.append("is_current = 0")
+    return clauses, params
+
+
+def _remediation_filter_sql(filters: dict) -> tuple[list[str], list]:
+    clauses, params = _remediation_scope_sql(filters.get("scope", "current"))
+    statuses = remediation_statuses(filters.get("status", ""))
+    if statuses:
+        clauses.append(f"status IN ({','.join('?' for _ in statuses)})")
+        params.extend(statuses)
+    severity = str(filters.get("severity") or "").strip().upper()
+    if severity in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
+        clauses.append("severity = ?")
+        params.append(severity)
+    owner = str(filters.get("owner") or "").strip()
+    if owner:
+        if owner == "__unassigned__":
+            clauses.append("owner = ''")
+        else:
+            clauses.append("owner = ?")
+            params.append(owner)
+    framework = str(filters.get("framework") or "").strip().lower()
+    if framework:
+        if db.is_postgres():
+            clauses.append("jsonb_exists(COALESCE(frameworks_json, '[]')::jsonb, ?)")
+            params.append(framework)
+        else:
+            clauses.append("lower(frameworks_json) LIKE ? ESCAPE '\\'")
+            params.append(f'%"{_like_escape(framework)}"%')
+    data_type = str(filters.get("data_type") or "").strip()
+    if data_type:
+        clauses.append("data_type = ?")
+        params.append(data_type)
+    asset = str(filters.get("asset") or "").strip()
+    if asset:
+        clauses.append("(asset_id = ? OR affected_asset = ?)")
+        params.extend((asset, asset))
+    sla = str(filters.get("sla") or "").strip().upper()
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+    if sla == "OVERDUE":
+        clauses.extend(("sla_due <> ''", "sla_due < ?", f"status IN ({','.join('?' for _ in REMEDIATION_ACTIVE_STATUSES)})"))
+        params.extend((now_text, *REMEDIATION_ACTIVE_STATUSES))
+    elif sla == "DUE_SOON":
+        clauses.extend(("sla_due >= ?", "sla_due <= ?"))
+        params.extend((now_text, (now + timedelta(hours=24)).isoformat()))
+    elif sla == "ON_TRACK":
+        clauses.append("sla_due > ?")
+        params.append((now + timedelta(hours=24)).isoformat())
+    elif sla == "NO_SLA":
+        clauses.append("sla_due = ''")
+    query = str(filters.get("q") or "").strip().lower()
+    if query:
+        clauses.append("lower(search_text) LIKE ? ESCAPE '\\'")
+        params.append(f"%{_like_escape(query)}%")
+    return clauses, params
+
+
+def _encode_remediation_cursor(sort: str, direction: str, value, finding_id: str) -> str:
+    raw = json.dumps([_REMEDIATION_CURSOR_VERSION, sort, direction, value, finding_id], ensure_ascii=False)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def _decode_remediation_cursor(cursor: str, sort: str, direction: str, is_text: bool):
+    if not cursor:
+        return None
+    try:
+        version, cursor_sort, cursor_direction, value, finding_id = json.loads(
+            base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8")
+        )
+        if version != _REMEDIATION_CURSOR_VERSION or cursor_sort != sort or cursor_direction != direction:
+            return None
+        if not isinstance(finding_id, str) or not finding_id:
+            return None
+        if is_text and not isinstance(value, str):
+            return None
+        if not is_text and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+            return None
+        return value, finding_id
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def _remediation_row(row) -> dict:
+    frameworks = _decode_string_list(row["frameworks_json"])
+    return {
+        "finding_id": str(row["id"] or ""),
+        "asset_id": str(row["asset_id"] or ""),
+        "severity": str(row["severity"] or "LOW"),
+        "risk": str(row["severity"] or "LOW"),
+        "risk_score": int(row["risk_score"] or 0),
+        "display_name": str(row["display_name"] or row["rule"] or "Finding"),
+        "type": str(row["rule"] or ""),
+        "technical_type": str(row["rule"] or ""),
+        "data_type": str(row["data_type"] or "Unclassified"),
+        "finding_category": str(row["category"] or row["data_type"] or ""),
+        "framework": frameworks[0] if frameworks else str(row["framework"] or "standard_scan"),
+        "frameworks": frameworks,
+        "affected_asset": str(row["affected_asset"] or row["asset_id"] or ""),
+        "exposure": str(row["exposure"] or ""),
+        "owner": str(row["owner"] or ""),
+        "status": str(row["status"] or "OPEN"),
+        "sla_due": str(row["sla_due"] or ""),
+        "last_seen": str(row["last_seen"] or ""),
+        "occurrence_count": int(row["occurrence_count"] or 0),
+        "confidence": int(row["confidence"] or 0),
+        "scope": "current" if int(row["is_current"] or 0) else "historical",
+        "file": {
+            "name": str(row["file_name"] or ""),
+            "path": str(row["file_path"] or ""),
+            "source": str(row["source"] or ""),
+        },
+    }
+
+
+def _remediation_framework_metric_rows(conn, tenant_id: str, scope_where: list[str], scope_params: list):
+    where = " AND ".join(["f.tenant_id = ?", *[f"f.{clause}" for clause in scope_where]])
+    params = (tenant_id, *scope_params)
+    if db.is_postgres():
+        return conn.execute(
+            "SELECT item.value AS value, COUNT(*) AS n, COALESCE(SUM(f.occurrence_count), 0) AS occurrences "
+            "FROM findings AS f CROSS JOIN LATERAL "
+            "jsonb_array_elements_text(COALESCE(f.frameworks_json, '[]')::jsonb) AS item(value) "
+            f"WHERE {where} GROUP BY item.value",
+            params,
+        ).fetchall()
+    return conn.execute(
+        "SELECT item.value AS value, COUNT(*) AS n, COALESCE(SUM(f.occurrence_count), 0) AS occurrences "
+        "FROM findings AS f, json_each(COALESCE(f.frameworks_json, '[]')) AS item "
+        f"WHERE {where} GROUP BY item.value",
+        params,
+    ).fetchall()
+
+
+def remediation_summary(tenant_id: str, scope: str = "current") -> dict:
+    normalized_scope = _remediation_scope(scope)
+    cache_key = (str(DB_PATH), tenant_id, normalized_scope, "summary")
+    now_mono = time.monotonic()
+    with _remediation_cache_lock:
+        cached = _remediation_cache.get(cache_key)
+        if cached and now_mono - cached[0] <= 15.0:
+            return dict(cached[1])
+    scope_where, scope_params = _remediation_scope_sql(normalized_scope)
+    where = " AND ".join(["tenant_id = ?", *scope_where])
+    open_values = ",".join(f"'{value}'" for value in REMEDIATION_STATUS_GROUPS["open"])
+    progress_values = ",".join(f"'{value}'" for value in REMEDIATION_STATUS_GROUPS["in_progress"])
+    validation_values = ",".join(f"'{value}'" for value in REMEDIATION_STATUS_GROUPS["validation"])
+    active_values = ",".join(f"'{value}'" for value in REMEDIATION_ACTIVE_STATUSES)
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total_findings, COALESCE(SUM(occurrence_count), 0) AS total_occurrences, "
+            f"SUM(CASE WHEN status IN ({active_values}) THEN 1 ELSE 0 END) AS active_findings, "
+            f"COUNT(DISTINCT CASE WHEN status IN ({active_values}) THEN asset_id END) AS affected_files, "
+            f"SUM(CASE WHEN status IN ({open_values}) THEN 1 ELSE 0 END) AS open_n, "
+            f"SUM(CASE WHEN status IN ({progress_values}) THEN 1 ELSE 0 END) AS progress_n, "
+            f"SUM(CASE WHEN status IN ({validation_values}) THEN 1 ELSE 0 END) AS validation_n, "
+            f"SUM(CASE WHEN status IN ({active_values}) AND sla_due <> '' AND sla_due < ? THEN 1 ELSE 0 END) AS overdue_n, "
+            "SUM(CASE WHEN status = 'RESOLVED' THEN 1 ELSE 0 END) AS resolved_n, "
+            "SUM(CASE WHEN status = 'RISK_ACCEPTED' THEN 1 ELSE 0 END) AS risk_accepted_n, "
+            "SUM(CASE WHEN status = 'SUPPRESSED' THEN 1 ELSE 0 END) AS suppressed_n, "
+            "SUM(CASE WHEN status = 'FALSE_POSITIVE' THEN 1 ELSE 0 END) AS false_positive_n "
+            f"FROM findings WHERE {where}",
+            (datetime.now(timezone.utc).isoformat(), tenant_id, *scope_params),
+        ).fetchone()
+        status_rows = conn.execute(
+            f"SELECT status, COUNT(*) AS n FROM findings WHERE {where} GROUP BY status",
+            (tenant_id, *scope_params),
+        ).fetchall()
+        severity_rows = conn.execute(
+            f"SELECT severity, COUNT(*) AS n FROM findings WHERE {where} GROUP BY severity",
+            (tenant_id, *scope_params),
+        ).fetchall()
+        framework_rows = _remediation_framework_metric_rows(conn, tenant_id, scope_where, scope_params)
+    summary = {
+        "scope": normalized_scope,
+        "total_findings": int((row["total_findings"] if row else 0) or 0),
+        "total_occurrences": int((row["total_occurrences"] if row else 0) or 0),
+        "active_findings": int((row["active_findings"] if row else 0) or 0),
+        "affected_files": int((row["affected_files"] if row else 0) or 0),
+        "open": int((row["open_n"] if row else 0) or 0),
+        "in_progress": int((row["progress_n"] if row else 0) or 0),
+        "pending_validation": int((row["validation_n"] if row else 0) or 0),
+        "overdue": int((row["overdue_n"] if row else 0) or 0),
+        "resolved": int((row["resolved_n"] if row else 0) or 0),
+        "risk_accepted": int((row["risk_accepted_n"] if row else 0) or 0),
+        "suppressed": int((row["suppressed_n"] if row else 0) or 0),
+        "false_positive": int((row["false_positive_n"] if row else 0) or 0),
+        "findings_by_status": {str(item["status"] or "OPEN"): int(item["n"] or 0) for item in status_rows},
+        "findings_by_severity": {str(item["severity"] or "LOW"): int(item["n"] or 0) for item in severity_rows},
+        "findings_by_framework": {
+            str(item["value"]): {"finding_count": int(item["n"] or 0), "occurrence_count": int(item["occurrences"] or 0)}
+            for item in framework_rows if item["value"]
+        },
+        "status_groups": {key: list(values) for key, values in REMEDIATION_STATUS_GROUPS.items()},
+    }
+    with _remediation_cache_lock:
+        _remediation_cache[cache_key] = (now_mono, dict(summary))
+    return summary
+
+
+def _remediation_facets(tenant_id: str, scope: str) -> dict:
+    normalized_scope = _remediation_scope(scope)
+    cache_key = (str(DB_PATH), tenant_id, normalized_scope, "facets")
+    now_mono = time.monotonic()
+    with _remediation_cache_lock:
+        cached = _remediation_cache.get(cache_key)
+        if cached and now_mono - cached[0] <= 15.0:
+            return dict(cached[1])
+    scope_where, scope_params = _remediation_scope_sql(normalized_scope)
+    where = " AND ".join(["tenant_id = ?", *scope_where])
+    with _connect() as conn:
+        def values(column: str, limit: int = 250, include_empty: bool = False) -> list[dict]:
+            nonempty = "" if include_empty else f"AND {column} <> ''"
+            rows = conn.execute(
+                f"SELECT {column} AS value, COUNT(*) AS n FROM findings WHERE {where} "
+                f"{nonempty} GROUP BY {column} ORDER BY n DESC, {column} ASC LIMIT ?",
+                (tenant_id, *scope_params, limit),
+            ).fetchall()
+            return [
+                {"value": str(row["value"] or "") or "__unassigned__", "count": int(row["n"] or 0)}
+                for row in rows
+            ]
+        framework_rows = _remediation_framework_metric_rows(conn, tenant_id, scope_where, scope_params)
+        facets = {
+            "severities": values("severity", 10),
+            "statuses": values("status", 20),
+            "owners": values("owner", include_empty=True),
+            "data_types": values("data_type"),
+            "assets": values("affected_asset"),
+            "frameworks": [{"value": str(row["value"]), "count": int(row["n"] or 0)} for row in framework_rows if row["value"]],
+        }
+    with _remediation_cache_lock:
+        _remediation_cache[cache_key] = (now_mono, dict(facets))
+    return facets
+
+
+def _remediation_filtered_total(conn, tenant_id: str, where: str, params: list) -> int:
+    cache_key = (str(DB_PATH), tenant_id, where, tuple(params))
+    now_mono = time.monotonic()
+    with _remediation_cache_lock:
+        cached = _remediation_total_cache.get(cache_key)
+        if cached and now_mono - cached[0] <= 15.0:
+            return cached[1]
+        if cached:
+            _remediation_total_cache.pop(cache_key, None)
+    total = int(conn.execute(f"SELECT COUNT(*) AS n FROM findings WHERE {where}", tuple(params)).fetchone()["n"] or 0)
+    with _remediation_cache_lock:
+        _remediation_total_cache[cache_key] = (now_mono, total)
+        if len(_remediation_total_cache) > 512:
+            oldest = min(_remediation_total_cache, key=lambda item: _remediation_total_cache[item][0])
+            _remediation_total_cache.pop(oldest, None)
+    return total
+
+
+def list_remediation_findings(
+    tenant_id: str, *, scope: str = "current", status: str = "active", severity: str = "",
+    owner: str = "", framework: str = "", data_type: str = "", asset: str = "", sla: str = "",
+    q: str = "", sort: str = "risk_score", direction: str = "", after: str = "", limit: int = 50,
+) -> dict:
+    """Server-filtered, keyset-paginated lightweight finding page plus metrics."""
+    normalized_scope = _remediation_scope(scope)
+    sort_key = sort if sort in REMEDIATION_SORTS else "risk_score"
+    expression, is_text, default_direction = REMEDIATION_SORTS[sort_key]
+    requested_direction = str(direction or "").strip().upper()
+    sort_direction = requested_direction if requested_direction in {"ASC", "DESC"} else default_direction
+    expression = db.collate_c(expression) if is_text else expression
+    page_size = max(1, min(int(limit or 50), 200))
+    filters = {
+        "scope": normalized_scope, "status": status, "severity": severity, "owner": owner,
+        "framework": framework, "data_type": data_type, "asset": asset, "sla": sla, "q": q,
+    }
+    clauses, params = _remediation_filter_sql(filters)
+    where = " AND ".join(["tenant_id = ?", *clauses])
+    base_params: list = [tenant_id, *params]
+    cursor = _decode_remediation_cursor(after, sort_key, sort_direction, is_text)
+    page_clauses = list(clauses)
+    page_params = list(base_params)
+    if cursor:
+        value, finding_id = cursor
+        operator = ">" if sort_direction == "ASC" else "<"
+        page_clauses.append(f"(({expression} {operator} ?) OR ({expression} = ? AND id {operator} ?))")
+        page_params.extend((value, value, finding_id))
+    page_where = " AND ".join(["tenant_id = ?", *page_clauses])
+    with _connect() as conn:
+        total = _remediation_filtered_total(conn, tenant_id, where, base_params)
+        rows = conn.execute(
+            f"SELECT * FROM findings WHERE {page_where} ORDER BY {expression} {sort_direction}, id {sort_direction} LIMIT ?",
+            (*page_params, page_size + 1),
+        ).fetchall()
+    has_more = len(rows) > page_size
+    page_rows = rows[:page_size]
+    next_cursor = None
+    if has_more and page_rows:
+        last = page_rows[-1]
+        if sort_key == "severity":
+            sort_value = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}.get(str(last["severity"] or "").upper(), 0)
+        elif sort_key == "sla_due":
+            sort_value = str(last["sla_due"] or "9999-12-31T23:59:59+00:00")
+        else:
+            column = {"finding_name": "display_name"}.get(sort_key, sort_key)
+            sort_value = str(last[column] or "") if is_text else int(last[column] or 0)
+        next_cursor = _encode_remediation_cursor(sort_key, sort_direction, sort_value, str(last["id"] or ""))
+    items = [_remediation_row(row) for row in page_rows]
+    return {
+        "items": items,
+        # Compatibility alias for older clients; it is the same bounded page,
+        # never a total and never a bulk export.
+        "findings": items,
+        "total": total,
+        "page_size": page_size,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "scope": normalized_scope,
+        "sort": sort_key,
+        "direction": sort_direction.lower(),
+        "summary": remediation_summary(tenant_id, normalized_scope),
+        "facets": _remediation_facets(tenant_id, normalized_scope),
+    }
+
 
 def list_findings(tenant_id: str, status: str = "", limit: int = 200) -> list[dict]:
-    # Read-switch (DATA-001): when enabled AND the mirror is provably complete
-    # and current for this tenant (F2), serve findings from the materialized
-    # finding_index instead of loading every report blob. Default off; a stale or
-    # incomplete mirror - or any error - falls back to the authoritative blob.
-    if _read_from_normalized(tenant_id):
-        try:
-            return _list_findings_normalized(tenant_id, status, limit)
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Normalized list_findings failed, falling back to blob: %s", exc)
-
-    wanted_status = str(status or "").strip().upper()
-    findings: dict[str, dict] = {}
-    for item in reversed(read_scan_history(tenant_id, limit=1000)):
-        report = read_scan_report(tenant_id, item.get("scan_id"))
-        if not report:
-            continue
-        for row in _iter_report_findings(report):
-            finding = row["finding"]
-            finding_id = str(finding.get("finding_id") or "")
-            if not finding_id or finding_id in findings:
-                continue
-            current_status = _finding_status(finding)
-            if wanted_status and current_status != wanted_status:
-                continue
-            findings[finding_id] = _finding_response(row)
-            if len(findings) >= max(1, min(int(limit or 200), 1000)):
-                return list(findings.values())
-    return list(findings.values())
+    """Compatibility wrapper returning one bounded page, never a total count."""
+    return list_remediation_findings(
+        tenant_id, scope="all", status=status or "all", limit=limit,
+    )["items"]
 
 
 def _list_findings_normalized(tenant_id: str, status: str, limit: int) -> list[dict]:
-    """Read-switch implementation of list_findings over the finding_index.
-
-    Mirrors the blob path exactly: newest scan first (created_at DESC, scan_id
-    DESC), findings in report order (seq), dedup by finding_id on what has been
-    kept, then the status filter, bounded to the 1000 newest scans and `limit`
-    findings. Because the index stores the exact _finding_response output, the
-    result is identical to the blob path.
-    """
-    wanted_status = str(status or "").strip().upper()
-    cap = max(1, min(int(limit or 200), 1000))
-    with _connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT fi.finding_id AS finding_id, fi.status AS status, fi.response_json AS response_json
-            FROM finding_index AS fi
-            JOIN scan_reports AS sr
-              ON sr.tenant_id = fi.tenant_id AND sr.scan_id = fi.scan_id
-            WHERE fi.tenant_id = ?
-              AND fi.scan_id IN (
-                  SELECT scan_id FROM scan_reports
-                  WHERE tenant_id = ?
-                  ORDER BY created_at DESC, scan_id DESC
-                  LIMIT 1000
-              )
-            ORDER BY sr.created_at DESC, sr.scan_id DESC, fi.seq ASC
-            """,
-            (tenant_id, tenant_id),
-        ).fetchall()
-
-    findings: dict[str, dict] = {}
-    for row in rows:
-        finding_id = str(row["finding_id"] or "")
-        if not finding_id or finding_id in findings:
-            continue
-        if wanted_status and str(row["status"] or "") != wanted_status:
-            continue
-        findings[finding_id] = json.loads(row["response_json"])
-        if len(findings) >= cap:
-            break
-    return list(findings.values())
+    return list_findings(tenant_id, status=status, limit=limit)
 
 
 def _normalized_ready(tenant_id: str) -> bool:
@@ -2289,8 +2995,9 @@ def _read_from_normalized(tenant_id: str) -> bool:
 # and the blob path's Python comparison agree byte-for-byte.
 # ---------------------------------------------------------------------------
 
-# name -> (column, is_text, direction). All parity-safe: numeric compare, or text
-# under COLLATE "C". risk_score is the default (highest risk first).
+# name -> (column, is_text, default direction). Each supported key may be
+# reversed by the caller; defaults keep the first click/operator expectation
+# sensible (for example, risk starts most-critical first).
 INVENTORY_SORTS: dict[str, tuple[str, bool, str]] = {
     "risk_score": ("risk_score", False, "DESC"),
     "size": ("size", False, "DESC"),
@@ -2309,9 +3016,10 @@ _INVENTORY_COLS = (
     "finding_types", "framework_keys", "scan_label",
 )
 _INVENTORY_COUNT_CAP = 10000
-_INVENTORY_CURSOR_VERSION = "sc-v2"
+_INVENTORY_CURSOR_VERSION = "sc-v3"
 _INVENTORY_COUNT_CACHE_MAX = 256
 _inventory_count_cache: dict[tuple, tuple[float, int]] = {}
+_inventory_facets_cache: dict[tuple, tuple[float, dict]] = {}
 _inventory_query_cache_lock = threading.Lock()
 
 
@@ -2324,9 +3032,12 @@ def _invalidate_inventory_query_cache(tenant_id: str | None = None) -> None:
     with _inventory_query_cache_lock:
         if tenant_id is None:
             _inventory_count_cache.clear()
+            _inventory_facets_cache.clear()
             return
         for key in [item for item in _inventory_count_cache if item[1] == tenant_id]:
             _inventory_count_cache.pop(key, None)
+        for key in [item for item in _inventory_facets_cache if item[1] == tenant_id]:
+            _inventory_facets_cache.pop(key, None)
 
 
 def _inventory_count_cache_seconds() -> float:
@@ -2419,28 +3130,42 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _encode_cursor(sort: str, sort_value, asset_id: str) -> str:
-    raw = json.dumps([_INVENTORY_CURSOR_VERSION, sort, sort_value, asset_id], ensure_ascii=False)
+def _inventory_sort_spec(sort: str, direction: str = "") -> tuple[str, bool, str]:
+    column, is_text, default_direction = INVENTORY_SORTS[sort]
+    requested = str(direction or "").strip().upper()
+    return column, is_text, requested if requested in {"ASC", "DESC"} else default_direction
+
+
+def _encode_cursor(sort: str, direction: str, sort_value, asset_id: str) -> str:
+    raw = json.dumps([_INVENTORY_CURSOR_VERSION, sort, direction, sort_value, asset_id], ensure_ascii=False)
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
-def _decode_cursor(cursor: str, sort: str, is_text: bool):
+def _decode_cursor(cursor: str, sort: str, direction: str, is_text: bool):
     """Decode a cursor only when its version, sort, value type and asset id fit.
 
-    S-C's original two-item cursors remain accepted for in-flight clients. The
-    strict asset-id/type checks also prevent a Meilisearch or cross-sort cursor
-    from causing a database type error and triggering an expensive fallback.
+    Legacy v2 cursors remain valid only for a key's default direction. A cursor
+    from the opposite order must restart at page one rather than skip or repeat
+    rows after an operator reverses a sort.
     """
     if not cursor:
         return None
     try:
         decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
-        if isinstance(decoded, list) and len(decoded) == 4:
-            version, cursor_sort, value, asset_id = decoded
+        if isinstance(decoded, list) and len(decoded) == 5:
+            version, cursor_sort, cursor_direction, value, asset_id = decoded
             if version != _INVENTORY_CURSOR_VERSION or cursor_sort != sort:
+                return None
+            if cursor_direction != direction:
+                return None
+        elif isinstance(decoded, list) and len(decoded) == 4:
+            version, cursor_sort, value, asset_id = decoded
+            if version != "sc-v2" or cursor_sort != sort or direction != INVENTORY_SORTS[sort][2]:
                 return None
         elif isinstance(decoded, list) and len(decoded) == 2:
             value, asset_id = decoded
+            if direction != INVENTORY_SORTS[sort][2]:
+                return None
         else:
             return None
         asset_id = str(asset_id)
@@ -2456,12 +3181,24 @@ def _decode_cursor(cursor: str, sort: str, is_text: bool):
         return None  # malformed cursor -> serve the first page rather than error
 
 
+_INVENTORY_SOURCE_GROUPS = {
+    "scan-kind:file-server": ("local", "smb"),
+    "scan-kind:endpoint": ("endpoint", "endpoint-local", "endpoint-winrm"),
+}
+
+
 def _inventory_filters(risk: str, source: str, framework: str, q: str, extension: str,
                        protected: bool | None = None, finding_type: str = "") -> dict:
     frameworks = [part.strip().lower() for part in str(framework or "").split(",") if part.strip()]
+    source_value = str(source or "").strip().lower()
+    source_group = _INVENTORY_SOURCE_GROUPS.get(source_value, ())
     return {
         "risk": str(risk or "").strip().upper(),
-        "source": str(source or "").strip().lower(),
+        # Named scans and raw protocol sources retain their existing exact
+        # semantics. The UI's two common scan kinds expand to collector source
+        # families only within the already-mandatory tenant predicate.
+        "source": "" if source_group else source_value,
+        "source_group": source_group,
         "extension": str(extension or "").strip().lower(),
         "framework": frameworks[0] if len(frameworks) == 1 else "",
         "frameworks": frameworks,
@@ -2483,7 +3220,11 @@ def _inventory_normalized_where(tenant_id: str, filt: dict) -> tuple[list[str], 
     params: list = [tenant_id]
     if filt["risk"]:
         where.append("risk_level = ?"); params.append(filt["risk"])
-    if filt["source"]:
+    if filt.get("source_group"):
+        placeholders = ", ".join("?" for _ in filt["source_group"])
+        where.append(f"source IN ({placeholders})")
+        params.extend(filt["source_group"])
+    elif filt["source"]:
         # The Source filter accepts either a collector protocol ("smb") or the
         # operator-facing scan name ("HR file share"), so the inventory can be
         # narrowed to one configured scan without a second parameter.
@@ -2520,22 +3261,23 @@ def _inventory_normalized_where(tenant_id: str, filt: dict) -> tuple[list[str], 
 @_tenant_scoped
 def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framework: str = "",
                    q: str = "", extension: str = "", protected: bool | None = None,
-                   finding_type: str = "", sort: str = "risk_score",
+                   finding_type: str = "", sort: str = "risk_score", direction: str = "",
                    cursor: str = "", limit: int = 100) -> dict:
     """One keyset-paginated page of the file inventory. Filters: risk (level),
     source, framework(s, OR), protected state, exact finding type, q
     (search_text), extension. Returns
     {items, next_cursor, has_more, total, total_is_estimate, source}."""
     sort = sort if sort in INVENTORY_SORTS else _DEFAULT_INVENTORY_SORT
+    _, _, direction = _inventory_sort_spec(sort, direction)
     limit = max(1, min(int(limit or 100), 500))
     filt = _inventory_filters(risk, source, framework, q, extension, protected, finding_type)
     # A selected operator-facing scan means "show that scan's latest saved
     # result", not "show current assets whose most recent observation still
     # happens to carry this label".  Resolve the immutable run before choosing
     # the current-estate normalized/search paths.
-    selected_report = read_latest_scan_report_by_label(tenant_id, source) if source else None
+    selected_report = read_latest_scan_report_by_label(tenant_id, source) if source and not filt.get("source_group") else None
     if selected_report is not None:
-        result = _list_inventory_scan_report(tenant_id, selected_report, filt, sort, cursor, limit)
+        result = _list_inventory_scan_report(tenant_id, selected_report, filt, sort, cursor, limit, direction)
         result["source"] = "scan-report"
         result["scan_id"] = str(selected_report.get("scan_id") or "")
         result["scan_label"] = str(selected_report.get("scan_label") or "")
@@ -2548,7 +3290,7 @@ def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framewor
             from backend.search import SearchUnavailable, external_search_requested, search_inventory
 
             if external_search_requested():
-                col, _, direction = INVENTORY_SORTS[sort]
+                col, _, _ = INVENTORY_SORTS[sort]
                 return search_inventory(tenant_id, filt, col, direction, cursor, limit)
         except SearchUnavailable as exc:
             logger.warning("Dedicated inventory search unavailable, falling back to DB: %s", exc)
@@ -2556,19 +3298,19 @@ def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framewor
             logger.warning("Dedicated inventory search failed, falling back to DB: %s", type(exc).__name__)
     if _read_inventory_from_normalized(tenant_id):
         try:
-            result = _list_inventory_normalized(tenant_id, filt, sort, cursor, limit)
+            result = _list_inventory_normalized(tenant_id, filt, sort, cursor, limit, direction)
             result["source"] = "normalized"
             return result
         except Exception as exc:  # pragma: no cover - operational failure path
             logger.error("Normalized inventory read failed: %s", type(exc).__name__)
             raise InventoryReadUnavailable("Normalized inventory is temporarily unavailable") from exc
-    result = _list_inventory_blob(tenant_id, filt, sort, cursor, limit)
+    result = _list_inventory_blob(tenant_id, filt, sort, cursor, limit, direction)
     result["source"] = "blob"
     return result
 
 
-def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
-    col, is_text, direction = INVENTORY_SORTS[sort]
+def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int, direction: str = "") -> dict:
+    col, is_text, direction = _inventory_sort_spec(sort, direction)
     order_expr = db.collate_c(f"COALESCE({col}, '')") if is_text else col
     # Asset ids are fixed lowercase hex, so their order is identical under C and
     # locale collations. Keep the raw column so S-C.1 composite indexes match.
@@ -2579,7 +3321,7 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
 
     count_where, count_params = list(where), list(params)
 
-    decoded = _decode_cursor(cursor, sort, is_text)
+    decoded = _decode_cursor(cursor, sort, direction, is_text)
     if decoded is not None:
         cv, cid = decoded
         if db.is_postgres() and not is_text:
@@ -2602,7 +3344,7 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
         total = _capped_inventory_total(conn, tenant_id, count_where, count_params)
 
     return _inventory_page(
-        [{c: r[c] for c in _INVENTORY_COLS} for r in rows], sort, col, is_text, limit, total
+        [{c: r[c] for c in _INVENTORY_COLS} for r in rows], sort, col, is_text, limit, total, direction
     )
 
 
@@ -2712,14 +3454,16 @@ def _scan_report_inventory_rows(tenant_id: str, report: dict) -> list[dict]:
 
 
 def _inventory_page_from_rows(
-    rows: list[dict], filt: dict, sort: str, cursor: str, limit: int, *, source_already_matched: bool = False,
+    rows: list[dict], filt: dict, sort: str, cursor: str, limit: int, direction: str = "", *, source_already_matched: bool = False,
 ) -> dict:
     """Apply the parity-safe inventory filters/sort/cursor to projected rows."""
-    col, is_text, direction = INVENTORY_SORTS[sort]
+    col, is_text, direction = _inventory_sort_spec(sort, direction)
     reverse = direction == "DESC"
 
     def _matches(row: dict) -> bool:
         if filt["risk"] and str(row.get("risk_level") or "") != filt["risk"]:
+            return False
+        if filt.get("source_group") and str(row.get("source") or "").lower() not in filt["source_group"]:
             return False
         if filt["source"] and not source_already_matched and filt["source"] not in {
             str(row.get("source") or "").lower(), str(row.get("scan_label") or "").lower(),
@@ -2745,7 +3489,7 @@ def _inventory_page_from_rows(
 
     matched = sorted((row for row in rows if _matches(row)), key=_key, reverse=reverse)
     total = len(matched)
-    decoded = _decode_cursor(cursor, sort, is_text)
+    decoded = _decode_cursor(cursor, sort, direction, is_text)
     if decoded is not None:
         cursor_value, cursor_id = decoded
         pivot = ((cursor_value or "") if is_text else (cursor_value or 0), str(cursor_id))
@@ -2754,11 +3498,11 @@ def _inventory_page_from_rows(
     # search_text is an internal projection and is never returned to clients.
     for row in matched:
         row.pop("search_text", None)
-    return _inventory_page(matched, sort, col, is_text, limit, total)
+    return _inventory_page(matched, sort, col, is_text, limit, total, direction)
 
 
 def _list_inventory_scan_report(
-    tenant_id: str, report: dict, filt: dict, sort: str, cursor: str, limit: int,
+    tenant_id: str, report: dict, filt: dict, sort: str, cursor: str, limit: int, direction: str = "",
 ) -> dict:
     return _inventory_page_from_rows(
         _scan_report_inventory_rows(tenant_id, report),
@@ -2766,11 +3510,12 @@ def _list_inventory_scan_report(
         sort,
         cursor,
         limit,
+        direction,
         source_already_matched=True,
     )
 
 
-def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int) -> dict:
+def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int, direction: str = "") -> dict:
     from backend.domain import normalize_scan_report
 
     latest: dict[str, dict] = {}
@@ -2780,7 +3525,7 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
             continue
         for asset in normalize_scan_report(tenant_id, report).assets:
             latest[asset.id] = {c: getattr(asset, c) for c in _INVENTORY_COLS} | {"search_text": asset.search_text}
-    return _inventory_page_from_rows(list(latest.values()), filt, sort, cursor, limit)
+    return _inventory_page_from_rows(list(latest.values()), filt, sort, cursor, limit, direction)
 
 
 def _decode_string_list(raw) -> list[str]:
@@ -2815,11 +3560,203 @@ def _facet_items(counts: dict[str, int]) -> list[dict]:
     ]
 
 
+def _framework_facet_items(counts: dict[str, int], severity_counts: dict[str, dict[str, int]]) -> list[dict]:
+    """Explicit unique-file metrics for every current inventory framework."""
+    return [
+        {
+            "value": value,
+            "count": count,  # compatibility for existing inventory filters
+            "file_count": count,
+            "severity_file_counts": severity_counts.get(value, {}),
+        }
+        for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+        if value
+    ]
+
+
+# Ordered youngest to oldest. ISO-8601 UTC timestamps sort chronologically as
+# text, so the buckets are plain string comparisons against precomputed
+# cutoffs - no date functions, and identical on SQLite and Postgres.
+AGE_BUCKETS = (("fresh", 30), ("recent", 90), ("ageing", 365), ("stale", None))
+
+
+def _age_cutoffs() -> list[tuple[str, str | None]]:
+    now = datetime.now(timezone.utc)
+    return [
+        (name, (now - timedelta(days=days)).isoformat() if days else None)
+        for name, days in AGE_BUCKETS
+    ]
+
+
+def _sensitive_age_counts_sql(conn, tenant_id: str) -> dict[str, int]:
+    """How old the sensitive files are, counted once per file.
+
+    Only files that carry a finding: the question is whether data worth
+    protecting has been left untouched, and a file with nothing in it is not
+    that question.
+    """
+    cutoffs = _age_cutoffs()
+    fresh, recent, ageing = (value for _, value in cutoffs[:3])
+    row = conn.execute(
+        "SELECT "
+        "SUM(CASE WHEN COALESCE(modified_at, '') = '' THEN 1 ELSE 0 END) AS unknown_n, "
+        "SUM(CASE WHEN modified_at >= ? THEN 1 ELSE 0 END) AS fresh_n, "
+        "SUM(CASE WHEN modified_at < ? AND modified_at >= ? THEN 1 ELSE 0 END) AS recent_n, "
+        "SUM(CASE WHEN modified_at < ? AND modified_at >= ? THEN 1 ELSE 0 END) AS ageing_n, "
+        "SUM(CASE WHEN modified_at <> '' AND modified_at < ? THEN 1 ELSE 0 END) AS stale_n "
+        "FROM assets WHERE tenant_id = ? AND finding_count > 0",
+        (fresh, fresh, recent, recent, ageing, ageing, tenant_id),
+    ).fetchone()
+    if row is None:
+        return {}
+    return {name: int(row[f"{name}_n"] or 0) for name in ("fresh", "recent", "ageing", "stale", "unknown")}
+
+
+def _sensitive_age_counts_rows(rows: list[dict]) -> dict[str, int]:
+    cutoffs = dict(_age_cutoffs())
+    counts = {name: 0 for name in ("fresh", "recent", "ageing", "stale", "unknown")}
+    for row in rows:
+        if not (row.get("finding_count") or 0):
+            continue
+        modified = str(row.get("modified_at") or "")
+        if not modified:
+            counts["unknown"] += 1
+        elif modified >= cutoffs["fresh"]:
+            counts["fresh"] += 1
+        elif modified >= cutoffs["recent"]:
+            counts["recent"] += 1
+        elif modified >= cutoffs["ageing"]:
+            counts["ageing"] += 1
+        else:
+            counts["stale"] += 1
+    return counts
+
+
+def _first_path_segment_sql() -> str:
+    """The first folder of an asset's path, as one SQL expression.
+
+    A share on its own says "somewhere in Shares", which is not a place anyone
+    can go and fix. One level down is, and two levels is where a tree stops
+    being readable inside a dashboard card.
+    """
+    if db.is_postgres():
+        return "split_part(ltrim(replace(a.path, '\\', '/'), '/'), '/', 1)"
+    # SQLite: everything before the first '/' of the path with its leading
+    # slash removed. The appended '/' makes a path with no folder work too.
+    return (
+        "substr(ltrim(replace(a.path, '\\', '/'), '/'), 1, "
+        "instr(ltrim(replace(a.path, '\\', '/'), '/') || '/', '/') - 1)"
+    )
+
+
+def _location_tree(
+    counts: dict[str, int],
+    severity_counts: dict[str, dict[str, int]],
+    child_counts: dict[tuple[str, str], int],
+    child_severity: dict[tuple[str, str], dict[str, int]],
+    *,
+    shares: int = 6,
+    children: int = 2,
+) -> list[dict]:
+    """Shares, each followed by its heaviest folders.
+
+    Flat and ordered rather than nested: the client draws the indent from
+    `depth`, which keeps this payload the same shape as every other facet.
+    """
+    def weight(by_severity: dict[str, int], total: int) -> tuple[int, int]:
+        return (
+            int(by_severity.get("CRITICAL", 0)) * 8
+            + int(by_severity.get("HIGH", 0)) * 4
+            + int(by_severity.get("MEDIUM", 0)),
+            total,
+        )
+
+    def node(value: str, label: str, depth: int, parent: str, total: int, by_severity: dict) -> dict:
+        return {
+            "value": value,
+            "label": label,
+            "depth": depth,
+            "parent": parent,
+            "count": total,
+            "file_count": total,
+            "severity_file_counts": by_severity,
+        }
+
+    ordered = sorted(
+        (name for name in counts if name),
+        key=lambda name: (weight(severity_counts.get(name, {}), counts[name]), name.lower()),
+        reverse=True,
+    )[:shares]
+
+    items: list[dict] = []
+    for share in ordered:
+        items.append(node(share, share, 0, "", counts[share], severity_counts.get(share, {})))
+        folders = sorted(
+            ((folder, total) for (owner, folder), total in child_counts.items() if owner == share and folder),
+            key=lambda pair: (weight(child_severity.get((share, pair[0]), {}), pair[1]), pair[0].lower()),
+            reverse=True,
+        )[:children]
+        for folder, total in folders:
+            items.append(node(
+                share + "/" + folder, folder, 1, share, total,
+                child_severity.get((share, folder), {}),
+            ))
+    return items
+
+
+def _location_facet_items(counts: dict[str, int], severity_counts: dict[str, dict[str, int]]) -> list[dict]:
+    """Where the risk sits, by share.
+
+    Ordered by weighted severity rather than raw volume: a share holding ten
+    critical files is the place to go first even if another holds a hundred
+    low ones. The weights are the ordering of the ramp, not a score anyone
+    reads - the counts themselves are what the client shows.
+    """
+    def weight(value: str) -> tuple[int, int]:
+        by_severity = severity_counts.get(value, {})
+        return (
+            int(by_severity.get("CRITICAL", 0)) * 8
+            + int(by_severity.get("HIGH", 0)) * 4
+            + int(by_severity.get("MEDIUM", 0)),
+            counts.get(value, 0),
+        )
+
+    return [
+        {
+            "value": value,
+            "count": counts[value],
+            "file_count": counts[value],
+            "severity_file_counts": severity_counts.get(value, {}),
+        }
+        for value in sorted(counts, key=lambda item: (weight(item), item.lower()), reverse=True)
+        if value
+    ]
+
+
+def _finding_type_facet_items(counts: dict[str, int], severity_counts: dict[str, dict[str, int]]) -> list[dict]:
+    return [
+        {
+            "value": value,
+            "count": count,
+            "file_count": count,
+            "severity_file_counts": severity_counts.get(value, {}),
+        }
+        for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].lower()))
+        if value
+    ]
+
+
 def _facets_from_rows(rows: list[dict], source: str) -> dict:
     risk_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
     finding_counts: dict[str, int] = {}
+    finding_severity_counts: dict[str, dict[str, int]] = {}
     framework_counts: dict[str, int] = {}
+    framework_severity_counts: dict[str, dict[str, int]] = {}
+    location_counts: dict[str, int] = {}
+    location_severity_counts: dict[str, dict[str, int]] = {}
+    child_counts: dict[tuple[str, str], int] = {}
+    child_severity: dict[tuple[str, str], dict[str, int]] = {}
     protected_count = 0
     hidden_count = 0
     sensitive_count = 0
@@ -2838,6 +3775,22 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
             # covers; a labeled asset is reachable by its scan name, so its
             # protocol must not reappear as a duplicate filter option.
             source_counts[asset_source] = source_counts.get(asset_source, 0) + 1
+        location = str(row.get("share") or "").strip()
+        if location:
+            location_counts[location] = location_counts.get(location, 0) + 1
+            if risk:
+                by_severity = location_severity_counts.setdefault(location, {})
+                by_severity[risk] = by_severity.get(risk, 0) + 1
+            segments = [
+                part for part in str(row.get("path") or "").replace(chr(92), "/").split("/") if part
+            ]
+            folder = segments[0] if segments else ""
+            if folder:
+                key = (location, folder)
+                child_counts[key] = child_counts.get(key, 0) + 1
+                if risk:
+                    by_child = child_severity.setdefault(key, {})
+                    by_child[risk] = by_child.get(risk, 0) + 1
         protected_count += 1 if row.get("is_protected") else 0
         hidden_count += 1 if row.get("is_hidden") else 0
         score_total += float(row.get("risk_score") or 0)
@@ -2846,15 +3799,23 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
             sensitive_count += 1
         for finding_type in row_finding_types:
             finding_counts[finding_type] = finding_counts.get(finding_type, 0) + 1
+            if risk:
+                by_severity = finding_severity_counts.setdefault(finding_type, {})
+                by_severity[risk] = by_severity.get(risk, 0) + 1
         for framework in set(_decode_string_list(row.get("framework_keys"))):
             framework_counts[framework] = framework_counts.get(framework, 0) + 1
+            if risk:
+                by_severity = framework_severity_counts.setdefault(framework, {})
+                by_severity[risk] = by_severity.get(risk, 0) + 1
     if protected_count:
         finding_counts["Protected / locked"] = protected_count
     return {
         "total": len(rows), "risk_counts": risk_counts, "protected": protected_count,
         "sources": _facet_items(source_counts), "scans": _facet_items(scan_label_counts),
-        "finding_types": _facet_items(finding_counts),
-        "frameworks": _facet_items(framework_counts),
+        "finding_types": _finding_type_facet_items(finding_counts, finding_severity_counts),
+        "frameworks": _framework_facet_items(framework_counts, framework_severity_counts),
+        "locations": _location_tree(location_counts, location_severity_counts, child_counts, child_severity),
+        "sensitive_age": _sensitive_age_counts_rows(rows),
         "hidden": hidden_count, "sensitive": sensitive_count,
         "avg_risk_score": (score_total / len(rows)) if rows else 0.0,
         "source": source,
@@ -2880,6 +3841,59 @@ def _normalized_json_facet_rows(conn, tenant_id: str, column: str):
     ).fetchall()
 
 
+def _normalized_framework_facet_rows(conn, tenant_id: str):
+    """One row per framework and risk bucket, counted as unique current files."""
+    if db.is_postgres():
+        return conn.execute(
+            "SELECT item.value AS value, a.risk_level AS severity, COUNT(*) AS n FROM assets AS a "
+            "CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(a.framework_keys, '[]')::jsonb) "
+            "AS item(value) WHERE a.tenant_id = ? GROUP BY item.value, a.risk_level",
+            (tenant_id,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT item.value AS value, a.risk_level AS severity, COUNT(*) AS n FROM assets AS a, "
+        "json_each(COALESCE(a.framework_keys, '[]')) AS item "
+        "WHERE a.tenant_id = ? GROUP BY item.value, a.risk_level",
+        (tenant_id,),
+    ).fetchall()
+
+
+def _normalized_finding_type_facet_rows(conn, tenant_id: str):
+    """One row per finding type and file-risk bucket for dashboard metrics."""
+    if db.is_postgres():
+        return conn.execute(
+            "SELECT item.value AS value, a.risk_level AS severity, COUNT(*) AS n FROM assets AS a "
+            "CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(a.finding_types, '[]')::jsonb) "
+            "AS item(value) WHERE a.tenant_id = ? GROUP BY item.value, a.risk_level",
+            (tenant_id,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT item.value AS value, a.risk_level AS severity, COUNT(*) AS n FROM assets AS a, "
+        "json_each(COALESCE(a.finding_types, '[]')) AS item "
+        "WHERE a.tenant_id = ? GROUP BY item.value, a.risk_level",
+        (tenant_id,),
+    ).fetchall()
+
+
+def _inventory_facets_cache_seconds() -> float:
+    try:
+        value = float(os.getenv("DSPM_INVENTORY_FACETS_CACHE_SECONDS", "30"))
+    except ValueError:
+        value = 30.0
+    return max(0.0, min(value, 300.0))
+
+
+def _cache_inventory_facets(cache_key: tuple, facets: dict) -> dict:
+    ttl = _inventory_facets_cache_seconds()
+    if ttl:
+        with _inventory_query_cache_lock:
+            _inventory_facets_cache[cache_key] = (time.monotonic(), facets)
+            if len(_inventory_facets_cache) > _INVENTORY_COUNT_CACHE_MAX:
+                oldest = min(_inventory_facets_cache, key=lambda item: _inventory_facets_cache[item][0])
+                _inventory_facets_cache.pop(oldest, None)
+    return facets
+
+
 @_tenant_scoped
 def inventory_facets(tenant_id: str, source: str = "") -> dict:
     """Aggregate inventory filters without transferring asset rows to the browser.
@@ -2887,9 +3901,24 @@ def inventory_facets(tenant_id: str, source: str = "") -> dict:
     With a configured scan name, facets describe that scan's newest persisted
     run.  Without one, they continue to describe the tenant's current estate.
     """
+    cache_key = (
+        str(DB_PATH), tenant_id, str(source or ""),
+        os.getenv("DSPM_INVENTORY_FROM_NORMALIZED", "1"), "inventory-facets",
+    )
+    ttl = _inventory_facets_cache_seconds()
+    if ttl:
+        with _inventory_query_cache_lock:
+            cached = _inventory_facets_cache.get(cache_key)
+            if cached and time.monotonic() - cached[0] <= ttl:
+                return cached[1]
+            if cached:
+                _inventory_facets_cache.pop(cache_key, None)
     selected_report = read_latest_scan_report_by_label(tenant_id, source) if source else None
     if selected_report is not None:
-        return _facets_from_rows(_scan_report_inventory_rows(tenant_id, selected_report), "scan-report")
+        return _cache_inventory_facets(
+            cache_key,
+            _facets_from_rows(_scan_report_inventory_rows(tenant_id, selected_report), "scan-report"),
+        )
     if _read_inventory_from_normalized(tenant_id):
         try:
             with _connect() as conn:
@@ -2924,30 +3953,90 @@ def inventory_facets(tenant_id: str, source: str = "") -> dict:
                     "FROM assets WHERE tenant_id = ?",
                     (tenant_id,),
                 ).fetchone()
-                finding_rows = _normalized_json_facet_rows(conn, tenant_id, "finding_types")
-                framework_rows = _normalized_json_facet_rows(conn, tenant_id, "framework_keys")
-            finding_counts = {str(row["value"]): int(row["n"]) for row in finding_rows if row["value"]}
-            framework_counts = {str(row["value"]): int(row["n"]) for row in framework_rows if row["value"]}
+                finding_rows = _normalized_finding_type_facet_rows(conn, tenant_id)
+                framework_rows = _normalized_framework_facet_rows(conn, tenant_id)
+                # One row per share and risk bucket. A plain column, so this
+                # is a GROUP BY rather than the JSON-array unnest the other
+                # two facets need.
+                sensitive_age = _sensitive_age_counts_sql(conn, tenant_id)
+                location_rows = conn.execute(
+                    "SELECT share AS value, risk_level AS severity, COUNT(*) AS n FROM assets "
+                    "WHERE tenant_id = ? AND COALESCE(share, '') <> '' GROUP BY share, risk_level",
+                    (tenant_id,),
+                ).fetchall()
+                child_rows = conn.execute(
+                    "SELECT a.share AS owner, " + _first_path_segment_sql() + " AS folder, "
+                    "a.risk_level AS severity, COUNT(*) AS n FROM assets AS a "
+                    "WHERE a.tenant_id = ? AND COALESCE(a.share, '') <> '' "
+                    "GROUP BY a.share, folder, a.risk_level",
+                    (tenant_id,),
+                ).fetchall()
+            finding_counts: dict[str, int] = {}
+            finding_severity_counts: dict[str, dict[str, int]] = {}
+            for row in finding_rows:
+                value = str(row["value"] or "")
+                if not value:
+                    continue
+                count = int(row["n"] or 0)
+                finding_counts[value] = finding_counts.get(value, 0) + count
+                severity = str(row["severity"] or "").upper()
+                if severity:
+                    finding_severity_counts.setdefault(value, {})[severity] = count
+            framework_counts: dict[str, int] = {}
+            framework_severity_counts: dict[str, dict[str, int]] = {}
+            for row in framework_rows:
+                value = str(row["value"] or "")
+                if not value:
+                    continue
+                count = int(row["n"] or 0)
+                framework_counts[value] = framework_counts.get(value, 0) + count
+                severity = str(row["severity"] or "").upper()
+                if severity:
+                    framework_severity_counts.setdefault(value, {})[severity] = count
+            child_counts: dict[tuple[str, str], int] = {}
+            child_severity: dict[tuple[str, str], dict[str, int]] = {}
+            for row in child_rows:
+                owner, folder = str(row["owner"] or ""), str(row["folder"] or "")
+                if not owner or not folder:
+                    continue
+                count = int(row["n"] or 0)
+                child_counts[(owner, folder)] = child_counts.get((owner, folder), 0) + count
+                severity = str(row["severity"] or "").upper()
+                if severity:
+                    child_severity.setdefault((owner, folder), {})[severity] = count
+            location_counts: dict[str, int] = {}
+            location_severity_counts: dict[str, dict[str, int]] = {}
+            for row in location_rows:
+                value = str(row["value"] or "")
+                if not value:
+                    continue
+                count = int(row["n"] or 0)
+                location_counts[value] = location_counts.get(value, 0) + count
+                severity = str(row["severity"] or "").upper()
+                if severity:
+                    location_severity_counts.setdefault(value, {})[severity] = count
             protected_count = int(protected_row["n"] if protected_row else 0)
             if protected_count:
                 finding_counts["Protected / locked"] = protected_count
-            return {
+            return _cache_inventory_facets(cache_key, {
                 "total": int(total_row["n"] if total_row else 0),
                 "risk_counts": {str(row["risk_level"] or "").upper(): int(row["n"]) for row in risk_rows if row["risk_level"]},
                 "protected": protected_count,
                 "sources": _facet_items({str(row["source"] or "workspace"): int(row["n"]) for row in source_rows}),
                 "scans": _facet_items({str(row["scan_label"]): int(row["n"]) for row in scan_label_rows}),
-                "finding_types": _facet_items(finding_counts),
-                "frameworks": _facet_items(framework_counts),
+                "finding_types": _finding_type_facet_items(finding_counts, finding_severity_counts),
+                "frameworks": _framework_facet_items(framework_counts, framework_severity_counts),
+                "locations": _location_tree(location_counts, location_severity_counts, child_counts, child_severity),
+                "sensitive_age": sensitive_age,
                 "hidden": int((estate_row["hidden_n"] if estate_row else 0) or 0),
                 "sensitive": int((estate_row["sensitive_n"] if estate_row else 0) or 0),
                 "avg_risk_score": float((estate_row["avg_score"] if estate_row else 0) or 0.0),
                 "source": "normalized",
-            }
+            })
         except Exception as exc:  # pragma: no cover - operational failure path
             logger.error("Normalized inventory facets failed: %s", type(exc).__name__)
             raise InventoryReadUnavailable("Normalized inventory facets are temporarily unavailable") from exc
-    return _facets_from_rows(_inventory_blob_rows(tenant_id), "blob")
+    return _cache_inventory_facets(cache_key, _facets_from_rows(_inventory_blob_rows(tenant_id), "blob"))
 
 
 def iter_search_asset_batches(batch_size: int = 500):
@@ -3083,7 +4172,7 @@ def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dic
     return None
 
 
-def _inventory_page(rows: list[dict], sort: str, col: str, is_text: bool, limit: int, total: int) -> dict:
+def _inventory_page(rows: list[dict], sort: str, col: str, is_text: bool, limit: int, total: int, direction: str = "") -> dict:
     """Shared page assembly for both inventory paths (identical output shape)."""
     has_more = len(rows) > limit
     page = rows[:limit]
@@ -3091,7 +4180,7 @@ def _inventory_page(rows: list[dict], sort: str, col: str, is_text: bool, limit:
     if has_more and page:
         last = page[-1]
         value = last.get(col)
-        next_cursor = _encode_cursor(sort, (value or "") if is_text else value, str(last.get("id") or ""))
+        next_cursor = _encode_cursor(sort, direction, (value or "") if is_text else value, str(last.get("id") or ""))
     return {
         "items": page,
         "next_cursor": next_cursor,
@@ -3116,40 +4205,32 @@ def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict |
             JOIN scan_reports AS sr
               ON sr.tenant_id = fi.tenant_id AND sr.scan_id = fi.scan_id
             WHERE fi.tenant_id = ? AND fi.finding_id = ?
-              AND fi.scan_id IN (
-                  SELECT scan_id FROM scan_reports
-                  WHERE tenant_id = ?
-                  ORDER BY created_at DESC, scan_id DESC
-                  LIMIT 1000
-              )
             ORDER BY sr.created_at DESC, sr.scan_id DESC, fi.seq ASC
             LIMIT 1
             """,
-            (tenant_id, finding_id, tenant_id),
+            (tenant_id, finding_id),
         ).fetchone()
     return json.loads(row["response_json"]) if row and row["response_json"] else None
 
 
 def get_finding(tenant_id: str, finding_id: str) -> dict | None:
-    if _read_from_normalized(tenant_id):
-        try:
-            response = _find_finding_response_normalized(tenant_id, finding_id)
-            if response is not None:
-                return response
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Normalized get_finding failed, falling back to blob: %s", exc)
+    try:
+        response = _find_finding_response_normalized(tenant_id, finding_id)
+        if response is not None:
+            return response
+    except Exception as exc:  # pragma: no cover - defensive legacy fallback
+        logger.warning("Indexed get_finding failed, falling back to blob: %s", exc)
     row = _find_finding_row(tenant_id, finding_id)
     return _finding_response(row) if row else None
 
 
 def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
-    if _read_from_normalized(tenant_id):
-        try:
-            response = _find_finding_response_normalized(tenant_id, finding_id)
-            if response is not None:
-                return response.get("status_history") or response.get("history") or []
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Normalized get_finding_history failed, falling back to blob: %s", exc)
+    try:
+        response = _find_finding_response_normalized(tenant_id, finding_id)
+        if response is not None:
+            return response.get("status_history") or response.get("history") or []
+    except Exception as exc:  # pragma: no cover - defensive legacy fallback
+        logger.warning("Indexed get_finding_history failed, falling back to blob: %s", exc)
     row = _find_finding_row(tenant_id, finding_id)
     if not row:
         return None
@@ -3158,13 +4239,12 @@ def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
 
 
 def get_finding_occurrences(tenant_id: str, finding_id: str) -> list[dict] | None:
-    if _read_from_normalized(tenant_id):
-        try:
-            response = _find_finding_response_normalized(tenant_id, finding_id)
-            if response is not None:
-                return response.get("occurrences") or []
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            logger.warning("Normalized get_finding_occurrences failed, falling back to blob: %s", exc)
+    try:
+        response = _find_finding_response_normalized(tenant_id, finding_id)
+        if response is not None:
+            return response.get("occurrences") or []
+    except Exception as exc:  # pragma: no cover - defensive legacy fallback
+        logger.warning("Indexed get_finding_occurrences failed, falling back to blob: %s", exc)
     row = _find_finding_row(tenant_id, finding_id)
     if not row:
         return None
@@ -3172,6 +4252,13 @@ def get_finding_occurrences(tenant_id: str, finding_id: str) -> list[dict] | Non
 
 
 def update_finding_lifecycle(tenant_id: str, finding_id: str, action: str, payload: dict, actor: str) -> dict | None:
+    with _connect() as conn:
+        operational = conn.execute(
+            "SELECT is_current FROM findings WHERE tenant_id = ? AND id = ?",
+            (tenant_id, finding_id),
+        ).fetchone()
+    if operational is not None and not int(operational["is_current"] or 0):
+        raise ValueError("Historical findings are read-only; remediate a current detection")
     row = _find_finding_row(tenant_id, finding_id)
     if not row:
         return None
@@ -3247,6 +4334,22 @@ def _iter_report_findings(report: dict):
 
 def _find_finding_row(tenant_id: str, finding_id: str) -> dict | None:
     target = str(finding_id or "")
+    # Operational projection owns the scan pointer, so the normal path opens
+    # one report instead of walking up to 1,000 historical report blobs.
+    try:
+        with _connect() as conn:
+            pointer = conn.execute(
+                "SELECT scan_id FROM findings WHERE tenant_id = ? AND id = ? LIMIT 1",
+                (tenant_id, target),
+            ).fetchone()
+        if pointer and pointer["scan_id"]:
+            report = read_scan_report(tenant_id, pointer["scan_id"])
+            if report:
+                for row in _iter_report_findings(report):
+                    if str(row["finding"].get("finding_id") or "") == target:
+                        return row
+    except Exception as exc:  # pragma: no cover - legacy compatibility path
+        logger.warning("Operational finding lookup failed, using history fallback: %s", type(exc).__name__)
     for item in reversed(read_scan_history(tenant_id, limit=1000)):
         report = read_scan_report(tenant_id, item.get("scan_id"))
         if not report:
