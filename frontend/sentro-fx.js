@@ -444,18 +444,6 @@
       return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#4f46e5";
     }
     function sevColor(sev) { return cssVar("--status-" + sev); }
-    function token() {
-      try { return sessionStorage.getItem("dspm-access-token") || ""; }
-      catch (e) { return ""; }
-    }
-    function apiGet(path) {
-      var t = token();
-      if (!t) return Promise.reject(new Error("no session"));
-      return fetch(path, { headers: { Authorization: "Bearer " + t } }).then(function (res) {
-        if (!res.ok) throw new Error(String(res.status));
-        return res.json();
-      });
-    }
     function esc(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, function (c) {
         return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -668,30 +656,23 @@
       }).join("") + "</div>";
     }
 
-    function refresh() {
-      apiGet("/api/history").then(function (data) {
-        historyItems = (data && data.history) || [];
-        renderSparks();
-        renderPosture();
-        renderScans();
-      }).catch(function () {
-        historyItems = [];
-        renderSparks();
-        renderPosture();
-        renderScans();
-      });
-      apiGet("/api/audit").then(function (data) {
-        renderFeed((data && (data.events || data.audit)) || [], false);
-      }).catch(function (err) {
-        renderFeed([], String(err && err.message).indexOf("403") !== -1);
-      });
+    function renderSnapshot(snapshot) {
+      if (!snapshot || !Array.isArray(snapshot.history)) return;
+      var selectedTenant = "";
+      try { selectedTenant = sessionStorage.getItem("dspm-tenant-id") || ""; }
+      catch (e) { /* storage unavailable */ }
+      if (selectedTenant && snapshot.tenantId !== selectedTenant) return;
+      historyItems = snapshot.history;
+      var activity = snapshot.auditAvailable && Array.isArray(snapshot.audit) && snapshot.audit.length
+        ? snapshot.audit
+        : historyItems.map(function (scan) {
+          return { action: "scan.completed", actor: scan.scan_label || scan.source || scan.scan_id, timestamp: itemTime(scan) };
+        });
+      renderSparks();
+      renderPosture();
+      renderScans();
+      renderFeed(activity, false);
       renderDonut();
-    }
-
-    var debounceTimer = 0;
-    function refreshSoon() {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(refresh, 500);
     }
 
     /* Skeletons paint instantly on load; the first fetch (or its empty
@@ -709,17 +690,13 @@
     })();
 
     renderPills();
-    refresh();
+    window.addEventListener("sentro:tenant-dashboard", function (event) { renderSnapshot(event.detail); });
+    renderSnapshot(window.__sentroTenantDashboard);
     /* re-render when app.js updates the KPI numbers */
     SEVS.forEach(function (sev) {
       var el = document.getElementById(sev + "-count");
       if (el) new MutationObserver(function () { renderDonut(); }).observe(el, { childList: true, characterData: true, subtree: true });
     });
-    /* refresh on tenant switch, scan completion, tab return, theme flip */
-    document.getElementById("tenant-switcher")?.addEventListener("change", refreshSoon);
-    var scanMeta = document.getElementById("scan-meta");
-    if (scanMeta) new MutationObserver(refreshSoon).observe(scanMeta, { childList: true, characterData: true, subtree: true });
-    document.querySelector('.side-nav .tab[data-tab="overview"]')?.addEventListener("click", refreshSoon);
     document.getElementById("theme-toggle")?.addEventListener("click", function () {
       setTimeout(function () { renderSparks(); renderPosture(); renderDonut(); }, 80);
     });

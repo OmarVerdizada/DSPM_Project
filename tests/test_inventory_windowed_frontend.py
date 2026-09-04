@@ -64,10 +64,13 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         self.assertIn("inventoryPageAbortController?.abort()", self.script)
         self.assertIn("{ signal: controller.signal }", self.script)
         self.assertIn("error?.name === \"AbortError\"", self.script)
-        click_handler = self.script[self.script.rindex("inventoryRiskFilters.forEach((button) => {"):
-                                    self.script.index("inventorySourceFilter?.addEventListener")]
-        self.assertLess(click_handler.index("renderInventoryRiskSelection()"),
-                        click_handler.index("refreshInventoryPageWindow()"))
+        # Severity is a select now, and both it and the dashboard's band jumps
+        # go through one entry point, so the state and the fetch cannot drift.
+        apply_risk = self.script[self.script.index("function applyInventoryRisk("):]
+        apply_risk = apply_risk[:apply_risk.index(chr(10) + "}" + chr(10))]
+        self.assertLess(apply_risk.index("inventoryRiskSelect.value = inventoryRiskFilter"),
+                        apply_risk.index("refreshInventoryPageWindow()"))
+        self.assertIn("applyInventoryRisk(inventoryRiskSelect.value)", self.script)
 
     def test_manual_risk_change_rerenders_without_a_database_round_trip(self) -> None:
         start = self.script.index('resultsBody.addEventListener("change"')

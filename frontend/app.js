@@ -23,10 +23,11 @@ const sidebarToggle = document.querySelector("#sidebar-toggle");
 const protectedCount = document.querySelector("#protected-count");
 const health = document.querySelector("#health");
 const filterInput = document.querySelector("#filter");
-const inventoryRiskFilters = document.querySelectorAll("[data-risk-filter]");
+const inventoryRiskSelect = document.querySelector("#inventory-risk-filter");
+const inventoryFrameworkSelect = document.querySelector("#inventory-framework-select");
+const inventoryFolderSelect = document.querySelector("#inventory-folder-filter");
 const inventorySourceFilter = document.querySelector("#inventory-source-filter");
 const inventoryFindingFilter = document.querySelector("#inventory-finding-filter");
-const inventoryFrameworkFilter = document.querySelector("#inventory-framework-filter");
 const inventoryClearFiltersBtn = document.querySelector("#clear-inventory-filters");
 const inventoryExportCsvBtn = document.querySelector("#inventory-export-csv");
 const inventoryExportNdjsonBtn = document.querySelector("#inventory-export-ndjson");
@@ -63,11 +64,8 @@ const historyFrom = document.querySelector("#history-from");
 const historyTo = document.querySelector("#history-to");
 const historyBody = document.querySelector("#history-body");
 const executiveSummary = document.querySelector("#executive-summary");
-const overviewInsights = document.querySelector("#overview-insights");
 const fileServerContext = document.querySelector("#file-server-context");
 const endpointContext = document.querySelector("#endpoint-context");
-const findingsSignalSummary = document.querySelector("#findings-signal-summary");
-const findingsPrioritySummary = document.querySelector("#findings-priority-summary");
 const refreshExecutiveBtn = document.querySelector("#refresh-executive-btn");
 const executiveHero = document.querySelector("#executive-hero");
 const riskDistribution = document.querySelector("#risk-distribution");
@@ -82,6 +80,21 @@ const scanComparison = document.querySelector("#scan-comparison");
 const topRiskyFolders = document.querySelector("#top-risky-folders");
 const postureTrend = document.querySelector("#posture-trend");
 const remediationWorkflow = document.querySelector("#remediation-workflow");
+const remediationDrawerToggle = document.querySelector("#remediation-drawer-toggle");
+const remediationDrawerBody = document.querySelector("#remediation-drawer-body");
+const remediationFilters = document.querySelector("#remediation-filters");
+const remediationSearch = document.querySelector("#remediation-search");
+const remediationScopeFilter = document.querySelector("#remediation-scope-filter");
+const remediationSeverityFilters = document.querySelectorAll("[data-remediation-severity]");
+const remediationStatusFilter = document.querySelector("#remediation-status-filter");
+const remediationOwnerFilter = document.querySelector("#remediation-owner-filter");
+const remediationFrameworkFilter = document.querySelector("#remediation-framework-filter");
+const remediationDataFilter = document.querySelector("#remediation-data-filter");
+const remediationAssetFilter = document.querySelector("#remediation-asset-filter");
+const remediationSlaFilter = document.querySelector("#remediation-sla-filter");
+const remediationResultCount = document.querySelector("#remediation-result-count");
+const remediationScopeSummary = document.querySelector("#remediation-scope-summary");
+const remediationError = document.querySelector("#remediation-error");
 const msspPortfolio = document.querySelector("#mssp-portfolio");
 const createApiKeyBtn = document.querySelector("#create-api-key-btn");
 const apiKeyLabel = document.querySelector("#api-key-label");
@@ -342,6 +355,26 @@ const EXTENSION_GROUP_ORDER = [
 ];
 
 let accessToken = safeSessionGet("dspm-access-token") || "";
+
+// The shell is hidden by <body class="auth-locked"> until something removes it
+// (`.auth-locked .app-shell { display: none }`), and index.html has no login
+// screen to fall back to - so while that class is on, the page is blank.
+//
+// That used to be decided 8,500 lines below, after every widget on every page
+// had wired itself up, which made "one dead element reference" and "the whole
+// console is a white screen" the same bug. Whether to show the shell depends
+// on one thing: is there a token. Decide it here, so a failure further down
+// costs the widget that failed and not the session.
+//
+// setAuthState() still runs later and stays the single entry point for login
+// and logout; this is the same two class toggles, early and without the
+// setBusy() call, which reads state that is not declared yet.
+if (accessToken) {
+  document.body.classList.remove("auth-locked");
+  document.body.classList.add("auth-ready");
+} else {
+  window.location.replace("/login");
+}
 let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
 // Every asynchronous tenant-owned render captures this generation. Switching
 // tenant increments it, so a slower response from the old tenant can never
@@ -353,6 +386,26 @@ let customExtensions = loadCustomExtensions();
 let latestFiles = [];
 let latestReport = null;
 let latestScanKind = "";
+let remediationFindings = [];
+let remediationSummary = null;
+let remediationFacets = {};
+const REMEDIATION_PAGE_SIZE = 50;
+// The severity pills hold their own state; there is no select to read it
+// back from, the same way the inventory keeps its risk filter in a variable.
+let remediationSeverityChoice = "ALL";
+// Sort lives on the column header, as it does on the inventory.
+let remediationSortKey = "risk_score";
+let remediationSortDirection = "desc";
+let remediationPage = { total: 0, hasMore: false, nextCursor: "", pageIndex: 0, pageStarts: [""] };
+let remediationLoaded = false;
+let remediationLoading = Boolean(accessToken);
+let remediationLoadError = "";
+let selectedRemediationFindingId = "";
+let selectedRemediationFinding = null;
+let remediationDetailRequest = 0;
+let remediationListRequest = 0;
+let remediationListAbortController = null;
+let remediationPendingAction = null;
 
 const COMPLIANCE_FRAMEWORKS = [
   { id: "gdpr", name: "GDPR", desc: "Personal data, IDs, health, biometric, HR and customer records." },
@@ -499,6 +552,8 @@ let scanProfilesState = [];
 // indexed inventory - the same data Data Inventory shows - not whichever
 // single scan happened to run last.
 let estateSummary = null;
+let estateFacets = null;
+let estateFacetsRequestPromise = null;
 let inventoryFacetRequest = 0;
 const expandedInventoryKeys = new Set();
 // Inventory details use the authenticated on-demand asset endpoint.
@@ -920,7 +975,7 @@ function removeSelectedExtension(list, extension) {
 function addCustomExtensionFromInput(input, list, search) {
   const extension = normalizeExtension(input?.value);
   if (!extension) {
-    setStatus("Custom extension format is invalid.");
+    showFieldError(input, "Use a file extension like .docx — letters and digits only.");
     return;
   }
   if (!customExtensions.includes(extension) && !FILE_EXTENSION_OPTIONS.some(([value]) => normalizeExtension(value) === extension)) {
@@ -1112,8 +1167,17 @@ function setBusy(isBusy) {
   updateEndpointCustomPathState(isBusy);
 }
 
-function setStatus(message, tone = "muted") {
+// `facts` turns a finished scan's diagnostics into figures instead of a
+// paragraph. Without it this behaves exactly as it always has.
+function setStatus(message, tone = "muted", facts = []) {
   statusBox.className = `status ${tone}`;
+  if (facts.length) {
+    statusBox.innerHTML = `<span class="status-headline">${escapeHtml(message)}</span>
+      <span class="status-facts">${facts
+        .map(([label, value]) => `<span class="status-fact"><b>${escapeHtml(String(value))}</b>${escapeHtml(label)}</span>`)
+        .join("")}</span>`;
+    return;
+  }
   statusBox.textContent = message;
 }
 
@@ -1286,27 +1350,32 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
   return parts.join(". ");
 }
 
+// One figure per diagnostic, and only the ones that carry news: a zero
+// unreadable-path count is not worth a chip. The allowed-extension list and
+// the local path are settings the scan was run WITH, not results, and they
+// belong on the profile rather than in the completion line.
 function summarizeFileServerDiagnostics(report = {}) {
   const diagnostics = report.scan_diagnostics || {};
-  const parts = [];
   const incremental = diagnostics.incremental || {};
+  const facts = [];
+  const number = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+  const add = (label, value, { always = false } = {}) => {
+    if (value === null || (!always && !value)) return;
+    facts.push([label, value.toLocaleString()]);
+  };
+  add("records", number(diagnostics.records), { always: true });
   if (incremental.enabled) {
-    parts.push(`Delta: ${Number(incremental.unchanged_objects || 0)} reused, ${Number(incremental.content_reads || 0)} read`);
-    if (Number(incremental.deleted_objects || 0)) parts.push(`Deleted: ${Number(incremental.deleted_objects)}`);
+    add("reused", number(incremental.unchanged_objects), { always: true });
+    add("read", number(incremental.content_reads), { always: true });
+    add("deleted", number(incremental.deleted_objects));
   }
-  if (Number.isFinite(Number(diagnostics.records))) parts.push(`Records: ${Number(diagnostics.records)}`);
-  if (Number.isFinite(Number(diagnostics.owner_resolved))) parts.push(`Owners: ${Number(diagnostics.owner_resolved)} resolved`);
-  if (Number.isFinite(Number(diagnostics.owner_missing)) && Number(diagnostics.owner_missing)) parts.push(`${Number(diagnostics.owner_missing)} owner missing`);
-  if (Number.isFinite(Number(diagnostics.owner_read_failed)) && Number(diagnostics.owner_read_failed)) parts.push(`${Number(diagnostics.owner_read_failed)} ACL reads failed`);
+  add("owners", number(diagnostics.owner_resolved), { always: true });
+  add("owners missing", number(diagnostics.owner_missing));
+  add("ACL reads failed", number(diagnostics.owner_read_failed));
   if (Array.isArray(diagnostics.list_errors) && diagnostics.list_errors.length) {
-    const shares = diagnostics.list_errors.slice(0, 3).map((item) => `${item.share || "share"}:${item.path || "/"}`).join(", ");
-    parts.push(`Unreadable paths: ${shares}`);
+    add("unreadable paths", diagnostics.list_errors.length, { always: true });
   }
-  if (diagnostics.local_path) parts.push(`Local path: ${diagnostics.local_path}`);
-  if (Array.isArray(diagnostics.allowed_extensions) && diagnostics.allowed_extensions.length) {
-    parts.push(`Allowed: ${diagnostics.allowed_extensions.slice(0, 12).join(", ")}`);
-  }
-  return parts.join(". ");
+  return facts;
 }
 
 function showToast(title, message = "", tone = "info") {
@@ -1428,6 +1497,22 @@ function setAuthState(isAuthenticated) {
   if (!isAuthenticated) {
     window.location.replace("/login");
   }
+}
+
+const ADMIN_ONLY_TABS = new Set(["security", "admin"]);
+
+function isAdminRole() {
+  return currentRole === "admin";
+}
+
+function applyRoleVisibility() {
+  const isAdmin = isAdminRole();
+  document.body.classList.toggle("role-admin", isAdmin);
+  document.querySelectorAll("[data-admin-only]").forEach((element) => {
+    element.setAttribute("aria-hidden", String(!isAdmin));
+    if (element.matches("button, input, select, textarea")) element.tabIndex = isAdmin ? 0 : -1;
+  });
+  syncNavGroups();
 }
 
 async function logout() {
@@ -1595,13 +1680,9 @@ function renderProfile() {
 }
 
 function displaySummary(summary = {}) {
-  // The dashboard shows the whole indexed estate (every source), exactly like
-  // Data Inventory. A single scan's summary only wins while it covers MORE
-  // than the persisted inventory - e.g. a scan that has not been saved yet.
-  if (estateSummary && estateSummary.total_files > Number(summary.total_files || 0)) {
-    return estateSummary;
-  }
-  return summary;
+  // The Dashboard and Data Inventory share the normalized current-estate
+  // aggregation. A scan report is a scoped snapshot, never the global source.
+  return estateSummary || summary;
 }
 
 function updateSummary(summary = {}) {
@@ -1633,20 +1714,33 @@ function facetsToEstateSummary(facets = {}) {
 
 async function refreshEstateSummary() {
   if (!accessToken) return;
+  if (estateFacets) return estateFacets;
+  if (estateFacetsRequestPromise) return estateFacetsRequestPromise;
   const context = captureTenantContext();
+  const request = (async () => {
+    try {
+      const facets = await api("/api/inventory/facets", null, "GET");
+      if (!isCurrentTenantContext(context, facets)) return null;
+      estateFacets = facets;
+      estateSummary = facetsToEstateSummary(facets);
+    } catch {
+      if (!isCurrentTenantContext(context)) return null;
+      estateFacets = null;
+      estateSummary = null;
+    }
+    if (!isCurrentTenantContext(context)) return null;
+    // Repaint the dashboard-facing views now that the estate numbers are known.
+    updateSummary(latestReport?.summary || buildCurrentSummary());
+    renderExecutiveExperience();
+    renderFindingsWorkspace();
+    return estateFacets;
+  })();
+  estateFacetsRequestPromise = request;
   try {
-    const facets = await api("/api/inventory/facets", null, "GET");
-    if (!isCurrentTenantContext(context, facets)) return;
-    estateSummary = facetsToEstateSummary(facets);
-  } catch {
-    if (!isCurrentTenantContext(context)) return;
-    estateSummary = null;
+    return await request;
+  } finally {
+    if (estateFacetsRequestPromise === request) estateFacetsRequestPromise = null;
   }
-  if (!isCurrentTenantContext(context)) return;
-  // Repaint the dashboard-facing views now that the estate numbers are known.
-  updateSummary(latestReport?.summary || buildCurrentSummary());
-  renderExecutiveExperience();
-  renderFindingsWorkspace();
 }
 
 function updateSummaryFromFiles(files = []) {
@@ -1710,7 +1804,7 @@ function clearActiveScanReport(message = "No scan loaded") {
   scanMeta.textContent = message;
 }
 
-function applyScanReport(report, scanKind = "file-server") {
+function applyScanReport(report, scanKind = "file-server", { refreshEstate = true } = {}) {
   if (scanKind === "endpoint" && !report?.endpoint) {
     clearActiveScanReport("Endpoint scan did not return endpoint data.");
     return;
@@ -1720,6 +1814,10 @@ function applyScanReport(report, scanKind = "file-server") {
   latestScanKind = scanKind;
   inventoryFacetRequest += 1;
   inventoryFacets = null;
+  if (refreshEstate) {
+    estateFacets = null;
+    estateSummary = null;
+  }
   fileSearchIndex = new WeakMap();
   renderedRowsLimit = ROW_PAGE_SIZE;
   resetInventoryPageWindow();
@@ -1736,7 +1834,7 @@ function applyScanReport(report, scanKind = "file-server") {
   renderRows(latestFiles);
   // The scan just persisted new assets server-side; pull the fresh estate
   // totals so the dashboard reflects every source, not only this scan.
-  refreshEstateSummary().catch(() => {});
+  if (refreshEstate) refreshEstateSummary().catch(() => {});
   scanMeta.textContent = buildScanMetaText(report, scanKind);
   refreshInventoryPageWindow();
   hydrateWorkspaceSlice();
@@ -1844,78 +1942,13 @@ function renderScanRunningContext(scanKind, message) {
   if (endpointContext) endpointContext.innerHTML = contextHtml;
 }
 
+// The Findings page is the Data inventory now: the detection-signal panel and
+// the priority queue above it restated the dashboard's severity band and the
+// table's own first rows, so both panels are gone. What is left is the one
+// thing this function still owns - the page's first-run state.
 function renderFindingsWorkspace() {
-  if (!findingsSignalSummary || !findingsPrioritySummary) return;
-  const findingsTab = document.querySelector("#tab-findings");
-  const hasCompletedScan = hasCompletedInventoryScan();
-  findingsTab?.classList.toggle("findings-pristine", !hasCompletedScan);
-  findingsSignalSummary.closest(".executive-grid")?.classList.toggle("hidden", !hasCompletedScan);
-  if (!hasCompletedScan) {
-    // The single, actionable first-run state lives in Data Inventory. Keeping
-    // placeholder KPIs and a pretend priority queue above it made the empty
-    // Findings page noisy and visually disconnected.
-    findingsSignalSummary.className = "summary-list";
-    findingsPrioritySummary.className = "summary-list";
-    findingsSignalSummary.innerHTML = "";
-    findingsPrioritySummary.innerHTML = "";
-    return;
-  }
-  const stats = buildFindingStats(Number.POSITIVE_INFINITY);
-  if (!latestFiles.length) {
-    const summary = displaySummary(buildCurrentSummary());
-    if (summary.total_files) {
-      findingsSignalSummary.className = "summary-list";
-      findingsPrioritySummary.className = "summary-list";
-      findingsSignalSummary.innerHTML = `
-        <div class="finding-kpi-grid">
-          <div class="finding-kpi critical"><span>Critical files</span><strong>${escapeHtml(summary.critical || 0)}</strong></div>
-          <div class="finding-kpi high"><span>High-risk files</span><strong>${escapeHtml(summary.high || 0)}</strong></div>
-          <div class="finding-kpi medium"><span>Protected / locked</span><strong>${escapeHtml(summary.protected_files || 0)}</strong></div>
-        </div>
-        <div class="summary-row finding-signal-row"><span>Inventory mode</span><strong>Windowed</strong></div>
-      `;
-      findingsPrioritySummary.innerHTML = `
-        <div class="summary-row finding-file-card HIGH"><span><b>${escapeHtml(summary.total_files)} assets indexed</b><small>Open Data Inventory to query bounded pages and load evidence on demand.</small></span><strong class="badge HIGH">LIVE</strong></div>
-      `;
-      return;
-    }
-    findingsSignalSummary.className = "summary-list";
-    findingsPrioritySummary.className = "summary-list";
-    findingsSignalSummary.innerHTML = `
-      <div class="finding-kpi-grid">
-        <div class="finding-kpi critical"><span>Sensitive files</span><strong>0</strong></div>
-        <div class="finding-kpi high"><span>Secret signals</span><strong>0</strong></div>
-        <div class="finding-kpi medium"><span>Regulated data</span><strong>0</strong></div>
-      </div>
-      <div class="summary-row finding-signal-row"><span>Scan status</span><strong>Ready</strong></div>
-      <div class="summary-row finding-signal-row"><span>Finding categories</span><strong>Secrets / PII / PCI</strong></div>
-    `;
-    findingsPrioritySummary.innerHTML = `
-      <div class="summary-row finding-file-card HIGH"><span><b>No scan loaded</b><small>Run a file-server or endpoint scan to fill this queue.</small></span><strong class="badge HIGH">READY</strong></div>
-      <div class="summary-row finding-file-card MEDIUM"><span><b>Priority queue</b><small>Critical and high-risk files will appear here first.</small></span><strong class="badge MEDIUM">0</strong></div>
-      <div class="summary-row finding-file-card LOW"><span><b>Inventory link</b><small>Use Data Inventory after scan to inspect every matched file.</small></span><strong class="badge LOW">OPEN</strong></div>
-    `;
-    return;
-  }
-  findingsSignalSummary.className = "summary-list";
-  findingsPrioritySummary.className = "summary-list";
-  const sensitiveFiles = latestFiles.filter((file) => (file.findings || []).length);
-  const findingRows = buildFindingQueueRows();
-  const regulatedFiles = latestFiles.filter((file) => (file.findings || []).some(isRegulatedFinding));
-  const secretFiles = latestFiles.filter((file) => (file.findings || []).some(isSecretFinding));
-  findingsSignalSummary.innerHTML = stats.length
-    ? `
-      <div class="finding-kpi-grid">
-        <div class="finding-kpi critical"><span>Sensitive files</span><strong>${sensitiveFiles.length}</strong></div>
-        <div class="finding-kpi high"><span>Secret signals</span><strong>${secretFiles.length}</strong></div>
-        <div class="finding-kpi medium"><span>Regulated data</span><strong>${regulatedFiles.length}</strong></div>
-      </div>
-      ${renderFindingBars(stats, "finding-signal-bars")}
-    `
-    : '<div class="empty compact">No sensitive findings were detected in the latest scan.</div>';
-  findingsPrioritySummary.innerHTML = findingRows.length
-    ? renderFindingQueueTable(findingRows.slice(0, 25))
-    : '<div class="empty compact">No priority finding queue for the latest scan.</div>';
+  document.querySelector("#tab-findings")
+    ?.classList.toggle("findings-pristine", !hasCompletedInventoryScan());
 }
 
 function buildFindingQueueRows() {
@@ -2352,12 +2385,15 @@ function resetInventoryPageWindow(active = false) {
   resultsBody?.setAttribute("aria-busy", "false");
 }
 
+function applyInventoryRisk(level) {
+  inventoryRiskFilter = String(level || "ALL").toUpperCase();
+  if (inventoryRiskSelect) inventoryRiskSelect.value = inventoryRiskFilter;
+  renderedRowsLimit = ROW_PAGE_SIZE;
+  refreshInventoryPageWindow();
+}
+
 function renderInventoryRiskSelection() {
-  inventoryRiskFilters.forEach((button) => {
-    const active = (button.dataset.riskFilter || "ALL") === inventoryRiskFilter;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
+  if (inventoryRiskSelect) inventoryRiskSelect.value = inventoryRiskFilter;
 }
 
 function canUseInventoryPageWindow() {
@@ -2388,12 +2424,12 @@ function summarizedInventoryFindings(item = {}) {
     .map((framework) => normalizeFrameworkId(framework.trim()))
     .filter(Boolean);
   const types = parseInventoryListField(item.finding_types);
-  return (types.length ? types : ["Indexed findings"]).map((type, index) => ({
+  return (types.length ? types : ["Finding"]).map((type, index) => ({
     type,
     count: index === 0 ? count : 1,
     framework: frameworks[0] || "standard_scan",
     frameworks,
-    description: "Summary from the normalized inventory index. Open this row to load full finding evidence.",
+    description: "Summary only \u2014 open the row for the full evidence.",
   }));
 }
 
@@ -2447,10 +2483,18 @@ function inventoryFilterParams() {
 // one keyset page, so clicking a column sorts every file in the tenant - not
 // just the rows already loaded in the browser.
 let inventorySortKey = "risk_score";
+const INVENTORY_SORT_DEFAULT_DIRECTIONS = {
+  risk_score: "desc",
+  finding_count: "desc",
+  name: "asc",
+  scan_label: "asc",
+};
+let inventorySortDirection = INVENTORY_SORT_DEFAULT_DIRECTIONS[inventorySortKey];
 
 function inventoryPageQuery(cursor = "") {
   const params = inventoryFilterParams();
   params.set("sort", inventorySortKey);
+  params.set("direction", inventorySortDirection);
   params.set("limit", String(INVENTORY_SERVER_PAGE_SIZE));
   if (cursor) params.set("after", cursor);
   return params.toString();
@@ -2465,7 +2509,7 @@ function inventoryExportQuery(format) {
 async function streamInventoryExport(format) {
   requireAuth();
   if (typeof window.showSaveFilePicker !== "function" || typeof WritableStream === "undefined") {
-    throw new Error("This browser cannot stream authenticated downloads to disk. Use current Chrome or Edge, or call /api/inventory/export with an API client.");
+    throw new Error("This browser can't save a streaming download. Open Sentro in Chrome or Edge to export from here.");
   }
 
   const extension = format === "csv" ? "csv" : "ndjson";
@@ -2515,6 +2559,14 @@ async function refreshInventoryFacets() {
   const selectedSource = inventorySourceFacet;
   const requestId = ++inventoryFacetRequest;
   try {
+    if (selectedSource === "ALL") {
+      const canonical = estateFacets || await refreshEstateSummary();
+      if (!canonical || !isCurrentTenantContext(context, canonical) || requestId !== inventoryFacetRequest || inventorySourceFacet !== selectedSource) return;
+      inventoryFacets = canonical;
+      const page = currentInventoryPage();
+      if (page) renderRows(page.items, { serverPage: page });
+      return;
+    }
     const params = new URLSearchParams();
     if (selectedSource !== "ALL") params.set("source", selectedSource);
     const facets = await api(`/api/inventory/facets${params.size ? `?${params}` : ""}`, null, "GET");
@@ -2543,8 +2595,7 @@ function trimInventoryPageCache() {
 function renderInventoryPageLoading() {
   resultsBody.setAttribute("aria-busy", "true");
   resultsBody.innerHTML = `<tr><td colspan="7" class="inventory-window-status">
-    <strong>Loading inventory page...</strong>
-    <span>The browser keeps only a bounded page window while the database filters and sorts.</span>
+    <strong>Loading the next page\u2026</strong>
   </td></tr>`;
 }
 
@@ -2594,8 +2645,8 @@ async function loadInventoryWindowPage(pageIndex = 0) {
     renderedRowsLimit = ROW_PAGE_SIZE;
     renderRows(latestFiles);
     setStatus(latestFiles.length
-      ? `Windowed inventory unavailable; using the bounded local preview: ${error.message}`
-      : `Windowed inventory unavailable; no report blob was loaded: ${error.message}`);
+      ? `Couldn't load that page. Showing the results already open. ${error.message}`
+      : `Couldn't load that page, and nothing is open yet. ${error.message}`);
   } finally {
     if (inventoryPageAbortController === controller) inventoryPageAbortController = null;
   }
@@ -2610,7 +2661,7 @@ function refreshInventoryPageWindow() {
   }
   resetInventoryPageWindow(true);
   if (!inventoryFacets) refreshInventoryFacets();
-  loadInventoryWindowPage(0);
+  return loadInventoryWindowPage(0);
 }
 
 function inventoryWindowControls(page) {
@@ -2815,8 +2866,7 @@ function getVisibleInventoryFiles(files = latestFiles) {
     const risk = getEffectiveRisk(file).level;
     if (inventoryRiskFilter === "PROTECTED" && !isProtectedFile(file)) return false;
     if (!["ALL", "PROTECTED"].includes(inventoryRiskFilter) && risk !== inventoryRiskFilter) return false;
-    const source = getInventorySourceValue(file);
-    if (inventorySourceFacet !== "ALL" && source !== inventorySourceFacet) return false;
+    if (inventorySourceFacet !== "ALL" && !inventorySourceMatches(file, inventorySourceFacet)) return false;
     if (inventoryFindingFacet !== "ALL" && !getFileFindingTypes(file).includes(inventoryFindingFacet)) return false;
     if (inventoryFrameworkFacets.size) {
       const frameworks = getFileFrameworks(file);
@@ -2829,8 +2879,8 @@ function getVisibleInventoryFiles(files = latestFiles) {
 function renderInventoryControlState(files = latestFiles, visible = getVisibleInventoryFiles(files), serverPage = null) {
   updateInventoryFilterOptions(files || []);
   renderInventoryRiskSelection();
-  inventoryRiskFilters.forEach((button) => {
-    const risk = button.dataset.riskFilter || "ALL";
+  [...(inventoryRiskSelect?.options || [])].forEach((option) => {
+    const risk = option.value || "ALL";
     const serverCounts = serverPage && inventoryFacets ? inventoryFacets.risk_counts || {} : null;
     const count = serverCounts
       ? risk === "ALL"
@@ -2843,7 +2893,8 @@ function renderInventoryControlState(files = latestFiles, visible = getVisibleIn
         : risk === "PROTECTED"
           ? (files || []).filter(isProtectedFile).length
           : (files || []).filter((file) => getEffectiveRisk(file).level === risk).length;
-    button.dataset.count = String(count);
+    const label = option.dataset.label || (option.dataset.label = option.textContent);
+    option.textContent = `${label} (${count.toLocaleString()})`;
   });
   if (inventoryContextMetrics) {
     const sensitive = serverPage
@@ -2852,13 +2903,11 @@ function renderInventoryControlState(files = latestFiles, visible = getVisibleIn
     const avgRisk = visible.length
       ? Math.round(visible.reduce((sum, file) => sum + (Number(getEffectiveRisk(file).score) || 0), 0) / visible.length)
       : 0;
-    const topSource = visible.length ? getTopFacet(visible.map(getInventorySourceValue)) : "none";
     const inventoryTotal = serverPage ? `${serverPage.total}${serverPage.totalIsEstimate ? "+" : ""}` : (files || []).length;
     inventoryContextMetrics.innerHTML = `
       <div><span>Visible</span><strong>${visible.length}</strong><small>of ${inventoryTotal} files</small></div>
       <div><span>Sensitive</span><strong>${sensitive}</strong><small>${Math.round((sensitive / Math.max(1, visible.length)) * 100)}% in view</small></div>
       <div><span>Avg risk</span><strong>${avgRisk}</strong><small>/100</small></div>
-      <div><span>Top source</span><strong>${escapeHtml(topSource)}</strong><small>current filter</small></div>
     `;
   }
 }
@@ -2874,23 +2923,25 @@ function syncInventorySortHeaders() {
   document.querySelectorAll(".inventory-table th[data-inventory-sort]").forEach((th) => {
     const active = th.dataset.inventorySort === inventorySortKey;
     th.classList.toggle("is-sorted", active);
-    // Each key has one meaningful direction server-side (risk high-first,
-    // names A-Z), so the header reports that rather than a toggle.
-    th.setAttribute("aria-sort", active
-      ? (["name", "scan_label"].includes(inventorySortKey) ? "ascending" : "descending")
-      : "none");
+    th.setAttribute("aria-sort", active ? (inventorySortDirection === "asc" ? "ascending" : "descending") : "none");
   });
 }
 
 async function applyInventorySort(key) {
-  if (!INVENTORY_SORT_LABELS[key] || key === inventorySortKey) return;
-  inventorySortKey = key;
+  if (!INVENTORY_SORT_LABELS[key]) return;
+  if (key === inventorySortKey) {
+    inventorySortDirection = inventorySortDirection === "asc" ? "desc" : "asc";
+  } else {
+    inventorySortKey = key;
+    inventorySortDirection = INVENTORY_SORT_DEFAULT_DIRECTIONS[key] || "asc";
+  }
+  const directionLabel = inventorySortDirection === "desc" ? "highest first" : "lowest first";
   syncInventorySortHeaders();
-  setStatus(`Sorting all files by ${INVENTORY_SORT_LABELS[key]}...`);
+  setStatus(`Sorting all files by ${INVENTORY_SORT_LABELS[key]}, ${directionLabel}...`);
   try {
     resetInventoryPageWindow();
     await refreshInventoryPageWindow();
-    setStatus(`Sorted every file by ${INVENTORY_SORT_LABELS[key]}.`);
+    setStatus(`Sorted every file by ${INVENTORY_SORT_LABELS[key]}, ${directionLabel}.`);
   } catch (error) {
     setStatus(`Sort failed: ${error.message}`);
   }
@@ -2909,15 +2960,12 @@ document.addEventListener("keydown", (event) => {
 });
 
 function completedInventoryScanNames() {
-  // Tenants can contain a mix of current named scans, legacy reports that only
-  // carry a collector source, and newly saved profiles that have not run yet.
-  // Union all three so the selector never goes empty, with names shadowing
-  // protocols: a run or asset covered by a scan name is listed by that name
-  // only, and protocol values remain solely for data nothing named covers.
+  // A tenant's configured profiles and persisted named runs are the only
+  // entries in the customer-facing Scans group. Collector protocols are
+  // covered by the two common scan kinds below.
   const candidates = [
-    ...latestHistoryItems.map((item) => item?.scan_label || item?.source),
+    ...latestHistoryItems.map((item) => item?.scan_label),
     ...(inventoryFacets?.scans || []).map((item) => item?.value),
-    ...(inventoryFacets?.sources || []).map((item) => item?.value),
     ...scanProfilesState.map((profile) => profile?.name),
   ];
   const unique = new Map();
@@ -2928,14 +2976,34 @@ function completedInventoryScanNames() {
   return [...unique.values()].sort((a, b) => a.localeCompare(b));
 }
 
+const COMMON_INVENTORY_SCAN_SOURCES = [
+  { value: "scan-kind:file-server", label: "File Server Scans" },
+  { value: "scan-kind:endpoint", label: "Endpoint Scans" },
+];
+
+function isCommonInventoryScanSource(value) {
+  return COMMON_INVENTORY_SCAN_SOURCES.some((source) => source.value === value);
+}
+
 function renderInventoryScanOptions() {
   if (inventorySourceFilter) {
     const scanNames = completedInventoryScanNames();
-    const current = scanNames.includes(inventorySourceFacet) ? inventorySourceFacet : "ALL";
+    const current = scanNames.includes(inventorySourceFacet) || isCommonInventoryScanSource(inventorySourceFacet)
+      ? inventorySourceFacet
+      : "ALL";
     inventorySourceFacet = current;
-    inventorySourceFilter.innerHTML = ["ALL", ...scanNames]
-      .map((value) => `<option value="${escapeHtml(value)}" ${value === current ? "selected" : ""}>${escapeHtml(value === "ALL" ? "All scans" : value)}</option>`)
+    const selected = (value) => value === current ? "selected" : "";
+    const savedScans = scanNames.length
+      ? `<optgroup label="Scans">${scanNames.map((name) => `<option value="${escapeHtml(name)}" ${selected(name)}>${escapeHtml(name)}</option>`).join("")}</optgroup>`
+      : "";
+    const commonSources = COMMON_INVENTORY_SCAN_SOURCES
+      .map((source) => `<option value="${source.value}" ${selected(source.value)}>${source.label}</option>`)
       .join("");
+    inventorySourceFilter.innerHTML = `
+      <option value="ALL" ${selected("ALL")}>All scans</option>
+      ${savedScans}
+      <optgroup label="Common scan sources">${commonSources}</optgroup>
+    `;
   }
 }
 
@@ -2961,6 +3029,12 @@ function getInventorySourceValue(file) {
   return String(file.scan_label || file.source || file.share || "workspace").trim() || "workspace";
 }
 
+function inventorySourceMatches(file, sourceFacet) {
+  if (sourceFacet === "scan-kind:file-server") return ["local", "smb"].includes(String(file.source || "").toLowerCase());
+  if (sourceFacet === "scan-kind:endpoint") return ["endpoint", "endpoint-local", "endpoint-winrm"].includes(String(file.source || "").toLowerCase());
+  return getInventorySourceValue(file) === sourceFacet;
+}
+
 function inventoryFrameworkOptions(files = latestFiles) {
   const allOptions = [
     ["standard_scan", "Standard scan"],
@@ -2970,30 +3044,29 @@ function inventoryFrameworkOptions(files = latestFiles) {
   ];
   const counts = new Map(allOptions.map(([id]) => [id, 0]));
   if (inventoryFacets) {
-    (inventoryFacets.frameworks || []).forEach((item) => counts.set(String(item.value || ""), Number(item.count || 0)));
-  } else {
-    (files || []).forEach((file) => {
-      getFileFrameworks(file).forEach((framework) => {
-        counts.set(framework, (counts.get(framework) || 0) + 1);
-      });
-    });
+    (inventoryFacets.frameworks || []).forEach((item) => counts.set(String(item.value || ""), Number(item.file_count ?? item.count ?? 0)));
   }
   return allOptions.map(([id, label]) => ({ id, label, count: counts.get(id) || 0 }));
 }
 
 function renderInventoryFrameworkFilter(files = latestFiles) {
-  if (!inventoryFrameworkFilter) return;
-  const options = inventoryFrameworkOptions(files);
-  inventoryFrameworkFilter.innerHTML = options.map(({ id, label, count }) => {
-    const checked = !inventoryFrameworkFacets.size || inventoryFrameworkFacets.has(id);
-    return `
-      <label class="inventory-framework-option ${checked ? "active" : ""}">
-        <input type="checkbox" value="${escapeHtml(id)}" ${checked ? "checked" : ""} />
-        <span>${escapeHtml(label)}</span>
-        <b>${escapeHtml(count)}</b>
-      </label>
-    `;
-  }).join("");
+  if (inventoryFrameworkSelect) {
+    const selected = inventoryFrameworkFacets.size ? [...inventoryFrameworkFacets][0] : "ALL";
+    const options = inventoryFrameworkOptions(files);
+    inventoryFrameworkSelect.innerHTML = `<option value="ALL">All frameworks</option>${
+      options.map(({ id, label, count }) =>
+        `<option value="${escapeHtml(id)}">${escapeHtml(label)} (${Number(count).toLocaleString()})</option>`).join("")}`;
+    inventoryFrameworkSelect.value = options.some((item) => item.id === selected) ? selected : "ALL";
+  }
+  // The folder list is the dashboard's own location tree, so the two pages
+  // name the same places the same way.
+  if (inventoryFolderSelect) {
+    const current = inventoryFolderSelect.value || "ALL";
+    const places = (estateFacets?.locations || []).filter((item) => item.label);
+    inventoryFolderSelect.innerHTML = `<option value="ALL">Anywhere</option>${
+      places.map((item) => `<option value="${escapeHtml(item.label)}">${"  ".repeat(Number(item.depth) || 0)}${escapeHtml(item.label)} (${Number(item.file_count || 0).toLocaleString()})</option>`).join("")}`;
+    inventoryFolderSelect.value = [...inventoryFolderSelect.options].some((option) => option.value === current) ? current : "ALL";
+  }
 }
 // Without these a fresh install shows an empty framework filter and count-less
 // risk pills until the first scan: only clearResultsFilter() and the scan-data
@@ -3125,6 +3198,11 @@ function resolveTabName(tabName) {
   return aliases[tabName] || tabName || "overview";
 }
 
+function permittedTabName(tabName) {
+  const resolved = resolveTabName(tabName);
+  return !isAdminRole() && ADMIN_ONLY_TABS.has(resolved) ? "settings" : resolved;
+}
+
 // Redesign P3: the sidebar shows 6 destinations while the tab panels keep their
 // original names (old data-tab-jump deep links stay valid). Merged destinations
 // own several member panels; navDestination() maps any panel to the sidebar
@@ -3219,7 +3297,7 @@ function syncNavGroups() {
       const isCurrent = open && resolveTabName(link.dataset.tabJump) === currentNavTab;
       link.classList.toggle("active", isCurrent);
       link.setAttribute("aria-current", isCurrent ? "page" : "false");
-      link.tabIndex = open ? 0 : -1;
+      link.tabIndex = open && (!link.hasAttribute("data-admin-only") || isAdminRole()) ? 0 : -1;
     });
   });
   document.querySelectorAll(".side-nav .tab").forEach((tab) => {
@@ -3270,7 +3348,7 @@ function hydrateNavigation() {
 
 function switchTab(tabName) {
   const requestedTab = tabName;
-  const resolvedTab = resolveTabName(tabName);
+  const resolvedTab = permittedTabName(tabName);
   const activePanel = document.getElementById(`tab-${resolvedTab}`);
   if (!activePanel) return;
 
@@ -3301,12 +3379,23 @@ function switchTab(tabName) {
   }
   tabPanels.forEach((panel) => panel.classList.toggle("active", panel === activePanel));
 
+  if (resolvedTab === "risk" && !remediationLoaded && !remediationLoading) {
+    loadRemediationFindings().catch(() => {});
+  }
+
+  // One transition for a page change. The console used to run three at once
+  // (this animate, a CSS dspmFade, and a 450ms stagger on every child); the
+  // other two are deleted from styles.css. Duration and distance come from
+  // the motion tokens, so reduced-motion collapses them in one place.
+  const motion = getComputedStyle(document.documentElement);
+  const duration = parseFloat(motion.getPropertyValue("--motion-base")) || 200;
+  const rise = motion.getPropertyValue("--motion-rise").trim() || "6px";
   activePanel.animate(
     [
-      { opacity: 0, transform: "translateY(8px)" },
+      { opacity: 0, transform: `translateY(${rise})` },
       { opacity: 1, transform: "translateY(0)" },
     ],
-    { duration: 180, easing: "ease-out" }
+    { duration, easing: "cubic-bezier(.2,.7,.3,1)" }
   );
 
   if (requestedTab === "inventory") {
@@ -3318,7 +3407,17 @@ function switchTab(tabName) {
   }
 }
 
-function applyTheme(theme) {
+
+function applyTheme(theme, { animate = false } = {}) {
+  // A whole screen inverting in one frame reads as a glitch. The class is
+  // added only for a deliberate toggle, never on first paint.
+  if (animate) {
+    document.body.classList.add("theme-animating");
+    const slow = parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue("--motion-slow")
+    ) || 320;
+    window.setTimeout(() => document.body.classList.remove("theme-animating"), slow + 60);
+  }
   document.documentElement.dataset.theme = theme;
   const icon = themeToggle.querySelector(".theme-icon");
   const nextLabel = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
@@ -3497,13 +3596,13 @@ function renderEssentialRows(rows = []) {
   `;
 }
 
-function renderEssentialDisclosure({ id, icon, eyebrow, title, summary, rows = [], content = "", open = false, count = null, countLabel = "" }) {
+function renderEssentialDisclosure({ id, icon, eyebrow, title, summary, rows = [], content = "", count = null, countLabel = "" }) {
   const visibleRows = rows.filter((row) => hasDisplayValue(row.value));
   if (!visibleRows.length && !content) return "";
   const numericCount = Number(count);
   const hasCount = count !== null && count !== "" && Number.isFinite(numericCount) && numericCount >= 0;
   return `
-    <details class="essential-disclosure" data-essential-section="${escapeHtml(id)}" ${open ? "open" : ""}>
+    <details class="essential-disclosure" data-essential-section="${escapeHtml(id)}">
       <summary>
         <span class="essential-disclosure-icon">${ESSENTIAL_DISCLOSURE_ICONS[icon] || ESSENTIAL_DISCLOSURE_ICONS.document}</span>
         <span class="essential-disclosure-copy">
@@ -3549,7 +3648,6 @@ function renderInventoryExpandedDetails(file) {
   const broadAccess = Boolean(permissions.public || permissions.wide_access);
   const writable = Boolean(permissions.writable);
   const privileged = Boolean(permissions.privileged_access);
-  const exposureAttention = broadAccess || writable || privileged || collectionSize(accessIssues) > 0;
   const accessPosture = broadAccess
     ? "Broad access reported"
     : writable
@@ -3565,7 +3663,6 @@ function renderInventoryExpandedDetails(file) {
   const hashChanged = hasHashChanged(file);
   const duplicateHashPath = hasDuplicateHashPath(file);
   const protectedAsset = isProtectedFile(file);
-  const protectionAttention = protectedAsset || file.content_scannable === false || hashChanged || duplicateHashPath;
   const protectionSummary = protectedAsset
     ? `Protected: ${getProtectionLabel(file)}`
     : file.content_scannable === false
@@ -3582,8 +3679,6 @@ function renderInventoryExpandedDetails(file) {
     : "";
   const elapsedMs = Number(file.detector_elapsed_ms ?? detectorMetrics.elapsed_ms);
   const timeoutSeconds = Number(detectorMetrics.detector_timeout_seconds);
-  const scanAttention = Boolean(file.scan_error || file.truncated || detectorMetrics.slow_detector_degraded_mode || file.compliance_degraded_mode)
-    || String(file.scan_completeness || "").toLowerCase() === "partial";
 
   const identityRows = [
     { label: "Owner", value: owner || "Unassigned" },
@@ -3655,16 +3750,16 @@ function renderInventoryExpandedDetails(file) {
       <div class="essential-stack">
         ${renderEssentialDisclosure({
           id: "identity", icon: "identity", eyebrow: "Asset context", title: "Identity and location",
-          summary: "Ownership, origin, format, and lifecycle timestamps", rows: identityRows, open: true,
+          summary: "Ownership, origin, format, and lifecycle timestamps", rows: identityRows,
         })}
         ${renderEssentialDisclosure({
           id: "exposure", icon: "exposure", eyebrow: "Access control", title: "Exposure context",
-          summary: accessPosture, rows: exposureRows, open: exposureAttention,
+          summary: accessPosture, rows: exposureRows,
           count: principalCount || grantCount || null, countLabel: principalCount ? `principal${principalCount === 1 ? "" : "s"}` : `grant${grantCount === 1 ? "" : "s"}`,
         })}
         ${renderEssentialDisclosure({
           id: "protection", icon: "protection", eyebrow: "Data handling", title: "Protection and integrity",
-          summary: protectionSummary, rows: protectionRows, open: protectionAttention,
+          summary: protectionSummary, rows: protectionRows,
         })}
         ${renderEssentialDisclosure({
           id: "document", icon: "document", eyebrow: "Extracted properties", title: "Document metadata",
@@ -3672,7 +3767,7 @@ function renderInventoryExpandedDetails(file) {
         })}
         ${renderEssentialDisclosure({
           id: "scan", icon: "scan", eyebrow: "Collection quality", title: "Scan coverage and provenance",
-          summary: "Completeness, reuse decisions, detector health, and catalog versions", rows: scanRows, open: scanAttention,
+          summary: "Completeness, reuse decisions, detector health, and catalog versions", rows: scanRows,
           count: detectorCount || null, countLabel: `detector${detectorCount === 1 ? "" : "s"}`,
         })}
         ${renderEssentialDisclosure({
@@ -3976,7 +4071,7 @@ function renderFindingMetadataGrid(file, finding) {
 
 function renderFindingEvidenceSections(finding) {
   const sections = [
-    ["Matched schema/context keywords", finding.matched_keywords || finding.keywords || []],
+    ["Matched field and context keywords", finding.matched_keywords || finding.keywords || []],
     ["Redacted value samples", finding.samples || []],
     ["Exact occurrence locations", (Array.isArray(finding.occurrences) ? finding.occurrences : []).map((occurrence) => formatObject(occurrence))],
     ["Framework and control mappings", compactEvidence([
@@ -4660,15 +4755,15 @@ async function loadComplianceKeywordLibrary(framework = "gdpr", context = captur
     try {
       if (framework !== "gdpr") throw error;
       const response = await fetch("/static/compliance_keywords_gdpr_builtin.json", { cache: "no-store" });
-      if (!response.ok) throw new Error(`Static fallback failed: ${response.status}`);
+      if (!response.ok) throw new Error(`Built-in GDPR keyword list unavailable (${response.status})`);
       const library = await response.json();
       if (!isCurrentTenantContext(context)) return;
       latestComplianceKeywordLibrary = library;
       latestComplianceKeywordLibraries[framework] = library;
       renderRiskRulesCache();
-      setKeywordImportStatus("Showing built-in GDPR keywords from static fallback. Restart backend to enable import/preview API.", "warning");
+      setKeywordImportStatus("Import is unavailable until the service restarts. Showing the built-in GDPR keyword list.", "warning");
     } catch {
-      setKeywordImportStatus(`Keyword library failed: ${error.message}`, "danger");
+      setKeywordImportStatus(`Couldn't load the keyword library. ${error.message}`, "danger");
     }
   }
 }
@@ -5624,75 +5719,662 @@ function renderExecutiveExperience() {
   const dashboardSummary = latestDashboard?.latest?.summary || {};
   const summary = currentSummary.total_files ? currentSummary : dashboardSummary.total_files ? dashboardSummary : currentSummary;
   const score = getCurrentPostureScore(summary);
-  const distribution = buildRiskDistribution(summary);
-  const topFiles = [...latestFiles].sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score).slice(0, 6);
-  const criticalCount = summary.critical || 0;
-  const highCount = summary.high || 0;
-  const queueCount = latestFiles.length
-    ? latestFiles.filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level) || isProtectedFile(file)).length
-    : Number(summary.critical || 0) + Number(summary.high || 0) + Number(summary.medium || 0);
-  const postureLabel = score >= 80 ? "Low risk" : score >= 55 ? "Elevated risk" : "Critical risk";
 
-  overviewInsights.innerHTML = `
-    <div class="insight-card posture">
-      <span>Posture score</span>
-      <strong>${score}</strong>
-      <p>${score >= 80 ? "Healthy exposure profile" : score >= 55 ? "Watch active risk concentration" : "Immediate remediation recommended"}</p>
+  renderPostureCard(summary, score);
+  renderDataClassesCard();
+  renderCoverageCard();
+  renderStaleCard();
+  renderLocationsCard();
+  renderFrameworksCard();
+  renderRemediationLoad(summary);
+
+  // The Remediation page keeps only the queue and the folders it points at.
+  // Everything else this function used to fill - the hero, the workspace
+  // status card, the distribution donut, the posture trend, the scan
+  // comparison, the heatmap, the signal bubbles and the topology - restated
+  // what the dashboard now says once, so the panels are gone and these writes
+  // are guarded rather than removed: the elements come back if a page needs
+  // them again, and nothing throws while they do not exist.
+  renderRemediationWorkspace();
+  setPanelHtml(topRiskyFolders, buildTopRiskyFolders());
+  setPanelHtml(riskDistribution, () => `<div class="distribution-visual">${buildDonutSvg(buildRiskDistribution(summary))}${buildDistributionBars(buildRiskDistribution(summary))}</div>`);
+  setPanelHtml(postureTrend, buildPostureTrend);
+  setPanelHtml(msspPortfolio, buildMsspPortfolio);
+  setPanelHtml(priorityRiskFiles, buildPriorityRiskFiles);
+  setPanelHtml(departmentRisk, buildDepartmentRisk);
+  setPanelHtml(scanComparison, buildScanComparison);
+  setPanelHtml(signalMatrix, buildSignalMatrix);
+  setPanelHtml(riskHeatmap, () => buildHeatmap(latestFiles));
+  setPanelHtml(riskTopology, () => buildRiskTopology(summary));
+  setPanelHtml(executiveHero, "");
+  setPanelHtml(executiveTopFiles, "");
+  if (riskTotalLabel) riskTotalLabel.textContent = `${summary.total_files || 0} files`;
+}
+
+// A panel that is not on the page is not an error; it is a panel this release
+// does not show. Builders are passed as functions so a removed panel costs
+// nothing to skip.
+function setPanelHtml(element, source) {
+  if (!element) return;
+  element.innerHTML = typeof source === "function" ? source() : source;
+}
+
+// ---- Dashboard cards ------------------------------------------------------
+// Three panels, one row, and every row inside them is a way into the page that
+// can act on it. The dashboard's job is to be read in one look and left
+// immediately.
+//
+// Every row opens with a glyph in a tinted coin, so a list is recognisable
+// before it is read: a risk's coin takes its severity, a data class's coin
+// takes the worst level it has been found at, a framework's takes its own
+// mark. That is the one place this page spends colour on the row itself.
+
+const POSTURE_BANDS = [
+  { floor: 80, key: "low", label: "Low risk", note: "Exposure is under control." },
+  { floor: 55, key: "elevated", label: "Elevated risk", note: "Work the queue before the next scan." },
+  { floor: 0, key: "critical", label: "Critical risk", note: "Start with the critical files." },
+];
+
+function postureBand(score) {
+  return POSTURE_BANDS.find((band) => score >= band.floor) || POSTURE_BANDS.at(-1);
+}
+
+function posturePoints() {
+  return (latestDashboard?.trend || [])
+    .slice(-12)
+    .map((item) => ({
+      label: String(item.timestamp || "").slice(5, 10),
+      score: calculatePostureScore(item.summary || {}),
+      files: Number((item.summary || {}).total_files || 0),
+    }));
+}
+
+// A posture score is the mean risk of whatever that scan covered. Two scans
+// only compare if they covered comparable ground: a 539-file estate sweep
+// against a 2-file spot check reads as "+68, improving" when nothing improved
+// at all - the second scan simply looked somewhere smaller and cleaner. Below
+// this ratio the honest answer is to say nothing rather than a number that is
+// wrong in the flattering direction.
+const POSTURE_COMPARABLE_RATIO = 0.6;
+
+function comparablePosturePoints(points) {
+  if (points.length < 2) return null;
+  const latest = points.at(-1);
+  if (!latest.files) return null;
+  // The most recent earlier scan that covered comparable ground.
+  for (let index = points.length - 2; index >= 0; index -= 1) {
+    const earlier = points[index];
+    if (!earlier.files) continue;
+    const ratio = Math.min(earlier.files, latest.files) / Math.max(earlier.files, latest.files);
+    if (ratio >= POSTURE_COMPARABLE_RATIO) return { earlier, latest, span: points.length - index };
+  }
+  return null;
+}
+
+function glyph(id, extraClass = "") {
+  return `<svg class="f-ico${extraClass ? ` ${extraClass}` : ""}" aria-hidden="true"><use href="#${id}"/></svg>`;
+}
+
+function coin(id, cat) {
+  return `<span class="coin" data-cat="${escapeHtml(cat)}" aria-hidden="true">${glyph(id)}</span>`;
+}
+
+// A sparkline, not a chart: the shape of the last dozen scans, no axes, no
+// legend, no gridlines. The question it answers is "better or worse than last
+// time", and that is the whole of it.
+// A wave, not a chart. Straight segments between eight points make a posture
+// history look like a saw; a Catmull-Rom spline converted to cubic beziers
+// gives the same data one continuous curve, which is what "the shape of the
+// last few scans" actually means. Tension 0.5 is the standard centripetal
+// value - lower overshoots, higher flattens back toward the polyline.
+function smoothPath(points, tension = 0.5) {
+  if (points.length < 2) return "";
+  const at = (index) => points[Math.max(0, Math.min(points.length - 1, index))];
+  let path = `M${points[0].x.toFixed(2)},${points[0].y.toFixed(2)}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = at(index - 1);
+    const current = at(index);
+    const next = at(index + 1);
+    const after = at(index + 2);
+    const c1x = current.x + ((next.x - previous.x) / 6) * tension * 2;
+    const c1y = current.y + ((next.y - previous.y) / 6) * tension * 2;
+    const c2x = next.x - ((after.x - current.x) / 6) * tension * 2;
+    const c2y = next.y - ((after.y - current.y) / 6) * tension * 2;
+    path += ` C${c1x.toFixed(2)},${c1y.toFixed(2)} ${c2x.toFixed(2)},${c2y.toFixed(2)} ${next.x.toFixed(2)},${next.y.toFixed(2)}`;
+  }
+  return path;
+}
+
+function buildPostureSparkline(points) {
+  if (points.length < 2) return "";
+  const width = 260;
+  const height = 96;
+  // Asymmetric: a Catmull-Rom curve overshoots its control points, so the
+  // crest needs more clearance than the trough. Six was not enough and the
+  // top of the wave was clipped.
+  const padTop = 14;
+  const padBottom = 8;
+  const scores = points.map((point) => point.score);
+  const low = Math.min(...scores);
+  // A flat history should read as flat, not as noise amplified to fill the
+  // box, so the band never shrinks below ten points of score.
+  const span = Math.max(10, Math.max(...scores) - low);
+  const mid = (low + Math.max(...scores)) / 2;
+  const plotted = points.map((point, index) => ({
+    x: 6 + (index / (points.length - 1)) * (width - 12),
+    y: padTop + (1 - (point.score - (mid - span / 2)) / span) * (height - padTop - padBottom),
+  }));
+  const line = smoothPath(plotted);
+  const area = `${line} L${plotted.at(-1).x.toFixed(2)},${height} L${plotted[0].x.toFixed(2)},${height} Z`;
+  const now = plotted.at(-1);
+  return `
+    <svg class="posture-wave" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none"
+         role="img" aria-label="Posture score across the last ${points.length} saved scans">
+      <defs>
+        <linearGradient id="posture-wave-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--indigo)" stop-opacity=".28" />
+          <stop offset="100%" stop-color="var(--indigo)" stop-opacity="0" />
+        </linearGradient>
+      </defs>
+      <path class="posture-wave-area" d="${area}" fill="url(#posture-wave-fill)" />
+      <path class="posture-wave-line" d="${line}" />
+      <circle class="posture-wave-now" cx="${now.x.toFixed(2)}" cy="${now.y.toFixed(2)}" r="3" />
+    </svg>`;
+}
+
+// ---- Top risks: categories, not folders ----------------------------------
+// Folders are where Remediation sends you; the dashboard says what KIND of
+// exposure the workspace has. Each category is a predicate over a file and
+// its primary findings, carries its own glyph, and is worth its own row only
+// if at least one file is in it.
+const RISK_CATEGORIES = [
+  { key: "credentials", label: "Exposed credentials", icon: "li-key-round", sev: "critical", cat: "secret",
+    test: (file, findings) => findings.some(isSecretFinding) },
+  { key: "unprotected", label: "Unprotected critical files", icon: "li-shield-off", sev: "critical", cat: "record",
+    test: (file, findings, level) => level === "CRITICAL" && !isProtectedFile(file) },
+  { key: "payment", label: "Payment and bank data", icon: "li-credit-card", sev: "high", cat: "finance",
+    test: (file, findings) => findings.some((finding) =>
+      /credit card|payment card|\bpan\b|cvv|track data|iban|swift|routing|bank account|card data/i.test(findingDisplayName(finding))
+      || String(finding.pci_category || "").length > 0) },
+  { key: "health", label: "Health records", icon: "li-heart-pulse", sev: "high", cat: "health",
+    test: (file, findings) => findings.some((finding) =>
+      /health|medical|\bphi\b|diagnos|patient|mental|disabilit|genetic|biometric/i.test(findingDisplayName(finding))) },
+  { key: "regulated", label: "Regulated personal data", icon: "li-id-card", sev: "high", cat: "identity",
+    test: (file, findings) => findings.some(isRegulatedFinding) },
+  { key: "changed", label: "Changed since last scan", icon: "li-file-diff", sev: "medium", cat: "record",
+    test: (file) => hasHashChanged(file) },
+  { key: "locked", label: "Locked or unreadable", icon: "li-lock", sev: "protected", cat: "legal",
+    test: (file) => isProtectedFile(file) },
+];
+
+function riskCategories(limit = 6) {
+  const counts = new Map(RISK_CATEGORIES.map((item) => [item.key, 0]));
+  latestFiles.forEach((file) => {
+    const findings = primaryFindingsForFile(file);
+    const level = String(getEffectiveRisk(file).level || "LOW").toUpperCase();
+    RISK_CATEGORIES.forEach((item) => {
+      let hit = false;
+      try { hit = Boolean(item.test(file, findings, level)); } catch { hit = false; }
+      if (hit) counts.set(item.key, counts.get(item.key) + 1);
+    });
+  });
+  return RISK_CATEGORIES
+    .map((item) => ({ ...item, count: counts.get(item.key) }))
+    .filter((item) => item.count > 0)
+    .sort((a, b) => SEVERITY_RANK.indexOf(b.sev.toUpperCase()) - SEVERITY_RANK.indexOf(a.sev.toUpperCase()) || b.count - a.count)
+    .slice(0, limit);
+}
+
+function renderPostureCard(summary, score) {
+  const card = document.querySelector("#posture-card");
+  if (!card) return;
+  const band = postureBand(score);
+  const points = posturePoints();
+  const comparable = comparablePosturePoints(points);
+  const delta = comparable ? comparable.latest.score - comparable.earlier.score : null;
+  const risks = riskCategories();
+
+  setCardMeta("#posture-card-meta", summary.total_files
+    ? `${Number(summary.total_files).toLocaleString()} files`
+    : "No scan yet");
+
+  card.innerHTML = `
+    <div class="posture-hero" data-band="${band.key}">
+      <div class="posture-figure">
+        <strong class="posture-score">${score}</strong>
+        <span class="posture-scale">/100</span>
+      </div>
+      <div class="posture-read">
+        <p class="posture-band">${band.label}</p>
+        <p class="posture-delta" ${comparable
+          ? `title="Against the scan saved ${escapeHtml(comparable.earlier.label)}, which covered ${comparable.earlier.files.toLocaleString()} files"`
+          : `title="No earlier scan covered comparable ground, so there is nothing to compare this score against"`}>${
+          comparable
+            ? `${glyph(delta >= 0 ? "li-trending-up" : "li-trending-down")}<b class="${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "+" : ""}${delta}</b> vs ${escapeHtml(comparable.earlier.label)}`
+            : escapeHtml(band.note)
+        }</p>
+      </div>
     </div>
-    <div class="insight-card">
-      <span>Critical alerts</span>
-      <strong>${criticalCount}</strong>
-      <p>${criticalCount ? "Threshold alert will be generated after scan save." : "No critical exposure in current view."}</p>
+    <div class="posture-wave-wrap" data-band="${band.key}">
+      ${points.length > 1
+        ? buildPostureSparkline(points)
+        : '<p class="posture-wave-empty">A second saved scan draws the trend.</p>'}
     </div>
-    <div class="insight-card" title="Files with PII, secrets, PCI, health data, or ML context signals.">
-      <span>Sensitive files</span>
-      <strong>${summary.sensitive_files ?? latestReport?.summary?.sensitive_files ?? countSensitiveFiles(latestFiles)}</strong>
+    <div class="posture-risks">
+      <p class="dash-sub">Top risks</p>
+      ${risks.length
+        ? risks.map((item) => `
+            <button type="button" class="risk-row plain-btn" data-remediation-jump
+                    aria-label="${escapeHtml(item.label)}, ${item.count} files — open Remediation">
+              ${coin(item.icon, item.cat)}
+              <span class="risk-row-name">${escapeHtml(item.label)}</span>
+              <span class="risk-row-count">${item.count.toLocaleString()}</span>
+              ${glyph("li-chevron-right", "risk-row-go")}
+            </button>`).join("")
+        : '<p class="dash-empty">No exposed data in this workspace.</p>'}
+    </div>`;
+}
+
+function setCardMeta(selector, text) {
+  const meta = document.querySelector(selector);
+  if (meta) meta.textContent = text;
+}
+
+// ---- Data classes: a glyph and a KIND per row ----------------------------
+// One table, two jobs: which glyph the row wears, and which of the eight
+// categories tints it. Matched on the display name, most specific first -
+// "Payment card data" has to be tested before the generic "card", and
+// "Source code secret context" before the "secret" that would claim it.
+//
+// The category is what the colour encodes. Severity is a separate scale on a
+// separate shape, because "what kind of data" and "how bad is it" are two
+// questions and one ramp cannot answer both.
+const DATA_CLASS_KINDS = [
+  // money
+  [/credit card|payment card|\bpan\b|\bcvv\b|track data|card data|\bcard number/i, "li-credit-card", "finance"],
+  [/iban|swift|\bbic\b|routing|bank account|account number|\btax\b|taxpayer/i, "li-landmark", "finance"],
+  [/salary|payroll|compensation|bonus|benefit|\bmoney\b|invoice|financial|finance/i, "li-banknote", "finance"],
+  // keys - before identity, so "recovery secret" is a secret
+  [/private key|\bsecret|\btoken\b|api key|password|credential|\bjwt\b|bearer|oauth|connection string|kubeconfig|\bdsn\b|kdbx|certificate|\bsaml\b|\bmfa\b|access key|service account/i, "li-key-round", "secret"],
+  // code and infrastructure - before "context" is claimed by records
+  [/source code|\brepo\b|build log|terraform|docker|jdbc|\bnpm\b|github|gitlab|code context/i, "li-search-code", "code"],
+  // health
+  [/health|medical|\bphi\b|diagnos|patient|mental|disabilit|genetic|\bdna\b|stethoscope/i, "li-heart-pulse", "health"],
+  // people
+  [/biometric|photograph|face image|signature|fingerprint/i, "li-fingerprint", "identity"],
+  [/passport|national id|\bssn\b|\bfin\b|\bpin\b|employee id|driver|licen[cs]e|id serial|vehicle|\bvin\b/i, "li-id-card", "identity"],
+  [/birth|maiden name/i, "li-calendar", "identity"],
+  // reachable
+  [/\bemail/i, "li-mail", "contact"],
+  [/phone|imei|imsi|mac address|mobile/i, "li-phone", "contact"],
+  [/address|geolocation|\bgps\b|location|\bgpe\b|\bloc\b|ip address|cookie|tracking|device identifier|browsing|clickstream/i, "li-map-pin", "contact"],
+  // legal and special category
+  [/legal|contract|court|criminal|immigration|citizenship|residency|union|political|religio|orientation|race|ethnic|special category|belief|next-of-kin|emergency contact/i, "li-scale", "legal"],
+  // records
+  [/hash|duplicate/i, "li-file-diff", "record"],
+  [/protected|locked|unreadable/i, "li-lock", "record"],
+  [/customer|board|security ops|retention|confidential|archive|\bcontext\b|\borg\b/i, "li-briefcase", "record"],
+  // whatever names a person, last - it is the broadest pattern here
+  [/\bname\b|alias|person|\bner\b|username|handle|profile/i, "li-user-round", "identity"],
+];
+
+function dataClassKind(name) {
+  const hit = DATA_CLASS_KINDS.find(([pattern]) => pattern.test(name));
+  return hit ? { glyph: hit[1], cat: hit[2] } : { glyph: "li-file-text", cat: "record" };
+}
+
+function renderDataClassesCard() {
+  const card = document.querySelector("#data-classes-card");
+  if (!card) return;
+  const allStats = (estateFacets?.finding_types || []).map((item) => {
+    const severityCounts = item.severity_file_counts || {};
+    return {
+      type: String(item.value || "Unknown"),
+      count: Number(item.file_count ?? item.count ?? 0),
+      critical: Number(severityCounts.CRITICAL || 0),
+      high: Number(severityCounts.HIGH || 0),
+      medium: Number(severityCounts.MEDIUM || 0),
+      low: Number(severityCounts.LOW || 0),
+    };
+  }).filter((item) => item.count > 0).sort((left, right) => right.count - left.count);
+  const stats = allStats.slice(0, 5);
+  stats.total = allStats.length;
+  setCardMeta("#classes-card-meta", stats.length
+    ? `Top ${stats.length} of ${stats.total}`
+    : "No scan yet");
+  if (!stats.length) {
+    card.innerHTML = '<p class="dash-empty">Data classes appear after the first scan.</p>';
+    return;
+  }
+  const max = Math.max(...stats.map((item) => item.count), 1);
+  // A dot on a rule rather than a fourth stacked bar. The question here is
+  // "how much of this class is there", which is one number, and a lollipop
+  // puts that number on a shared axis so five rows compare at a glance -
+  // without repeating the shape the framework card uses for a different
+  // question. The dot takes the row's category colour; severity stays on the
+  // framework card where it belongs.
+  card.innerHTML = `
+    <div class="dash-rows dash-rows-plot">
+      ${stats.map((item) => {
+        const kind = dataClassKind(item.type);
+        const share = Math.max(4, Math.round((item.count / max) * 100));
+        return `
+        <button type="button" class="class-row plain-btn" data-inventory-search="${escapeHtml(item.type)}"
+                data-cat="${escapeHtml(kind.cat)}" style="--plot-share:${share}%"
+                aria-label="${escapeHtml(item.type)}, ${item.count} files — open in Findings">
+          ${coin(kind.glyph, kind.cat)}
+          <span class="class-row-name">${escapeHtml(item.type)}</span>
+          <span class="class-row-count">${item.count.toLocaleString()}</span>
+          <span class="lolli" aria-hidden="true"><i class="lolli-stem"></i><i class="lolli-dot"></i></span>
+        </button>`;
+      }).join("")}
+    </div>`;
+}
+
+// ---- Where the risk is: the estate ranked by where it sits --------------
+// The severity band says how much, the class card says what kind, and neither
+// says WHERE - which is the only one of the three that names something an
+// operator can go and fix. Ordered by weighted severity on the server, so a
+// share holding ten critical files outranks one holding a hundred low ones.
+function renderLocationsCard() {
+  const card = document.querySelector("#locations-card");
+  if (!card) return;
+  const rows = (estateFacets?.locations || [])
+    .map((item) => {
+      const severity = item.severity_file_counts || {};
+      return {
+        name: String(item.value || ""),
+        label: String(item.label || item.value || ""),
+        depth: Number(item.depth || 0),
+        total: Number(item.file_count ?? item.count ?? 0),
+        critical: Number(severity.CRITICAL || 0),
+        high: Number(severity.HIGH || 0),
+        medium: Number(severity.MEDIUM || 0),
+        low: Number(severity.LOW || 0),
+      };
+    })
+    .filter((entry) => entry.name && entry.total > 0);
+
+  if (!rows.length) {
+    // A backend that predates this facet sends no `locations` key at all.
+    // Reporting that as "no scan yet" sent one operator looking for a scan
+    // that had already run; the two states now read differently.
+    const missing = estateFacets && !Array.isArray(estateFacets.locations);
+    setCardMeta("#locations-card-meta", missing ? "Unavailable" : "No scan yet");
+    card.innerHTML = missing
+      ? '<p class="dash-empty">This service build does not report locations. Restart the Sentro service to pick them up.</p>'
+      : '<p class="dash-empty">Locations appear after the first scan.</p>';
+    return;
+  }
+  const shares = rows.filter((entry) => !entry.depth);
+  const pressing = rows.filter((entry) => entry.critical || entry.high).length;
+  setCardMeta("#locations-card-meta", `${shares.length} shares · ${pressing} need attention`);
+  const max = Math.max(...rows.map((entry) => entry.total), 1);
+  // A tree, because "Shares" and "Shares/IT" are not siblings and the flat
+  // list said they were. Each row keeps a compact severity meter on its own
+  // line rather than a bar underneath, which is what lets eighteen rows fit
+  // where eight used to.
+  card.innerHTML = `
+    <div class="dash-rows tree-rows">
+      ${rows.map((entry, index) => {
+        const mix = SEVERITY_CLIMB.filter((sev) => entry[sev]).map((sev) => `${entry[sev].toLocaleString()} ${sev}`).join(", ");
+        const last = entry.depth > 0 && (rows[index + 1]?.depth ?? 0) === 0;
+        return `
+        <button type="button" class="place-row plain-btn" data-location-jump="${escapeHtml(entry.label)}"
+                data-depth="${entry.depth}" ${last ? "data-last" : ""}
+                style="--fw-share:${Math.max(10, Math.round((entry.total / max) * 100))}%"
+                aria-label="${escapeHtml(entry.name)}, ${entry.total} files, ${escapeHtml(mix)} — open in Findings">
+          <span class="place-lead">
+            <span class="place-mark" aria-hidden="true">${glyph(entry.depth ? "li-folder" : "li-database")}</span>
+            <span class="place-row-name">${escapeHtml(entry.label)}</span>
+          </span>
+          ${buildStack(entry)}
+          <span class="place-row-count">${entry.total.toLocaleString()}</span>
+        </button>`;
+      }).join("")}
+    </div>`;
+}
+
+// ---- Stale and abandoned sensitive data ---------------------------------
+// Age is an ordered scale but it is NOT severity, so it does not borrow the
+// severity ramp - a single-hue sequential that darkens as the data is left
+// alone longer. Buckets are counted server-side over files carrying at least
+// one finding: whether an empty file is old is not a security question.
+const AGE_BANDS = [
+  ["active", "Active", "Touched in the last 90 days"],
+  ["ageing", "Ageing", "Untouched for 90 days to a year"],
+  ["abandoned", "Abandoned", "Untouched for over a year"],
+];
+
+function renderStaleCard() {
+  const card = document.querySelector("#stale-card");
+  if (!card) return;
+  const age = estateFacets?.sensitive_age;
+  if (!age || !Object.keys(age).length) {
+    const missing = estateFacets && !age;
+    setCardMeta("#stale-card-meta", missing ? "Unavailable" : "No scan yet");
+    card.innerHTML = missing
+      ? '<p class="dash-empty">This service build does not report file ages. Restart the Sentro service to pick them up.</p>'
+      : '<p class="dash-empty">File ages appear after the first scan.</p>';
+    return;
+  }
+  const counts = {
+    active: Number(age.fresh || 0) + Number(age.recent || 0),
+    ageing: Number(age.ageing || 0),
+    abandoned: Number(age.stale || 0),
+  };
+  const undated = Number(age.unknown || 0);
+  const total = counts.active + counts.ageing + counts.abandoned;
+  if (!total && !undated) {
+    setCardMeta("#stale-card-meta", "No scan yet");
+    card.innerHTML = '<p class="dash-empty">File ages appear after the first scan.</p>';
+    return;
+  }
+  const left = counts.ageing + counts.abandoned;
+  setCardMeta("#stale-card-meta", undated
+    ? `${undated.toLocaleString()} undated`
+    : `${total.toLocaleString()} sensitive files`);
+  // A gauge, because this is one proportion against a target of zero: what
+  // share of the sensitive estate has been left alone. A 240-degree sweep
+  // reads as a dial rather than a progress bar, and the three bands sit
+  // under it as a single line rather than three legend rows.
+  const share = total ? Math.round((left / total) * 100) : 0;
+  const sweep = 240;
+  const radius = 42;
+  const track = (sweep / 360) * 2 * Math.PI * radius;
+  card.innerHTML = `
+    <div class="gauge" role="img"
+         aria-label="${left.toLocaleString()} of ${total.toLocaleString()} sensitive files untouched for 90 days or more">
+      <svg class="gauge-dial" viewBox="0 0 104 76">
+        <g transform="rotate(150 52 52)">
+          <circle class="gauge-track" cx="52" cy="52" r="${radius}"
+                  stroke-dasharray="${track.toFixed(2)} ${(2 * Math.PI * radius).toFixed(2)}" />
+          <circle class="gauge-fill" cx="52" cy="52" r="${radius}"
+                  stroke-dasharray="${(track * share / 100).toFixed(2)} ${(2 * Math.PI * radius).toFixed(2)}" />
+        </g>
+      </svg>
+      <span class="gauge-read"><strong>${share}%</strong><small>left alone</small></span>
     </div>
-    <div class="insight-card" title="Hidden local and SMB entries are included in discovery scope.">
-      <span>Hidden files</span>
-      <strong>${summary.hidden_files ?? latestReport?.summary?.hidden_files ?? latestFiles.filter((file) => file.is_hidden).length}</strong>
-    </div>
-    <div class="insight-card protected" title="Password-protected archives, encrypted vaults, and unreadable files needing owner review.">
-      <span>Protected / locked</span>
-      <strong>${summary.protected_files ?? latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length}</strong>
-    </div>
-    <div class="insight-card" title="History, audit, and vault data are isolated by tenant.">
-      <span>Tenant</span>
-      <strong>${escapeHtml(currentTenant)}</strong>
-    </div>
+    <div class="gauge-bands">
+      ${AGE_BANDS.map(([key, label, note]) => `
+        <button type="button" class="gauge-band plain-btn" data-age-jump="${key}" title="${escapeHtml(note)}"
+                aria-label="${escapeHtml(label)}, ${counts[key].toLocaleString()} files — ${escapeHtml(note.toLowerCase())}">
+          <span class="gauge-band-dot" data-age="${key}" aria-hidden="true"></span>
+          <span class="gauge-band-label">${escapeHtml(label)}</span>
+          <b>${counts[key].toLocaleString()}</b>
+        </button>`).join("")}
+    </div>`;
+}
+
+// ---- Assessment coverage: what the other four cards are counting --------
+// Every figure on this page is "of the files we could read and classify". That
+// qualifier was nowhere on the dashboard, so a 96% number and a 40% number
+// looked identical. Three states, one meter: classified, nothing found,
+// unreadable.
+function renderCoverageCard() {
+  const card = document.querySelector("#coverage-card");
+  if (!card) return;
+  const total = Number(estateFacets?.total || 0);
+  if (!total) {
+    setCardMeta("#coverage-card-meta", "No scan yet");
+    card.innerHTML = '<p class="dash-empty">Coverage appears after the first scan.</p>';
+    return;
+  }
+  const unreadable = Number(estateFacets.protected || 0);
+  const classified = Math.max(0, Math.min(total - unreadable, Number(estateFacets.sensitive || 0)));
+  const clear = Math.max(0, total - classified - unreadable);
+  const share = Math.round((classified / total) * 100);
+  setCardMeta("#coverage-card-meta", `${total.toLocaleString()} assessed`);
+  // Three columns on a shared baseline. A one-line meter could not show that
+  // "nothing found" and "unreadable" are two orders of magnitude apart - both
+  // were slivers. Columns give the small values a readable footing and a
+  // label, and the card gets shorter for it.
+  const columns = [
+    ["classified", classified, "Classified", "ALL"],
+    ["clear", clear, "Clear", "ALL"],
+    ["unreadable", unreadable, "Unreadable", "PROTECTED"],
+  ];
+  const tallest = Math.max(...columns.map(([, count]) => count), 1);
+  card.innerHTML = `
+    <p class="coverage-lede"><strong>${share}%</strong> classified</p>
+    <div class="col-chart" role="img"
+         aria-label="${columns.map(([, count, label]) => `${count.toLocaleString()} ${label.toLowerCase()}`).join(", ")}">
+      ${columns.map(([kind, count, label, jump]) => `
+        <button type="button" class="col-item plain-btn" data-risk-jump="${jump}" data-kind="${kind}"
+                style="--col-height:${Math.max(14, Math.round((count / tallest) * 100))}%"
+                aria-label="${escapeHtml(label)}, ${count.toLocaleString()} files — open in Findings">
+          <span class="col-value">${count.toLocaleString()}</span>
+          <span class="col-bar"></span>
+          <span class="col-label">${escapeHtml(label)}</span>
+        </button>`).join("")}
+    </div>`;
+}
+
+// ---- Frameworks: their own mark, and the severity of what they cover -----
+const FRAMEWORK_MARKS = {
+  gdpr: { label: "GDPR", glyph: "mk-eu-stars" },
+  pci_dss: { label: "PCI DSS", glyph: "li-credit-card" },
+  nist_sp800_60_enterprise: { label: "NIST SP 800-60", glyph: "li-shield-check" },
+  nist_csf: { label: "NIST CSF", glyph: "li-shield-check" },
+  hipaa: { label: "HIPAA", glyph: "li-plus" },
+  iso27001: { label: "ISO/IEC 27001", glyph: "li-lock" },
+};
+
+function frameworkMark(id) {
+  return FRAMEWORK_MARKS[id] || { label: frameworkLabel(id), glyph: "li-badge-check" };
+}
+
+// Files per framework, split by the file's effective severity. "standard
+// scan" is the absence of a framework and is not a row.
+function frameworkBreakdown() {
+  if (estateFacets) {
+    return (estateFacets.frameworks || [])
+      .map((item) => {
+        const id = String(item.value || "");
+        const severity = item.severity_file_counts || {};
+        return {
+          id,
+          total: Number(item.file_count ?? item.count ?? 0),
+          critical: Number(severity.CRITICAL || 0),
+          high: Number(severity.HIGH || 0),
+          medium: Number(severity.MEDIUM || 0),
+          low: Number(severity.LOW || 0),
+        };
+      })
+      .filter((entry) => entry.id && entry.id !== "standard_scan" && entry.id !== "generic" && entry.total > 0)
+      .sort((left, right) => right.total - left.total);
+  }
+  // The preview array is never an estate metric, even when a report happens
+  // to contain every file. The canonical facet response is the only source.
+  return [];
+}
+
+// Least severe first, so the bar climbs into the risk rather than leading
+// with it. Reading left to right then matches reading the ramp: green, yellow,
+// amber, red.
+const SEVERITY_CLIMB = ["low", "medium", "high", "critical"];
+
+function buildStack(entry) {
+  const present = SEVERITY_CLIMB.filter((sev) => entry[sev]);
+  const segments = present
+    .map((sev) => `<i data-sev="${sev}" style="flex-grow:${entry[sev]}" title="${entry[sev].toLocaleString()} ${sev}"></i>`)
+    .join("");
+  // Colour is never the only channel: the mix is spelled out for a screen
+  // reader and in the row's own title.
+  const legend = present.map((sev) => `${entry[sev].toLocaleString()} ${sev}`).join(", ");
+  return `<span class="stack" role="img" aria-label="${escapeHtml(legend)}">${segments}</span>`;
+}
+
+function renderFrameworksCard() {
+  const card = document.querySelector("#frameworks-card");
+  if (!card) return;
+  const rows = frameworkBreakdown();
+  const maxTotal = Math.max(...rows.map((row) => row.total), 1);
+  setCardMeta("#frameworks-card-meta", rows.length
+    ? `${rows.length} mapped`
+    : "No scan yet");
+  if (!rows.length) {
+    card.innerHTML = '<p class="dash-empty">Framework coverage appears after the first scan.</p>';
+    return;
+  }
+  card.innerHTML = `
+    <div class="dash-rows">
+      ${rows.map((entry) => {
+        const mark = frameworkMark(entry.id);
+        return `
+        <button type="button" class="fw-row plain-btn" data-framework-jump="${escapeHtml(entry.id)}"
+                data-mark="${escapeHtml(entry.id)}"
+                style="--fw-share:${Math.max(18, Math.round(entry.total / maxTotal * 100))}%"
+                aria-label="${escapeHtml(mark.label)}, ${entry.total} files — open in Findings">
+          <span class="mark" data-mark="${escapeHtml(entry.id)}" aria-hidden="true">${glyph(mark.glyph)}</span>
+          <span class="fw-row-name">${escapeHtml(mark.label)}</span>
+          <span class="fw-row-count">${entry.total.toLocaleString()} <small>files</small></span>
+          ${buildStack(entry)}
+        </button>`;
+      }).join("")}
+    </div>`;
+}
+
+// Finding lifecycle figures come from /api/findings, not file-level summary
+// totals. A file can carry several independently owned remediation tasks.
+function renderRemediationLoad() {
+  const metrics = document.querySelector("#remediation-stats");
+  if (!metrics) return;
+  if (remediationLoadError && !remediationSummary) {
+    metrics.innerHTML = '<div><span>Queue</span><strong>—</strong><small>metrics unavailable</small></div>';
+    if (remediationScopeSummary) remediationScopeSummary.textContent = "Finding metrics unavailable";
+    return;
+  }
+  if ((remediationLoading && !remediationLoaded) || !remediationSummary) {
+    metrics.innerHTML = Array.from({ length: 5 }, () =>
+      '<div><span class="skeleton remediation-stat-skeleton" aria-label="Loading"></span></div>').join("");
+    if (remediationScopeSummary) remediationScopeSummary.textContent = "Loading current finding metrics…";
+    return;
+  }
+  const open = Number(remediationSummary.open || 0);
+  const affected = Number(remediationSummary.affected_files || 0);
+  const overdue = Number(remediationSummary.overdue || 0);
+  const shown = remediationFindings.length;
+  const total = Number(remediationPage.total || 0);
+  metrics.innerHTML = `
+    <div><span>Visible</span><strong>${shown.toLocaleString()}</strong><small>of ${total.toLocaleString()} findings</small></div>
+    <div><span>Open</span><strong>${open.toLocaleString()}</strong><small>${affected.toLocaleString()} files affected</small></div>
+    <div><span>In progress</span><strong>${Number(remediationSummary.in_progress || 0).toLocaleString()}</strong><small>${Number(remediationSummary.pending_validation || 0).toLocaleString()} in validation</small></div>
+    <div><span>Overdue</span><strong>${overdue.toLocaleString()}</strong><small>${Math.round((overdue / Math.max(1, open)) * 100)}% of open</small></div>
+    <div><span>Resolved</span><strong>${Number(remediationSummary.resolved || 0).toLocaleString()}</strong><small>${Number(remediationSummary.risk_accepted || 0).toLocaleString()} risk accepted</small></div>
   `;
-
-  executiveHero.innerHTML = `
-    <div class="remediation-score" aria-label="Posture score ${score} out of 100">
-      <strong>${score}</strong>
-      <span>/100</span>
-      <small>${postureLabel}</small>
-    </div>
-    <div class="remediation-summary-copy">
-      <span>Latest assessment</span>
-      <h3>${queueCount ? `${queueCount} items need review` : "No active remediation work"}</h3>
-      <p>${criticalCount || highCount ? `${criticalCount} critical and ${highCount} high-risk files are at the front of the queue.` : "No urgent exposure is present in the current workspace."}</p>
-    </div>
-    <div class="remediation-summary-actions">
-      <button type="button" class="secondary-btn" data-tab-jump="overview">Open inventory</button>
-      <button type="button" data-tab-jump="security">Export controls</button>
-    </div>
-  `;
-
-  riskTotalLabel.textContent = `${summary.total_files || 0} files`;
-  riskDistribution.innerHTML = `<div class="distribution-visual">${buildDonutSvg(distribution)}${buildDistributionBars(distribution)}</div>`;
-  riskHeatmap.innerHTML = buildHeatmap(topFiles.length ? latestFiles : []);
-  signalMatrix.innerHTML = buildSignalMatrix();
-  riskTopology.innerHTML = buildRiskTopology(summary);
-  postureTrend.innerHTML = buildPostureTrend();
-  remediationWorkflow.innerHTML = buildRemediationWorkflow();
-  msspPortfolio.innerHTML = buildMsspPortfolio();
-  priorityRiskFiles.innerHTML = buildPriorityRiskFiles();
-  departmentRisk.innerHTML = buildDepartmentRisk();
-  scanComparison.innerHTML = buildScanComparison();
-  topRiskyFolders.innerHTML = buildTopRiskyFolders();
-  // Duplicate loose priority cards were intentionally hidden; the structured priority queue above is the source of truth.
-  executiveTopFiles.innerHTML = "";
+  const severityCounts = remediationSummary.findings_by_severity || {};
+  remediationSeverityFilters.forEach((button) => {
+    const level = button.dataset.remediationSeverity || "ALL";
+    button.dataset.count = String(level === "ALL"
+      ? Number(remediationSummary.active_findings || total || 0)
+      : Number(severityCounts[level] || 0));
+    button.classList.toggle("active", level === remediationSeverityChoice);
+  });
+  if (remediationScopeSummary) {
+    const scope = remediationStatusLabel(remediationSummary.scope || "current");
+    remediationScopeSummary.textContent = `${scope} scope · ${Number(remediationSummary.active_findings || 0).toLocaleString()} active findings across ${affected.toLocaleString()} affected files`;
+  }
 }
 
 function getCurrentPostureScore(summary = buildCurrentSummary()) {
@@ -5744,22 +6426,38 @@ function buildRiskDistribution(summary) {
   ];
 }
 
+// Severity, worst first. A data class is worth listing with the worst level it
+// has been found at - "Credit card numbers, 25k" says how much, not how bad.
+const SEVERITY_RANK = ["PROTECTED", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
+
+function worstSeverity(a, b) {
+  return SEVERITY_RANK.indexOf(b) > SEVERITY_RANK.indexOf(a) ? b : a;
+}
+
 function buildFindingStats(limit = 6) {
-  const counts = {};
+  const stats = {};
   latestFiles.forEach((file) => {
+    const fileLevel = String(getEffectiveRisk(file).level || "LOW").toUpperCase();
     primaryFindingsForFile(file).forEach((finding) => {
       const name = findingDisplayName(finding);
-      counts[name] = (counts[name] || 0) + Number(finding.count || 1);
+      const level = String(finding.risk || finding.severity || fileLevel).toUpperCase();
+      const entry = stats[name] || { type: name, count: 0, level: "LOW" };
+      entry.count += Number(finding.count || 1);
+      entry.level = worstSeverity(entry.level, level);
+      stats[name] = entry;
     });
     if (hasHashChanged(file)) {
-      counts["Hash changed"] = (counts["Hash changed"] || 0) + 1;
+      const entry = stats["Hash changed"] || { type: "Hash changed", count: 0, level: "LOW" };
+      entry.count += 1;
+      entry.level = worstSeverity(entry.level, fileLevel);
+      stats["Hash changed"] = entry;
     }
   });
 
-  return Object.entries(counts)
-    .map(([type, count]) => ({ type, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, limit);
+  const all = Object.values(stats).sort((a, b) => b.count - a.count);
+  const shown = all.slice(0, limit);
+  shown.total = all.length;
+  return shown;
 }
 
 function buildPostureTrend() {
@@ -5794,44 +6492,792 @@ function buildPostureTrend() {
 }
 
 
-function buildRemediationWorkflow() {
-  const items = latestFiles
-    .filter((file) => ["CRITICAL", "HIGH", "MEDIUM"].includes(getEffectiveRisk(file).level) || isProtectedFile(file))
-    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
-    .slice(0, 12);
+const REMEDIATION_LIFECYCLE_STATUSES = [
+  "NEW", "OPEN", "UNDER_REVIEW", "CONFIRMED", "ASSIGNED", "IN_PROGRESS",
+  "PENDING_VALIDATION", "RESOLVED", "RISK_ACCEPTED", "FALSE_POSITIVE", "SUPPRESSED", "REOPENED",
+];
 
-  if (!items.length) {
-    return '<div class="empty compact">No active remediation queue yet.</div>';
+const REMEDIATION_TERMINAL_STATUSES = new Set(["RESOLVED", "RISK_ACCEPTED", "FALSE_POSITIVE", "SUPPRESSED"]);
+
+function remediationStatus(finding = {}) {
+  const value = String(finding.status || finding.review_status || finding.workflow_status || "OPEN").trim().toUpperCase();
+  if (value === "UNREVIEWED") return "NEW";
+  return REMEDIATION_LIFECYCLE_STATUSES.includes(value) ? value : "OPEN";
+}
+
+function remediationStatusLabel(value = "") {
+  return String(value || "OPEN").toLowerCase().replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function remediationIsTerminal(finding = {}) {
+  return REMEDIATION_TERMINAL_STATUSES.has(remediationStatus(finding));
+}
+
+function remediationSeverity(finding = {}) {
+  const risk = typeof finding.risk === "object" ? finding.risk?.level : finding.risk;
+  const value = String(risk || finding.severity || finding.impact_severity || "LOW").toUpperCase();
+  return ["CRITICAL", "HIGH", "MEDIUM", "LOW"].includes(value) ? value : "LOW";
+}
+
+function remediationRiskScore(finding = {}) {
+  const risk = typeof finding.risk === "object" ? finding.risk?.score : null;
+  const explicit = finding.risk_score ?? finding.operational_priority_score ?? risk;
+  return explicit === undefined || explicit === null ? severityScore(remediationSeverity(finding)) : clampScore(explicit);
+}
+
+function remediationFileContext(finding = {}) {
+  const path = String(finding.file?.path || finding.path || "");
+  const findingId = String(finding.finding_id || "");
+  return latestFiles.find((file) => {
+    if (path && String(file.path || "") === path) return true;
+    return findingId && (file.findings || []).some((item) => String(item.finding_id || "") === findingId);
+  }) || {};
+}
+
+function remediationFileName(finding = {}) {
+  const path = String(finding.file?.name || finding.file?.path || finding.path || "");
+  return path.split(/[\\/]/).filter(Boolean).at(-1) || "Unknown file";
+}
+
+function remediationAsset(finding = {}) {
+  const file = remediationFileContext(finding);
+  return String(
+    finding.affected_asset || finding.asset_name || finding.resource_name || file.host_id || file.server || file.share
+      || finding.asset_id || finding.file?.source || file.source || "Unknown asset"
+  );
+}
+
+function remediationDataType(finding = {}) {
+  const domain = String(finding.classification_domain || "").toLowerCase();
+  if (domain === "secrets" || domain.includes("credential")) return "Credential";
+  const raw = finding.data_type || finding.data_element || finding.personal_data_type
+    || finding.finding_category || finding.data_category || finding.category || finding.entity_type || "Unclassified";
+  return remediationHumanize(raw);
+}
+
+function remediationHumanize(value = "") {
+  const text = String(value || "").replaceAll("_", " ").replace(/\s+/g, " ").trim().toLowerCase();
+  return text ? text.replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Unknown";
+}
+
+function remediationExposure(finding = {}) {
+  const file = remediationFileContext(finding);
+  const state = finding.exposure || finding.exposure_state;
+  if (state && String(state).toUpperCase() !== "UNKNOWN") return remediationHumanize(state);
+  return findingExposureText(file, finding);
+}
+
+function remediationFrameworkValues(finding = {}) {
+  const frameworks = allFindingFrameworks(finding).filter((value) => value && value !== "generic");
+  return frameworks.length ? frameworks : [normalizeFrameworkId(finding.framework || "generic")];
+}
+
+function remediationFrameworkText(finding = {}) {
+  const frameworks = remediationFrameworkValues(finding);
+  if (!frameworks.length || frameworks.every((value) => value === "generic")) return "Unmapped";
+  return frameworks.map(frameworkLabel).join(", ");
+}
+
+function remediationSla(finding = {}) {
+  if (remediationIsTerminal(finding)) return { category: "CLOSED", label: "—", detail: "Closed" };
+  const due = String(finding.sla_due || finding.due_date || "").trim();
+  const dueMs = Date.parse(due);
+  if (!due || Number.isNaN(dueMs)) {
+    const file = remediationFileContext(finding);
+    const fallback = String(finding.sla || file.risk?.remediation?.sla || "").trim();
+    return fallback
+      ? { category: "ON_TRACK", label: fallback, detail: "Target" }
+      : { category: "NO_SLA", label: "—", detail: "No SLA" };
   }
+  const remainingHours = (dueMs - Date.now()) / 3600000;
+  const absoluteHours = Math.max(1, Math.round(Math.abs(remainingHours)));
+  const short = absoluteHours >= 48 ? `${Math.ceil(absoluteHours / 24)}d` : `${absoluteHours}h`;
+  if (remainingHours < 0) return { category: "OVERDUE", label: short, detail: "overdue", due };
+  if (remainingHours <= 24) return { category: "DUE_SOON", label: short, detail: "remaining", due };
+  return { category: "ON_TRACK", label: short, detail: "remaining", due };
+}
 
+function remediationOwner(finding = {}) {
+  return String(finding.owner || finding.assignee || finding.data_owner || "Unassigned");
+}
+
+function remediationSelectOptions(select, placeholder, values, labeler = (value) => value) {
+  if (!select) return;
+  const selected = select.value || "ALL";
+  select.innerHTML = `<option value="ALL">${escapeHtml(placeholder)}</option>${values.map((value) =>
+    `<option value="${escapeHtml(value)}">${escapeHtml(labeler(value))}</option>`).join("")}`;
+  select.value = values.includes(selected) ? selected : "ALL";
+}
+
+function remediationFacetValues(name) {
+  return (remediationFacets?.[name] || []).map((item) => String(item.value || "")).filter(Boolean);
+}
+
+function renderRemediationStatusOptions() {
+  if (!remediationStatusFilter) return;
+  const selected = remediationStatusFilter.value || "active";
+  const groups = [
+    ["active", "Active findings"], ["open", "Open group"], ["in_progress", "In progress group"],
+    ["validation", "Validation group"], ["resolved", "Resolved group"], ["exceptions", "Exceptions"], ["all", "All statuses"],
+  ];
+  remediationStatusFilter.innerHTML = `
+    <optgroup label="Workflow groups">${groups.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</optgroup>
+    <optgroup label="Lifecycle status">${REMEDIATION_LIFECYCLE_STATUSES.map((value) => `<option value="${value}">${escapeHtml(remediationStatusLabel(value))}</option>`).join("")}</optgroup>`;
+  remediationStatusFilter.value = [...groups.map(([value]) => value), ...REMEDIATION_LIFECYCLE_STATUSES].includes(selected) ? selected : "active";
+}
+
+function renderRemediationFilterOptions() {
+  renderRemediationStatusOptions();
+  remediationSelectOptions(remediationOwnerFilter, "Owner", remediationFacetValues("owners"), (value) => value === "__unassigned__" ? "Unassigned" : value);
+  remediationSelectOptions(remediationFrameworkFilter, "Framework", remediationFacetValues("frameworks"), frameworkLabel);
+  remediationSelectOptions(remediationDataFilter, "Data type", remediationFacetValues("data_types"), remediationHumanize);
+  remediationSelectOptions(remediationAssetFilter, "Asset", remediationFacetValues("assets"));
+}
+
+function remediationBadge(finding = {}) {
+  const severity = remediationSeverity(finding);
+  return `<span class="badge badge-sm badge-soft remediation-badge remediation-severity" data-severity="${severity}">${remediationStatusLabel(severity)}</span>`;
+}
+
+function remediationStatusBadge(finding = {}) {
+  const status = remediationStatus(finding);
+  return `<span class="badge badge-sm badge-soft remediation-badge remediation-status" data-status="${status}">${escapeHtml(remediationStatusLabel(status))}</span>`;
+}
+
+function remediationSlaMarkup(finding = {}) {
+  const sla = remediationSla(finding);
+  return `<span class="remediation-sla" data-sla="${escapeHtml(sla.category)}"><span>${escapeHtml(sla.label)}</span><small>${escapeHtml(sla.detail)}</small></span>`;
+}
+
+function remediationActionSet(finding = {}) {
+  const status = remediationStatus(finding);
+  let actions = [];
+  if (["NEW", "OPEN", "UNDER_REVIEW"].includes(status)) actions = ["assign", "confirm"];
+  if (status === "CONFIRMED") actions = finding.validated_at ? ["resolve"] : ["assign"];
+  if (status === "ASSIGNED") actions = ["start"];
+  if (status === "IN_PROGRESS") actions = ["request_validation"];
+  if (status === "PENDING_VALIDATION") actions = ["validate"];
+  if (status === "REOPENED") actions = ["assign", "confirm"];
+  if (REMEDIATION_TERMINAL_STATUSES.has(status)) return ["reopen"];
+  return [...actions, "risk_acceptance", "false_positive", "suppress"];
+}
+
+function remediationActionLabel(action = "") {
+  return {
+    view: "View details", assign: "Assign", confirm: "Confirm finding", start: "Start remediation",
+    request_validation: "Request validation", validate: "Validate evidence", resolve: "Resolve",
+    risk_acceptance: "Accept risk", false_positive: "Mark false positive", suppress: "Suppress", reopen: "Reopen",
+  }[action] || remediationStatusLabel(action);
+}
+
+function remediationActionMenu(finding = {}) {
+  const findingId = escapeHtml(finding.finding_id || "");
+  const actions = remediationCanManage(finding) ? remediationActionSet(finding) : [];
+  const primary = actions.filter((action) => !["risk_acceptance", "false_positive", "suppress"].includes(action));
+  const exceptions = actions.filter((action) => ["risk_acceptance", "false_positive", "suppress"].includes(action));
   return `
-    <div class="scroll-card-list remediation-list remediation-queue">
-      ${items.map((file, index) => {
-        const risk = getEffectiveRisk(file);
-        const remediation = file.risk?.remediation || {};
-        const actions = remediation.actions || ["Validate business ownership"];
-        const findingCount = (file.findings || []).length;
-        const owner = remediation.owner || inferDepartment(file) || "Data owner";
-        const ticket = remediation.ticket || `DSPM-${String(index + 1).padStart(4, "0")}`;
-        const sla = remediation.sla || (risk.level === "CRITICAL" ? "24 hours" : risk.level === "HIGH" ? "3 business days" : "14 days");
-        return `
-          <article class="remediation-item remediation-row compact-risk-card ${risk.level}">
-            <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
-            <div class="remediation-file">
-              <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
-              <span title="${escapeHtml(file.path || "")}">${escapeHtml(file.path || file.source || "Workspace")}</span>
-              <small>${escapeHtml(ticket)} &middot; ${findingCount} finding${findingCount === 1 ? "" : "s"}</small>
-            </div>
-            <div class="remediation-assignment">
-              <span>${escapeHtml(owner)}</span>
-              <small>SLA ${escapeHtml(sla)}</small>
-              <strong>${escapeHtml(actions[0])}</strong>
-            </div>
-          </article>
-        `;
-      }).join("")}
+    <details class="dropdown dropdown-end remediation-queue-menu">
+      <summary class="btn btn-sm btn-square btn-ghost remediation-more-button" aria-label="Actions for ${escapeHtml(findingDisplayName(finding))}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
+      </summary>
+      <div class="dropdown-content">
+        <button type="button" data-remediation-open="${findingId}">View details</button>
+        ${primary.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}
+        ${exceptions.length ? `<hr />${exceptions.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}` : ""}
+      </div>
+    </details>`;
+}
+
+// Only the columns the API can actually order by are clickable, so a header
+// never offers a sort the queue cannot perform.
+const REMEDIATION_SORT_LABELS = {
+  severity: "severity",
+  finding_name: "finding name",
+  status: "status",
+  sla_due: "SLA date",
+  risk_score: "risk score",
+};
+
+function remediationHeadCell(key, label, className = "") {
+  const active = remediationSortKey === key;
+  const sort = active ? (remediationSortDirection === "asc" ? "ascending" : "descending") : "none";
+  return `<th scope="col" class="inv-sortable${active ? " is-sorted" : ""}${className ? ` ${className}` : ""}"
+    data-remediation-sort="${key}" aria-sort="${sort}" tabindex="0" role="columnheader"
+    title="Sort the queue by ${escapeHtml(REMEDIATION_SORT_LABELS[key] || label)}">${escapeHtml(label)}<span class="inv-sort-ind" aria-hidden="true"></span></th>`;
+}
+
+function applyRemediationSort(key) {
+  if (!REMEDIATION_SORT_LABELS[key]) return;
+  if (remediationSortKey === key) {
+    remediationSortDirection = remediationSortDirection === "asc" ? "desc" : "asc";
+  } else {
+    remediationSortKey = key;
+    // Severity, risk and SLA are worst-first questions; a name is not.
+    remediationSortDirection = key === "finding_name" || key === "status" ? "asc" : "desc";
+  }
+  loadRemediationFindings({ resetPage: true }).catch(() => {});
+}
+
+document.addEventListener("click", (event) => {
+  const th = event.target.closest?.(".remediation-table th[data-remediation-sort]");
+  if (th) applyRemediationSort(th.dataset.remediationSort);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const th = event.target.closest?.(".remediation-table th[data-remediation-sort]");
+  if (!th) return;
+  event.preventDefault();
+  applyRemediationSort(th.dataset.remediationSort);
+});
+
+// Findings is paginated, so the row may not be on the page that is loaded.
+// Search for the path first, then open the row's own detail once it lands -
+// and if it never does, the reader is still on the right search.
+function openFileInInventory(path) {
+  const wanted = String(path || "").trim();
+  if (!wanted) return;
+  switchTab("findings");
+  if (!filterInput) return;
+  filterInput.value = wanted;
+  lastInventoryQuery = "";
+  filterInput.dispatchEvent(new Event("input", { bubbles: true }));
+  let tries = 0;
+  const open = () => {
+    const row = [...document.querySelectorAll("#results-body [data-inventory-expand]")]
+      .find((button) => String(button.dataset.inventoryExpand || "").endsWith(wanted));
+    if (row) {
+      row.click();
+      return;
+    }
+    if (++tries < 12) window.setTimeout(open, 250);
+  };
+  window.setTimeout(open, 400);
+}
+
+function remediationTableMarkup(rows = []) {
+  return `
+    <div class="table-wrap inventory-table-wrap remediation-table-wrap">
+      <table class="remediation-table" aria-label="Remediation findings">
+        <thead><tr>${remediationHeadCell("severity", "Severity")}${remediationHeadCell("finding_name", "Finding")}<th scope="col" class="remediation-col-data">Data type</th><th scope="col">Affected asset</th>${remediationHeadCell("risk_score", "Exposure / risk", "remediation-col-exposure")}<th scope="col" class="remediation-col-owner">Owner</th>${remediationHeadCell("status", "Status")}${remediationHeadCell("sla_due", "SLA")}<th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody>${rows.map((finding) => {
+          const findingId = escapeHtml(finding.finding_id || "");
+          const filePath = String(finding.file?.path || "");
+          return `<tr data-remediation-finding="${findingId}" data-remediation-file="${escapeHtml(filePath)}"
+            class="${selectedRemediationFindingId === finding.finding_id ? "is-selected" : ""}">
+            <td>${remediationBadge(finding)}</td>
+            <td><button type="button" class="remediation-row-button plain-btn" data-remediation-open="${findingId}"><strong>${escapeHtml(findingDisplayName(finding))}</strong><span title="${escapeHtml(filePath)}">${escapeHtml(remediationFileName(finding))}</span></button></td>
+            <td class="remediation-col-data" title="${escapeHtml(remediationDataType(finding))}">${escapeHtml(remediationDataType(finding))}</td>
+            <td><span class="remediation-asset-name" title="${escapeHtml(remediationAsset(finding))}">${escapeHtml(remediationAsset(finding))}</span></td>
+            <td class="remediation-col-exposure"><span class="remediation-exposure" title="${escapeHtml(remediationExposure(finding))}">${escapeHtml(remediationExposure(finding))}</span><span class="remediation-cell-secondary">Risk ${remediationRiskScore(finding)}</span></td>
+            <td class="remediation-col-owner" title="${escapeHtml(remediationOwner(finding))}">${escapeHtml(remediationOwner(finding))}</td>
+            <td>${remediationStatusBadge(finding)}</td><td>${remediationSlaMarkup(finding)}</td><td>${remediationActionMenu(finding)}</td>
+          </tr>`;
+        }).join("")}</tbody>
+      </table>
     </div>
-  `;
+    <div class="remediation-mobile-list" aria-label="Remediation findings">
+      ${rows.map((finding) => `<button type="button" class="remediation-mobile-card plain-btn" data-remediation-open="${escapeHtml(finding.finding_id || "")}">
+        ${remediationBadge(finding)}<span class="remediation-mobile-card-copy"><strong>${escapeHtml(findingDisplayName(finding))}</strong><span>${escapeHtml(remediationAsset(finding))} · ${escapeHtml(remediationFileName(finding))}</span></span>
+        <span aria-hidden="true">›</span><span class="remediation-mobile-meta">${remediationStatusBadge(finding)}${remediationSlaMarkup(finding)}</span>
+      </button>`).join("")}
+    </div>`;
+}
+
+function remediationLoadingMarkup() {
+  const row = `<tr class="remediation-skeleton-row" aria-hidden="true">${["short", "wide", "mid", "mid", "wide", "mid", "mid", "short", "short"].map((width) => `<td><div class="skeleton skeleton-${width}"></div></td>`).join("")}</tr>`;
+  return `<div class="table-wrap inventory-table-wrap remediation-table-wrap"><table class="remediation-table"><thead><tr><th>Severity</th><th>Finding</th><th>Data type</th><th>Asset</th><th>Exposure / risk</th><th>Owner</th><th>Status</th><th>SLA</th><th></th></tr></thead><tbody>${row.repeat(7)}</tbody></table></div>`;
+}
+
+function remediationEmptyMarkup(filtered = false) {
+  const title = filtered ? "No findings match these filters" : "No active remediation tasks";
+  const copy = filtered
+    ? "Reset one or more filters to broaden the remediation queue."
+    : "All discovered findings are currently resolved, accepted, suppressed, or awaiting new scan results.";
+  return `<div class="table-wrap inventory-table-wrap remediation-empty-state"><div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h5l2 3h4l2-3h5"/><path d="M5 5h14l2 7v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-6z"/></svg><strong>${title}</strong><p>${copy}</p>${filtered ? '<button type="button" class="secondary-btn mini-btn" data-remediation-reset>Clear filters</button>' : ""}</div></div>`;
+}
+
+function remediationHasNonDefaultFilters() {
+  return Boolean(String(remediationSearch?.value || "").trim())
+    || (remediationScopeFilter?.value || "current") !== "current"
+    || (remediationStatusFilter?.value || "active") !== "active"
+    || remediationSeverityChoice !== "ALL"
+    || [remediationOwnerFilter, remediationFrameworkFilter,
+      remediationDataFilter, remediationAssetFilter, remediationSlaFilter]
+      .some((element) => element && element.value !== "ALL");
+}
+
+function remediationPaginationMarkup() {
+  const total = Number(remediationPage.total || 0);
+  if (!total) return "";
+  const first = remediationPage.pageIndex * REMEDIATION_PAGE_SIZE + 1;
+  const last = first + remediationFindings.length - 1;
+  const pages = Math.max(1, Math.ceil(total / REMEDIATION_PAGE_SIZE));
+  return `<nav class="remediation-pagination" aria-label="Remediation result pages">
+    <span>Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${total.toLocaleString()} findings</span>
+    <div class="remediation-page-controls">
+      <button type="button" class="secondary-btn mini-btn" data-remediation-page="previous" ${remediationPage.pageIndex === 0 ? "disabled" : ""}>Previous</button>
+      <span class="remediation-page-number" aria-current="page">Page ${(remediationPage.pageIndex + 1).toLocaleString()} of ${pages.toLocaleString()}</span>
+      <button type="button" class="secondary-btn mini-btn" data-remediation-page="next" ${!remediationPage.hasMore ? "disabled" : ""}>Next</button>
+    </div>
+  </nav>`;
+}
+
+function renderRemediationWorkspace() {
+  if (!remediationWorkflow) return;
+  renderRemediationLoad();
+  if (remediationError) remediationError.hidden = !remediationLoadError;
+  if (remediationLoading && !remediationLoaded) {
+    remediationWorkflow.innerHTML = remediationLoadingMarkup();
+    if (remediationResultCount) remediationResultCount.textContent = "Loading findings…";
+    return;
+  }
+  renderRemediationFilterOptions();
+  if (remediationLoadError && !remediationLoaded) {
+    remediationWorkflow.innerHTML = "";
+    if (remediationResultCount) remediationResultCount.textContent = "Findings unavailable";
+    return;
+  }
+  if (remediationResultCount) remediationResultCount.textContent = `${Number(remediationPage.total || 0).toLocaleString()} matching findings`;
+  remediationWorkflow.innerHTML = remediationFindings.length
+    ? `${remediationTableMarkup(remediationFindings)}${remediationPaginationMarkup()}`
+    : remediationEmptyMarkup(remediationHasNonDefaultFilters());
+}
+
+function resetRemediationPage() {
+  remediationPage = { total: 0, hasMore: false, nextCursor: "", pageIndex: 0, pageStarts: [""] };
+}
+
+function remediationQueryParams() {
+  const params = new URLSearchParams({
+    scope: remediationScopeFilter?.value || "current",
+    status: remediationStatusFilter?.value || "active",
+    limit: String(REMEDIATION_PAGE_SIZE),
+  });
+  const filters = [
+    ["owner", remediationOwnerFilter],
+    ["framework", remediationFrameworkFilter], ["data_type", remediationDataFilter],
+    ["asset", remediationAssetFilter], ["sla", remediationSlaFilter],
+  ];
+  filters.forEach(([name, element]) => {
+    if (element?.value && element.value !== "ALL") params.set(name, element.value);
+  });
+  if (remediationSeverityChoice !== "ALL") params.set("severity", remediationSeverityChoice);
+  const query = String(remediationSearch?.value || "").trim();
+  if (query) params.set("q", query);
+  params.set("sort", remediationSortKey);
+  params.set("direction", remediationSortDirection);
+  const cursor = remediationPage.pageStarts[remediationPage.pageIndex] || "";
+  if (cursor) params.set("after", cursor);
+  return params;
+}
+
+async function loadRemediationFindings({ showLoading = true, resetPage = false } = {}) {
+  if (!remediationWorkflow) return;
+  if (resetPage) resetRemediationPage();
+  if (!accessToken) {
+    remediationFindings = [];
+    remediationSummary = null;
+    remediationFacets = {};
+    resetRemediationPage();
+    remediationLoaded = true;
+    remediationLoading = false;
+    remediationLoadError = "";
+    renderRemediationWorkspace();
+    return;
+  }
+  const context = captureTenantContext();
+  const requestId = ++remediationListRequest;
+  remediationListAbortController?.abort();
+  remediationListAbortController = new AbortController();
+  if (showLoading && !remediationLoaded) remediationLoading = true;
+  remediationLoadError = "";
+  renderRemediationWorkspace();
+  try {
+    const data = await api(`/api/findings?${remediationQueryParams()}`, null, "GET", { signal: remediationListAbortController.signal });
+    if (!isCurrentTenantContext(context) || requestId !== remediationListRequest) return;
+    remediationFindings = Array.isArray(data?.items) ? data.items : [];
+    remediationSummary = data?.summary || null;
+    remediationFacets = data?.facets || {};
+    remediationPage.total = Number(data?.total || 0);
+    remediationPage.hasMore = Boolean(data?.has_more);
+    remediationPage.nextCursor = String(data?.next_cursor || "");
+    remediationLoaded = true;
+    remediationLoading = false;
+    renderRemediationWorkspace();
+  } catch (error) {
+    if (!isCurrentTenantContext(context) || requestId !== remediationListRequest) return;
+    if (error?.name === "AbortError") return;
+    remediationLoading = false;
+    remediationLoadError = error.message || "Unable to load findings";
+    renderRemediationWorkspace();
+  }
+}
+
+function remediationDrawerLoadingMarkup() {
+  return `<div class="remediation-drawer-loading" aria-label="Loading finding details"><div class="skeleton skeleton-title"></div><div class="skeleton skeleton-short"></div>${Array.from({ length: 9 }, () => '<div class="skeleton skeleton-copy"></div>').join("")}</div>`;
+}
+
+function remediationFormatDate(value = "", { dateOnly = false } = {}) {
+  const parsed = new Date(value);
+  if (!value || Number.isNaN(parsed.getTime())) return "Not available";
+  return new Intl.DateTimeFormat(undefined, dateOnly
+    ? { year: "numeric", month: "short", day: "2-digit" }
+    : { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(parsed);
+}
+
+function remediationRecommendations(finding = {}) {
+  const file = remediationFileContext(finding);
+  const values = [];
+  const add = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach(add);
+      return;
+    }
+    if (typeof value === "object") {
+      add(value.actions || value.steps || value.recommendations);
+      return;
+    }
+    const text = String(value).trim();
+    if (text) values.push(text);
+  };
+  add(finding.remediation);
+  add(finding.recommendations);
+  add(finding.dlp_recommendations);
+  add(file.risk?.remediation);
+  add(file.risk?.dlp_recommendations);
+  return [...new Set(values)].slice(0, 8);
+}
+
+function remediationRiskFactors(finding = {}) {
+  const file = remediationFileContext(finding);
+  const values = [];
+  const add = (value) => {
+    if (Array.isArray(value)) value.forEach(add);
+    else if (value) values.push(String(value).trim());
+  };
+  add(finding.risk_factors);
+  add(finding.reasons);
+  add(file.risk?.reasons);
+  return [...new Set(values.filter(Boolean))].slice(0, 5);
+}
+
+function remediationOverviewItem(label, value, wide = false, title = "") {
+  return `<div class="remediation-overview-item ${wide ? "remediation-overview-wide" : ""}"><span>${escapeHtml(label)}</span><strong${title ? ` title="${escapeHtml(title)}"` : ""}>${escapeHtml(value || "Not available")}</strong></div>`;
+}
+
+function remediationWorkflowStage(finding = {}) {
+  const status = remediationStatus(finding);
+  if (status === "RESOLVED") return 4;
+  if (status === "PENDING_VALIDATION" || finding.validated_at) return 3;
+  if (status === "IN_PROGRESS") return 2;
+  if (status === "ASSIGNED") return 1;
+  return 0;
+}
+
+function remediationWorkflowMarkup(finding = {}) {
+  const stage = remediationWorkflowStage(finding);
+  const labels = ["Triage", "Assigned", "Remediation", "Validation", "Resolved"];
+  return `<ul class="steps steps-horizontal remediation-workflow-steps" aria-label="Remediation workflow">${labels.map((label, index) => `<li class="step ${index <= stage ? "step-primary" : ""}">${label}</li>`).join("")}</ul>`;
+}
+
+function remediationHistory(finding = {}) {
+  const items = Array.isArray(finding.__history) ? finding.__history : (finding.status_history || finding.history || []);
+  return [...items].sort((left, right) => Date.parse(left.timestamp || left.created_at || "") - Date.parse(right.timestamp || right.created_at || ""));
+}
+
+function remediationActivityLabel(event = {}) {
+  const action = String(event.action || "status updated").replaceAll("_", " ").replaceAll("-", " ");
+  const labels = {
+    assign: "Assigned", comment: "Comment added", suppress: "Finding suppressed", "false positive": "Marked false positive",
+    "risk acceptance": "Risk accepted", resolve: "Finding resolved", reopen: "Finding reopened", validate: "Validation recorded",
+    status: `Status changed to ${remediationStatusLabel(event.status || "")}`,
+  };
+  return labels[action] || remediationHumanize(action);
+}
+
+function remediationActivityMarkup(finding = {}) {
+  const events = remediationHistory(finding);
+  if (!events.length) return '<p>No lifecycle activity has been recorded for this finding yet.</p>';
+  return `<ol class="remediation-activity-list">${events.map((event) => {
+    const timestamp = event.timestamp || event.created_at || "";
+    const actor = event.actor || event.user || "";
+    return `<li class="remediation-activity-item"><time class="remediation-activity-time" datetime="${escapeHtml(timestamp)}">${escapeHtml(remediationFormatDate(timestamp))}</time><span class="remediation-activity-copy"><strong>${escapeHtml(remediationActivityLabel(event))}</strong>${actor ? `<span>${escapeHtml(actor)}</span>` : ""}${event.comment ? `<span>${escapeHtml(event.comment)}</span>` : ""}</span></li>`;
+  }).join("")}</ol>`;
+}
+
+function remediationValidationMarkup(finding = {}) {
+  const status = remediationStatus(finding);
+  if (status !== "PENDING_VALIDATION" && !finding.validated_at) return "";
+  const occurrences = Math.max(Array.isArray(finding.__occurrences) ? finding.__occurrences.length : 0, findingOccurrenceCount(finding));
+  const history = remediationHistory(finding);
+  const lastActivity = [...history].reverse().find((event) => ["start", "request_validation", "status"].includes(String(event.action || "")));
+  const lastScan = finding.last_seen || remediationFileContext(finding).last_scanned_at || latestReport?.timestamp || "";
+  const pending = status === "PENDING_VALIDATION";
+  return `<section class="remediation-drawer-section"><div class="remediation-validation-panel">
+    <div class="remediation-section-head"><h4>${pending ? "Validation required" : "Validation recorded"}</h4>${pending ? '<span class="badge badge-sm badge-soft remediation-badge remediation-status" data-status="PENDING_VALIDATION">Pending</span>' : ""}</div>
+    <p>${pending ? "Review current occurrence evidence before recording validation. This action does not trigger a new scan." : `Validated by ${escapeHtml(finding.validator || "an analyst")}.`}</p>
+    <div class="remediation-validation-meta">
+      <div><span>Last remediation activity</span><strong>${escapeHtml(remediationFormatDate(lastActivity?.timestamp || lastActivity?.created_at || ""))}</strong></div>
+      <div><span>Last scan</span><strong>${escapeHtml(remediationFormatDate(lastScan))}</strong></div>
+      <div><span>Current occurrences</span><strong>${occurrences.toLocaleString()}</strong></div>
+      <div><span>Validated</span><strong>${escapeHtml(remediationFormatDate(finding.validated_at || ""))}</strong></div>
+    </div>
+    ${pending && remediationCanManage(finding) ? `<button type="button" class="btn btn-sm" data-remediation-action="validate" data-finding-id="${escapeHtml(finding.finding_id || "")}">Validate current evidence</button>` : ""}
+  </div></section>`;
+}
+
+function remediationCanManage(finding = null) {
+  return (currentRole === "admin" || currentRole === "analyst") && finding?.scope !== "historical";
+}
+
+function remediationDrawerActions(finding = {}) {
+  if (!remediationCanManage(finding)) {
+    const message = finding.scope === "historical" ? "Historical finding · workflow actions are read-only" : "Viewer access · workflow actions are read-only";
+    return `<div class="remediation-drawer-actions"><span class="remediation-cell-secondary">${message}</span></div>`;
+  }
+  const actions = remediationActionSet(finding);
+  const main = actions.filter((action) => !["risk_acceptance", "false_positive", "suppress"].includes(action));
+  const exceptions = actions.filter((action) => ["risk_acceptance", "false_positive", "suppress"].includes(action));
+  const findingId = escapeHtml(finding.finding_id || "");
+  return `<div class="remediation-drawer-actions">
+    ${main.map((action, index) => `<button type="button" class="btn btn-sm ${index === 0 ? "btn-primary" : ""}" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}
+    ${exceptions.length ? `<details class="dropdown dropdown-end remediation-queue-menu"><summary class="btn btn-sm">More</summary><div class="dropdown-content">${exceptions.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}</div></details>` : ""}
+  </div>`;
+}
+
+function renderRemediationDrawer(finding = selectedRemediationFinding) {
+  if (!remediationDrawerBody || !finding) return;
+  const file = remediationFileContext(finding);
+  const path = String(finding.file?.path || file.path || "Not available");
+  const severity = remediationSeverity(finding);
+  const status = remediationStatus(finding);
+  const sla = remediationSla(finding);
+  const occurrences = Math.max(Array.isArray(finding.__occurrences) ? finding.__occurrences.length : 0, findingOccurrenceCount(finding));
+  const recommendations = remediationRecommendations(finding);
+  const factors = remediationRiskFactors(finding);
+  const due = finding.sla_due || finding.due_date || "";
+  const reason = finding.risk_reason || finding.explanation || finding.description || "No risk explanation is available for this finding.";
+  remediationDrawerBody.innerHTML = `
+    <header class="remediation-drawer-head">
+      <div class="remediation-drawer-headline">${remediationBadge(finding)}<span class="remediation-finding-id" title="${escapeHtml(finding.finding_id || "")}">Finding ID: ${escapeHtml(finding.finding_id || "Not available")}</span></div>
+      <div class="remediation-drawer-title-row"><h3 id="remediation-drawer-title">${escapeHtml(findingDisplayName(finding))}</h3><label for="remediation-drawer-toggle" class="btn btn-sm btn-circle btn-ghost remediation-drawer-close" aria-label="Close finding details">×</label></div>
+      <div class="remediation-drawer-score-row"><span>Risk score <strong>${remediationRiskScore(finding)} / 100</strong></span>${remediationStatusBadge(finding)}</div>
+    </header>
+    <div class="remediation-drawer-content">
+      <section class="remediation-drawer-section"><h4>Overview</h4><div class="remediation-overview-grid">
+        ${remediationOverviewItem("Affected asset", remediationAsset(finding))}${remediationOverviewItem("File", remediationFileName(finding))}
+        ${remediationOverviewItem("Full path", path, true, path)}${remediationOverviewItem("Data type", remediationDataType(finding))}
+        ${remediationOverviewItem("Finding type", finding.technical_type || finding.type || finding.rule_id || "Not available")}
+        ${remediationOverviewItem("Occurrences", occurrences.toLocaleString())}${remediationOverviewItem("Confidence", findingConfidenceLabel(finding))}
+        ${remediationOverviewItem("Exposure", remediationExposure(finding))}${remediationOverviewItem("Framework", remediationFrameworkText(finding))}
+        ${remediationOverviewItem("Last detected", remediationFormatDate(finding.last_seen || file.last_scanned_at || ""), true)}
+      </div></section>
+      <section class="remediation-drawer-section"><h4>Why this matters</h4><p>${escapeHtml(reason)}</p>${factors.length ? `<ul class="remediation-risk-list">${factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}</section>
+      <section class="remediation-drawer-section remediation-recommendation"><h4>Recommended remediation</h4>${recommendations.length ? `<ol class="remediation-recommendation-list">${recommendations.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>` : '<p>No recommendation is available for this finding.</p>'}</section>
+      <section class="remediation-drawer-section"><h4>Workflow progress</h4>${remediationWorkflowMarkup(finding)}</section>
+      <section class="remediation-drawer-section"><h4>Ownership</h4><div class="remediation-owner-grid">
+        <div class="remediation-owner-item"><span>Assigned owner</span><strong>${escapeHtml(remediationOwner(finding))}</strong></div>
+        ${finding.team ? `<div class="remediation-owner-item"><span>Team</span><strong>${escapeHtml(finding.team)}</strong></div>` : ""}
+        <div class="remediation-owner-item"><span>Due date</span><strong>${escapeHtml(remediationFormatDate(due, { dateOnly: true }))}</strong></div>
+        <div class="remediation-owner-item" data-overdue="${sla.category === "OVERDUE"}"><span>SLA</span><strong>${escapeHtml(sla.category === "OVERDUE" ? `Overdue by ${sla.label}` : `${sla.label} ${sla.detail}`)}</strong></div>
+      </div></section>
+      ${remediationValidationMarkup(finding)}
+      <section class="remediation-drawer-section"><div class="remediation-section-head"><h4>Activity</h4><span class="remediation-cell-secondary">${remediationHistory(finding).length} events</span></div>${remediationActivityMarkup(finding)}
+        ${remediationCanManage(finding) ? `<form class="remediation-comment-form" data-remediation-comment-form><input class="input input-sm" name="comment" maxlength="1000" required placeholder="Add comment…" aria-label="Add comment" /><button type="submit" class="btn btn-sm">Send</button></form>` : ""}
+      </section>
+    </div>${remediationDrawerActions(finding)}`;
+}
+
+async function openRemediationFinding(findingId, { openDrawer = true } = {}) {
+  const finding = remediationFindings.find((item) => String(item.finding_id || "") === String(findingId || ""));
+  if (!finding || !remediationDrawerBody) return;
+  selectedRemediationFindingId = finding.finding_id;
+  selectedRemediationFinding = finding;
+  if (openDrawer && remediationDrawerToggle) remediationDrawerToggle.checked = true;
+  remediationDrawerBody.innerHTML = remediationDrawerLoadingMarkup();
+  renderRemediationWorkspace();
+  const context = captureTenantContext();
+  const requestId = ++remediationDetailRequest;
+  const encodedId = encodeURIComponent(finding.finding_id);
+  try {
+    const [detail, history, occurrences] = await Promise.all([
+      api(`/api/findings/${encodedId}`, null, "GET"),
+      api(`/api/findings/${encodedId}/history`, null, "GET").catch(() => ({ history: finding.status_history || [] })),
+      api(`/api/findings/${encodedId}/occurrences`, null, "GET").catch(() => ({ occurrences: finding.occurrences || [] })),
+    ]);
+    if (!isCurrentTenantContext(context) || requestId !== remediationDetailRequest) return;
+    selectedRemediationFinding = {
+      ...finding,
+      ...(detail?.finding || {}),
+      __detail: detail?.detail || {},
+      __history: history?.history || [],
+      __occurrences: occurrences?.occurrences || [],
+    };
+    renderRemediationDrawer(selectedRemediationFinding);
+  } catch (error) {
+    if (!isCurrentTenantContext(context) || requestId !== remediationDetailRequest) return;
+    remediationDrawerBody.innerHTML = `<div class="remediation-drawer-empty"><strong>Unable to load finding details</strong><span>Please try again.</span><button type="button" class="btn btn-sm" data-remediation-open="${escapeHtml(finding.finding_id)}">Retry</button></div>`;
+  }
+}
+
+function remediationFindingById(findingId = "") {
+  if (selectedRemediationFinding?.finding_id === findingId) return selectedRemediationFinding;
+  return remediationFindings.find((finding) => finding.finding_id === findingId) || null;
+}
+
+function remediationTomorrow() {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function remediationShowModal(modal) {
+  if (!modal) return;
+  modal.querySelectorAll("[data-remediation-modal-error]").forEach((element) => { element.textContent = ""; });
+  if (typeof modal.showModal === "function") modal.showModal();
+  else modal.classList.add("modal-open");
+}
+
+function closeRemediationModal(modal) {
+  if (!modal) return;
+  if (typeof modal.close === "function") modal.close();
+  else modal.classList.remove("modal-open");
+}
+
+function openRemediationAction(action, findingId) {
+  const finding = remediationFindingById(findingId);
+  if (!finding || !remediationCanManage(finding) || !remediationActionSet(finding).includes(action)) return;
+  remediationPendingAction = { action, findingId };
+  if (action === "assign") {
+    const modal = document.querySelector("#remediation-assignment-modal");
+    const form = document.querySelector("#remediation-assignment-form");
+    form?.reset();
+    const owner = document.querySelector("#remediation-assignment-owner");
+    const due = document.querySelector("#remediation-assignment-due");
+    if (owner) owner.value = remediationOwner(finding) === "Unassigned" ? "" : remediationOwner(finding);
+    if (due) due.value = String(finding.sla_due || finding.due_date || "").slice(0, 10);
+    remediationShowModal(modal);
+    owner?.focus();
+    return;
+  }
+  if (action === "risk_acceptance") {
+    const modal = document.querySelector("#remediation-risk-modal");
+    const form = document.querySelector("#remediation-risk-form");
+    form?.reset();
+    const expiration = form?.elements.namedItem("expiration_date");
+    const review = form?.elements.namedItem("review_date");
+    const affected = form?.elements.namedItem("affected_assets");
+    const volume = form?.elements.namedItem("accepted_volume");
+    if (expiration) expiration.min = remediationTomorrow();
+    if (review) review.min = remediationTomorrow();
+    if (affected) affected.value = remediationAsset(finding);
+    if (volume) volume.value = String(Math.max(Array.isArray(finding.__occurrences) ? finding.__occurrences.length : 0, findingOccurrenceCount(finding)));
+    remediationShowModal(modal);
+    return;
+  }
+  if (action === "false_positive") {
+    const modal = document.querySelector("#remediation-false-positive-modal");
+    document.querySelector("#remediation-false-positive-form")?.reset();
+    remediationShowModal(modal);
+    return;
+  }
+  if (action === "suppress") {
+    const modal = document.querySelector("#remediation-suppression-modal");
+    const form = document.querySelector("#remediation-suppression-form");
+    form?.reset();
+    const expiration = form?.elements.namedItem("expiration_date");
+    if (expiration) expiration.min = remediationTomorrow();
+    remediationShowModal(modal);
+    return;
+  }
+  const configuration = {
+    confirm: ["Confirm finding", "Record that triage confirmed this detection.", "Confirm"],
+    start: ["Start remediation", "Move this assigned finding into active remediation.", "Start remediation"],
+    request_validation: ["Request validation", "Move this finding to pending validation for evidence review.", "Request validation"],
+    validate: ["Validate current evidence", "Record validation against the current evidence. This does not launch or simulate a re-scan.", "Record validation"],
+    resolve: ["Resolve finding", "Record the resolution after validation. A resolution note is required.", "Resolve"],
+    reopen: ["Reopen finding", "Return this finding to the active remediation queue.", "Reopen"],
+  }[action];
+  if (!configuration) return;
+  const modal = document.querySelector("#remediation-action-modal");
+  const form = document.querySelector("#remediation-action-form");
+  form?.reset();
+  document.querySelector("#remediation-action-title").textContent = configuration[0];
+  document.querySelector("#remediation-action-description").textContent = configuration[1];
+  document.querySelector("#remediation-action-submit").textContent = configuration[2];
+  const comment = document.querySelector("#remediation-action-comment");
+  if (comment) {
+    comment.required = action === "resolve";
+    comment.placeholder = action === "resolve" ? "Describe how the finding was resolved" : "Optional workflow note";
+  }
+  remediationShowModal(modal);
+}
+
+function remediationModalMessage(form, message = "") {
+  const element = form?.querySelector("[data-remediation-modal-error]");
+  if (element) element.textContent = message;
+}
+
+function remediationSetFormBusy(form, busy) {
+  form?.querySelectorAll("button, input, select, textarea").forEach((element) => { element.disabled = busy; });
+}
+
+async function runRemediationLifecycle(action, findingId, payload = {}, form = null) {
+  const finding = remediationFindingById(findingId);
+  if (!finding || !remediationActionSet(finding).includes(action)) {
+    remediationModalMessage(form, "This action is no longer valid for the finding's current status.");
+    return;
+  }
+  const encodedId = encodeURIComponent(findingId);
+  const requests = {
+    confirm: [`/api/findings/${encodedId}/status`, "PATCH", { ...payload, status: "CONFIRMED" }],
+    start: [`/api/findings/${encodedId}/status`, "PATCH", { ...payload, status: "IN_PROGRESS" }],
+    request_validation: [`/api/findings/${encodedId}/status`, "PATCH", { ...payload, status: "PENDING_VALIDATION" }],
+    validate: [`/api/findings/${encodedId}/validate`, "POST", payload],
+    resolve: [`/api/findings/${encodedId}/resolve`, "POST", { ...payload, resolution: payload.resolution || payload.comment }],
+    reopen: [`/api/findings/${encodedId}/reopen`, "POST", payload],
+    assign: [`/api/findings/${encodedId}/assign`, "POST", payload],
+    risk_acceptance: [`/api/findings/${encodedId}/risk-acceptance`, "POST", payload],
+    false_positive: [`/api/findings/${encodedId}/false-positive`, "POST", payload],
+    suppress: [`/api/findings/${encodedId}/suppress`, "POST", payload],
+  };
+  const request = requests[action];
+  if (!request) return;
+  remediationSetFormBusy(form, true);
+  remediationModalMessage(form, "");
+  try {
+    const data = await api(request[0], request[2], request[1]);
+    const updated = data?.finding;
+    if (updated) remediationFindings = remediationFindings.map((item) => item.finding_id === findingId ? { ...item, ...updated } : item);
+    renderRemediationWorkspace();
+    closeRemediationModal(form?.closest("dialog"));
+    showToast("Finding updated", `${remediationActionLabel(action)} completed.`, "success");
+    if (remediationDrawerToggle?.checked) await openRemediationFinding(findingId, { openDrawer: false });
+    await loadRemediationFindings({ showLoading: false, resetPage: true });
+  } catch (error) {
+    remediationModalMessage(form, String(error.message || "Unable to update finding").replace(/^\d+:\s*/, ""));
+  } finally {
+    remediationSetFormBusy(form, false);
+  }
+}
+
+async function addRemediationComment(form) {
+  const findingId = selectedRemediationFindingId;
+  const input = form?.elements.namedItem("comment");
+  const comment = String(input?.value || "").trim();
+  if (!findingId || !comment) return;
+  remediationSetFormBusy(form, true);
+  try {
+    await api(`/api/findings/${encodeURIComponent(findingId)}/comment`, { comment }, "POST");
+    if (input) input.value = "";
+    showToast("Comment added", "The finding activity has been updated.", "success");
+    await openRemediationFinding(findingId, { openDrawer: false });
+  } catch (error) {
+    showToast("Comment not added", String(error.message || "Please try again").replace(/^\d+:\s*/, ""), "danger");
+  } finally {
+    remediationSetFormBusy(form, false);
+  }
 }
 
 function buildMsspPortfolio() {
@@ -7463,7 +8909,7 @@ async function loadHistory() {
     return;
   }
   const context = captureTenantContext();
-  const [history, dashboard, hashComparison, estateFacets] = await Promise.all([
+  const [history, dashboard, hashComparison, estateFacetResponse] = await Promise.all([
     api("/api/history", null, "GET"),
     api("/api/executive-dashboard", null, "GET"),
     loadHashComparison(),
@@ -7472,11 +8918,12 @@ async function loadHistory() {
   if (!isCurrentTenantContext(context, history)
       || !isCurrentTenantContext(context, dashboard)
       || (hashComparison && !isCurrentTenantContext(context, hashComparison))
-      || (estateFacets && !isCurrentTenantContext(context, estateFacets))) return;
+      || (estateFacetResponse && !isCurrentTenantContext(context, estateFacetResponse))) return;
   loadScanProfiles(context).catch(() => {});
   latestDashboard = dashboard;
   latestHashComparison = hashComparison;
-  estateSummary = estateFacets ? facetsToEstateSummary(estateFacets) : null;
+  estateFacets = estateFacetResponse;
+  estateSummary = estateFacetResponse ? facetsToEstateSummary(estateFacetResponse) : null;
   renderHistory(history.history || []);
   await restoreLatestSavedReport(history.history || [], context);
   if (!isCurrentTenantContext(context)) return;
@@ -7528,8 +8975,8 @@ async function restoreLatestSavedReport(historyItems = latestHistoryItems, conte
         continue;
       }
       const scanKind = report.endpoint ? "endpoint" : "file-server";
-      applyScanReport(report, scanKind);
-      scanMeta.textContent = `Restored ${activeCompactReportCount(report)} indexed files from saved scan ${scanId}.`;
+      applyScanReport(report, scanKind, { refreshEstate: false });
+      scanMeta.textContent = `Restored ${activeCompactReportCount(report)} files from saved scan ${scanId}.`;
       return;
     } catch (error) {
       setStatus(`Saved scan restore failed: ${error.message}`);
@@ -7617,6 +9064,7 @@ function renderTenantsTable(tenants) {
 
 function renderHistory(items) {
   latestHistoryItems = items || [];
+  publishTenantDashboardAnalytics();
   renderInventoryScanOptions();
   const visibleItems = filterHistoryItems(latestHistoryItems);
   updateRangeStatus(historyRange, visibleItems.length, latestHistoryItems.length);
@@ -7647,6 +9095,22 @@ function renderHistory(items) {
       `;
     })
     .join("");
+}
+
+function publishTenantDashboardAnalytics() {
+  // sentro-fx owns only presentation. Its previous independent fetches did
+  // not carry X-Tenant-ID, so an MSSP admin's widgets stayed on the token's
+  // home tenant. This snapshot is emitted only after the app's guarded,
+  // tenant-scoped loaders accept a response.
+  const snapshot = {
+    tenantId: currentTenant,
+    tenantVersion: tenantContextVersion,
+    history: [...latestHistoryItems],
+    audit: isAdminRole() ? [...latestAuditEvents] : [],
+    auditAvailable: isAdminRole(),
+  };
+  window.__sentroTenantDashboard = snapshot;
+  window.dispatchEvent(new CustomEvent("sentro:tenant-dashboard", { detail: snapshot }));
 }
 
 function parseHistoryTime(item) {
@@ -7696,7 +9160,7 @@ function renderExecutiveDashboard(data = {}, visibleHistoryItems = filterHistory
 }
 
 async function loadAudit() {
-  if (!accessToken) {
+  if (!accessToken || !isAdminRole()) {
     return;
   }
   const context = captureTenantContext();
@@ -7712,6 +9176,7 @@ async function loadAudit() {
 
 function renderAudit(events) {
   latestAuditEvents = events || [];
+  publishTenantDashboardAnalytics();
   const visibleEvents = filterTimedItems(latestAuditEvents, auditRange, auditFrom, auditTo);
   updateRangeStatus(auditRange, visibleEvents.length, latestAuditEvents.length);
   if (!latestAuditEvents.length) {
@@ -8058,7 +9523,7 @@ form.addEventListener("submit", async (event) => {
     await refreshHashComparison();
     const diagnostics = summarizeFileServerDiagnostics(report);
     lastScanElapsedSeconds = report.__job_elapsed_seconds || scanElapsedSeconds(scanStartedAt);
-    setStatus(`Scan completed in ${formatElapsedTime(lastScanElapsedSeconds)} and report.json updated.${diagnostics ? ` ${diagnostics}` : ""}`);
+    setStatus(`Scan completed in ${formatElapsedTime(lastScanElapsedSeconds)}`, "ok", diagnostics);
     setScanProgress(true, 100, "Scan completed", lastScanElapsedSeconds);
     showToast("Scan completed", `${activeReportFileCount()} files found · ${formatElapsedTime(lastScanElapsedSeconds)}`, latestReport.summary?.critical ? "danger" : "success");
     if (latestReport.summary?.critical) {
@@ -8080,17 +9545,17 @@ form.addEventListener("submit", async (event) => {
 
 localWinrmActivateBtn.addEventListener("click", async () => {
   setBusy(true);
-  localWinrmStatus.textContent = "Checking backend-host WinRM readiness only. Target machine credentials are entered below.";
+  localWinrmStatus.textContent = "Checking WinRM on this server only. Credentials for the machine you want to scan go below.";
   try {
     requireAuth();
     const result = await api("/api/endpoint/activate-local-winrm", readLocalWinrmPayload());
     localWinrmStatus.textContent = result.activated
-      ? "Backend host WinRM readiness is complete. Enter the target machine local-admin credential in the Target machine WinRM or Endpoint scan section below."
-      : `Local backend readiness needs review: ${result.message}`;
-    showToast(result.activated ? "Backend WinRM readiness complete" : "Local backend readiness needs review", result.message || "", result.activated ? "success" : "danger");
+      ? "WinRM is ready on this server. Enter the local-admin credential for the machine you want to scan, below."
+      : `WinRM on this server needs attention: ${result.message}`;
+    showToast(result.activated ? "WinRM ready on this server" : "WinRM needs attention", result.message || "", result.activated ? "success" : "danger");
   } catch (error) {
-    localWinrmStatus.textContent = `Local backend WinRM preparation failed: ${error.message}`;
-    showToast("Local backend WinRM failed", error.message, "danger");
+    localWinrmStatus.textContent = `Couldn't prepare WinRM on this server. ${error.message}`;
+    showToast("WinRM setup failed", error.message, "danger");
   } finally {
     setBusy(false);
   }
@@ -8225,32 +9690,74 @@ document.querySelector("#endpoint-target-username")?.addEventListener("input", (
   updateEndpointCustomPathState();
 });
 
-// Risk-summary tiles are drill-downs: clicking one opens Findings, scrolls to
-// the Data inventory and applies the matching risk filter (Total -> All).
-const METRIC_FILTERS = { critical: "CRITICAL", high: "HIGH", medium: "MEDIUM", low: "LOW", protected: "PROTECTED", total: "ALL" };
+// Every figure on the dashboard is a way in. The severity band opens Findings
+// on that risk level, a data class opens Findings searched for it, a framework
+// opens Findings filtered to it, and a top risk opens Remediation - which is
+// where you would go to act on it. Buttons, so Enter and Space already work.
 document.addEventListener("click", (event) => {
-  const tile = event.target.closest("#tab-overview .metrics .metric");
-  if (!tile) return;
-  const key = Object.keys(METRIC_FILTERS).find((k) => tile.classList.contains(k));
-  if (!key) return;
-  switchTab("inventory");
-  document.querySelector(`[data-risk-filter="${METRIC_FILTERS[key]}"]`)?.click();
+  const cell = event.target.closest("#tab-overview .ledger-cell[data-risk-jump]");
+  if (cell) {
+    switchTab("findings");
+    applyInventoryRisk(cell.dataset.riskJump);
+    return;
+  }
+
+  const dataClass = event.target.closest("[data-inventory-search]");
+  if (dataClass) {
+    switchTab("findings");
+    // Typing the class name into the search box matched it as free text
+    // against paths and file names too. The inventory has a Finding type
+    // facet holding exactly these values, so select it there instead - an
+    // exact filter, and the control shows which one is applied.
+    const wanted = dataClass.dataset.inventorySearch;
+    const selectable = inventoryFindingFilter
+      && [...inventoryFindingFilter.options].some((option) => option.value === wanted);
+    if (selectable) {
+      if (filterInput && filterInput.value) {
+        filterInput.value = "";
+        lastInventoryQuery = "";
+      }
+      inventoryFindingFilter.value = wanted;
+      inventoryFindingFilter.dispatchEvent(new Event("change", { bubbles: true }));
+    } else if (filterInput) {
+      filterInput.value = wanted;
+      filterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    return;
+  }
+
+  const place = event.target.closest("[data-location-jump]");
+  if (place) {
+    switchTab("findings");
+    if (filterInput) {
+      filterInput.value = place.dataset.locationJump;
+      filterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    return;
+  }
+
+  // The coverage legend is not a ledger cell, but it points at the same
+  // filters: "unreadable" is the protected risk level, the rest is everything.
+  const coverage = event.target.closest(".coverage-item[data-risk-jump]");
+  if (coverage) {
+    switchTab("findings");
+    applyInventoryRisk(coverage.dataset.riskJump);
+    return;
+  }
+
+  const framework = event.target.closest("[data-framework-jump]");
+  if (framework) {
+    switchTab("findings");
+    const wanted = framework.dataset.frameworkJump;
+    if (inventoryFrameworkSelect) {
+      inventoryFrameworkSelect.value = wanted;
+      inventoryFrameworkSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    return;
+  }
+
+  if (event.target.closest("[data-remediation-jump]")) switchTab("risk");
 });
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  const tile = event.target.closest?.("#tab-overview .metrics .metric");
-  if (!tile) return;
-  event.preventDefault();
-  tile.click();
-});
-const armMetricTiles = () => {
-  document.querySelectorAll("#tab-overview .metrics .metric").forEach((tile) => {
-    tile.setAttribute("role", "button");
-    tile.tabIndex = 0;
-  });
-};
-if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", armMetricTiles);
-else armMetricTiles();
 
 let lastInventoryQuery = "";
 filterInput.addEventListener("input", debounce(() => {
@@ -8269,13 +9776,26 @@ filterInput.addEventListener("keydown", (event) => {
   }
 });
 
-inventoryRiskFilters.forEach((button) => {
-  button.addEventListener("click", () => {
-    inventoryRiskFilter = button.dataset.riskFilter || "ALL";
-    renderInventoryRiskSelection();
-    renderedRowsLimit = ROW_PAGE_SIZE;
-    refreshInventoryPageWindow();
-  });
+inventoryRiskSelect?.addEventListener("change", () => {
+  applyInventoryRisk(inventoryRiskSelect.value);
+});
+
+inventoryFrameworkSelect?.addEventListener("change", () => {
+  const value = inventoryFrameworkSelect.value || "ALL";
+  inventoryFrameworkFacets = value === "ALL" ? new Set() : new Set([value]);
+  renderedRowsLimit = ROW_PAGE_SIZE;
+  refreshInventoryPageWindow();
+});
+
+// The inventory has no folder filter of its own, so this drives the same
+// text search the dashboard's location rows use. The select is the point:
+// it shows which folder is applied, where typing into the box did not.
+inventoryFolderSelect?.addEventListener("change", () => {
+  const value = inventoryFolderSelect.value || "ALL";
+  if (filterInput) {
+    filterInput.value = value === "ALL" ? "" : value;
+    filterInput.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 });
 
 inventorySourceFilter?.addEventListener("change", () => {
@@ -8292,13 +9812,6 @@ inventoryFindingFilter?.addEventListener("change", () => {
   refreshInventoryPageWindow();
 });
 
-inventoryFrameworkFilter?.addEventListener("change", () => {
-  const checked = [...inventoryFrameworkFilter.querySelectorAll("input[type='checkbox']:checked")].map((input) => input.value);
-  const allValues = inventoryFrameworkOptions(latestFiles).map((item) => item.id);
-  inventoryFrameworkFacets = checked.length && checked.length < allValues.length ? new Set(checked) : new Set();
-  renderedRowsLimit = ROW_PAGE_SIZE;
-  refreshInventoryPageWindow();
-});
 
 inventoryClearFiltersBtn?.addEventListener("click", () => {
   inventoryRiskFilter = "ALL";
@@ -8364,7 +9877,7 @@ document.addEventListener("change", (event) => {
 
 themeToggle.addEventListener("click", () => {
   const current = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-  applyTheme(current);
+  applyTheme(current, { animate: true });
 });
 
 addAssetBtn.addEventListener("click", upsertAssetRule);
@@ -8484,7 +9997,178 @@ sidebarToggles.forEach((btn) => {
   });
 });
 refreshExecutiveBtn.addEventListener("click", () => {
-  loadHistory().catch((error) => setStatus(`Executive dashboard failed: ${error.message}`));
+  loadRemediationFindings({ showLoading: false, resetPage: true })
+    .catch((error) => setStatus(`Remediation refresh failed: ${error.message}`));
+});
+
+const loadRemediationSearch = debounce(() => {
+  loadRemediationFindings({ resetPage: true }).catch(() => {});
+}, 300);
+remediationSearch?.addEventListener("input", loadRemediationSearch);
+remediationFilters?.addEventListener("change", (event) => {
+  if (event.target === remediationSearch) return;
+  loadRemediationSearch.cancel();
+  loadRemediationFindings({ resetPage: true }).catch(() => {});
+});
+function resetRemediationFilters() {
+  loadRemediationSearch.cancel();
+  if (remediationSearch) remediationSearch.value = "";
+  remediationSeverityChoice = "ALL";
+  if (remediationScopeFilter) remediationScopeFilter.value = "current";
+  if (remediationStatusFilter) remediationStatusFilter.value = "active";
+  [remediationOwnerFilter, remediationFrameworkFilter, remediationDataFilter,
+    remediationAssetFilter, remediationSlaFilter].forEach((element) => {
+    if (element) element.value = "ALL";
+  });
+  remediationSortKey = "risk_score";
+  remediationSortDirection = "desc";
+  remediationSeverityFilters.forEach((button) => {
+    button.classList.toggle("active", (button.dataset.remediationSeverity || "ALL") === "ALL");
+  });
+  loadRemediationFindings({ resetPage: true }).catch(() => {});
+}
+
+remediationSeverityFilters.forEach((button) => {
+  button.addEventListener("click", () => {
+    const level = button.dataset.remediationSeverity || "ALL";
+    if (level === remediationSeverityChoice) return;
+    remediationSeverityChoice = level;
+    remediationSeverityFilters.forEach((item) => {
+      item.classList.toggle("active", item === button);
+    });
+    loadRemediationSearch.cancel();
+    loadRemediationFindings({ resetPage: true }).catch(() => {});
+  });
+});
+remediationDrawerToggle?.addEventListener("change", () => {
+  if (remediationDrawerToggle.checked) return;
+  remediationDetailRequest += 1;
+  selectedRemediationFindingId = "";
+  selectedRemediationFinding = null;
+  renderRemediationWorkspace();
+});
+
+document.addEventListener("click", (event) => {
+  const closeModal = event.target.closest?.("[data-close-remediation-modal]");
+  if (closeModal) {
+    closeRemediationModal(closeModal.closest("dialog"));
+    return;
+  }
+  if (event.target.closest?.("[data-remediation-retry]")) {
+    loadRemediationFindings().catch(() => {});
+    return;
+  }
+  if (event.target.closest?.("[data-remediation-reset]")) {
+    resetRemediationFilters();
+    return;
+  }
+  const pageButton = event.target.closest?.("[data-remediation-page]");
+  if (pageButton && !pageButton.disabled) {
+    const direction = pageButton.dataset.remediationPage;
+    if (direction === "next" && remediationPage.hasMore && remediationPage.nextCursor) {
+      remediationPage.pageStarts[remediationPage.pageIndex + 1] = remediationPage.nextCursor;
+      remediationPage.pageIndex += 1;
+    } else if (direction === "previous" && remediationPage.pageIndex > 0) {
+      remediationPage.pageIndex -= 1;
+    } else {
+      return;
+    }
+    loadRemediationFindings({ showLoading: false }).catch(() => {});
+    return;
+  }
+  // A finding is about a file, and the file's full context - every finding on
+  // it, its reasons, its recommended actions - already has a page. The queue
+  // row now goes there rather than making the reader open a drawer and then
+  // go looking for the same file by hand.
+  const queueRow = event.target.closest?.("[data-remediation-file]");
+  if (queueRow && !event.target.closest("[data-remediation-action], [data-remediation-open], .remediation-queue-menu")) {
+    openFileInInventory(queueRow.dataset.remediationFile);
+    return;
+  }
+
+  const actionButton = event.target.closest?.("[data-remediation-action]");
+  if (actionButton) {
+    actionButton.closest("details")?.removeAttribute("open");
+    openRemediationAction(actionButton.dataset.remediationAction, actionButton.dataset.findingId);
+    return;
+  }
+  const openButton = event.target.closest?.("[data-remediation-open]");
+  if (openButton) {
+    openButton.closest("details")?.removeAttribute("open");
+    openRemediationFinding(openButton.dataset.remediationOpen).catch(() => {});
+    return;
+  }
+  const row = event.target.closest?.("[data-remediation-finding]");
+  if (row && !event.target.closest("button, a, input, select, textarea, details, summary")) {
+    openRemediationFinding(row.dataset.remediationFinding).catch(() => {});
+  }
+});
+
+document.querySelector("#remediation-assignment-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  runRemediationLifecycle("assign", remediationPendingAction?.findingId || "", {
+    owner: String(data.get("owner") || "").trim(),
+    sla_due: String(data.get("sla_due") || "").trim(),
+    comment: String(data.get("comment") || "").trim(),
+  }, form);
+});
+
+document.querySelector("#remediation-risk-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const lines = (value) => String(value || "").split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+  runRemediationLifecycle("risk_acceptance", remediationPendingAction?.findingId || "", {
+    business_justification: String(data.get("business_justification") || "").trim(),
+    approver: String(data.get("approver") || "").trim(),
+    expiration_date: String(data.get("expiration_date") || "").trim(),
+    review_date: String(data.get("review_date") || "").trim(),
+    compensating_controls: lines(data.get("compensating_controls")),
+    affected_assets: lines(data.get("affected_assets")),
+    accepted_volume: Number(data.get("accepted_volume") || 0),
+  }, form);
+});
+
+document.querySelector("#remediation-false-positive-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  const reason = String(data.get("reason") || "").trim();
+  const note = String(data.get("comment") || "").trim();
+  runRemediationLifecycle("false_positive", remediationPendingAction?.findingId || "", {
+    reason,
+    comment: [reason, note].filter(Boolean).join(" — ").slice(0, 1000),
+  }, form);
+});
+
+document.querySelector("#remediation-suppression-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = new FormData(form);
+  runRemediationLifecycle("suppress", remediationPendingAction?.findingId || "", {
+    reason: String(data.get("reason") || "").trim(),
+    expiration_date: String(data.get("expiration_date") || "").trim(),
+    comment: String(data.get("comment") || "").trim(),
+  }, form);
+});
+
+document.querySelector("#remediation-action-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const comment = String(new FormData(form).get("comment") || "").trim();
+  runRemediationLifecycle(remediationPendingAction?.action || "", remediationPendingAction?.findingId || "", {
+    comment,
+    resolution: remediationPendingAction?.action === "resolve" ? comment : "",
+  }, form);
+});
+
+document.addEventListener("submit", (event) => {
+  const form = event.target.closest?.("[data-remediation-comment-form]");
+  if (!form) return;
+  event.preventDefault();
+  addRemediationComment(form);
 });
 refreshAuditBtn.addEventListener("click", () => {
   loadAudit().catch((error) => setStatus(`Audit failed: ${error.message}`));
@@ -8633,11 +10317,27 @@ tenantSwitcher.addEventListener("change", async () => {
   latestHistoryItems = [];
   latestAuditEvents = [];
   estateSummary = null;
+  estateFacets = null;
+  estateFacetsRequestPromise = null;
   inventoryFacetRequest += 1;
   inventoryFacets = null;
   scanProfilesState = [];
   latestComplianceKeywordLibrary = null;
   latestComplianceKeywordLibraries = {};
+  remediationListRequest += 1;
+  remediationListAbortController?.abort();
+  remediationListAbortController = null;
+  remediationDetailRequest += 1;
+  remediationFindings = [];
+  remediationSummary = null;
+  remediationFacets = {};
+  resetRemediationPage();
+  remediationLoaded = false;
+  remediationLoading = true;
+  remediationLoadError = "";
+  selectedRemediationFindingId = "";
+  selectedRemediationFinding = null;
+  if (remediationDrawerToggle) remediationDrawerToggle.checked = false;
   inventoryRiskFilter = "ALL";
   inventorySourceFacet = "ALL";
   inventoryFindingFacet = "ALL";
@@ -8674,24 +10374,17 @@ tenantSwitcher.addEventListener("change", async () => {
   await Promise.all([
     loadAllComplianceKeywordLibraries().catch(() => {}),
     loadAudit().catch(() => {}),
+    loadRemediationFindings().catch(() => {}),
     loadHistory().catch((error) => {
       if (isCurrentTenantContext(context)) setStatus(`Tenant switch failed: ${error.message}`);
     }),
   ]);
 });
 
-msspPortfolio.addEventListener("click", async (event) => {
-  const card = event.target.closest("[data-tenant-jump]");
-  if (!card) {
-    return;
-  }
-  tenantSwitcher.value = card.dataset.tenantJump || currentTenant;
-  tenantSwitcher.dispatchEvent(new Event("change"));
-});
-
 hydrateNavigation();
 applyTheme(safeStorageGet("dspm-theme") || "light");
 setAuthState(Boolean(accessToken));
+applyRoleVisibility();
 renderExtensionFilter(allowedExtensionsList, extensionSearch);
 renderExtensionFilter(endpointAllowedExtensionsList, endpointExtensionSearch);
 renderComplianceSelectors();
@@ -8768,10 +10461,10 @@ updateEndpointCustomPathState();
 fetch("/api/health")
   .then((response) => response.json())
   .then((data) => {
-    health.textContent = data.status === "ok" ? "API online" : "API unavailable";
+    health.textContent = data.status === "ok" ? "Connected" : "Not connected";
   })
   .catch(() => {
-    health.textContent = "API unavailable";
+    health.textContent = "Not connected";
   });
 
 async function loadProtectedMetadata() {
@@ -8790,6 +10483,7 @@ async function loadProtectedMetadata() {
 
 if (accessToken) {
   loadProtectedMetadata();
+  loadRemediationFindings().catch(() => {});
   loadHistory().catch(() => {});
   loadAudit().catch(() => {});
   loadUsers().catch(() => {});
@@ -8804,6 +10498,10 @@ document.addEventListener("keydown", (event) => {
   document.querySelector(".profile-menu")?.classList.remove("open");
   profileToggle?.setAttribute("aria-expanded", "false");
   document.querySelector("#detail-drawer")?.classList.add("hidden");
+  if (remediationDrawerToggle?.checked && !document.querySelector("#tab-risk dialog[open]")) {
+    remediationDrawerToggle.checked = false;
+    remediationDrawerToggle.dispatchEvent(new Event("change"));
+  }
 });
 
 window.addEventListener("storage", (event) => {
@@ -9089,23 +10787,80 @@ function closeScanWizard(kind, options = {}) {
   }
 }
 
+// ---- Field-attached validation (F4) ---------------------------------------
+// An error belongs to the field that caused it. Every message below used to
+// land in one footer line under the wizard - the single place a reader is not
+// looking when a field is empty, and a line no screen reader ever associated
+// with the field it was about. Now the message sits under its own input, the
+// input is marked invalid, and focus moves there.
+
+function clearFieldErrors(root) {
+  const scope = root || document;
+  scope.querySelectorAll(".field-error").forEach((node) => node.remove());
+  scope.querySelectorAll("[aria-invalid='true']").forEach((field) => {
+    field.removeAttribute("aria-invalid");
+    field.removeAttribute("aria-describedby");
+  });
+}
+
+function showFieldError(target, message) {
+  const field = typeof target === "string" ? document.querySelector(target) : target;
+  if (!field) return false;
+  const id = `${field.id || "field"}-error`;
+  document.getElementById(id)?.remove();
+  field.setAttribute("aria-invalid", "true");
+  field.setAttribute("aria-describedby", id);
+  const note = document.createElement("span");
+  note.className = "field-error";
+  note.id = id;
+  note.setAttribute("role", "alert");
+  note.textContent = message;
+  // A <span> rather than a <p>: these inputs are wrapped in their own <label>,
+  // which may only contain phrasing content.
+  (field.closest("label") || field.parentElement || field).appendChild(note);
+  // The message goes as soon as the reader starts fixing the thing it is
+  // about; an error that outlives its cause is worse than no error.
+  field.addEventListener("input", function drop() {
+    field.removeEventListener("input", drop);
+    field.removeAttribute("aria-invalid");
+    field.removeAttribute("aria-describedby");
+    document.getElementById(id)?.remove();
+  });
+  field.focus({ preventScroll: true });
+  field.scrollIntoView({ block: "center" });
+  return true;
+}
+
 function validateWizardStep(kind, step) {
   if (step === 1) {
     if (kind === "file-server") {
-      const name = document.querySelector("#fs-profile-name").value.trim();
-      if (!name) return "Give this scan a name.";
+      if (!document.querySelector("#fs-profile-name").value.trim()) {
+        return { field: "#fs-profile-name", message: "Give this scan a name." };
+      }
       const server = document.querySelector("#server").value.trim();
       const hasCred = document.querySelector("#username").value.trim()
         || document.querySelector("#password").value
         || document.querySelector("#credential_ref").value.trim();
-      if (server && !hasCred) return "SMB targets need a username + password, or a credential ref.";
+      if (server && !hasCred) {
+        return {
+          field: "#username",
+          message: "A Windows file share needs a username and password, or a credential ref.",
+        };
+      }
     } else {
-      if (!document.querySelector("#endpoint-profile-name").value.trim()) return "Give this scan a name.";
-      if (!document.querySelector("#endpoint-host").value.trim()) return "Enter the endpoint host or IP.";
+      if (!document.querySelector("#endpoint-profile-name").value.trim()) {
+        return { field: "#endpoint-profile-name", message: "Give this scan a name." };
+      }
+      if (!document.querySelector("#endpoint-host").value.trim()) {
+        return { field: "#endpoint-host", message: "Enter the machine's host name or IP address." };
+      }
+      if (!document.querySelector("#endpoint-username").value.trim()) {
+        return { field: "#endpoint-username", message: "Enter the local-admin username for that machine." };
+      }
       const hasCred = document.querySelector("#endpoint-password").value
         || document.querySelector("#endpoint-credential-ref").value.trim();
-      if (!document.querySelector("#endpoint-username").value.trim() || !hasCred) {
-        return "Enter the admin username and a password (or credential ref).";
+      if (!hasCred) {
+        return { field: "#endpoint-password", message: "Enter a password, or a credential ref instead." };
       }
     }
   }
@@ -9113,19 +10868,23 @@ function validateWizardStep(kind, step) {
     try {
       readEndpointPayload();
     } catch (error) {
-      return error.message;
+      return { field: "#endpoint-custom-paths", message: error.message };
     }
   }
-  return "";
+  return null;
 }
 
 function wizardNext(kind) {
   const state = scanWizardState[kind];
+  const wizard = wizardEl(kind, "wizard");
+  clearFieldErrors(wizard);
   const problem = validateWizardStep(kind, state.step);
   if (problem) {
-    setWizardHint(kind, problem);
+    // The footer line stays only for a problem with no field to point at.
+    setWizardHint(kind, showFieldError(problem.field, problem.message) ? "" : problem.message);
     return;
   }
+  setWizardHint(kind, "");
   if (state.step < 3) setWizardStep(kind, state.step + 1);
 }
 

@@ -1,0 +1,983 @@
+/* ============================================================
+   Sentro pages — phase F3, one page at a time
+   Roadmap: docs/frontend/FRONTEND_UX_ASSESSMENT_AND_ROADMAP_2026-09.md
+
+   Each section here rebuilds one page against the token contract. New class
+   names are used deliberately: the legacy rules (206 for `.metric` alone)
+   stop matching rather than being fought with overrides, so F5 can delete
+   them in bulk instead of untangling a specificity war.
+   ============================================================ */
+
+/* Every figure on this page is set in --font-text with tabular numerals.
+   --font-data is a monospace face and belongs to paths, hashes and code; a
+   count set in it reads as a different kind of number from the count in the
+   band 40px above, which is the whole reason the band was moved off the
+   display face in the first place. Alignment comes from tabular-nums, which
+   is what the mono was actually being used for. */
+
+/* ── The severity band ────────────────────────────────────────
+   Six figures, one row, hairline rules between them, no cards: the same
+   information the six 270px KPI tiles carried, in 76px.
+
+   The colour is the point. It was a 10x2px tick beside the label, which is a
+   footnote — you had to already be looking at the cell to see it. Now each
+   column is capped by a full-width 4px rule in its own severity colour and
+   the figure itself is set in that colour, so the shape of the workspace's
+   risk is legible from across a desk while the row stays one line tall.
+
+   Every cell is a button: it opens Findings filtered to that level. */
+.ledger-row {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.ledger-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--surface);
+  text-align: left;
+  min-width: 0;
+  font-family: var(--font-text);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.ledger-cell:first-child { border-left: 0; }
+button.ledger-cell:hover { background: var(--band-wash); }
+
+/* The colour rule. `currentColor` would inherit into the label, so the tone
+   is carried on a custom property and spent in exactly two places: this cap
+   and the figure. */
+.ledger-cell::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  background: var(--band);
+}
+
+.ledger-cell[data-sev="critical"]  { --band: var(--sev-critical);  --band-wash: color-mix(in srgb, var(--sev-critical) 7%, var(--surface)); }
+.ledger-cell[data-sev="high"]      { --band: var(--sev-high);      --band-wash: color-mix(in srgb, var(--sev-high) 7%, var(--surface)); }
+.ledger-cell[data-sev="medium"]    { --band: var(--sev-medium);    --band-wash: color-mix(in srgb, var(--sev-medium) 7%, var(--surface)); }
+.ledger-cell[data-sev="low"]       { --band: var(--sev-low);       --band-wash: color-mix(in srgb, var(--sev-low) 7%, var(--surface)); }
+.ledger-cell[data-sev="protected"] { --band: var(--sev-protected); --band-wash: color-mix(in srgb, var(--sev-protected) 7%, var(--surface)); }
+/* A total is not a severity - and it is not the accent either. Indigo put a
+   cap nine degrees from the protected violet in the cell immediately to its
+   left, so the two rightmost columns read as one purple pair. Ink says "this
+   is the sum of the others", which is what the column means. */
+.ledger-cell[data-sev="total"]     { --band: var(--ink);           --band-wash: color-mix(in srgb, var(--ink) 4%, var(--surface)); }
+
+.ledger-cell-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.ledger-cell-value {
+  font-family: var(--font-text);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-display);
+  letter-spacing: -.02em;
+  color: var(--band-ink, var(--ink));
+  font-variant-numeric: tabular-nums;
+}
+.ledger-cell[data-sev="critical"]  .ledger-cell-value { color: var(--sev-critical); }
+.ledger-cell[data-sev="high"]      .ledger-cell-value { color: var(--sev-high); }
+.ledger-cell[data-sev="medium"]    .ledger-cell-value { color: var(--sev-medium); }
+.ledger-cell[data-sev="low"]       .ledger-cell-value { color: var(--sev-low); }
+.ledger-cell[data-sev="protected"] .ledger-cell-value { color: var(--sev-protected); }
+
+/* ── Glyphs and coins ─────────────────────────────────────────
+   The console's line icons are per-panel sprites with no global rule, so the
+   dashboard states its own: lucide geometry, 2px round stroke, no fill.
+
+   A coin is a 28px rounded square holding one glyph, tinted by WHAT KIND of
+   thing its row is — people, money, health, keys, code — never by how bad it
+   is. That is the whole point of the split: severity has the ramp and its own
+   shapes, the category scale has the coin, and because they never share a
+   shape they can sit 12px apart without being confusable. A row is
+   recognisable before it is read. */
+#tab-overview .f-ico {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.coin {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--coin-ink, var(--indigo));
+  background: var(--coin-wash, var(--indigo-wash));
+  /* A 10% wash of the row's own colour is only a few steps from the indigo
+     hover wash behind it, so on hover a coin could dissolve into its row.
+     The edge is the same colour at 22% - it keeps every coin bounded on any
+     background without adding a second hue. */
+  border: 1px solid color-mix(in srgb, var(--coin-ink, var(--indigo)) 22%, transparent);
+}
+.coin .f-ico { width: 15px; height: 15px; }
+.coin[data-cat="identity"] { --coin-ink: var(--cat-identity); --coin-wash: color-mix(in srgb, var(--cat-identity) 10%, var(--surface)); }
+.coin[data-cat="contact"]  { --coin-ink: var(--cat-contact);  --coin-wash: color-mix(in srgb, var(--cat-contact) 10%, var(--surface)); }
+.coin[data-cat="finance"]  { --coin-ink: var(--cat-finance);  --coin-wash: color-mix(in srgb, var(--cat-finance) 10%, var(--surface)); }
+.coin[data-cat="health"]   { --coin-ink: var(--cat-health);   --coin-wash: color-mix(in srgb, var(--cat-health) 10%, var(--surface)); }
+.coin[data-cat="secret"]   { --coin-ink: var(--cat-secret);   --coin-wash: color-mix(in srgb, var(--cat-secret) 10%, var(--surface)); }
+.coin[data-cat="legal"]    { --coin-ink: var(--cat-legal);    --coin-wash: color-mix(in srgb, var(--cat-legal) 10%, var(--surface)); }
+.coin[data-cat="record"]   { --coin-ink: var(--cat-record);   --coin-wash: color-mix(in srgb, var(--cat-record) 10%, var(--surface)); }
+.coin[data-cat="code"]     { --coin-ink: var(--cat-code);     --coin-wash: color-mix(in srgb, var(--cat-code) 10%, var(--surface)); }
+
+/* ── Dashboard: one screen, no page scroll ────────────────────
+   The page is sized to the window and never scrolls; when a card holds more
+   than fits, that card's own list scrolls. This is the difference between
+   "the dashboard is long" and "there are more folders than fit" — only the
+   second is true, and only the second should move.
+
+   Below the thresholds at the bottom of this file the panel returns to normal
+   flow and the page scrolls, which is the right answer in a half-height
+   window. (The header no longer takes a row of its own — it sits on the title
+   row — so the panel is the full viewport height.) */
+#tab-overview.tab-panel.active {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  height: 100dvh;
+  overflow: hidden;
+}
+/* The flex gap is the spacing here; the header's own margin would double it. */
+#tab-overview > .section-header { flex: 0 0 auto; margin-bottom: 0; }
+#tab-overview > .ledger-row { flex: 0 0 auto; }
+
+/* Three equal columns of full-height cards left four of the five panels
+   two-thirds empty. The left column is narrow because both cards in it are
+   short lists; the right column is one tall card because a ranked list is the
+   one thing here that earns the height. Row 1 is sized by its content and
+   row 2 takes what is left, so nothing is stretched to fill a gap. */
+.dash-board {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns:
+    minmax(252px, 0.84fr) minmax(0, 0.92fr) minmax(0, 0.62fr) minmax(0, 1.02fr);
+  grid-template-rows: minmax(0, auto) minmax(0, auto);
+  align-content: start;
+  gap: var(--space-3);
+}
+
+/* Two full-height columns bracket two stacked pairs. Posture earns its column
+   because it is the page's headline and its wave wants the room; locations
+   earns its because a ranked tree is the one list here long enough to use it.
+
+   The pairs are matched by HEIGHT, not by topic: a five-row list over a
+   three-row list, a column chart over a dial. That is what stops one card
+   ending 120px above the one beside it, which is what a grid of cards with
+   unrelated content lengths does if you let it. */
+.dash-card-posture    { grid-area: 1 / 1 / span 2 / 2; }
+.dash-card-classes    { grid-area: 1 / 2; }
+.dash-card-frameworks { grid-area: 2 / 2; }
+.dash-card-coverage   { grid-area: 1 / 3; }
+.dash-card-stale      { grid-area: 2 / 3; }
+.dash-card-locations  { grid-area: 1 / 4 / span 2 / 5; }
+
+.dash-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: none;
+}
+/* In a 200px column the meta wrapped under the title and cost every card a
+   line it did not have. The title keeps its space; the meta gives way. */
+#tab-overview .dash-card > .panel-title {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+#tab-overview .dash-card > .panel-title h4 {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+#tab-overview .dash-card > .panel-title span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: right;
+}
+
+/* The only element allowed to scroll on this page. */
+.dash-card-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+}
+
+.dash-sub {
+  margin: 0 0 6px;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--ink-muted);
+}
+.dash-empty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--ink-muted);
+}
+
+/* ── Security posture: the hero of the board ─────────────────
+   Every other card answers a question about a list. This one answers "how are
+   we doing", which is the question the page exists for, so it gets the size:
+   a 44px score, then the history as a full-width wave rather than a 56x30
+   thumbnail wedged into a third column. */
+.posture-hero {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+}
+
+.posture-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.posture-score {
+  color: var(--posture-ink, var(--ink));
+  font-family: var(--font-text);
+  font-size: 46px;
+  font-weight: var(--weight-semibold);
+  line-height: 1;
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.posture-scale {
+  color: var(--ink-subtle);
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+}
+
+.posture-hero[data-band="low"]      { --posture-ink: var(--sev-low); }
+.posture-hero[data-band="elevated"] { --posture-ink: var(--sev-medium); }
+.posture-hero[data-band="critical"] { --posture-ink: var(--sev-critical); }
+
+.posture-read { min-width: 0; }
+
+.posture-band {
+  margin: 0;
+  color: var(--posture-ink, var(--ink));
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+.posture-delta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.posture-delta .f-ico { width: 13px; height: 13px; }
+/* The ramp is reserved for severity, and this is direction. The glyph beside
+   it is an up or down arrow and the sign is printed on the number. */
+.posture-delta .up,
+.posture-delta .down { color: var(--ink); font-weight: var(--weight-semibold); }
+
+/* The wave. Straight segments between eight scans made a saw; a spline makes
+   the same data one line, which is what "the shape of it" means. */
+.posture-wave-wrap {
+  position: relative;
+  height: 96px;
+  margin: 0 calc(var(--space-4) * -1) var(--space-2);
+  overflow: hidden;
+}
+
+.posture-wave {
+  display: block;
+  width: 100%;
+  height: 96px;
+}
+
+.posture-wave-line {
+  fill: none;
+  stroke: var(--indigo);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.posture-wave-now {
+  fill: var(--surface);
+  stroke: var(--indigo);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.posture-wave-empty {
+  margin: 0;
+  padding: var(--space-4) var(--space-4) 0;
+  color: var(--ink-subtle);
+  font-size: var(--text-xs);
+}
+
+/* ── Rows ─────────────────────────────────────────────────────
+   One grammar for all three lists: coin, name, figure, and a second line that
+   is the indicator. Hairlines between rows, a wash on hover, the token ring on
+   focus. Rows are buttons; the aria-label says where they go. */
+.dash-rows { display: flex; flex-direction: column; }
+
+.risk-row,
+.class-row,
+.fw-row {
+  display: grid;
+  align-items: center;
+  width: 100%;
+  padding: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+  text-align: left;
+  font-family: var(--font-text);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.risk-row:first-of-type,
+.class-row:first-child,
+.fw-row:first-child { border-top: 0; }
+.risk-row:hover,
+.class-row:hover { background: var(--indigo-wash); }
+.fw-row:hover { background: color-mix(in srgb, var(--row-mark, var(--indigo)) 7%, var(--surface)); }
+.fw-row[data-mark="gdpr"]                     { --row-mark: var(--mark-gdpr); }
+.fw-row[data-mark="pci_dss"]                  { --row-mark: var(--mark-pci); }
+.fw-row[data-mark="nist_sp800_60_enterprise"],
+.fw-row[data-mark="nist_csf"]                 { --row-mark: var(--mark-nist); }
+.fw-row[data-mark="hipaa"]                    { --row-mark: var(--mark-hipaa); }
+.fw-row[data-mark="iso27001"]                 { --row-mark: var(--mark-iso); }
+
+.risk-row { grid-template-columns: 28px minmax(0, 1fr) auto 16px; column-gap: var(--space-3); }
+.risk-row-name,
+.class-row-name,
+.fw-row-name {
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.risk-row-count,
+.class-row-count,
+.fw-row-count {
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.class-row-count small,
+.fw-row-count small {
+  color: var(--ink-muted);
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+.risk-row-go { color: var(--ink-muted); }
+.risk-row:hover .risk-row-go { color: var(--indigo); }
+
+/* Data class and framework rows carry their indicator on a second line. */
+.fw-row {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  column-gap: var(--space-3);
+  row-gap: 3px;
+}
+/* One line, not two: a dot on a shared rule instead of a bar underneath. The
+   question is "how much of this class is there", which is one number, and a
+   lollipop compares five of them at a glance without repeating the shape the
+   framework card uses for a different question. */
+.class-row {
+  grid-template-columns: 26px minmax(0, 1fr) auto 84px;
+  align-items: center;
+  column-gap: var(--space-2);
+}
+
+.lolli {
+  position: relative;
+  display: block;
+  height: 12px;
+}
+.lolli::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 1px;
+  background: var(--line);
+}
+.lolli-stem {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: var(--plot-share, 0%);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--dot, var(--indigo));
+  transform: translateY(-50%);
+  transition: width var(--motion-base) var(--ease-out);
+}
+.lolli-dot {
+  position: absolute;
+  top: 50%;
+  /* The dot is centred on its value, so at 100% half of it hung off the end
+     of the track and was clipped by the card. Its travel stops one radius in
+     from each end - the stem still runs the full share. */
+  left: clamp(4px, var(--plot-share, 0%), calc(100% - 4px));
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dot, var(--indigo));
+  transform: translate(-50%, -50%);
+  transition: left var(--motion-base) var(--ease-out);
+}
+.class-row[data-cat="identity"] { --dot: var(--cat-identity); }
+.class-row[data-cat="contact"]  { --dot: var(--cat-contact); }
+.class-row[data-cat="finance"]  { --dot: var(--cat-finance); }
+.class-row[data-cat="health"]   { --dot: var(--cat-health); }
+.class-row[data-cat="secret"]   { --dot: var(--cat-secret); }
+.class-row[data-cat="legal"]    { --dot: var(--cat-legal); }
+.class-row[data-cat="record"]   { --dot: var(--cat-record); }
+.class-row[data-cat="code"]     { --dot: var(--cat-code); }
+.fw-row .mark { grid-row: 1 / span 2; }
+.fw-row .stack { grid-column: 2 / span 2; }
+
+/* A framework's own mark: its colour, a white glyph, and nothing else. */
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: var(--on-mark);
+  background: var(--mark-generic);
+}
+.mark .f-ico { width: 15px; height: 15px; }
+.mark[data-mark="gdpr"]                     { background: var(--mark-gdpr); }
+.mark[data-mark="pci_dss"]                  { background: var(--mark-pci); }
+.mark[data-mark="nist_sp800_60_enterprise"],
+.mark[data-mark="nist_csf"]                 { background: var(--mark-nist); }
+.mark[data-mark="hipaa"]                    { background: var(--mark-hipaa); }
+.mark[data-mark="iso27001"]                 { background: var(--mark-iso); }
+
+/* The severity mix of what a row covers, as one stacked bar - the same
+   component on the data-class card and the framework card, because both
+   answer the same question about a different list. Colour is
+   never the only channel: each segment carries its count as a title and the
+   bar carries the full legend as its label. */
+/* The bars used to be identical in every channel except fill proportion,
+   because each spanned the same grid column - so with similar severity mixes
+   they read as the same gradient over and over. Length is now the row's share
+   of the largest, which is a fact neither card was showing at all. */
+.stack {
+  display: flex;
+  width: var(--fw-share, 100%);
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--line);
+  transition: width var(--motion-base) var(--ease-out);
+}
+.stack i { display: block; height: 100%; flex: 0 1 auto; min-width: 2px; }
+/* The band keeps the full ramp; the cards take it one step back. */
+.stack i[data-sev="critical"] { background: var(--sev-critical-soft); }
+.stack i[data-sev="high"]     { background: var(--sev-high-soft); }
+.stack i[data-sev="medium"]   { background: var(--sev-medium-soft); }
+.stack i[data-sev="low"]      { background: var(--sev-low-soft); }
+
+/* ── Where the risk is ────────────────────────────────────────
+   The same row grammar as the data-class and framework cards: a mark, a name,
+   a count and the severity mix as one bar whose length is the share of the
+   largest. The mark is neutral - a location has no identity colour of its own,
+   and giving it one would invent a third scale. */
+/* "Shares" and "Shares/IT" are not siblings, and a flat list said they were.
+   The indent and the elbow say which folder is inside which; the severity
+   meter moves onto the row so eighteen of them fit where eight did. */
+.place-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px auto;
+  align-items: center;
+  column-gap: var(--space-2);
+  width: 100%;
+  padding: 2px var(--space-1);
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.place-row:first-child { border-top: 0; }
+.place-row:hover { background: var(--indigo-wash); }
+
+/* The indent moves the folder and its name; the bar and the count keep their
+   own columns, so every meter in the card starts on the same line. Indenting
+   the whole row is what staggered them. */
+.place-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-left: var(--tree-indent, 0);
+}
+
+.tree-rows .place-row[data-depth="1"] {
+  position: relative;
+  --tree-indent: 18px;
+  border-top: 0;
+}
+/* The elbow: a vertical rule down the parent's gutter, stopped at the last
+   child so the line does not dangle past the group it belongs to. */
+.tree-rows .place-row[data-depth="1"]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 13px;
+  width: 1px;
+  background: var(--line);
+}
+.tree-rows .place-row[data-depth="1"][data-last]::before { bottom: 50%; }
+.tree-rows .place-row[data-depth="1"]::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 13px;
+  width: 7px;
+  height: 1px;
+  background: var(--line);
+}
+.tree-rows .place-row[data-depth="0"] { margin-top: 2px; }
+.tree-rows .place-row[data-depth="0"] .place-row-name { font-weight: var(--weight-semibold); }
+.tree-rows .place-row[data-depth="1"] .place-mark {
+  width: 20px;
+  height: 20px;
+  background: none;
+}
+.tree-rows .place-row[data-depth="1"] .place-mark .f-ico { width: 13px; height: 13px; }
+.tree-rows .place-row .stack { height: 5px; }
+
+.place-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 8px;
+  color: var(--ink-muted);
+  background: color-mix(in srgb, var(--ink-muted) 10%, var(--surface));
+}
+.place-mark .f-ico { width: 14px; height: 14px; }
+
+.place-row-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.place-row-count {
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.place-row-count small {
+  color: var(--ink-muted);
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+
+/* ── Assessment coverage: three columns ───────────────────────
+   As one horizontal meter, "nothing found" and "unreadable" were 3px slivers
+   two orders of magnitude apart. On a shared baseline each gets a readable
+   footing, its own number and its own label - and the card is shorter. */
+.coverage-lede {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.coverage-lede strong {
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.col-chart {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+  gap: var(--space-2);
+  height: 92px;
+}
+
+.col-item {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 4px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.col-value {
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.col-bar {
+  align-self: end;
+  width: 100%;
+  height: var(--col-height, 3%);
+  border-radius: 3px 3px 0 0;
+  background: var(--col-ink, var(--indigo));
+  transition: height var(--motion-base) var(--ease-out);
+}
+.col-item[data-kind="classified"] { --col-ink: var(--indigo); }
+.col-item[data-kind="clear"]      { --col-ink: color-mix(in srgb, var(--indigo) 38%, var(--surface)); }
+.col-item[data-kind="unreadable"] { --col-ink: var(--sev-protected); }
+.col-item:hover .col-bar { filter: brightness(1.08); }
+
+.col-label {
+  color: var(--ink-muted);
+  font-size: 10.5px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Stale sensitive data: a dial ─────────────────────────────
+   One proportion against a target of zero, which is what a gauge is for. The
+   240-degree sweep keeps it from reading as a progress bar, and the three
+   bands sit under it on one line instead of three legend rows. */
+.gauge {
+  position: relative;
+  display: grid;
+  place-items: center;
+  margin-bottom: var(--space-1);
+}
+
+.gauge-dial {
+  display: block;
+  width: 100%;
+  max-width: 132px;
+  height: auto;
+  max-height: 100%;
+}
+.gauge-track {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+.gauge-fill {
+  fill: none;
+  stroke: var(--gauge-ink, var(--indigo));
+  stroke-width: 9;
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--motion-base) var(--ease-out);
+}
+
+.gauge-read {
+  position: absolute;
+  bottom: 2px;
+  display: grid;
+  justify-items: center;
+}
+.gauge-read strong {
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: 24px;
+  font-weight: var(--weight-semibold);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.gauge-read small { color: var(--ink-muted); font-size: 10.5px; }
+
+.gauge-bands {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-1);
+}
+.gauge-band {
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-out);
+}
+.gauge-band:hover { background: var(--indigo-wash); }
+.gauge-band-dot { width: 8px; height: 8px; border-radius: 50%; }
+.gauge-band-label {
+  color: var(--ink-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.gauge-band b {
+  color: var(--ink);
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Age is ordered but it is not severity: a single-hue sequential that darkens
+   the longer data has been left alone, so the ramp keeps one meaning. */
+.gauge-band-dot[data-age="active"]    { background: color-mix(in srgb, var(--ink) 32%, var(--surface)); }
+.gauge-band-dot[data-age="ageing"]    { background: color-mix(in srgb, var(--ink) 45%, var(--surface)); }
+.gauge-band-dot[data-age="abandoned"] { background: color-mix(in srgb, var(--ink) 78%, var(--surface)); }
+
+/* ── Remediation: the queue is the page ───────────────────────
+   Same band on top as the dashboard, then the work and the folders it points
+   at. It sizes to the window on the same terms the dashboard does. */
+#tab-risk.tab-panel.active {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  height: 100dvh;
+  overflow: hidden;
+}
+#tab-risk > .section-header,
+#tab-risk > .ledger-row { flex: 0 0 auto; }
+#tab-risk > .section-header { margin-bottom: 0; }
+#tab-risk .ledger-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.remediation-board {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr);
+  gap: var(--space-4);
+}
+.remediation-board > .visual-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: none;
+}
+.remediation-board > .visual-panel > .panel-title {
+  flex: 0 0 auto;
+  margin-bottom: var(--space-3);
+}
+
+/* The panel is now the scroller, so the fixed heights the lists used to carry
+   (430px, 330px, 300px) just leave dead space under them. Cleared here rather
+   than at the source because those values still hold on the pages F3 has not
+   reached. */
+#tab-risk #remediation-workflow {
+  max-height: none !important; /* token-gate: allow — clears a legacy !important height */
+  /* Both axes: `visible` on one axis computes to `auto` when the other is
+     `hidden`, which is exactly how this panel kept a second scrollbar beside
+     the table's own. token-gate: allow — the legacy rule is !important. */
+  overflow: visible !important;
+}
+#tab-risk #remediation-workflow .remediation-queue,
+#tab-risk #remediation-workflow .scroll-card-list {
+  max-height: none !important; /* token-gate: allow — clears a legacy !important height */
+  overflow: visible !important; /* token-gate: allow — the panel is the scroller now */
+}
+/* The queue's severity chip. It was severity ink on a 16% wash of the same
+   hue, which lifts the ground and drops the pair to 4.1-4.3:1 — a chip whose
+   whole job is to be read at a glance. On the card's own surface with a
+   hairline in the same colour it measures 4.8-5.0:1 and looks sharper. */
+.remediation-board .badge {
+  background: var(--surface) !important; /* token-gate: allow — the wash is set with !important */
+  border: 1px solid color-mix(in srgb, currentColor 34%, transparent);
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0;
+}
+
+.remediation-board :is(.scroll-card-list, .folder-risk-list) {
+  max-height: none !important; /* token-gate: allow — clears a legacy !important height */
+  overflow: visible;
+}
+
+/* ── Narrow and short windows ─────────────────────────────────
+   The one-screen rule is a promise about a full-height desktop window, not a
+   constraint to enforce on a half-height one: below these thresholds the
+   panels stack and the page scrolls, which is what the reader expects there. */
+@media (max-width: 1180px) {
+  .dash-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dash-board > .dash-card:first-child { grid-column: 1 / -1; }
+}
+@media (max-width: 1100px) {
+  .ledger-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .ledger-cell:nth-child(4) { border-left: 0; }
+  .ledger-cell:nth-child(n + 4) { border-top: 1px solid var(--line); }
+  #tab-risk .ledger-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 900px), (max-height: 640px) {
+  #tab-overview.tab-panel.active,
+  #tab-risk.tab-panel.active { height: auto; overflow: visible; }
+  .dash-card-body { overflow: visible; }
+  .dash-board,
+  .remediation-board { grid-template-columns: minmax(0, 1fr); }
+  .dash-board > .dash-card:first-child { grid-column: auto; }
+  .dash-card,
+  .remediation-board > .visual-panel { min-height: 220px; }
+}
+@media (max-width: 700px) {
+  .ledger-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ledger-cell:nth-child(odd) { border-left: 0; }
+  .ledger-cell:nth-child(n + 3) { border-top: 1px solid var(--line); }
+}
+
+
+/* ── Row rhythm ───────────────────────────────────────────────
+   These rows inherit type and padding from four places, so the heights are
+   declared once, here. They were 25-30px, which was me reading "no empty
+   space" as "tighten the rows" - it meant the dead band at the bottom of a
+   card, which is a different fix (see the block below). Back to a rhythm
+   that has air in it. */
+#tab-overview :is(.class-row, .risk-row, .place-row) {
+  min-height: 0;   /* styles.css puts a 40px touch floor on every button */
+  line-height: 1.35;
+}
+#tab-overview .class-row { height: 36px; }
+#tab-overview .risk-row  { height: 36px; }
+#tab-overview .tree-rows .place-row { height: 29px; }
+#tab-overview .dash-sub { margin-bottom: var(--space-2); font-size: 10.5px; line-height: 1.4; }
+#tab-overview .posture-band { line-height: 1.35; }
+#tab-overview .posture-delta { margin-top: 1px; line-height: 1.35; }
+
+/* ── Cards stop where their content does ──────────────────────
+   Every card was stretched to its grid row, so a card with three rows in it
+   carried a hundred pixels of empty card underneath. Row two is now the
+   remainder and the cards in it hug; the leftover shows as page, not as a
+   card that goes on after it has finished. "Where the risk is" is the one
+   that earns the full height, so it is the one that keeps it. */
+.dash-board > .dash-card { min-height: 0; }
+
+/* The columns sit on the bottom edge of their card rather than floating in
+   the middle of it: a bar chart with no baseline is not a bar chart. */
+.dash-card-coverage .dash-card-body,
+.dash-card-stale .dash-card-body {
+  display: flex;
+  flex-direction: column;
+}
+.dash-card-coverage .col-chart {
+  flex: 1 1 auto;
+  min-height: 84px;
+}
+.dash-card-stale .gauge {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: auto;
+}
+
+#tab-overview .gauge-dial { max-width: 128px; }
+#tab-overview .gauge-read strong { font-size: 25px; }
+#tab-overview .gauge-band { min-height: 0; padding: 2px; }
+#tab-overview .gauge-bands { gap: var(--space-1); }
+#tab-overview .gauge { margin-bottom: var(--space-2); }
+
+
+/* ── Card edges ───────────────────────────────────────────────
+   A soft lift instead of a hard 1px box. The accent rule that was here is
+   removed: the card's own edge is what the rest of the console uses. */
+#tab-overview .dash-card {
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent),
+              0 8px 24px color-mix(in srgb, var(--ink) 4%, transparent);
+}
+
+/* Colour changes on this page are state changes, so they take the same
+   duration as everything else rather than snapping. */
+#tab-overview .dash-card,
+#tab-overview :is(.class-row, .risk-row, .place-row, .fw-row, .col-item, .gauge-band, .coverage-item) {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-base) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #tab-overview .dash-card,
+  #tab-overview :is(.class-row, .risk-row, .place-row, .fw-row, .col-item, .gauge-band, .coverage-item),
+  .lolli-stem,
+  .lolli-dot,
+  .col-bar,
+  .gauge-fill { transition: none; }
+}

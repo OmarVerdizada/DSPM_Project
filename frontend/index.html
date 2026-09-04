@@ -10,7 +10,12 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=240" />
+    <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
+    <link rel="stylesheet" href="/static/styles/tokens.css?v=8" />
+    <link rel="stylesheet" href="/static/styles.css?v=245" />
+    <link rel="stylesheet" href="/static/styles/shell.css?v=10" />
+    <link rel="stylesheet" href="/static/styles/pages.css?v=13" />
+    <link rel="stylesheet" href="/static/styles/remediation.css?v=6" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -102,8 +107,8 @@
           </button>
           <div class="nav-sub" data-nav-sub="security" aria-hidden="true">
             <div class="nav-sub-inner">
-              <button type="button" class="nav-sub-link" data-tab-jump="security">Security ops</button>
-              <button type="button" class="nav-sub-link" data-tab-jump="admin">Tenants</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="security" data-admin-only>Security ops</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="admin" data-admin-only>Tenants</button>
               <button type="button" class="nav-sub-link" data-tab-jump="settings">Asset rules</button>
               <button type="button" class="nav-sub-link" data-tab-jump="logic">Risk logic</button>
             </div>
@@ -150,10 +155,10 @@
               </button>
               <div class="tb-newscan-menu" role="menu">
                 <button type="button" role="menuitem" data-tab-jump="file-servers">
-                  <b>Start file scan</b><small>SMB or local dataset</small>
+                  <b>Start file scan</b><small><abbr title="Windows file share">SMB</abbr> or local dataset</small>
                 </button>
                 <button type="button" role="menuitem" data-tab-jump="endpoint">
-                  <b>Start endpoint scan</b><small>WinRM workstation</small>
+                  <b>Start endpoint scan</b><small><abbr title="Windows Remote Management">WinRM</abbr> workstation</small>
                 </button>
                 <button type="button" role="menuitem" data-tab-jump="reports">
                   <b>Open reports</b><small>CSV, Word, PDF evidence</small>
@@ -163,7 +168,7 @@
             <button type="button" id="theme-toggle" class="theme-toggle tb-icon-btn" aria-label="Switch to dark mode" title="Switch theme">
               <span class="theme-icon" aria-hidden="true">&#9790;</span>
             </button>
-            <div class="health" id="health">API checking...</div>
+            <div class="health" id="health">Checking…</div>
             <select id="tenant-switcher" class="tenant-switcher" title="Switch MSSP customer">
               <option value="default">default</option>
             </select>
@@ -173,7 +178,7 @@
                 <section id="tab-file-servers" class="tab-panel">
           <div class="section-header">
             <div>
-              <h3>File server scan</h3>
+              <h2 class="page-title">File server scan</h2>
             </div>
           </div>
 
@@ -481,67 +486,137 @@
 
 
         <section id="tab-overview" class="tab-panel active">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Dashboard</h2>
+            </div>
+          </div>
+
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-file-bar-chart-2" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M8 18v-2"/><path d="M12 18v-4"/><path d="M16 18v-6"/></symbol>
               <symbol id="li-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
               <symbol id="li-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol>
               <symbol id="li-rotate-ccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+              <!-- Dashboard glyphs (lucide, ISC). One per risk category and data
+                   class, so a row is recognisable before it is read. -->
+              <symbol id="li-credit-card" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></symbol>
+              <symbol id="li-id-card" viewBox="0 0 24 24"><path d="M16 10h2"/><path d="M16 14h2"/><path d="M6.17 15a3 3 0 0 1 5.66 0"/><circle cx="9" cy="11" r="2"/><rect x="2" y="5" width="20" height="14" rx="2"/></symbol>
+              <symbol id="li-heart-pulse" viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="M3.22 12H9.5l.5-1 2 4.5 2-7 1.5 3.5h5.27"/></symbol>
+              <symbol id="li-mail" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></symbol>
+              <symbol id="li-phone" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></symbol>
+              <symbol id="li-map-pin" viewBox="0 0 24 24"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></symbol>
+              <symbol id="li-landmark" viewBox="0 0 24 24"><line x1="3" x2="21" y1="22" y2="22"/><line x1="6" x2="6" y1="18" y2="11"/><line x1="10" x2="10" y1="18" y2="11"/><line x1="14" x2="14" y1="18" y2="11"/><line x1="18" x2="18" y1="18" y2="11"/><polygon points="12 2 20 7 4 7"/></symbol>
+              <symbol id="li-calendar" viewBox="0 0 24 24"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></symbol>
+              <symbol id="li-banknote" viewBox="0 0 24 24"><rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></symbol>
+              <symbol id="li-scale" viewBox="0 0 24 24"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/></symbol>
+              <symbol id="li-briefcase" viewBox="0 0 24 24"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></symbol>
+              <symbol id="li-shield-off" viewBox="0 0 24 24"><path d="m2 2 20 20"/><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71"/><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264"/></symbol>
+              <symbol id="li-file-diff" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/></symbol>
+              <symbol id="li-file-key" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="10" cy="16" r="2"/><path d="m16 10-4.5 4.5"/><path d="m15 11 1 1"/></symbol>
+              <symbol id="li-eye-off" viewBox="0 0 24 24"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></symbol>
+              <symbol id="li-hash" viewBox="0 0 24 24"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></symbol>
+              <symbol id="li-cloud" viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
+              <symbol id="li-badge-check" viewBox="0 0 24 24"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"/><path d="m9 12 2 2 4-4"/></symbol>
+              <symbol id="li-stethoscope" viewBox="0 0 24 24"><path d="M11 2v2"/><path d="M5 2v2"/><path d="M5 3H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/></symbol>
+              <symbol id="li-trending-up" viewBox="0 0 24 24"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></symbol>
+              <symbol id="li-trending-down" viewBox="0 0 24 24"><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></symbol>
+              <symbol id="li-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+              <symbol id="li-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+              <symbol id="li-user-round" viewBox="0 0 24 24"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></symbol>
+              <symbol id="li-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+              <symbol id="li-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+              <symbol id="li-archive" viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></symbol>
+              <symbol id="mk-eu-stars" viewBox="0 0 24 24"><circle cx="20.00" cy="12.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="18.93" cy="16.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.00" cy="18.93" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.00" cy="20.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="8.00" cy="18.93" r="1.3" fill="currentColor" stroke="none"/><circle cx="5.07" cy="16.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="4.00" cy="12.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="5.07" cy="8.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="8.00" cy="5.07" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.00" cy="4.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.00" cy="5.07" r="1.3" fill="currentColor" stroke="none"/><circle cx="18.93" cy="8.00" r="1.3" fill="currentColor" stroke="none"/></symbol>
+              <symbol id="li-receipt" viewBox="0 0 24 24"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 17.5v-11"/></symbol>
             </defs>
           </svg>
-          <section class="metrics" aria-label="Risk summary">
-            <div class="metric critical">
-              <span>Critical</span>
-              <strong id="critical-count">0</strong>
-            </div>
-            <div class="metric high">
-              <span>High</span>
-              <strong id="high-count">0</strong>
-            </div>
-            <div class="metric medium">
-              <span>Medium</span>
-              <strong id="medium-count">0</strong>
-            </div>
-            <div class="metric low">
-              <span>Low</span>
-              <strong id="low-count">0</strong>
-            </div>
-            <div class="metric protected">
-              <span>Protected / Locked</span>
-              <strong id="protected-count">0</strong>
-            </div>
-            <div class="metric total">
-              <span>Total files</span>
-              <strong id="total-count">0</strong>
-            </div>
+          <section class="ledger-row" aria-label="Findings by severity">
+            <button type="button" class="ledger-cell plain-btn" data-sev="critical" data-risk-jump="CRITICAL"
+                    aria-label="Critical — open in Findings">
+              <span class="ledger-cell-label">Critical</span>
+              <strong class="ledger-cell-value" id="critical-count">0</strong>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="high" data-risk-jump="HIGH"
+                    aria-label="High — open in Findings">
+              <span class="ledger-cell-label">High</span>
+              <strong class="ledger-cell-value" id="high-count">0</strong>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="medium" data-risk-jump="MEDIUM"
+                    aria-label="Medium — open in Findings">
+              <span class="ledger-cell-label">Medium</span>
+              <strong class="ledger-cell-value" id="medium-count">0</strong>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="low" data-risk-jump="LOW"
+                    aria-label="Low — open in Findings">
+              <span class="ledger-cell-label">Low</span>
+              <strong class="ledger-cell-value" id="low-count">0</strong>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="protected" data-risk-jump="PROTECTED"
+                    aria-label="Protected — open in Findings">
+              <span class="ledger-cell-label">Protected</span>
+              <strong class="ledger-cell-value" id="protected-count">0</strong>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="total" data-risk-jump="ALL"
+                    aria-label="All files — open in Findings">
+              <span class="ledger-cell-label">All files</span>
+              <strong class="ledger-cell-value" id="total-count">0</strong>
+            </button>
           </section>
 
-          <!-- Dashboard analytics: hosts for the sentro-fx charts suite
-               (posture trend, severity mix, recent scans, activity feed).
-               The suite reads /api/history + /api/audit read-only. -->
-          <div class="dash-grid" aria-label="Posture analytics">
-            <section class="visual-panel col-main">
+          <!-- Two narrow cards on the left say how bad it is and who
+               regulates it; the middle says what kind of data and how much of
+               the estate we have actually read; the right says where to go
+               first. Each one is a way in to Findings. -->
+          <div class="dash-board">
+            <section class="visual-panel dash-card dash-card-posture" aria-labelledby="posture-card-title">
               <div class="panel-title">
-                <h4>Posture trend</h4>
-                <div class="chart-pills" id="fx-posture-pills"></div>
+                <h4 id="posture-card-title">Security posture</h4>
+                <span id="posture-card-meta">No scan yet</span>
               </div>
-              <div id="fx-posture-chart" class="fx-chart"></div>
+              <div id="posture-card" class="dash-card-body"></div>
             </section>
-            <section class="visual-panel col-side">
-              <div class="panel-title"><h4>Severity mix</h4></div>
-              <div id="fx-severity-donut"></div>
+
+            <section class="visual-panel dash-card dash-card-frameworks" aria-labelledby="frameworks-card-title">
+              <div class="panel-title">
+                <h4 id="frameworks-card-title">Compliance frameworks</h4>
+                <span id="frameworks-card-meta">No scan yet</span>
+              </div>
+              <div id="frameworks-card" class="dash-card-body"></div>
             </section>
-            <section id="overview-insights" class="insights-grid dash-span"></section>
-            <section class="visual-panel col-scans">
-              <div class="panel-title"><h4>Recent scans</h4></div>
-              <div id="fx-recent-scans"></div>
+
+            <section class="visual-panel dash-card dash-card-classes" aria-labelledby="classes-card-title">
+              <div class="panel-title">
+                <h4 id="classes-card-title">Top data classes</h4>
+                <span id="classes-card-meta">No scan yet</span>
+              </div>
+              <div id="data-classes-card" class="dash-card-body"></div>
             </section>
-            <section class="visual-panel col-activity">
-              <div class="panel-title"><h4>Activity</h4></div>
-              <div id="fx-activity"></div>
+
+            <section class="visual-panel dash-card dash-card-coverage" aria-labelledby="coverage-card-title">
+              <div class="panel-title">
+                <h4 id="coverage-card-title">Assessment coverage</h4>
+                <span id="coverage-card-meta">No scan yet</span>
+              </div>
+              <div id="coverage-card" class="dash-card-body"></div>
+            </section>
+
+            <section class="visual-panel dash-card dash-card-stale" aria-labelledby="stale-card-title">
+              <div class="panel-title">
+                <h4 id="stale-card-title">Stale sensitive data</h4>
+                <span id="stale-card-meta">No scan yet</span>
+              </div>
+              <div id="stale-card" class="dash-card-body"></div>
+            </section>
+
+            <section class="visual-panel dash-card dash-card-locations" aria-labelledby="locations-card-title">
+              <div class="panel-title">
+                <h4 id="locations-card-title">Where the risk is</h4>
+                <span id="locations-card-meta">No scan yet</span>
+              </div>
+              <div id="locations-card" class="dash-card-body"></div>
             </section>
           </div>
-
         </section>
 
         <section id="tab-findings" class="tab-panel findings-pristine">
@@ -549,37 +624,20 @@
             <defs>
               <symbol id="li-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></symbol>
               <symbol id="li-clock-3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4.5"/></symbol>
+              <symbol id="li-arrow-up-down" viewBox="0 0 24 24"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></symbol>
             </defs>
           </svg>
           <div class="section-header">
             <div>
-              <h3>Sensitive findings</h3>
+              <h2 class="page-title">Findings</h2>
             </div>
           </div>
-          <div class="executive-grid">
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Detection signal mix</h4>
-                <span>From latest scan</span>
-              </div>
-              <div id="findings-signal-summary" class="empty compact">Run a scan to populate finding categories.</div>
-            </section>
-            <section class="visual-panel">
-              <div class="panel-title">
-                <h4>Priority finding queue</h4>
-                <span>Critical and high sensitivity</span>
-              </div>
-              <div id="findings-priority-summary" class="empty compact">Sensitive files will appear in Data Inventory and Risk & Remediation.</div>
-            </section>
-          </div>
-
           <section class="workspace" id="inventory-workspace">
             <div class="table-toolbar inventory-toolbar">
-              <div>
-                <p class="eyebrow">Data catalog</p>
-                <h3>Data inventory</h3>
-                <p id="scan-meta">No scan has been run yet.</p>
-              </div>
+              <!-- The page is the inventory, so it does not need to say so. The
+                   scan line stays: it is the only thing here that says which
+                   scan these rows came from. -->
+              <p id="scan-meta" class="inventory-scan-meta">No scan has been run yet.</p>
               <div class="inventory-toolbar-actions">
                 <div class="inventory-search-box">
                   <span aria-hidden="true"><svg class="f-ico" aria-hidden="true"><use href="#li-search"/></svg></span>
@@ -594,17 +652,20 @@
             </div>
 
             <section class="inventory-command-bar" aria-label="Inventory filters and context">
-              <div class="risk-filter-group" aria-label="Risk filters">
-                <button type="button" class="risk-filter active" data-risk-filter="ALL">All</button>
-                <button type="button" class="risk-filter critical" data-risk-filter="CRITICAL">Critical</button>
-                <button type="button" class="risk-filter high" data-risk-filter="HIGH">High</button>
-                <button type="button" class="risk-filter medium" data-risk-filter="MEDIUM">Medium</button>
-                <button type="button" class="risk-filter low" data-risk-filter="LOW">Low</button>
-                <button type="button" class="risk-filter protected" data-risk-filter="PROTECTED">Protected</button>
-              </div>
               <div class="inventory-facet-row">
+                <label>
+                  Severity
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-off"/></svg><select id="inventory-risk-filter">
+                    <option value="ALL">All severities</option>
+                    <option value="CRITICAL">Critical</option>
+                    <option value="HIGH">High</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LOW">Low</option>
+                    <option value="PROTECTED">Protected</option>
+                  </select></span>
+                </label>
                 <label class="inventory-scan-facet">
-                  Scan
+                  Scan source
                   <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="inventory-source-filter">
                     <option value="ALL">All scans</option>
                   </select></span>
@@ -615,10 +676,18 @@
                     <option value="ALL">All finding types</option>
                   </select></span>
                 </label>
-                <div class="inventory-framework-filter" aria-label="Framework filters">
-                  <span><svg class="f-ico fw-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>Framework</span>
-                  <div id="inventory-framework-filter" class="inventory-framework-options"></div>
-                </div>
+                <label>
+                  Framework
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="inventory-framework-select">
+                    <option value="ALL">All frameworks</option>
+                  </select></span>
+                </label>
+                <label>
+                  Folder / path
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder"/></svg><select id="inventory-folder-filter">
+                    <option value="ALL">Anywhere</option>
+                  </select></span>
+                </label>
                 <button type="button" id="clear-inventory-filters" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Clear filters</button>
               </div>
               <div id="inventory-context-metrics" class="inventory-context-metrics">
@@ -658,100 +727,158 @@
           </section>
         </section>
 
-        <section id="tab-risk" class="tab-panel">
-          <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
-            <defs>
-              <symbol id="li-pie-chart" viewBox="0 0 24 24"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></symbol>
-              <symbol id="li-siren" viewBox="0 0 24 24"><path d="M7 18v-6a5 5 0 1 1 10 0v6"/><path d="M5 21a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-1a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2z"/><path d="M21 12h1"/><path d="M18.5 4.5 18 5"/><path d="M2 12h1"/><path d="M12 2v1"/><path d="m4.929 4.929.707.707"/><path d="M12 12v6"/></symbol>
-              <symbol id="li-folder-open-dot" viewBox="0 0 24 24"><path d="m6 14 1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5c0-1.1.9-2 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2"/><circle cx="14" cy="15" r="1"/></symbol>
-              <symbol id="li-map" viewBox="0 0 24 24"><path d="M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z"/><path d="M15 5.764v15"/><path d="M9 3.236v15"/></symbol>
-              <symbol id="li-share-2" viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98"/><path d="m15.41 6.51-6.82 3.98"/></symbol>
-              <symbol id="li-git-compare" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></symbol>
-            </defs>
-          </svg>
-          <div class="section-header">
-            <div>
-              <h3>Remediation Center</h3>
-            </div>
-            <button type="button" id="refresh-executive-btn" class="secondary-btn">Refresh</button>
-          </div>
+        <section id="tab-risk" class="tab-panel remediation-center">
+          <div class="drawer drawer-end remediation-drawer-shell">
+            <input id="remediation-drawer-toggle" type="checkbox" class="drawer-toggle" aria-label="Finding details" />
+            <div class="drawer-content remediation-page-content">
+              <div class="section-header">
+                <div>
+                  <h2 class="page-title">Remediation</h2>
+                </div>
+              </div>
 
-          <div id="executive-hero" class="executive-hero remediation-summary"></div>
-          <section class="visual-panel mssp-panel remediation-workspace-panel" aria-label="Workspace status">
-            <div id="mssp-portfolio" class="mssp-portfolio remediation-workspace-status"></div>
-          </section>
-          <div class="risk-analytics">
-            <div class="risk-analytics-main">
-              <section class="visual-panel risk-anchor-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-pie-chart"/></svg></span>Risk distribution</h4>
-                  <span id="risk-total-label">No scan yet</span>
+              <section class="workspace" id="remediation-workspace">
+                <div class="table-toolbar inventory-toolbar">
+                  <p id="remediation-scope-summary" class="visually-hidden" aria-live="polite">Loading findings…</p>
+                  <div class="risk-filter-group" id="remediation-severity-filters" aria-label="Severity filters">
+                    <button type="button" class="risk-filter active" data-remediation-severity="ALL">All</button>
+                    <button type="button" class="risk-filter critical" data-remediation-severity="CRITICAL">Critical</button>
+                    <button type="button" class="risk-filter high" data-remediation-severity="HIGH">High</button>
+                    <button type="button" class="risk-filter medium" data-remediation-severity="MEDIUM">Medium</button>
+                    <button type="button" class="risk-filter low" data-remediation-severity="LOW">Low</button>
+                  </div>
+                  <div class="inventory-toolbar-actions">
+                    <div class="inventory-search-box">
+                      <span aria-hidden="true"><svg class="f-ico" aria-hidden="true"><use href="#li-search"/></svg></span>
+                      <input id="remediation-search" type="search" placeholder="Search finding, file, asset, owner, status..." autocomplete="off" />
+                    </div>
+                    <div class="inventory-export-actions">
+                      <button type="button" id="refresh-executive-btn" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+                    </div>
+                  </div>
                 </div>
-                <div id="risk-distribution"></div>
-              </section>
-              <section class="visual-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-siren"/></svg></span>Critical and high files</h4>
-                </div>
-                <div id="priority-risk-files"></div>
-              </section>
-              
-              
-            </div>
-            <aside class="risk-analytics-side">
-              <section class="visual-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-activity"/></svg></span>Posture trend</h4>
-                </div>
-                <div id="posture-trend" class="posture-trend"></div>
-              </section>
-              
-            </aside>
-          </div>
 
-          <section class="visual-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-git-compare"/></svg></span>Scan comparison</h4>
-                </div>
-                <div id="scan-comparison"></div>
-              </section>
+                <section class="inventory-command-bar" aria-label="Remediation filters and context">
 
-          <section class="visual-panel remediation-queue-panel">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Remediation queue</h4>
-                  <span>Highest priority first</span>
+                  <form id="remediation-filters" class="inventory-facet-row" role="search">
+                    <label>
+                      Scope
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="remediation-scope-filter">
+                        <option value="current">Current scope</option><option value="historical">Historical scope</option><option value="all">All scopes</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Status
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-scan-search"/></svg><select id="remediation-status-filter"><option value="active">Active findings</option></select></span>
+                    </label>
+                    <label>
+                      Owner
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user-round"/></svg><select id="remediation-owner-filter"><option value="ALL">Owner</option></select></span>
+                    </label>
+                    <label>
+                      Framework
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="remediation-framework-filter"><option value="ALL">Framework</option></select></span>
+                    </label>
+                    <label>
+                      Data type
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-file-text"/></svg><select id="remediation-data-filter"><option value="ALL">Data type</option></select></span>
+                    </label>
+                    <label>
+                      Asset
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="remediation-asset-filter"><option value="ALL">Asset</option></select></span>
+                    </label>
+                    <label>
+                      SLA
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-clock-3"/></svg><select id="remediation-sla-filter">
+                        <option value="ALL">SLA</option><option value="OVERDUE">Overdue</option><option value="DUE_SOON">Due in 24h</option><option value="ON_TRACK">On track</option><option value="NO_SLA">No SLA</option>
+                      </select></span>
+                    </label>
+                    <button type="button" id="remediation-reset-filters" class="secondary-btn mini-btn" data-remediation-reset><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Clear filters</button>
+                  </form>
+
+                  <div id="remediation-stats" class="inventory-context-metrics"></div>
+                </section>
+
+                <p id="remediation-result-count" class="visually-hidden" role="status" aria-live="polite">Loading findings…</p>
+
+                <div id="remediation-error" class="alert alert-error alert-soft remediation-error" role="alert" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
+                  <div><strong>Unable to load remediation findings.</strong><span>Please try again.</span></div>
+                  <button type="button" class="secondary-btn mini-btn" data-remediation-retry>Retry</button>
                 </div>
+
                 <div id="remediation-workflow" class="remediation-workflow"></div>
               </section>
+            </div>
 
-          <section class="visual-panel exposure-insights">
-                <div class="panel-title">
-                  <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-open-dot"/></svg></span>Exposure insights</h4>
+            <div class="drawer-side remediation-drawer-side">
+              <label for="remediation-drawer-toggle" aria-label="Close finding details" class="drawer-overlay"></label>
+              <aside class="remediation-drawer-panel" aria-label="Finding details">
+                <div id="remediation-drawer-body" class="remediation-drawer-body">
+                  <div class="remediation-drawer-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg><strong>Select a finding</strong><span>Choose a queue item to inspect its risk and remediation workflow.</span></div>
                 </div>
-                <div class="insight-tabs">
-                  <input type="radio" name="exposure-tab" id="xt-folders" class="insight-tab-radio" checked />
-                  <input type="radio" name="exposure-tab" id="xt-departments" class="insight-tab-radio" />
-                  <input type="radio" name="exposure-tab" id="xt-heatmap" class="insight-tab-radio" />
-                  <input type="radio" name="exposure-tab" id="xt-signals" class="insight-tab-radio" />
-                  <input type="radio" name="exposure-tab" id="xt-topology" class="insight-tab-radio" />
-                  <div class="insight-tab-bar" role="tablist" aria-label="Exposure insight views">
-                    <label for="xt-folders"><svg class="f-ico" aria-hidden="true"><use href="#li-folder-open-dot"/></svg>Top risky folders</label>
-                    <label for="xt-departments"><svg class="f-ico" aria-hidden="true"><use href="#li-building-2"/></svg>Department risk</label>
-                    <label for="xt-heatmap"><svg class="f-ico" aria-hidden="true"><use href="#li-map"/></svg>Folder heatmap</label>
-                    <label for="xt-signals"><svg class="f-ico" aria-hidden="true"><use href="#li-activity"/></svg>Signal mix</label>
-                    <label for="xt-topology"><svg class="f-ico" aria-hidden="true"><use href="#li-share-2"/></svg>Topology</label>
-                  </div>
-                  <div class="insight-tab-panels">
-                    <div class="insight-tab-panel" data-tab="folders"><div id="top-risky-folders"></div></div>
-                    <div class="insight-tab-panel" data-tab="departments"><div id="department-risk"></div></div>
-                    <div class="insight-tab-panel" data-tab="heatmap"><div id="risk-heatmap"></div></div>
-                    <div class="insight-tab-panel" data-tab="signals"><div id="signal-matrix"></div></div>
-                    <div class="insight-tab-panel" data-tab="topology"><div id="risk-topology" class="risk-topology"></div></div>
-                  </div>
-                </div>
-              </section>
+              </aside>
+            </div>
+          </div>
 
-          <div id="executive-top-files" class="top-files-grid hidden" aria-hidden="true"></div>
+          <dialog id="remediation-assignment-modal" class="modal">
+            <form id="remediation-assignment-form" class="modal-box remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Ownership</span><h3>Assign finding</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
+              <label>Owner<input id="remediation-assignment-owner" name="owner" class="input input-sm" required maxlength="160" autocomplete="off" /></label>
+              <label>Due date<input id="remediation-assignment-due" name="sla_due" class="input input-sm" type="date" /></label>
+              <label>Comment<textarea id="remediation-assignment-comment" name="comment" class="textarea textarea-sm" maxlength="1000" placeholder="Add assignment context"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Assign</button></div>
+            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-risk-modal" class="modal">
+            <form id="remediation-risk-form" class="modal-box remediation-modal-box remediation-modal-wide">
+              <div class="remediation-modal-header remediation-span-two"><div><span class="eyebrow">Auditable exception</span><h3>Risk acceptance</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
+              <p class="remediation-modal-note remediation-span-two">Acceptance records a time-bound security decision. It does not remediate the underlying finding.</p>
+              <label class="remediation-span-two">Business justification<textarea name="business_justification" class="textarea textarea-sm" required maxlength="2000"></textarea></label>
+              <label>Approver<input name="approver" class="input input-sm" required maxlength="160" /></label>
+              <label>Accepted volume<input name="accepted_volume" class="input input-sm" type="number" min="1" max="100000000" required /></label>
+              <label>Review date<input name="review_date" class="input input-sm" type="date" required /></label>
+              <label>Expiration date<input name="expiration_date" class="input input-sm" type="date" required /></label>
+              <label class="remediation-span-two">Compensating controls<textarea name="compensating_controls" class="textarea textarea-sm" required placeholder="One control per line"></textarea></label>
+              <label class="remediation-span-two">Affected assets<textarea name="affected_assets" class="textarea textarea-sm" required placeholder="One asset per line"></textarea></label>
+              <p class="remediation-modal-error remediation-span-two" data-remediation-modal-error aria-live="polite"></p>
+              <div class="modal-action remediation-span-two"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Accept risk</button></div>
+            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-false-positive-modal" class="modal">
+            <form id="remediation-false-positive-form" class="modal-box remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Review outcome</span><h3>Mark as false positive</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
+              <label>Reason<textarea name="reason" class="textarea textarea-sm" required maxlength="1000" placeholder="Why is this detection not valid?"></textarea></label>
+              <label>Optional comment<textarea name="comment" class="textarea textarea-sm" maxlength="1000"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Confirm</button></div>
+            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-suppression-modal" class="modal">
+            <form id="remediation-suppression-form" class="modal-box remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Temporary exception</span><h3>Suppress finding</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
+              <div class="alert alert-warning alert-soft remediation-modal-note"><span>Suppression temporarily hides the finding and does not remediate the underlying risk.</span></div>
+              <label>Reason<textarea name="reason" class="textarea textarea-sm" required maxlength="1000"></textarea></label>
+              <label>Expiration date<input name="expiration_date" class="input input-sm" type="date" required /></label>
+              <label>Optional comment<textarea name="comment" class="textarea textarea-sm" maxlength="1000"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Suppress</button></div>
+            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-action-modal" class="modal">
+            <form id="remediation-action-form" class="modal-box remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Workflow update</span><h3 id="remediation-action-title">Update finding</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
+              <p id="remediation-action-description" class="remediation-modal-note"></p>
+              <label>Comment<textarea id="remediation-action-comment" name="comment" class="textarea textarea-sm" maxlength="1000"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" id="remediation-action-submit" class="btn btn-sm btn-primary">Continue</button></div>
+            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+          </dialog>
         </section>
 
         <section id="tab-settings" class="tab-panel">
@@ -763,7 +890,7 @@
           </svg>
           <div class="asset-header">
             <div>
-              <h3>Customer asset risk</h3>
+              <h2 class="page-title">Asset rules</h2>
               <p>Define tenant-specific crown-jewel paths, folders, extensions, or filenames. Saved rules are applied to every new scan.</p>
             </div>
             <div class="asset-actions">
@@ -811,7 +938,7 @@
           </svg>
           <div class="report-header">
             <div>
-              <h3>Reporting center</h3>
+              <h2 class="page-title">Reports</h2>
             </div>
             <div class="report-actions">
               <button type="button" id="export-csv-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-spreadsheet"/></svg>Export Excel Workbook</button>
@@ -827,7 +954,7 @@
           <div class="table-toolbar history-toolbar">
             <div class="toolbar-fx" aria-hidden="true"><i class="fx-sweep"></i></div>
             <div>
-              <h3>Scan history and audit</h3>
+              <h2 class="page-title">History & audit</h2>
             </div>
             <div class="history-controls">
                 <span class="field-shell history-filter-shell"><svg class="f-ico field-ico dropdown-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg><select id="history-range" class="tenant-switcher" title="Filter scan history">
@@ -895,7 +1022,7 @@
           </svg>
           <div class="section-header">
             <div>
-              <h3>Endpoint local-admin scan</h3>
+              <h2 class="page-title">Endpoint scan</h2>
             </div>
           </div>
 
@@ -1111,7 +1238,7 @@
                 </section>
                 <section class="visual-panel endpoint-panel winrm-activation-panel endpoint-io-panel" aria-label="Target WinRM">
                   <div class="panel-title">
-                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-plug-zap"/></svg></span>Prepare target WinRM</h4>
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-plug-zap"/></svg></span>Prepare target <abbr title="Windows Remote Management">WinRM</abbr></h4>
                     <span>Uses the admin credential from Basics</span>
                   </div>
                   <div class="hidden" aria-hidden="true">
@@ -1129,12 +1256,12 @@
                   <div id="endpoint-wizard-status" class="wizard-status-mirror muted">Ready</div>
                 </section>
 <details class="scan-advanced">
-            <summary>Optional — prepare local backend WinRM (rarely needed)</summary>
+            <summary>Optional — prepare WinRM on this server (rarely needed)</summary>
 
           <section class="visual-panel endpoint-panel winrm-activation-panel">
             <div class="panel-title">
               <h4>Optional local readiness</h4>
-              <span>Backend host only</span>
+              <span>This server only</span>
             </div>
             <div class="asset-form-grid endpoint-form">
               <label>
@@ -1143,7 +1270,7 @@
               </label>
               <label>
                 Admin username
-                <input id="local-winrm-username" autocomplete="username" placeholder="Local admin on this backend host" />
+                <input id="local-winrm-username" autocomplete="username" placeholder="Local admin on this server" />
               </label>
               <label>
                 Admin password
@@ -1151,9 +1278,9 @@
               </label>
             </div>
             <div class="actions endpoint-actions">
-              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Prepare local backend WinRM</button>
+              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Prepare WinRM on this server</button>
             </div>
-            <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows host running this backend. Do not enter domain/DC credentials here unless this backend host actually needs them; target machine local-admin credentials are entered below.</p>
+            <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows machine Sentro runs on. Don’t enter domain or domain-controller credentials here unless this machine needs them — the credential for the machine you want to scan goes below.</p>
           </section>
           </details>
               </div>
@@ -1182,7 +1309,7 @@
         </section>
 
 
-        <section id="tab-security" class="tab-panel">
+        <section id="tab-security" class="tab-panel" data-admin-only>
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-users-round" viewBox="0 0 24 24"><path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="8" r="5"/><path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/></symbol>
@@ -1194,7 +1321,7 @@
           </svg>
           <div class="section-header">
             <div>
-              <h3>Security operations</h3>
+              <h2 class="page-title">Security operations</h2>
             </div>
           </div>
 
@@ -1291,7 +1418,7 @@
             <div class="table-toolbar">
               <div>
                 <h3><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scroll-text"/></svg></span>Audit trail</h3>
-                <p>Immutable tenant activity captured by the backend.</p>
+                <p>Every action in this workspace, recorded as it happens and never edited.</p>
               </div>
               <div class="history-controls audit-controls">
                 <span class="field-shell audit-filter-shell"><svg class="f-ico field-ico dropdown-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg><select id="audit-range" class="tenant-switcher" title="Filter audit trail">
@@ -1325,7 +1452,7 @@
           </section>
         </section>
 
-        <section id="tab-admin" class="tab-panel">
+        <section id="tab-admin" class="tab-panel" data-admin-only>
           <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-building-2" viewBox="0 0 24 24"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></symbol>
@@ -1338,7 +1465,7 @@
           </svg>
           <div class="section-header">
             <div>
-              <h3>Customers and workspaces</h3>
+              <h2 class="page-title">Tenants</h2>
             </div>
           </div>
 
@@ -1365,7 +1492,7 @@
             <div class="table-toolbar">
               <div>
                 <h3>Tenant list</h3>
-                <p>Available tenants are used by registration, user management, and the MSSP switcher.</p>
+                <p>Available tenants are used by registration, user management, and the <abbr title="Managed security service provider — one customer workspace per tenant">MSSP</abbr> switcher.</p>
               </div>
               <button type="button" id="refresh-tenants-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh tenants</button>
             </div>
@@ -1392,7 +1519,7 @@
         <section id="tab-logic" class="tab-panel workspace risk-logic">
           <div class="section-header">
             <div>
-              <h3>Risk logic</h3>
+              <h2 class="page-title">Risk logic</h2>
               <p>Scoring model, severity ranges, detection signals, and customer asset context.</p>
             </div>
           </div>
@@ -1432,10 +1559,10 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=189"></script>
+    <script src="/static/app.js?v=203"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
-    <script src="/static/sentro-fx.js?v=14" defer></script>
+    <script src="/static/sentro-fx.js?v=15" defer></script>
   </body>
 </html>
