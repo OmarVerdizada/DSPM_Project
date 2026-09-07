@@ -1539,3 +1539,13 @@ body:has(#tab-risk dialog[open]) .app-shell > main {
 /* styles.css gives the refresh button a 14px top margin for a layout it no
    longer sits in, which is what put it 7px below the search box beside it. */
 #remediation-workspace .inventory-export-actions .secondary-btn { margin: 0; }
+
+/* A refresh that already has rows keeps them: the table dims rather than
+   being replaced by a skeleton and rebuilt. Replacing it made every filter
+   change flicker through an empty state on the way to a near-identical one,
+   and cost three renders of the workspace per load instead of one. */
+#remediation-workflow.is-refreshing {
+  opacity: .55;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}

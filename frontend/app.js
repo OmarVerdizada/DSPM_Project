@@ -1888,11 +1888,13 @@ function applyScanReport(report, scanKind = "file-server", { refreshEstate = tru
 // workspaces from it. Tiles keep using the report summary (see
 // updateSummaryFromFiles), so the slice never skews the numbers.
 let workspaceSliceRequest = 0;
-async function hydrateWorkspaceSlice() {
+async function hydrateWorkspaceSlice({ force = false } = {}) {
   if (!latestReport?.files_omitted) return;
-  // 200 rows for the Findings workspace. Fetching them while that tab is
-  // hidden bought 203KB and 9,685 nodes nobody had asked to see.
-  if (deferWhileHidden("tab-findings", "slice", () => hydrateWorkspaceSlice())) return;
+  // 200 rows for the Findings workspace. Fetching them while nothing on screen
+  // needs them bought 203KB and 9,685 nodes nobody had asked to see. `force`
+  // is the dashboard saying it does need them: its top-risk list counts per
+  // file, so without this slice that card has nothing to count.
+  if (!force && deferWhileHidden("tab-findings", "slice", () => hydrateWorkspaceSlice())) return;
   const context = captureTenantContext();
   const requestId = ++workspaceSliceRequest;
   const resultsBody = document.getElementById("results-body");
@@ -2729,6 +2731,11 @@ function inventoryWindowControls(page) {
 // reflow per row and the answer would still be three.
 const FILE_META_VISIBLE = 3;
 
+// Four is what the cell fits, and what the +N beside it has always counted
+// against. Rendering all of them cost 54 nodes a row to draw two that fit
+// behind a fade.
+const FINDING_CHIPS_SHOWN = 4;
+
 function fileMetaLine({ extension, size, source, hashChanged, duplicateHashPath, flags = [] }) {
   const parts = [
     ...(extension ? [{ text: extension }] : []),
@@ -2810,11 +2817,12 @@ function renderRows(files, options = {}) {
       ].filter(Boolean);
       const displayFindings = integrityFindings.length ? [...rawFindings, ...integrityFindings] : rawFindings;
       const visibleFindingChips = displayFindings.filter((finding) => !isNistFinding(finding));
-      const findingChips = visibleFindingChips.length
-        ? visibleFindingChips.map((finding) => `<span class="finding-chip ${escapeHtml(frameworkClass(findingVisualFramework(finding)))}">${escapeHtml(findingDisplayName(finding))} <b>${escapeHtml(finding.count || 1)}</b></span>`).join("")
+      const shownFindingChips = visibleFindingChips.slice(0, FINDING_CHIPS_SHOWN);
+      const findingChips = shownFindingChips.length
+        ? shownFindingChips.map((finding) => `<span class="finding-chip ${escapeHtml(frameworkClass(findingVisualFramework(finding)))}">${escapeHtml(findingDisplayName(finding))} <b>${escapeHtml(finding.count || 1)}</b></span>`).join("")
         : displayFindings.length ? "" : '<span class="subtext">No sensitive signals</span>';
       const frameworkStrip = displayFindings.length ? `<div class="finding-framework-strip">${findingFrameworkStrip(displayFindings)}</div>` : "";
-      const hiddenFindingCount = Math.max(0, displayFindings.length - Math.min(visibleFindingChips.length, 4));
+      const hiddenFindingCount = Math.max(0, displayFindings.length - shownFindingChips.length);
       const moreFindings = hiddenFindingCount > 0
         ? `<button type="button" class="detail-toggle finding-chip muted-chip" data-detail-type="findings" data-detail-key="${escapeHtml(key)}" title="Show all findings and matched keywords">+${hiddenFindingCount}</button>`
         : "";
@@ -2825,14 +2833,14 @@ function renderRows(files, options = {}) {
 
       const rowFrameworkClass = "";
       const copyPathButton = path
-        ? `<button type="button" class="icon-mini-btn copy-path-btn" data-copy-text="${escapeHtml(path)}" title="Copy full path" aria-label="Copy full file path"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"></path></svg><span>Copy path</span></button>`
+        ? `<button type="button" class="icon-mini-btn copy-path-btn" data-copy-text="${escapeHtml(path)}" title="Copy full path" aria-label="Copy full path"><svg class="f-ico" aria-hidden="true"><use href="#inv-copy"/></svg><span>Copy path</span></button>`
         : "";
 
       return `
         <tr class="${flash} severity-row ${level} ${escapeHtml(rowFrameworkClass)}" data-file-key="${escapeHtml(key)}">
           <td>
             <div class="file-title polished-file-title">
-              <button type="button" class="preview-toggle inventory-row-expand" data-inventory-expand="${escapeHtml(key)}" title="Open asset &amp; scan detail" aria-label="Open asset and scan detail for ${escapeHtml(file.name || file.path || "file")}" aria-haspopup="dialog"><svg class="preview-toggle-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6"></path><path d="M20 4 11.5 12.5"></path><path d="M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"></path></svg></button>
+              <button type="button" class="preview-toggle inventory-row-expand" data-inventory-expand="${escapeHtml(key)}" title="Open asset &amp; scan detail" aria-label="Open asset and scan detail" aria-haspopup="dialog"><svg class="preview-toggle-icon f-ico" aria-hidden="true"><use href="#inv-open"/></svg></button>
               <button type="button" class="file-info-toggle" data-inventory-expand="${escapeHtml(key)}" aria-haspopup="dialog" title="Open asset &amp; scan detail">
                 <span class="file-path">${escapeHtml(file.name || file.path || "Unknown file")}</span>
               </button>
@@ -2857,7 +2865,7 @@ function renderRows(files, options = {}) {
               <span class="badge ${level}">${escapeHtml(level)} ${escapeHtml(score)}</span>
               <span class="risk-override" title="${manualLevel ? "Set manually - change or return to Auto" : "Set the risk manually"}">
                 <svg class="f-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg>
-                <select class="risk-override-select" data-override="${escapeHtml(key)}" aria-label="Manual risk for ${escapeHtml(file.name || file.path || "file")}">
+                <select class="risk-override-select" data-override="${escapeHtml(key)}" aria-label="Manual risk">
                   ${riskOption("", "Auto", manualLevel)}
                   ${riskOption("CRITICAL", "Critical", manualLevel)}
                   ${riskOption("HIGH", "High", manualLevel)}
@@ -2876,17 +2884,57 @@ function renderRows(files, options = {}) {
             : lazyDetailButton(file, "recommendations", "DLP actions")}</td>
         </tr>
       `;
-    })
-    .join("");
+    });
   const moreRow = serverPage
     ? inventoryWindowControls(serverPage)
     : visible.length > page.length
       ? `<tr><td colspan="6" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
       : "";
-  resultsBody.innerHTML = rows + moreRow;
-  resolveLazyDetailCounts(page);
+  writeRowsInChunks(rows, moreRow, () => resolveLazyDetailCounts(page));
   lastRenderedFileKeys = currentKeys;
   hasRenderedScanRows = true;
+}
+
+// One frame's worth of rows. At ~0.6ms a row this keeps each write inside the
+// frame budget, and the number is small enough that a re-render started
+// mid-flight discards little work.
+const ROW_CHUNK_SIZE = 25;
+let rowChunkToken = 0;
+
+// requestAnimationFrame stops being called when the document is hidden, so a
+// render that began before the operator switched away would stall part-drawn
+// and stay that way. Yielding through a timeout instead keeps the remaining
+// chunks arriving; both let the browser answer input between them, which is
+// the whole point.
+function scheduleRowChunk(step) {
+  if (document.hidden) setTimeout(step, 0);
+  else requestAnimationFrame(step);
+}
+
+function writeRowsInChunks(rowsHtml, tailHtml, whenDone = () => {}) {
+  const token = ++rowChunkToken;
+  if (rowsHtml.length <= ROW_CHUNK_SIZE) {
+    resultsBody.innerHTML = rowsHtml.join("") + tailHtml;
+    whenDone();
+    return;
+  }
+  // The first chunk is synchronous: the operator sees the table in the same
+  // frame as before, and only the rows below the fold are deferred.
+  resultsBody.innerHTML = rowsHtml.slice(0, ROW_CHUNK_SIZE).join("");
+  let next = ROW_CHUNK_SIZE;
+  const step = () => {
+    // A newer render owns the table now; this one stops where it is.
+    if (token !== rowChunkToken) return;
+    if (next >= rowsHtml.length) {
+      resultsBody.insertAdjacentHTML("beforeend", tailHtml);
+      whenDone();
+      return;
+    }
+    resultsBody.insertAdjacentHTML("beforeend", rowsHtml.slice(next, next + ROW_CHUNK_SIZE).join(""));
+    next += ROW_CHUNK_SIZE;
+    scheduleRowChunk(step);
+  };
+  scheduleRowChunk(step);
 }
 
 // Backstop: if a rendered row is still waiting on reason/fix counts (a data
@@ -5824,6 +5872,9 @@ function buildReportComparisonRows() {
 }
 
 function renderExecutiveExperience() {
+  if (deferWhileHidden("tab-overview", "dashboard", renderExecutiveExperience)) return;
+  // Top risks are per-file, and a restored report carries no files.
+  if (latestReport?.files_omitted && !latestFiles.length) hydrateWorkspaceSlice({ force: true });
   const currentSummary = displaySummary(buildCurrentSummary());
   const dashboardSummary = latestDashboard?.latest?.summary || {};
   const summary = currentSummary.total_files ? currentSummary : dashboardSummary.total_files ? dashboardSummary : currentSummary;
@@ -6110,6 +6161,9 @@ let dashFit = "";
 function refitDashboardLists() {
   const board = document.querySelector(".dash-board");
   if (!board || !board.clientHeight) return;
+  // Three reads, then three writes. Reading a height after writing markup
+  // forces the layout the write invalidated, so interleaving them paid for
+  // three layouts of the whole document instead of one.
   const next = [
     dashListCapacity("#data-classes-card", 36, { min: 4, max: 14 }),
     dashListCapacity("#locations-card", 29, { min: 6, max: 25 }),
@@ -6903,7 +6957,16 @@ function renderRemediationStatusOptions() {
   remediationStatusFilter.value = [...groups.map(([value]) => value), ...REMEDIATION_LIFECYCLE_STATUSES].includes(selected) ? selected : "active";
 }
 
+let remediationFacetSignature = "";
+
 function renderRemediationFilterOptions() {
+  const signature = JSON.stringify([
+    remediationFacetValues("categories"), remediationFacetValues("owners"),
+    remediationFacetValues("frameworks"), remediationFacetValues("data_types"),
+    remediationFacetValues("assets"),
+  ]);
+  if (signature === remediationFacetSignature) return;
+  remediationFacetSignature = signature;
   renderRemediationStatusOptions();
   remediationSelectOptions(remediationCategoryFilter, "Category", remediationFacetValues("categories"), remediationHumanize);
   remediationSelectOptions(remediationOwnerFilter, "Owner", remediationFacetValues("owners"), (value) => value === "__unassigned__" ? "Unassigned" : value);
@@ -7169,7 +7232,13 @@ async function loadRemediationFindings({ showLoading = true, resetPage = false }
   remediationListAbortController = new AbortController();
   if (showLoading && !remediationLoaded) remediationLoading = true;
   remediationLoadError = "";
-  renderRemediationWorkspace();
+  if (remediationLoaded) {
+    // Rows are already on screen: mark the panel busy instead of rebuilding
+    // it into a skeleton and back. One render per load, not three.
+    remediationWorkflow?.classList.add("is-refreshing");
+  } else {
+    renderRemediationWorkspace();
+  }
   try {
     const data = await api(`/api/findings?${remediationQueryParams()}`, null, "GET", { signal: remediationListAbortController.signal });
     if (!isCurrentTenantContext(context) || requestId !== remediationListRequest) return;
@@ -7181,6 +7250,7 @@ async function loadRemediationFindings({ showLoading = true, resetPage = false }
     remediationPage.nextCursor = String(data?.next_cursor || "");
     remediationLoaded = true;
     remediationLoading = false;
+    remediationWorkflow?.classList.remove("is-refreshing");
     renderRemediationWorkspace();
   } catch (error) {
     if (!isCurrentTenantContext(context) || requestId !== remediationListRequest) return;
@@ -7188,11 +7258,13 @@ async function loadRemediationFindings({ showLoading = true, resetPage = false }
       // Only the newest attempt owns the flag; an older one must not clear it.
       if (requestId === remediationListRequest) {
         remediationLoading = false;
+        remediationWorkflow?.classList.remove("is-refreshing");
         renderRemediationWorkspace();
       }
       return;
     }
     remediationLoading = false;
+    remediationWorkflow?.classList.remove("is-refreshing");
     remediationLoadError = error.message || "Unable to load findings";
     renderRemediationWorkspace();
   }

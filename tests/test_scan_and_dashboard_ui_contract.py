@@ -846,7 +846,10 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
                     values.append(" ".join(match.group(1).replace("!important", "").split()))
 
         washed = [v for v in values if v == "var(--hover-wash)"]
-        self.assertGreaterEqual(len(washed), 85, "the sweep stopped covering surfaces")
+        # The floor moved from 85 when Phase 1.4 deleted 758 unreachable rules
+        # from styles.css; seven of them were hover rules for markup this
+        # product no longer renders.
+        self.assertGreaterEqual(len(washed), 80, "the sweep stopped covering surfaces")
         self.assertLessEqual(len(set(values)), 22, f"hover colours are drifting again: {sorted(set(values))}")
 
         # A hover never announces itself with a gradient, and the only raw

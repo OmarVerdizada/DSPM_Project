@@ -122,7 +122,13 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         self.assertIn(".inventory-scan-facet .facet-shell select", self.styles)
         self.assertIn("width: 180px !important", self.styles)
         self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", self.styles)
-        self.assertIn(".inventory-expanded-grid", self.styles)
+        # `.inventory-expanded-grid` used to be asserted here. Phase 1.4 found
+        # that the class appears in no HTML and no JavaScript this product
+        # ships, so the two rules for it could never apply; they went with the
+        # other 758 unreachable rules. What the row expands into now is the
+        # asset detail modal, which has its own contract.
+        self.assertNotIn(".inventory-expanded-grid", self.styles)
+        self.assertIn(".asset-detail-panel", Path("frontend/styles.css").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

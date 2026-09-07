@@ -160,6 +160,84 @@ class BootWorkTests(unittest.TestCase):
         self.assertIn('if (resolvedTab === "risk" && !remediationLoaded) {', self.APP_JS)
 
 
+class RenderCostTests(unittest.TestCase):
+    """Phase 1 - what an interaction costs once the data has arrived."""
+
+    APP_JS = Path("frontend/app.js").read_text(encoding="utf-8")
+
+    def test_a_row_shows_only_what_it_draws(self) -> None:
+        """1.1 - a row was 6,758 bytes and 110 nodes, of which 27 finding
+        chips (2,524 bytes, 54 nodes) where only two are ever visible; the +N
+        beside them had always been computed against a cap of four that the
+        markup did not apply."""
+        self.assertIn("const FINDING_CHIPS_SHOWN = 4;", self.APP_JS)
+        self.assertIn("visibleFindingChips.slice(0, FINDING_CHIPS_SHOWN)", self.APP_JS)
+        self.assertIn("displayFindings.length - shownFindingChips.length", self.APP_JS)
+        # Five inline SVGs a row - 744 bytes of path data, a hundred times a
+        # page - become two sprite references.
+        index = Path("frontend/index.html").read_text(encoding="utf-8")
+        for symbol in ('<symbol id="inv-open"', '<symbol id="inv-copy"'):
+            self.assertIn(symbol, index)
+        row = self.APP_JS[self.APP_JS.index("preview-toggle inventory-row-expand"):]
+        row = row[:row.index("</td>")]
+        self.assertIn('href="#inv-open"', row)
+        self.assertNotIn("<path d=", row)
+
+    def test_a_page_of_rows_is_not_one_task(self) -> None:
+        """1.2 - the whole page went in through one `innerHTML`: 63ms after
+        the row diet, 320ms before it, and the browser cannot interrupt any of
+        it to answer a click."""
+        self.assertIn("const ROW_CHUNK_SIZE = 25;", self.APP_JS)
+        self.assertIn("function writeRowsInChunks(", self.APP_JS)
+        # The first chunk stays synchronous, so the table still appears in the
+        # frame it always did.
+        chunks = self.APP_JS[self.APP_JS.index("function writeRowsInChunks("):]
+        chunks = chunks[:chunks.index("\n}\n", 10)]
+        self.assertIn("resultsBody.innerHTML = rowsHtml.slice(0, ROW_CHUNK_SIZE)", chunks)
+        # requestAnimationFrame stops firing in a hidden document, which would
+        # strand a render part-drawn until the operator came back.
+        self.assertIn("if (document.hidden) setTimeout(step, 0);", self.APP_JS)
+        # A newer render owns the table; the older one stops where it is.
+        self.assertIn("if (token !== rowChunkToken) return;", chunks)
+
+    def test_the_queue_renders_once_per_load(self) -> None:
+        """1.3 - three renders of the whole workspace per load, and nine
+        selects rebuilt from innerHTML on every keystroke's response."""
+        self.assertIn("let remediationFacetSignature", self.APP_JS)
+        options = self.APP_JS[self.APP_JS.index("function renderRemediationFilterOptions("):]
+        options = options[:options.index("\n}\n", 10)]
+        self.assertIn("if (signature === remediationFacetSignature) return;", options)
+        # A refresh that already has rows dims them instead of replacing the
+        # table with a skeleton and building it back.
+        self.assertIn('remediationWorkflow?.classList.add("is-refreshing")', self.APP_JS)
+        queue_css = Path("frontend/styles/remediation.css").read_text(encoding="utf-8")
+        self.assertIn("#remediation-workflow.is-refreshing", queue_css)
+
+    def test_the_dashboard_renders_only_when_it_is_visible(self) -> None:
+        """The renderer 0.3 missed. It ran on every scan restore and every
+        workspace hydrate from whichever tab was open: 1,082ms, measured,
+        because four cards each write markup and then read a geometry
+        property, forcing a full layout of the document apiece."""
+        body = self.APP_JS[self.APP_JS.index("function renderExecutiveExperience("):]
+        body = body[:body.index("\n}\n", 10)]
+        self.assertIn('deferWhileHidden("tab-overview", "dashboard"', body)
+        # ...and it asks for the per-file slice its top-risk card counts,
+        # rather than relying on boot having fetched it for another tab.
+        self.assertIn("hydrateWorkspaceSlice({ force: true })", body)
+
+    def test_the_stylesheet_carries_no_unreachable_rules(self) -> None:
+        """1.4 - 758 rules (121KB) named classes and ids that appear in no
+        HTML and no JavaScript this product ships, so they could never match.
+        Recalculation is nodes x rule complexity, and this is the rule side."""
+        css = Path("frontend/styles.css").read_text(encoding="utf-8")
+        self.assertLess(len(css), 700_000, "styles.css is growing again")
+        for gone in (".inventory-framework-option", ".login-actions", ".auth-panel",
+                     ".inventory-expanded-grid", ".chart-legend"):
+            self.assertNotIn(gone + " ", css)
+        self.assertEqual(css.count("{"), css.count("}"))
+        self.assertEqual(css.count("/*"), css.count("*/"))
+
+
 class ResponseSizeTests(unittest.TestCase):
     def test_responses_and_assets_are_compressed(self) -> None:
         """0.1 - 1.5MB of JS and CSS and 100-200KB JSON pages went out

@@ -12,10 +12,10 @@
     />
     <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=9" />
-    <link rel="stylesheet" href="/static/styles.css?v=247" />
+    <link rel="stylesheet" href="/static/styles.css?v=248" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=13" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=18" />
-    <link rel="stylesheet" href="/static/styles/remediation.css?v=9" />
+    <link rel="stylesheet" href="/static/styles/remediation.css?v=10" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -1325,6 +1325,11 @@
               <symbol id="li-file-json" viewBox="0 0 24 24"><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1"/><path d="M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1"/></symbol>
               <symbol id="li-list-filter" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></symbol>
               <symbol id="li-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+              <!-- The inventory row drew these two inline, a hundred times per
+                   page: 744 bytes of path data per row. Same geometry, one
+                   copy. -->
+              <symbol id="inv-open" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 11.5 12.5"/><path d="M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"/></symbol>
+              <symbol id="inv-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></symbol>
             </defs>
           </svg>
           <div class="section-header">
@@ -1584,7 +1589,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=211"></script>
+    <script src="/static/app.js?v=217"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

@@ -309,6 +309,92 @@ measurement that justified it.
 | 1.4 | **The stylesheet diet — finish F3.** The frontend roadmap already moves pages onto the contract sheets and deletes the legacy rules they replace. The cascade census (§3.1.2) is the argument for finishing it: every `:root:root`/`!important` layer deleted is recalc time back. Priority targets, by cost: the 108 `:has()` selectors (replace with a class set from JS where the state is known), the 477 `:not()` chains, the 988 four-plus-compound descendant selectors. Measure the forced recalc after each page's migration. | forced recalc 62 ms → target ≤ 10 ms with the DOM diet; `styles.css` 745 KB → ≤ 200 KB |
 | 1.5 | **Split `detail_json`.** Keep a small `detail_json` (risk, compliance summary, preview flags: ~5 KB) and move `findings` (102 KB), `canonical_entities`, `framework_mapping` and `evidence` to a `asset_details` table read only by the detail modal's tabs. | `assets` 62 MB → ~7 MB; the modal's lazy fetch already exists |
 
+### Phase 1 — shipped 2026-09-07 (1.1–1.4; 1.5 not started)
+
+| Metric | Before Phase 1 | After | Target | |
+|---|---|---|---|---|
+| Inventory row | 6,758 B / 110 nodes | **4,545 B / 63 nodes** | ~2 KB / ~45 | not met |
+| Findings tbody (100 rows) | 588 KB | **430 KB** | — | |
+| Opening Findings, longest task | 1,156 ms | **101 ms** | ≤ 50 ms | not met |
+| Queue filter change, longest task | ~94 ms | **none recorded** | ≤ 20 ms | met |
+| Forced style recalc (median of 9) | 33.2 ms | **26.4 ms** | ≤ 10 ms | not met |
+| `styles.css` | 718 KB, 4,135 rules | **596 KB, 3,377 rules** | ≤ 200 KB | not met |
+| CSS rules in the document | 4,543 | **3,836** | — | |
+| Boot transfer / API calls | 160 KB / 10 | **186 KB / 12** | — | +1 call, see below |
+
+**1.1 Row diet.** The finding-chip set rendered every chip — 27 of them, 2,524
+bytes and 54 nodes — while the `+N` button beside it had always been computed
+against a cap of four that the markup never applied. It applies now, so the row
+shows what the count claims. The two inline SVGs per row (five elements, 744
+bytes of path data, repeated a hundred times a page) became `<use>` references
+to two new sprite symbols with the same geometry, and the per-row `aria-label`s
+dropped the file name the row already announces.
+
+**1.2 Chunked render.** 25 rows per write, the first chunk synchronous so the
+table still appears in the frame it always did. Two things worth recording:
+`requestAnimationFrame` does not fire in a hidden document, so the first version
+stalled at 25 rows whenever the operator switched away — the scheduler falls
+back to a timeout; and a newer render takes ownership by token, so a re-render
+mid-flight abandons the old one instead of interleaving with it.
+
+**1.3 One render per load.** A filter change used to replace the table with a
+skeleton and then rebuild it, and rebuild nine facet selects from `innerHTML`
+whether or not the facets had changed. The table now dims (`.is-refreshing`)
+and keeps its rows; the selects rebuild only when the facet payload differs.
+That also removes the change events a rebuild fired, which is what stranded the
+queue's loading flag at boot in Phase 0.
+
+**The 1,082 ms nobody had measured.** Opening Findings still cost over a second
+after the row diet, and it was not the rows: `renderExecutiveExperience` — the
+*dashboard's* renderer — ran on every scan restore and workspace hydrate from
+whichever tab was open. Its cost is not markup either. Four cards each write
+DOM and then read a geometry property, so each one forces a full style
+recalculation and layout: `refitDashboardLists` 340 ms, `renderDataClassesCard`
+285, `renderLocationsCard` 272, `renderPostureCard` 269 — suspiciously uniform,
+which is the signature of layout thrash rather than of work. It is deferred to
+its own tab now, like every other renderer.
+
+That deferral exposed a real coupling: the dashboard's top-risk card counts
+*per file*, so it needs the 200-row workspace slice that boot used to fetch for
+the Findings tab. Deferring the slice emptied the card. The dashboard asks for
+the slice itself now (`hydrateWorkspaceSlice({ force: true })`), which is why
+boot is one request larger than after Phase 0 — the honest cost of a card that
+needs file-level data.
+
+**1.4 Unreachable CSS.** 758 rules, 121 KB, whose class and id tokens appear in
+no HTML and no JavaScript this product ships. Method, and its two corrections,
+because the naive versions would have deleted live rules:
+
+- A DOM test ("does this selector match anything on screen") called 2,539 rules
+  dead — including every `.login-*` rule, which belongs to a different
+  document, and everything a modal or drawer only creates when opened. Replaced
+  with a *presence* test over the union of every HTML file that loads this
+  sheet and every script that generates markup: a token found anywhere, even
+  inside a template string, keeps its rule.
+- The rule parser read a comment sitting above a rule as part of its selector,
+  so a class name mentioned in prose became a required token. Selectors are
+  read from after the last comment close now.
+- 16 tokens appear as substrings but not as whole words — the shape of a class
+  assembled at runtime (`"remediation-row-" + id`). Weak evidence is enough to
+  keep a rule, so they were whitelisted.
+
+One stale contract fell out of it: `.inventory-expanded-grid` was asserted by a
+test but exists in no markup — the row expands into the asset detail modal now.
+
+**Where the targets were missed.** The row is 4.5 KB, not 2 KB: what remains is
+the path, the name, the meta line, three detail buttons and the badges — data,
+not decoration. Opening Findings is 101 ms, not 50: the remaining cost is the
+deferred renders landing together plus the layout they force. Recalculation is
+26 ms, not 10, and `styles.css` is 596 KB, not 200: deleting what is
+unreachable is the safe half of 1.4. The rest — 3,790 `!important`, 477
+`:not()`, 108 `:has()`, 345 `:root:root` — is *reachable* CSS that F3 has to
+replace page by page, which is the frontend roadmap's own work and cannot be
+done by a script.
+
+**Not started: 1.5 (split `detail_json`).** `assets.detail_json` is still 62 MB.
+Since Phase 0 the inventory list no longer reads it, so it is storage weight
+rather than request latency; it belongs with the Phase 2 storage work.
+
 ### Phase 2 — storage and write path (one week)
 
 | # | Change | Expected gain |
