@@ -762,6 +762,86 @@ facets, which wiped an applied multi-value filter on the next load.
 dataset, and the rebuild re-adds any value the facets do not list - so the
 control keeps showing what is actually applied.
 
+### 0.4t Four things that were each two answers to one question
+
+**The risk cell said the level twice and the override lived in a column.**
+Under every badge sat a 7px meter filled with
+`linear-gradient(90deg, low, medium, high, critical)` - the same four hues in
+every row whatever the row's level, so a LOW row and a CRITICAL row painted
+the identical rainbow and only the fill length differed. The badge already
+carries the word and the score. It is gone.
+
+Beside it, a whole column - measured at 191px of a 1326px table that has to
+show a path - held a `Manual risk` select that almost no row uses. The
+override is now a 20px caret on the badge with the platform's own `<select>`
+laid transparent over it: a real menu, its keyboard, its screen reader, and no
+open/close state of ours. It reads at 20px, which is the size of every other
+control in this table, and offers a 28x32 target taken from the space around
+it - only 2px of that from the badge, so clicking the badge still opens the
+row. A row set by hand says so where the level is (`is-manual`, "Set
+manually"), which is what the column used to be for.
+
+That freed the width for `Immediate remediation` to stop being
+`Immediate remediat…`. It was ellipsised by
+`:root:root #results-body td:nth-child(4) .subtext { white-space: nowrap
+!important }` - a rule written for paths that had caught a sentence of advice.
+The path keeps the treatment; the advice wraps.
+
+**The queue's command line held one control and 1150px of white.** Measured
+at 1600px: a 234px search box and a 97px Refresh, sitting together at the left
+of a 1482px band, 5px out of vertical alignment with each other because
+styles.css gives that button a 14px top margin for a layout it no longer sits
+in. Below them, nine facets flowed ragged across two rows - cells from 155px
+to 254px - with Clear filters orphaned at the end of the second.
+
+Now the search takes the line, the two "run it again" buttons sit at its end at
+the same 32px height, and the facets are a grid of equal cells
+(`repeat(auto-fit, minmax(132px, 1fr))`) with the label above the control. The
+label had to move: beside a control, nine facets leave about 70px for the
+value, which is how `All severities (6,831)` came to be painted over by the
+select's own arrow. Above, at 12px on a 28px control, the pair is 45px - not
+the 84px that label-above cost when the control was 40px tall, which is what
+0.4n warned about. Nine on one row at 1600px, eight plus one at 1366px, and
+the chrome above the first finding is 50px shorter than before.
+
+Every facet select on both tables now draws one chevron of ours, because the
+platform's arrow is a different mark on every OS and on this one it sat on top
+of the value.
+
+**Scrollbars: sixty-three declarations, two opposite bugs.** styles.css
+declared the appearance of a scrollbar sixty-three times over eleven groups of
+containers - 8px here, 12px there, 14px forced somewhere else, several with a
+thumb pinned visible in the accent colour and one in cyan. On screen: the two
+tables carried a permanent grey stripe 20px wide, and every panel written since
+the contract sheets carried nothing at all, because the contract's hover rule
+(zero specificity) lost to all of it. "There is no scrollbar" and "there is an
+ugly one that never goes away" were the same bug seen from two pages.
+
+The pile is deleted rather than out-specified - a sixty-fourth rule would not
+have made the answer clearer. shell.css now holds the only definition: a 10px
+track that always reserves its width, a 6px thumb at 34% of the text colour
+that appears when the pointer is over that container and darkens to 52% under
+the pointer. One selector had to change with it: `*:hover > ::-webkit-scrollbar-thumb`
+matches nothing, because a thumb is a *part* of the scrolling element, not a
+child of it.
+
+The window gets the same bar instead of none. `scrollbar-width: none` on
+`html` meant Administration - which overflows by 846px - scrolled with no
+indication that it could.
+
+**The all-classes panel was a second answer to "how does a modal work".** It
+was a `<dialog class="sheet">` leaning on `::backdrop`, which computes here
+(`getComputedStyle` reports the colour) but paints nothing, so the page behind
+stayed bright and the panel read as a white slab; it closed only from a text
+`Close` button. Three hundred lines below it in the same document, the asset
+detail modal already answers this: a real backdrop element at
+`rgba(2, 6, 23, .55)` with `blur(3px)`, an icon close, click-outside, Escape
+and focus return. The panel takes that markup and those handlers. It needed
+two rules of its own - the asset panel pins 1120px and 92vh with `!important`
+for four tabs of content, and a list of classes is one column that should stop
+where the list ends. `.sheet`, `.sheet::backdrop` and `.sheet-head` are
+deleted; `.sheet-body` stays because it is the list, not the frame.
+
 ### 0.4a The regression F3 shipped, and the fragility it exposed
 
 Deleting Remediation's second dashboard left one reference behind:

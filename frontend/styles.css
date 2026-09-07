@@ -1444,21 +1444,6 @@ main {
   scrollbar-gutter: stable both-edges;
 }
 
-.inventory-table-wrap::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
-}
-
-.inventory-table-wrap::-webkit-scrollbar-thumb {
-  border: 3px solid var(--surface);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 42%, var(--line));
-}
-
-.inventory-table-wrap::-webkit-scrollbar-track {
-  background: color-mix(in srgb, var(--surface-soft) 72%, var(--surface));
-}
-
 table {
   width: 100%;
   min-width: 1180px;
@@ -3637,8 +3622,6 @@ main { padding: 22px; max-width: 1840px; width: 100%; }
   padding: 22px 16px;
   box-shadow: 18px 0 40px rgba(2, 6, 23, .08);
 }
-.sidebar::-webkit-scrollbar { width: 10px; }
-.sidebar::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, .25); border-radius: 999px; }
 .brand, .logo-lockup { padding: 8px 8px 14px; margin-bottom: 8px; border-bottom: 1px solid rgba(148, 163, 184, .18); }
 .brand h1, .logo-lockup h1 { color: #fff; letter-spacing: -.04em; font-size: 24px; }
 .brand p, .logo-lockup p { color: var(--sidebar-muted); font-weight: 700; }
@@ -4411,20 +4394,6 @@ body:not(.role-admin) [data-admin-only] { display: none !important; } /* token-g
   overscroll-behavior: contain;
   padding-right: 6px;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--accent) 45%, var(--line)) transparent;
-}
-
-.scroll-card-list::-webkit-scrollbar,
-#findings-priority-summary::-webkit-scrollbar,
-#exposure-permissions-summary::-webkit-scrollbar {
-  width: 8px;
-}
-
-.scroll-card-list::-webkit-scrollbar-thumb,
-#findings-priority-summary::-webkit-scrollbar-thumb,
-#exposure-permissions-summary::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 42%, var(--line));
 }
 
 .compact-risk-card {
@@ -5128,7 +5097,6 @@ body.sidebar-collapsed .side-nav .tab {
 .priority-file-list.scroll-card-list {
   overflow: auto !important;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--accent) 44%, var(--line)) transparent;
 }
 #exposure-permissions-summary { max-height: 430px !important; padding-bottom: 8px; }
 #exposure-permissions-summary .summary-row,
@@ -5198,19 +5166,6 @@ td .timestamp-cell + small {
   font-size: 11px;
   white-space: nowrap;
 }
-
-.table-wrap::-webkit-scrollbar,
-.scroll-card-list::-webkit-scrollbar,
-#exposure-permissions-summary::-webkit-scrollbar,
-.compact-folder-list::-webkit-scrollbar { height: 10px; width: 10px; }
-.table-wrap::-webkit-scrollbar-thumb,
-.scroll-card-list::-webkit-scrollbar-thumb,
-#exposure-permissions-summary::-webkit-scrollbar-thumb,
-.compact-folder-list::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--accent) 42%, var(--line)); }
-.table-wrap::-webkit-scrollbar-track,
-.scroll-card-list::-webkit-scrollbar-track,
-#exposure-permissions-summary::-webkit-scrollbar-track,
-.compact-folder-list::-webkit-scrollbar-track { background: transparent; }
 
 .visual-panel,
 .workspace,
@@ -6707,32 +6662,6 @@ body.sidebar-collapsed .app-shell > main {
   min-width: 0 !important;
 }
 
-#tab-risk #remediation-workflow::-webkit-scrollbar,
-#tab-risk .remediation-item::-webkit-scrollbar,
-#signal-matrix::-webkit-scrollbar,
-#report-preview::-webkit-scrollbar {
-  width: var(--scrollbar-size);
-  height: var(--scrollbar-size);
-}
-
-#tab-risk #remediation-workflow::-webkit-scrollbar-thumb,
-#tab-risk .remediation-item::-webkit-scrollbar-thumb,
-#signal-matrix::-webkit-scrollbar-thumb,
-#report-preview::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 50%, transparent);
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-
-#tab-risk #remediation-workflow::-webkit-scrollbar-track,
-#tab-risk .remediation-item::-webkit-scrollbar-track,
-#signal-matrix::-webkit-scrollbar-track,
-#report-preview::-webkit-scrollbar-track {
-  background: color-mix(in srgb, var(--card-2) 74%, transparent);
-  border-radius: 999px;
-}
-
 @media (max-width: 760px) {
   #tab-risk #remediation-workflow .scroll-card-list,
   #tab-risk .remediation-list,
@@ -7004,17 +6933,6 @@ body.sidebar-collapsed .app-shell > main {
   margin-bottom: 8px !important;
 }
 
-#posture-trend::-webkit-scrollbar,
-#remediation-workflow::-webkit-scrollbar,
-#risk-heatmap::-webkit-scrollbar,
-#signal-matrix::-webkit-scrollbar,
-#department-risk::-webkit-scrollbar,
-#scan-comparison::-webkit-scrollbar,
-#risk-topology::-webkit-scrollbar {
-  width: var(--scrollbar-size);
-  height: var(--scrollbar-size);
-}
-
 @media (max-width: 760px) {
   #posture-trend .trend-bars,
   #risk-topology .topology-svg {
@@ -7226,8 +7144,7 @@ body.sidebar-collapsed .app-shell > main {
   overflow-y: hidden !important;
   padding-bottom: 18px !important;
   scrollbar-gutter: stable both-edges !important;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 #risk-heatmap,
@@ -7236,47 +7153,7 @@ body.sidebar-collapsed .app-shell > main {
   overflow-x: auto !important;
   padding-right: 16px !important;
   scrollbar-gutter: stable both-edges !important;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
-}
-
-#posture-trend::-webkit-scrollbar,
-#remediation-workflow::-webkit-scrollbar,
-#risk-heatmap::-webkit-scrollbar,
-#signal-matrix::-webkit-scrollbar,
-#department-risk::-webkit-scrollbar {
-  width: 14px !important;
-  height: 14px !important;
-}
-
-#posture-trend::-webkit-scrollbar-track,
-#remediation-workflow::-webkit-scrollbar-track,
-#risk-heatmap::-webkit-scrollbar-track,
-#signal-matrix::-webkit-scrollbar-track,
-#department-risk::-webkit-scrollbar-track {
-  border-radius: 999px !important;
-  background: var(--risk-scrollbar-track) !important;
-}
-
-#posture-trend::-webkit-scrollbar-thumb,
-#remediation-workflow::-webkit-scrollbar-thumb,
-#risk-heatmap::-webkit-scrollbar-thumb,
-#signal-matrix::-webkit-scrollbar-thumb,
-#department-risk::-webkit-scrollbar-thumb {
-  min-height: 44px !important;
-  min-width: 44px !important;
-  border: 3px solid var(--risk-scrollbar-track) !important;
-  border-radius: 999px !important;
-  background: var(--risk-scrollbar-thumb) !important;
-  background-clip: padding-box !important;
-}
-
-#posture-trend::-webkit-scrollbar-corner,
-#remediation-workflow::-webkit-scrollbar-corner,
-#risk-heatmap::-webkit-scrollbar-corner,
-#signal-matrix::-webkit-scrollbar-corner,
-#department-risk::-webkit-scrollbar-corner {
-  background: transparent !important;
+  scrollbar-width: thin;
 }
 
 #remediation-workflow,
@@ -7284,8 +7161,7 @@ body.sidebar-collapsed .app-shell > main {
 #priority-risk-files,
 #scan-comparison,
 #risk-topology {
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 /* DSPM v108 local: report center rebuilt as bounded scroll cards. */
@@ -7295,8 +7171,7 @@ body.sidebar-collapsed .app-shell > main {
   overflow: auto !important;
   padding: 14px !important;
   scrollbar-gutter: stable both-edges;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 #report-preview .premium-report-preview,
@@ -7331,8 +7206,7 @@ body.sidebar-collapsed .app-shell > main {
   overflow: auto !important;
   padding: 14px !important;
   scrollbar-gutter: stable both-edges;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 #report-preview .report-signal-card {
@@ -7381,29 +7255,6 @@ body.sidebar-collapsed .app-shell > main {
   justify-self: end !important;
 }
 
-#report-preview::-webkit-scrollbar,
-#report-preview .chart-panel::-webkit-scrollbar,
-#report-preview .report-card-scroll::-webkit-scrollbar {
-  width: 14px !important;
-  height: 14px !important;
-}
-
-#report-preview::-webkit-scrollbar-track,
-#report-preview .chart-panel::-webkit-scrollbar-track,
-#report-preview .report-card-scroll::-webkit-scrollbar-track {
-  border-radius: 999px !important;
-  background: var(--risk-scrollbar-track) !important;
-}
-
-#report-preview::-webkit-scrollbar-thumb,
-#report-preview .chart-panel::-webkit-scrollbar-thumb,
-#report-preview .report-card-scroll::-webkit-scrollbar-thumb {
-  border: 3px solid var(--risk-scrollbar-track) !important;
-  border-radius: 999px !important;
-  background: var(--risk-scrollbar-thumb) !important;
-  background-clip: padding-box !important;
-}
-
 /* DSPM v109 local: inventory paths must be fully readable. */
 .inventory-table .path-subtext,
 .inventory-table td .path-subtext,
@@ -7449,8 +7300,7 @@ body.sidebar-collapsed .app-shell > main {
   overscroll-behavior: contain;
   padding-right: 8px !important;
   scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 #findings-signal-summary .finding-kpi-grid {
@@ -7519,22 +7369,6 @@ body.sidebar-collapsed .app-shell > main {
   background: linear-gradient(90deg, var(--accent), var(--critical));
 }
 
-#findings-signal-summary::-webkit-scrollbar {
-  width: 14px;
-}
-
-#findings-signal-summary::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: var(--risk-scrollbar-track);
-}
-
-#findings-signal-summary::-webkit-scrollbar-thumb {
-  border: 3px solid var(--risk-scrollbar-track);
-  border-radius: 999px;
-  background: var(--risk-scrollbar-thumb);
-  background-clip: padding-box;
-}
-
 #report-preview {
   padding: 18px !important;
 }
@@ -7586,8 +7420,7 @@ body.sidebar-collapsed .app-shell > main {
   overflow: auto;
   padding-right: 6px;
   scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 #report-preview .report-row {
@@ -7600,29 +7433,12 @@ body.sidebar-collapsed .app-shell > main {
   margin-top: 10px !important;
 }
 
-#report-preview .report-signal-card .signal-bars::-webkit-scrollbar {
-  width: 12px;
-}
-
-#report-preview .report-signal-card .signal-bars::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: var(--risk-scrollbar-track);
-}
-
-#report-preview .report-signal-card .signal-bars::-webkit-scrollbar-thumb {
-  border: 3px solid var(--risk-scrollbar-track);
-  border-radius: 999px;
-  background: var(--risk-scrollbar-thumb);
-  background-clip: padding-box;
-}
-
 /* DSPM v110 local: keep audit trail timestamps bounded inside the table. */
 .table-wrap:has(#audit-body) {
   max-height: min(58vh, 560px);
   overflow: auto;
   scrollbar-gutter: stable both-edges;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 .table-wrap:has(#audit-body) thead th {
@@ -7662,7 +7478,6 @@ body.sidebar-collapsed .app-shell > main {
   overflow-wrap: anywhere;
   word-break: break-word;
   scrollbar-width: thin;
-  scrollbar-color: var(--risk-scrollbar-thumb) transparent;
 }
 
 #audit-body code {
@@ -7674,32 +7489,6 @@ body.sidebar-collapsed .app-shell > main {
   overflow-wrap: anywhere;
   word-break: break-word;
   scrollbar-width: thin;
-  scrollbar-color: var(--risk-scrollbar-thumb) transparent;
-}
-
-.table-wrap:has(#audit-body)::-webkit-scrollbar,
-#audit-body .timestamp-cell + small::-webkit-scrollbar,
-#audit-body code::-webkit-scrollbar {
-  width: 12px;
-  height: 12px;
-}
-
-.table-wrap:has(#audit-body)::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: var(--risk-scrollbar-track);
-}
-
-.table-wrap:has(#audit-body)::-webkit-scrollbar-thumb {
-  border: 3px solid var(--risk-scrollbar-track);
-  border-radius: 999px;
-  background: var(--risk-scrollbar-thumb);
-  background-clip: padding-box;
-}
-
-#audit-body .timestamp-cell + small::-webkit-scrollbar-thumb,
-#audit-body code::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--risk-scrollbar-thumb);
 }
 
 /* DSPM v111 local: fuller report risk distribution and scrollable coverage bars. */
@@ -7751,8 +7540,7 @@ body.sidebar-collapsed .app-shell > main {
   overflow-y: auto !important;
   padding-right: 8px !important;
   scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
 }
 
 #exposure-coverage-summary .coverage-overview-card {
@@ -7787,29 +7575,6 @@ body.sidebar-collapsed .app-shell > main {
   overflow-y: auto;
   padding-right: 6px;
   scrollbar-width: thin;
-  scrollbar-color: var(--risk-scrollbar-thumb) transparent;
-}
-
-#exposure-coverage-summary::-webkit-scrollbar,
-.coverage-scroll-list::-webkit-scrollbar {
-  width: 12px;
-}
-
-#exposure-coverage-summary::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: var(--risk-scrollbar-track);
-}
-
-#exposure-coverage-summary::-webkit-scrollbar-thumb {
-  border: 3px solid var(--risk-scrollbar-track);
-  border-radius: 999px;
-  background: var(--risk-scrollbar-thumb);
-  background-clip: padding-box;
-}
-
-.coverage-scroll-list::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: var(--risk-scrollbar-thumb);
 }
 
 @media (max-width: 760px) {
@@ -8002,8 +7767,7 @@ body.sidebar-collapsed .app-shell > main {
     linear-gradient(180deg, color-mix(in srgb, var(--surface) 92%, var(--card)), color-mix(in srgb, var(--bg) 18%, var(--surface))),
     var(--surface);
   scrollbar-gutter: stable;
-  scrollbar-width: auto;
-  scrollbar-color: var(--risk-scrollbar-thumb) var(--risk-scrollbar-track);
+  scrollbar-width: thin;
   box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 32%, transparent);
 }
 
@@ -8111,25 +7875,6 @@ body.sidebar-collapsed .app-shell > main {
   font-weight: 900;
 }
 
-#ext-advanced-mode .extension-list::-webkit-scrollbar,
-#endpoint-ext-advanced-mode .extension-list::-webkit-scrollbar {
-  width: 12px;
-}
-
-#ext-advanced-mode .extension-list::-webkit-scrollbar-track,
-#endpoint-ext-advanced-mode .extension-list::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: var(--risk-scrollbar-track);
-}
-
-#ext-advanced-mode .extension-list::-webkit-scrollbar-thumb,
-#endpoint-ext-advanced-mode .extension-list::-webkit-scrollbar-thumb {
-  border: 3px solid var(--risk-scrollbar-track);
-  border-radius: 999px;
-  background: var(--risk-scrollbar-thumb);
-  background-clip: padding-box;
-}
-
 
 
 @media (max-width: 560px) {
@@ -8219,25 +7964,6 @@ body.sidebar-collapsed .app-shell > main {
   overflow: auto;
   align-content: start;
   border-style: solid;
-}
-
-#ext-advanced-mode .extension-selected::-webkit-scrollbar,
-#endpoint-ext-advanced-mode .extension-selected::-webkit-scrollbar {
-  width: 10px;
-}
-
-#ext-advanced-mode .extension-selected::-webkit-scrollbar-track,
-#endpoint-ext-advanced-mode .extension-selected::-webkit-scrollbar-track {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--line) 48%, transparent);
-}
-
-#ext-advanced-mode .extension-selected::-webkit-scrollbar-thumb,
-#endpoint-ext-advanced-mode .extension-selected::-webkit-scrollbar-thumb {
-  border: 3px solid color-mix(in srgb, var(--line) 48%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 52%, var(--line));
-  background-clip: padding-box;
 }
 
 #ext-advanced-mode .extension-list,
@@ -9809,15 +9535,6 @@ body.sidebar-collapsed .app-shell > main {
   padding-bottom: 18px !important;
 }
 
-.app-shell > .sidebar .side-nav::-webkit-scrollbar {
-  width: 8px;
-}
-
-.app-shell > .sidebar .side-nav::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.28);
-  border-radius: 999px;
-}
-
 .compliance-logic-section {
   border-color: color-mix(in srgb, var(--accent) 26%, var(--line)) !important;
   background:
@@ -11135,12 +10852,6 @@ button:not(.tab):not(.profile-action):not(.profile-toggle):not(.plain-btn):not(.
 
 
 .profile-avatar { background: linear-gradient(135deg, #00c2de, #7b5bf2) !important; }
-
-
-
-/* ── Scrollbars & focus ─────────────────────────────────── */
-.sidebar::-webkit-scrollbar-thumb { background: rgba(0, 229, 255, .22); }
-:root[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(0, 229, 255, .28); }
 
 
 /* =========================================================
@@ -16242,12 +15953,6 @@ body.sidebar-collapsed .app-shell > main {
 #tab-security .table-toolbar p { color: var(--muted); }
 #tab-security .table-wrap { overflow-x: auto; }
 #tab-security .logic-table { min-width: 760px; }
-#tab-security .table-wrap::-webkit-scrollbar { width: 8px; height: 8px; }
-#tab-security .table-wrap::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 35%, transparent);
-}
-#tab-security .table-wrap::-webkit-scrollbar-track { background: transparent; }
 #tab-security .logic-table th {
   padding: 10px 14px;
   font-size: 11px;
@@ -16743,12 +16448,6 @@ body.sidebar-collapsed .app-shell > main {
 /* ---- 4. Scan history table ------------------------------------------------ */
 #tab-history .table-wrap { overflow-x: auto; }
 #tab-history .logic-table { min-width: 680px; }
-#tab-history .table-wrap::-webkit-scrollbar { width: 8px; height: 8px; }
-#tab-history .table-wrap::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 35%, transparent);
-}
-#tab-history .table-wrap::-webkit-scrollbar-track { background: transparent; }
 #tab-history .logic-table th {
   padding: 10px 14px;
   font-size: 11px;
@@ -17382,12 +17081,6 @@ body.sidebar-collapsed .app-shell > main {
 /* ---- 7. Inventory table ----------------------------------------------------- */
 #inventory-workspace .inventory-table-wrap { overflow-x: auto; }
 #inventory-workspace .inventory-table { min-width: 960px; }
-#inventory-workspace .inventory-table-wrap::-webkit-scrollbar { width: 8px; height: 8px; }
-#inventory-workspace .inventory-table-wrap::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--muted) 35%, transparent);
-}
-#inventory-workspace .inventory-table-wrap::-webkit-scrollbar-track { background: transparent; }
 #inventory-workspace .inventory-table th {
   padding: 10px 14px;
   font-size: 11px;
@@ -20996,27 +20689,6 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-/* Inventory scrollbar: wide thumb with a minimum grab size plus real
-   click arrows at both ends. */
-:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar { width: 14px; height: 12px; }
-:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-track { background: color-mix(in srgb, var(--line) 30%, transparent); border-radius: 8px; }
-:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--muted) 45%, transparent);
-  border-radius: 8px;
-  border: 3px solid transparent;
-  background-clip: content-box;
-  min-height: 56px;
-}
-:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted) 65%, transparent); background-clip: content-box; }
-:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-button:single-button {
-  display: block;
-  height: 14px;
-  background-repeat: no-repeat;
-  background-position: center;
-  background-color: transparent;
-}
-:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-button:single-button:vertical:decrement { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><path d='M5 3l3.5 4h-7z' fill='%2394a3b8'/></svg>"); }
-:root:root #inventory-workspace .inventory-table-wrap::-webkit-scrollbar-button:single-button:vertical:increment { background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><path d='M5 7L1.5 3h7z' fill='%2394a3b8'/></svg>"); }
 
 /* Remediation hero: slimmer band; 11 carries the weight, /100 and the
    verdict step back. */
@@ -21066,8 +20738,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   overflow: hidden;
 }
 :root:root #results-body .finding-chip { white-space: nowrap; flex: 0 0 auto; }
-:root:root #results-body .path-subtext,
-:root:root #results-body td:nth-child(4) .subtext {
+:root:root #results-body .path-subtext {
   display: block !important;
   white-space: nowrap !important;
   overflow: hidden !important;
@@ -23271,14 +22942,6 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 #fs-wizard .scan-wizard-footer, #endpoint-wizard .scan-wizard-footer {
   flex: 0 0 auto;
   margin-top: 10px !important;
-}
-/* A slim, unobtrusive scrollbar for the step body */
-#fs-wizard .wizard-step::-webkit-scrollbar,
-#endpoint-wizard .wizard-step::-webkit-scrollbar { width: 8px; }
-#fs-wizard .wizard-step::-webkit-scrollbar-thumb,
-#endpoint-wizard .wizard-step::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--muted) 35%, transparent);
-  border-radius: 999px;
 }
 
 /* Wider screens: the Basics fields breathe into three columns instead of

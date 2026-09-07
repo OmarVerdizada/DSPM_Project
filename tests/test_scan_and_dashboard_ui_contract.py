@@ -695,15 +695,21 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         inventory's controls but not the layer that compacts them. Four rows
         were visible; six are now, and each row is 46px rather than 59."""
         styles = Path("frontend/styles/remediation.css").read_text(encoding="utf-8")
-        # The facet label sits beside its control - stacking doubled the row.
-        block = styles[styles.index("#remediation-workspace .inventory-facet-row label {"):]
-        block = block[:block.index("}")]
-        self.assertIn("display: inline-flex;", block)
-        # The facets flow rather than reserving fixed columns, so seven of them
-        # take one line where there is room and two where there is not.
+        # Nine facets in equal cells. Flowing them packed the line but left it
+        # ragged - cells from 155px to 254px wide, and the reset button alone
+        # at the end of the second row. A grid lines them up in columns at any
+        # width, and only the number of rows changes.
         row = styles[styles.index("#remediation-workspace .inventory-facet-row {"):]
         row = row[:row.index("}")]
-        self.assertIn("flex-wrap: wrap;", row)
+        self.assertIn("display: grid;", row)
+        self.assertIn("repeat(auto-fit, minmax(", row)
+        # The label goes above its control here, unlike the inventory's two:
+        # beside it, nine facets leave about 70px for the value. It is 12px on
+        # a 28px control, so the pair is 45px - not the 84px that label-above
+        # cost when the control was 40px tall.
+        block = styles[styles.index("#remediation-workspace .inventory-facet-row label {"):]
+        block = block[:block.index("}")]
+        self.assertIn("display: grid;", block)
         # The workload figures read on one line, as the inventory's do.
         self.assertIn("#remediation-workspace .inventory-context-metrics > div {", styles)
         self.assertIn("flex-direction: row !important;", styles)
@@ -720,9 +726,73 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn('id="remediation-severity-filter"', facets)
         self.assertIn('id="remediation-category-filter"', facets)
         self.assertNotIn('id="remediation-severity-filters"', risk_panel)
+        # Every facet names itself, and the two "run it again" buttons share
+        # the command line with the search rather than one sitting alone above
+        # 1150px of white and the other trailing a wrapped filter row.
+        self.assertEqual(9, facets.count('class="facet-name"'))
+        toolbar = risk_panel[risk_panel.index('class="inventory-export-actions"'):]
+        toolbar = toolbar[:toolbar.index("</div>")]
+        self.assertIn('id="remediation-reset-filters"', toolbar)
+        self.assertIn('id="refresh-executive-btn"', toolbar)
         self.assertIn("flex-wrap: nowrap !important;", styles)
         # And a fixed-width cell never wraps, or every row in the queue grows.
         self.assertIn("text-overflow: ellipsis;", styles)
+
+    def test_the_risk_cell_says_the_level_once_and_carries_the_override(self) -> None:
+        """A four-hue gradient under every badge said nothing the badge had not
+        said, and a whole column - 191px of a table that has to show a path -
+        held a select almost no row uses."""
+        self.assertNotIn("risk-mini-meter", self.app_js)
+        self.assertNotIn("<th>Manual risk</th>", self.index_html)
+        self.assertNotIn('colspan="7"', self.index_html[
+            self.index_html.index('id="tab-findings"'):
+            self.index_html.index('id="tab-risk"')
+        ])
+        # The override is a caret on the badge with the platform's own menu
+        # behind it: a real menu, its keyboard and its screen reader, and no
+        # open-and-close state of our own to keep.
+        self.assertIn('class="risk-override"', self.app_js)
+        self.assertIn("risk-override-select", self.app_js)
+        pages = Path("frontend/styles/pages.css").read_text(encoding="utf-8")
+        block = pages[pages.index(".risk-override select.risk-override-select {"):]
+        block = block[:block.index("}")]
+        self.assertIn("opacity: 0;", block)
+        # A row whose level was set by hand says so where the level is.
+        self.assertIn("is-manual", self.app_js)
+
+    def test_one_modal_shape_and_one_scrollbar(self) -> None:
+        """The all-classes panel was a <dialog> leaning on ::backdrop, which
+        paints nothing on this engine - so the page behind stayed bright and
+        the panel read as a white slab with a text Close button. It takes the
+        asset detail's shape instead: a real backdrop element, an icon close,
+        click-outside and Escape."""
+        panel = self.index_html[
+            self.index_html.index('id="data-classes-dialog"'):
+        ]
+        panel = panel[:panel.index("</div>\n\n")]
+        self.assertIn("asset-detail-modal classes-modal hidden", panel)
+        self.assertIn('class="asset-detail-backdrop" data-close-classes-modal', panel)
+        self.assertIn("asset-modal-close", panel)
+        self.assertNotIn("<dialog", panel)
+        self.assertIn("function closeClassesModal(", self.app_js)
+        self.assertIn('event.target.closest("[data-close-classes-modal]")', self.app_js)
+
+        # One place decides what a scrollbar looks like. styles.css declared it
+        # sixty-three times - 8px, 12px, 14px forced - several with a thumb
+        # that never faded, which is why the two tables carried a permanent
+        # grey stripe and every panel written since carried nothing at all.
+        legacy = Path("frontend/styles.css").read_text(encoding="utf-8")
+        self.assertNotIn("-webkit-scrollbar", legacy)
+        self.assertNotIn("scrollbar-color", legacy)
+        shell = Path("frontend/styles/shell.css").read_text(encoding="utf-8")
+        self.assertIn("::-webkit-scrollbar-thumb {", shell)
+        # The hover sits on the scrolling element: a thumb is a part of that
+        # element, so a descendant combinator would match nothing.
+        self.assertIn(":hover::-webkit-scrollbar-thumb {", shell)
+        self.assertNotIn("*:hover > ::-webkit-scrollbar-thumb", shell)
+        # The window keeps a bar for the views that are taller than it.
+        html_rule = shell[shell.index("html {"):]
+        self.assertIn("scrollbar-width: thin;", html_rule[:html_rule.index("}")])
 
     def test_findings_is_the_inventory_and_says_so_once(self) -> None:
         """Two panels sat above the table - a detection-signal summary and a

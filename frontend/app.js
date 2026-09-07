@@ -2592,7 +2592,7 @@ function trimInventoryPageCache() {
 
 function renderInventoryPageLoading() {
   resultsBody.setAttribute("aria-busy", "true");
-  resultsBody.innerHTML = `<tr><td colspan="7" class="inventory-window-status">
+  resultsBody.innerHTML = `<tr><td colspan="6" class="inventory-window-status">
     <strong>Loading the next page\u2026</strong>
   </td></tr>`;
 }
@@ -2667,7 +2667,7 @@ function inventoryWindowControls(page) {
   const start = page.total ? (pageIndex * INVENTORY_SERVER_PAGE_SIZE) + 1 : 0;
   const end = start ? start + page.items.length - 1 : 0;
   const totalLabel = `${page.total}${page.totalIsEstimate ? "+" : ""}`;
-  return `<tr class="inventory-window-row"><td colspan="7">
+  return `<tr class="inventory-window-row"><td colspan="6">
     <div class="inventory-window-controls" aria-label="Inventory page controls" role="status" aria-live="polite">
       <button type="button" class="secondary-btn mini-btn" data-inventory-page="previous" ${pageIndex === 0 ? "disabled" : ""}>Previous page</button>
       <span><strong>${start}-${end}</strong> of ${totalLabel} files · page ${pageIndex + 1} · ${escapeHtml(page.source)} source</span>
@@ -2720,8 +2720,8 @@ function renderRows(files, options = {}) {
     const hasCompletedScan = hasCompletedInventoryScan();
     document.querySelector("#tab-findings")?.classList.toggle("findings-pristine", !hasCompletedScan);
     resultsBody.innerHTML = hasCompletedScan
-      ? `<tr><td colspan="7" class="inventory-empty-cell"><div class="inventory-empty-panel is-filtered" role="status"><strong>No findings found</strong></div></td></tr>`
-      : `<tr><td colspan="7" class="inventory-empty-cell"><div class="inventory-empty-panel is-pristine">
+      ? `<tr><td colspan="6" class="inventory-empty-cell"><div class="inventory-empty-panel is-filtered" role="status"><strong>No findings found</strong></div></td></tr>`
+      : `<tr><td colspan="6" class="inventory-empty-cell"><div class="inventory-empty-panel is-pristine">
           <span class="inventory-empty-icon" aria-hidden="true"></span>
           <strong>See your sensitive data clearly</strong>
           <p>Run a file-server or endpoint scan to build a readable inventory of findings, risk reasons, and recommended actions.</p>
@@ -2755,6 +2755,7 @@ function renderRows(files, options = {}) {
         isProtectedFile(file) ? "Protected / locked" : "",
       ].filter(Boolean);
       const riskLabel = buildRiskLabel(level, score);
+      const manualLevel = rowOverrides[key] || "";
       const integrityFindings = [
         hashChanged ? { type: "Hash changed", count: 1 } : null,
         duplicateHashPath ? { type: "Duplicate hash path", count: 1 } : null,
@@ -2804,18 +2805,20 @@ function renderRows(files, options = {}) {
           </td>
           <td><div class="finding-chip-wrap"><div class="finding-chip-set">${findingChips}</div>${moreFindings}</div>${frameworkStrip}</td>
           <td>
-            <span class="badge ${level}">${escapeHtml(level)} ${escapeHtml(score)}</span>
-            <div class="risk-mini-meter" style="--risk-score:${Math.max(0, Math.min(100, Number(score) || 0))}%"><span></span></div>
-            <div class="subtext">${escapeHtml(riskLabel)}</div>
-          </td>
-          <td>
-            <select class="risk-select" data-override="${escapeHtml(key)}" aria-label="Manual risk override for ${escapeHtml(file.name || file.path || "file")}">
-              ${riskOption("", "Auto", rowOverrides[key] || "")}
-              ${riskOption("CRITICAL", "Critical", rowOverrides[key] || "")}
-              ${riskOption("HIGH", "High", rowOverrides[key] || "")}
-              ${riskOption("MEDIUM", "Medium", rowOverrides[key] || "")}
-              ${riskOption("LOW", "Low", rowOverrides[key] || "")}
-            </select>
+            <div class="risk-cell${manualLevel ? " is-manual" : ""}">
+              <span class="badge ${level}">${escapeHtml(level)} ${escapeHtml(score)}</span>
+              <span class="risk-override" title="${manualLevel ? "Set manually - change or return to Auto" : "Set the risk manually"}">
+                <svg class="f-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg>
+                <select class="risk-override-select" data-override="${escapeHtml(key)}" aria-label="Manual risk for ${escapeHtml(file.name || file.path || "file")}">
+                  ${riskOption("", "Auto", manualLevel)}
+                  ${riskOption("CRITICAL", "Critical", manualLevel)}
+                  ${riskOption("HIGH", "High", manualLevel)}
+                  ${riskOption("MEDIUM", "Medium", manualLevel)}
+                  ${riskOption("LOW", "Low", manualLevel)}
+                </select>
+              </span>
+            </div>
+            <div class="subtext risk-note">${manualLevel ? "Set manually" : escapeHtml(riskLabel)}</div>
           </td>
           <td>${!lazyDetail ? detailButton(reasons, file, "reasons", "Reasons", "No reasons")
             : Number.isInteger(file.reason_count) ? countDetailButton(file.reason_count, file, "reasons", "Reasons", "No reasons")
@@ -2830,7 +2833,7 @@ function renderRows(files, options = {}) {
   const moreRow = serverPage
     ? inventoryWindowControls(serverPage)
     : visible.length > page.length
-      ? `<tr><td colspan="7" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
+      ? `<tr><td colspan="6" class="empty"><button type="button" class="secondary-btn mini-btn" id="load-more-results">Load ${Math.min(ROW_PAGE_SIZE, visible.length - page.length)} more of ${visible.length}</button></td></tr>`
       : "";
   resultsBody.innerHTML = rows + moreRow;
   resolveLazyDetailCounts(page);
@@ -2988,7 +2991,7 @@ function openInventoryRowDetail(row) {
 document.addEventListener("click", (event) => {
   const row = event.target.closest("#results-body tr[data-file-key]");
   if (!row) return;
-  if (event.target.closest("button, select, a, input, label, [data-detail-type]")) return;
+  if (event.target.closest("button, select, a, input, label, [data-detail-type], .risk-override")) return;
   openInventoryRowDetail(row);
 });
 document.addEventListener("keydown", (event) => {
@@ -6409,8 +6412,39 @@ function openAllDataClasses() {
         </button>`;
       }).join("")}
     </div>`;
-  if (!dialog.open) dialog.showModal();
+  openClassesModal();
 }
+
+// Same three lines the asset detail runs: unhide, force a frame so the rise
+// animation has a start, then mark it open. The backdrop element, the icon
+// close, the click-outside and the Escape all come with the shape.
+let classesModalReturnFocus = null;
+
+function openClassesModal() {
+  const modal = document.querySelector("#data-classes-dialog");
+  if (!modal || !modal.classList.contains("hidden")) return;
+  classesModalReturnFocus = document.activeElement;
+  modal.classList.remove("hidden");
+  modal.getBoundingClientRect();
+  modal.classList.add("open");
+  requestAnimationFrame(() => modal.querySelector(".asset-modal-close")?.focus());
+}
+
+function closeClassesModal() {
+  const modal = document.querySelector("#data-classes-dialog");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.remove("open");
+  modal.classList.add("hidden");
+  if (classesModalReturnFocus?.isConnected) classesModalReturnFocus.focus();
+  classesModalReturnFocus = null;
+}
+
+document.addEventListener("click", (event) => {
+  if (event.target.closest("[data-close-classes-modal]")) closeClassesModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeClassesModal();
+});
 
 // ---- Frameworks: their own mark, and the severity of what they cover -----
 const FRAMEWORK_MARKS = {
@@ -9886,7 +9920,7 @@ document.addEventListener("click", (event) => {
 
   const dataClass = event.target.closest("[data-inventory-search]");
   if (dataClass) {
-    document.querySelector("#data-classes-dialog")?.close();
+    closeClassesModal();
     switchTab("findings");
     // Typing the class name into the search box matched it as free text
     // against paths and file names too. The inventory has a Finding type

@@ -541,11 +541,11 @@ abbr[title] {
    fading the whole bar in and out reflows the content under it every time the
    mouse crosses a card. Only the thumb's colour changes. */
 html {
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
 }
-html::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+html:hover {
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
 }
 
 :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
@@ -562,28 +562,36 @@ html::-webkit-scrollbar {
 :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
        .remediation-drawer-body, .scroll-card-list, .dash-rows, .drawer-content,
        .inventory-facet-row, .risk-filter-group, .modal-box, .detail-list):focus-within {
-  scrollbar-color: color-mix(in srgb, var(--ink) 26%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
 }
 
 /* Chromium draws its own bar rather than honouring scrollbar-color on every
    build, so the thumb is styled directly as well. Same rule: the track holds
-   its width, only the thumb appears. */
+   its width, only the thumb appears.
+
+   These are the only scrollbar declarations in the product. styles.css
+   carried sixty-three more - 8px here, 12px there, 14px forced somewhere
+   else, several with a thumb that never faded - and they are deleted rather
+   than out-specified, because a sixty-fourth rule would not have made the
+   answer any clearer. */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
   background: transparent;
-  border: 3px solid transparent;
+  border: 2px solid transparent;
   border-radius: 999px;
   background-clip: content-box;
   transition: background-color var(--motion-base) var(--ease-out);
 }
-*:hover > ::-webkit-scrollbar-thumb,
-*:hover::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--ink) 26%, transparent);
+/* The hover has to sit on the scrolling element - a thumb is a part of that
+   element, not a child of it, so a descendant combinator matches nothing. */
+:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 34%, transparent);
   background-clip: content-box;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--ink) 42%, transparent);
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--ink) 52%, transparent);
   background-clip: content-box;
 }
 ::-webkit-scrollbar-corner { background: transparent; }
@@ -592,6 +600,40 @@ html::-webkit-scrollbar {
   :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap) {
     transition: none;
   }
+}
+
+
+/* ── One caret, ours ──────────────────────────────────────────
+   token-gate: allow - the shells below are pinned with !important in
+   styles.css, and a caret cannot be drawn in space the control does not
+   reserve. */
+#inventory-workspace .facet-shell,
+#remediation-workspace .facet-shell { position: relative; }
+
+#inventory-workspace .facet-shell::after,
+#remediation-workspace .facet-shell::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--ink-muted);
+  border-bottom: 1.5px solid var(--ink-muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+#inventory-workspace .facet-shell select,
+#remediation-workspace .facet-shell select {
+  appearance: none !important; /* token-gate: allow — the platform arrow is what we are replacing */
+  padding-right: 26px !important; /* token-gate: allow — the shell padding is pinned with !important in styles.css */
+  text-overflow: ellipsis;
+}
+
+#inventory-workspace .facet-shell:focus-within::after,
+#remediation-workspace .facet-shell:focus-within::after {
+  border-color: var(--indigo);
 }
 
 
@@ -630,37 +672,24 @@ html::-webkit-scrollbar {
 }
 
 
-/* ── The all-classes sheet ────────────────────────────────────
+/* ── The all-classes panel ────────────────────────────────────
    The dashboard card shows what its height allows. This shows the rest, in
-   the same rows, so a class looks the same in both places. */
-.sheet {
-  width: min(560px, 92vw);
-  max-height: min(76vh, 720px);
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  background: var(--surface);
-  color: var(--ink);
-}
-.sheet::backdrop { background: color-mix(in srgb, var(--ink) 52%, transparent); }
+   the same rows, so a class looks the same in both places - and in the shape
+   every other panel in the product uses, which is where its backdrop, its
+   icon close, its click-outside and its Escape come from.
 
-.sheet-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-4);
-  border-bottom: 1px solid var(--line);
-}
-.sheet-head h3 {
-  margin: 0;
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
-}
-.sheet-head p {
-  margin: 2px 0 0;
-  color: var(--ink-muted);
-  font-size: var(--text-xs);
+   What was here was a <dialog> with a ::backdrop, a header of its own and a
+   text Close button. The ::backdrop paints nothing on this engine, so the
+   page behind stayed bright; the rest is deleted rather than kept beside the
+   pattern it duplicated. */
+/* The asset detail is pinned to 1120px and 92vh with !important because it
+   carries four tabs of content. A list of classes is one column, so it takes
+   the width it needs and stops where the list ends.
+   token-gate: allow — the pin above cannot be undone by specificity alone. */
+:root:root .classes-modal .asset-detail-panel {
+  width: min(560px, 94vw) !important; /* token-gate: allow — the asset panel pins 1120px with !important */
+  height: auto !important; /* token-gate: allow — and 92vh, for four tabs this panel does not have */
+  max-height: min(720px, 86vh) !important; /* token-gate: allow — same pin */
 }
 
 .sheet-body {
@@ -672,7 +701,7 @@ html::-webkit-scrollbar {
 }
 .sheet-body:hover,
 .sheet-body:focus-within {
-  scrollbar-color: color-mix(in srgb, var(--ink) 26%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
 }
 .sheet-body .class-row { height: 36px; }
 

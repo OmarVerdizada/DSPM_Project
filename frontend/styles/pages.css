@@ -1051,3 +1051,71 @@ button.ledger-cell:hover { background: var(--band-wash); }
 }
 #tab-overview .class-row,
 #tab-overview .tree-rows .place-row { flex: 1 1 auto; }
+
+
+/* ── Findings: the risk cell owns the override ────────────────
+   The meter that used to sit under the badge drew low-through-critical as a
+   gradient in every row, so the colour said nothing the badge had not already
+   said and the four hues repeated a hundred times down the page. It is gone,
+   and the column it needed is gone with it: the manual override is a caret on
+   the badge, with the platform's own menu behind it. */
+.risk-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.risk-override {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-control);
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.risk-override:hover,
+.risk-cell.is-manual .risk-override {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--ink);
+}
+.risk-override .f-ico {
+  width: 13px;
+  height: 13px;
+}
+
+/* The select is the control; the caret is what it looks like. Laying it over
+   the caret keeps the platform's menu, its keyboard and its screen-reader
+   behaviour, and costs no state of our own. */
+.risk-override select.risk-override-select {
+  position: absolute;
+  /* The caret reads as 20px, which is the size of every other control in
+     this table. The target it offers is 32px, taken from the space around
+     it - and only 2px of that from the badge, which is what the rest of the
+     row is for. */
+  inset: -6px -6px -6px -2px;
+  width: auto;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+/* A row whose level was set by hand says so where the level is. */
+.risk-cell.is-manual .badge {
+  outline: 1px dashed color-mix(in srgb, var(--ink) 42%, transparent);
+  outline-offset: 2px;
+}
+
+/* The advice under the badge is a short sentence, not a path: it wraps rather
+   than ending in an ellipsis in a 134px column. */
+#results-body .risk-note {
+  white-space: normal;
+  line-height: 1.25;
+}

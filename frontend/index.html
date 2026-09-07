@@ -12,10 +12,10 @@
     />
     <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=8" />
-    <link rel="stylesheet" href="/static/styles.css?v=245" />
-    <link rel="stylesheet" href="/static/styles/shell.css?v=11" />
-    <link rel="stylesheet" href="/static/styles/pages.css?v=15" />
-    <link rel="stylesheet" href="/static/styles/remediation.css?v=6" />
+    <link rel="stylesheet" href="/static/styles.css?v=246" />
+    <link rel="stylesheet" href="/static/styles/shell.css?v=12" />
+    <link rel="stylesheet" href="/static/styles/pages.css?v=16" />
+    <link rel="stylesheet" href="/static/styles/remediation.css?v=7" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -609,17 +609,6 @@
               <div id="stale-card" class="dash-card-body"></div>
             </section>
 
-            <dialog id="data-classes-dialog" class="sheet" aria-labelledby="data-classes-dialog-title">
-              <form method="dialog" class="sheet-head">
-                <div>
-                  <h3 id="data-classes-dialog-title">All data classes</h3>
-                  <p id="data-classes-dialog-count"></p>
-                </div>
-                <button class="secondary-btn mini-btn" aria-label="Close">Close</button>
-              </form>
-              <div id="data-classes-dialog-body" class="sheet-body"></div>
-            </dialog>
-
             <section class="visual-panel dash-card dash-card-locations" aria-labelledby="locations-card-title">
               <div class="panel-title">
                 <h4 id="locations-card-title">Where the risk is</h4>
@@ -716,14 +705,13 @@
                     <th class="inv-sortable" data-inventory-sort="scan_label" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by scan">Source<span class="inv-sort-ind" aria-hidden="true"></span></th>
                     <th class="inv-sortable" data-inventory-sort="finding_count" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by finding count">Findings<span class="inv-sort-ind" aria-hidden="true"></span></th>
                     <th class="inv-sortable" data-inventory-sort="risk_score" aria-sort="descending" tabindex="0" role="columnheader" title="Sort every file by risk score">Risk<span class="inv-sort-ind" aria-hidden="true"></span></th>
-                    <th>Manual risk</th>
                     <th>Reasons</th>
                     <th>DLP recommendations</th>
                   </tr>
                 </thead>
                 <tbody id="results-body" aria-live="polite" aria-relevant="all">
                   <tr>
-                    <td colspan="7" class="inventory-empty-cell">
+                    <td colspan="6" class="inventory-empty-cell">
                       <div class="inventory-empty-panel is-pristine">
                         <span class="inventory-empty-icon" aria-hidden="true"></span>
                         <strong>See your sensitive data clearly</strong>
@@ -757,6 +745,7 @@
                       <input id="remediation-search" type="search" placeholder="Search finding, file, asset, owner, status..." autocomplete="off" />
                     </div>
                     <div class="inventory-export-actions">
+                      <button type="button" id="remediation-reset-filters" class="secondary-btn mini-btn" data-remediation-reset><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-list-filter"/></svg>Clear filters</button>
                       <button type="button" id="refresh-executive-btn" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
                     </div>
                   </div>
@@ -766,7 +755,7 @@
 
                   <form id="remediation-filters" class="inventory-facet-row" role="search">
                     <label>
-                      Severity
+                      <span class="facet-name">Severity</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-off"/></svg><select id="remediation-severity-filter">
                         <option value="ALL">All severities</option>
                         <option value="CRITICAL">Critical</option>
@@ -776,44 +765,43 @@
                       </select></span>
                     </label>
                     <label>
-                      Risk category
+                      <span class="facet-name">Risk category</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="remediation-category-filter">
                         <option value="ALL">All categories</option>
                       </select></span>
                     </label>
                     <label>
-                      Scope
+                      <span class="facet-name">Scope</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="remediation-scope-filter">
                         <option value="current">Current scope</option><option value="historical">Historical scope</option><option value="all">All scopes</option>
                       </select></span>
                     </label>
                     <label>
-                      Status
+                      <span class="facet-name">Status</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-scan-search"/></svg><select id="remediation-status-filter"><option value="active">Active findings</option></select></span>
                     </label>
                     <label>
-                      Owner
+                      <span class="facet-name">Owner</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user-round"/></svg><select id="remediation-owner-filter"><option value="ALL">Owner</option></select></span>
                     </label>
                     <label>
-                      Framework
+                      <span class="facet-name">Framework</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="remediation-framework-filter"><option value="ALL">Framework</option></select></span>
                     </label>
                     <label>
-                      Data type
+                      <span class="facet-name">Data type</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-file-text"/></svg><select id="remediation-data-filter"><option value="ALL">Data type</option></select></span>
                     </label>
                     <label>
-                      Asset
+                      <span class="facet-name">Asset</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="remediation-asset-filter"><option value="ALL">Asset</option></select></span>
                     </label>
                     <label>
-                      SLA
+                      <span class="facet-name">SLA</span>
                       <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-clock-3"/></svg><select id="remediation-sla-filter">
                         <option value="ALL">SLA</option><option value="OVERDUE">Overdue</option><option value="DUE_SOON">Due in 24h</option><option value="ON_TRACK">On track</option><option value="NO_SLA">No SLA</option>
                       </select></span>
                     </label>
-                    <button type="button" id="remediation-reset-filters" class="secondary-btn mini-btn" data-remediation-reset><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Clear filters</button>
                   </form>
 
                   <div id="remediation-stats" class="inventory-context-metrics"></div>
@@ -1551,6 +1539,23 @@
       </main>
     </div>
 
+    <div id="data-classes-dialog" class="asset-detail-modal classes-modal hidden" role="dialog" aria-modal="true" aria-labelledby="data-classes-dialog-title">
+      <div class="asset-detail-backdrop" data-close-classes-modal></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Data classes</span>
+            <h3 id="data-classes-dialog-title">All data classes</h3>
+            <p id="data-classes-dialog-count" class="asset-detail-path"></p>
+          </div>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-classes-modal title="Close" aria-label="Close data classes">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div id="data-classes-dialog-body" class="sheet-body"></div>
+      </div>
+    </div>
+
     <div id="asset-detail-modal" class="asset-detail-modal hidden" role="dialog" aria-modal="true" aria-labelledby="asset-modal-title">
       <div class="asset-detail-backdrop" data-close-asset-modal></div>
       <div class="asset-detail-panel">
@@ -1579,7 +1584,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=206"></script>
+    <script src="/static/app.js?v=207"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
