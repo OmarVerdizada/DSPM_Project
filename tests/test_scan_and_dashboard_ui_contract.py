@@ -267,8 +267,22 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         # Traffic runs the other way now: the dashboard's top risks are the
         # entry point to Remediation, so Remediation does not need a link back
         # to a page the reader just came from.
-        self.assertIn('if (event.target.closest("[data-remediation-jump]")) switchTab("risk");',
-                      self.app_js)
+        # A top risk carries the filter that answers the question its row
+        # asked: opening the queue unfiltered from a card that names one kind
+        # of exposure is the same as not clicking it.
+        self.assertIn("function openRemediationFiltered(", self.app_js)
+        self.assertIn("[data-risk-jump-key]", self.app_js)
+        for expected in ("credentials_secrets", "pci_cardholder_data",
+                         "pii,government_ids,biometric_data"):
+            with self.subTest(category=expected):
+                self.assertIn(f'category: "{expected}"', self.app_js)
+        # A changed hash and an unreadable file are properties of a FILE, not
+        # of a finding, so they go to the inventory rather than asking the
+        # queue a question it cannot answer.
+        self.assertIn('go: { to: "inventory", risk: "PROTECTED" }', self.app_js)
+        # An applied filter the facets do not list stays visible in its own
+        # control instead of being dropped by the next rebuild.
+        self.assertIn("select.dataset.appliedLabel", self.app_js)
 
     def test_tenant_switch_invalidates_every_async_dashboard_surface(self) -> None:
         self.assertIn("let tenantContextVersion = 0", self.app_js)
@@ -423,20 +437,23 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
 
         # Two lists that answer "which of these should I look at" should not be
         # two different controls. The queue takes the data inventory's toolbar,
-        # its severity pill row, its labelled facet shells and its context
-        # strip - so a filter learned on one page is the same on the other.
+        # its labelled facet shells and its context strip - so a filter learned
+        # on one page is the same control on the other.
         for shared in ('class="table-toolbar inventory-toolbar"',
                        'class="inventory-search-box"',
                        'class="inventory-command-bar"',
-                       'class="risk-filter-group"',
                        'class="inventory-facet-row"',
                        'class="field-shell facet-shell"',
                        'class="inventory-context-metrics"',
                        'class="secondary-btn mini-btn"'):
             with self.subTest(control=shared):
                 self.assertIn(shared, risk_panel)
-        for level in ("ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW"):
-            self.assertIn(f'data-remediation-severity="{level}"', risk_panel)
+        # Severity is a select, like every other queue facet - the pill row was
+        # the one control on this page that worked differently from its
+        # neighbours, and it cost a whole band of chrome to say five words.
+        self.assertIn('id="remediation-severity-filter"', risk_panel)
+        self.assertIn('id="remediation-category-filter"', risk_panel)
+        self.assertNotIn("data-remediation-severity=", risk_panel)
 
         # Sorting is a column header on the inventory, so it is a column header
         # here too - not a ninth dropdown doing the same job differently.
@@ -541,6 +558,19 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
 
         # And they are ways in, like every other figure on the page.
         self.assertIn("[data-location-jump]", self.app_js)
+        # The card shows what fits; the count of what it did not show is the
+        # way in to the rest.
+        self.assertIn("data-open-all-classes", self.app_js)
+        self.assertIn("function openAllDataClasses(", self.app_js)
+        self.assertIn('id="data-classes-dialog"', self.index_html)
+        # A row is one file, and the detail is what a row is for - so the whole
+        # row opens it, not only the two buttons on its name.
+        self.assertIn("function openInventoryRowDetail(", self.app_js)
+        self.assertIn('#results-body tr[data-file-key]', self.app_js)
+        # Extension, size, source and flags are one sentence about the file, so
+        # they stay on one line and the overflow becomes a +N.
+        self.assertIn("const FILE_META_VISIBLE = 3;", self.app_js)
+        self.assertIn("file-meta-more", self.app_js)
         # Severity, framework and folder are selects, so the filter state is
         # readable without counting which pills happen to be lit.
         for select in ("inventory-risk-filter", "inventory-framework-select", "inventory-folder-filter"):
@@ -677,16 +707,19 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         # The workload figures read on one line, as the inventory's do.
         self.assertIn("#remediation-workspace .inventory-context-metrics > div {", styles)
         self.assertIn("flex-direction: row !important;", styles)
-        # The severity pills share the command line with the search box: the
-        # queue carries seven facets to the inventory's two, so it cannot
-        # afford a band per control.
+        # Severity filters from a select in the facet row, like every other
+        # queue filter. The pill band was the one control on this page that
+        # worked differently from its neighbours, and it cost a whole row of
+        # chrome to say five words.
         risk_panel = self.index_html[
             self.index_html.index('id="tab-risk"'):
             self.index_html.index('id="tab-settings"')
         ]
-        toolbar = risk_panel[risk_panel.index('class="table-toolbar'):]
-        toolbar = toolbar[:toolbar.index("</div>\n\n")]
-        self.assertIn('id="remediation-severity-filters"', toolbar)
+        facets = risk_panel[risk_panel.index('class="inventory-facet-row"'):]
+        facets = facets[:facets.index("</div>\n\n")]
+        self.assertIn('id="remediation-severity-filter"', facets)
+        self.assertIn('id="remediation-category-filter"', facets)
+        self.assertNotIn('id="remediation-severity-filters"', risk_panel)
         self.assertIn("flex-wrap: nowrap !important;", styles)
         # And a fixed-width cell never wraps, or every row in the queue grows.
         self.assertIn("text-overflow: ellipsis;", styles)
@@ -787,7 +820,7 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         for card in ("posture-card", "data-classes-card", "frameworks-card"):
             self.assertIn(card, overview)
         self.assertIn("data-risk-jump", overview)
-        for hook in ("data-inventory-search", "data-framework-jump", "data-remediation-jump"):
+        for hook in ("data-inventory-search", "data-framework-jump", "data-risk-jump-key"):
             with self.subTest(hook=hook):
                 self.assertIn(hook, self.app_js)
         # A severity cell lands on the matching Findings filter.

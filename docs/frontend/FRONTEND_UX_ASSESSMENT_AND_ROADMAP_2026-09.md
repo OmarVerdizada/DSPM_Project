@@ -711,6 +711,57 @@ Card shadows are removed - six cards each lifted off the page is six shadows
 on one screen, and the hairline border already separates a card from its
 ground. Confirmed with the user: no liquid glass, no emoji.
 
+### 0.4s A card that shows part of a list, a row that opens, a filter that travels
+
+Four things, all of them the same complaint in different places: the interface
+knew something and did not hand it over.
+
+**The card shows 7 of 43.** The count was flat text, which made the other 36
+look like a limit rather than a fold. It is a button now - `7 of 43 · View all`
+- and it opens a `<dialog class="sheet">` holding every class in the same row
+the card draws, so a class looks identical in both places and clicking it does
+the same thing. The list is built from `estateFacets.finding_types`, which the
+card already had, so the panel costs no request.
+
+**The row opens the file.** Two small buttons on the name did what the whole
+row implied. A delegated listener on `#results-body tr[data-file-key]` now
+forwards to the row's existing expand button, bailing out on
+`button, select, a, input, label, [data-detail-type]` so the manual-risk select,
+the reason and action counts and the copy-path button still mean what they say.
+Verified: a plain cell opens the asset detail
+(`#asset-detail-modal`, `status_report_m&a_009.md`), the risk select does not,
+and the original buttons still work.
+
+**The meta line is one line.** Extension, size, source and flags wrapped to two
+or three lines on narrow columns and dragged every row below out of rhythm.
+`fileMetaLine()` shows `FILE_META_VISIBLE = 3` and collapses the rest into a
+`+N` chip whose `title` lists them. A fixed cap rather than a measured one:
+measuring a hundred rows to hide a chip costs a reflow per row, and at every
+width this column is used at the answer is three. Measured after: one distinct
+row height, 24px, across the page.
+
+**A top risk carries its filter.** Clicking "Regulated personal data" opened
+the queue showing all 6,831 findings, which is the same as not clicking it.
+Each `RISK_CATEGORIES` entry now has a `go` descriptor, and five of them resolve
+to an exact server-side filter over the `category` column the classifiers
+already write (`credentials_secrets` = 852, `pii,government_ids,biometric_data`
+= 1,045). Two of them - a changed hash, an unreadable file - are properties of a
+*file*, not of a finding, so they go to the inventory instead of asking the
+queue a question it cannot answer.
+
+That needed a `category` filter end to end: `_remediation_filter_sql` splits a
+comma list into an `IN (...)`, `list_remediation_findings` takes `category`,
+`/api/findings` passes it, and the facets return `categories`. Severity became a
+select at the same time - it was the one control on this page that worked
+differently from its neighbours, and the pill band cost a whole row of chrome to
+say five words. The counts the pills carried moved onto the option labels.
+
+One trap: `remediationSelectOptions` rebuilds a select's `innerHTML` from the
+facets, which wiped an applied multi-value filter on the next load.
+`openRemediationFiltered` records the applied value and label on the element's
+dataset, and the rebuild re-adds any value the facets do not list - so the
+control keeps showing what is actually applied.
+
 ### 0.4a The regression F3 shipped, and the fragility it exposed
 
 Deleting Remediation's second dashboard left one reference behind:

@@ -183,9 +183,7 @@ class RemediationFrontendDataFlowTests(unittest.TestCase):
         self.assertIn("signal: remediationListAbortController.signal", self.script)
         for parameter in ("owner", "framework", "data_type", "asset", "sla"):
             self.assertIn(f'["{parameter}",', self.script)
-        # Severity is the inventory's pill row now, so it comes from state
-        # rather than off a select - but it still goes to the server.
-        self.assertIn('params.set("severity", remediationSeverityChoice)', self.script)
+        # Severity and risk category are selects, read like every other facet.
         self.assertIn('params.set("sort", remediationSortKey)', self.script)
 
     def test_windowed_dashboard_uses_inventory_facets_not_preview_files(self) -> None:

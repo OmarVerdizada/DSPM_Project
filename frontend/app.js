@@ -85,7 +85,8 @@ const remediationDrawerBody = document.querySelector("#remediation-drawer-body")
 const remediationFilters = document.querySelector("#remediation-filters");
 const remediationSearch = document.querySelector("#remediation-search");
 const remediationScopeFilter = document.querySelector("#remediation-scope-filter");
-const remediationSeverityFilters = document.querySelectorAll("[data-remediation-severity]");
+const remediationSeverityFilter = document.querySelector("#remediation-severity-filter");
+const remediationCategoryFilter = document.querySelector("#remediation-category-filter");
 const remediationStatusFilter = document.querySelector("#remediation-status-filter");
 const remediationOwnerFilter = document.querySelector("#remediation-owner-filter");
 const remediationFrameworkFilter = document.querySelector("#remediation-framework-filter");
@@ -390,9 +391,6 @@ let remediationFindings = [];
 let remediationSummary = null;
 let remediationFacets = {};
 const REMEDIATION_PAGE_SIZE = 50;
-// The severity pills hold their own state; there is no select to read it
-// back from, the same way the inventory keeps its risk filter in a variable.
-let remediationSeverityChoice = "ALL";
 // Sort lives on the column header, as it does on the inventory.
 let remediationSortKey = "risk_score";
 let remediationSortDirection = "desc";
@@ -2678,6 +2676,32 @@ function inventoryWindowControls(page) {
   </td></tr>`;
 }
 
+// Three facts fit the column at every width the table is used at; the rest
+// become one +N chip whose title lists them. A fixed cap rather than a
+// measured one, because measuring a hundred rows to hide a chip costs a
+// reflow per row and the answer would still be three.
+const FILE_META_VISIBLE = 3;
+
+function fileMetaLine({ extension, size, source, hashChanged, duplicateHashPath, flags = [] }) {
+  const parts = [
+    ...(extension ? [{ text: extension }] : []),
+    { text: size },
+    { text: source },
+    ...(hashChanged ? [{ text: "Hash changed", className: "hash-change-chip" }] : []),
+    ...(duplicateHashPath ? [{ text: "Duplicate hash path", className: "hash-change-chip duplicate-hash-chip" }] : []),
+    ...flags.map((flag) => ({ text: flag })),
+  ];
+  const shown = parts.slice(0, FILE_META_VISIBLE);
+  const hidden = parts.slice(FILE_META_VISIBLE);
+  return `<div class="file-meta-line">${
+    shown.map((part) => `<span${part.className ? ` class="${part.className}"` : ""}>${escapeHtml(part.text)}</span>`).join("")
+  }${
+    hidden.length
+      ? `<span class="file-meta-more" title="${escapeHtml(hidden.map((part) => part.text).join(", "))}">+${hidden.length}</span>`
+      : ""
+  }</div>`;
+}
+
 function renderRows(files, options = {}) {
   if (!options.serverPage && inventoryPageWindow.active && currentInventoryPage()) {
     const current = currentInventoryPage();
@@ -2764,14 +2788,14 @@ function renderRows(files, options = {}) {
                 <span class="file-path">${escapeHtml(file.name || file.path || "Unknown file")}</span>
               </button>
             </div>
-            <div class="file-meta-line">
-              ${file.extension ? `<span>${escapeHtml(file.extension)}</span>` : ""}
-              <span>${escapeHtml(formatBytes(file.size))}</span>
-              <span>${escapeHtml(sourceName)}</span>
-              ${hashChanged ? '<span class="hash-change-chip">Hash changed</span>' : ""}
-              ${duplicateHashPath ? '<span class="hash-change-chip duplicate-hash-chip">Duplicate hash path</span>' : ""}
-            </div>
-            ${fileFlags.length ? `<div class="file-flags polished-flags">${fileFlags.map((flag) => `<span>${escapeHtml(flag)}</span>`).join("")}</div>` : ""}
+            ${fileMetaLine({
+              extension: file.extension,
+              size: formatBytes(file.size),
+              source: sourceName,
+              hashChanged,
+              duplicateHashPath,
+              flags: fileFlags,
+            })}
             <div class="subtext path-subtext"><span>${escapeHtml(path)}</span>${copyPathButton}</div>
           </td>
           <td>
@@ -2950,6 +2974,22 @@ async function applyInventorySort(key) {
 document.addEventListener("click", (event) => {
   const th = event.target.closest(".inventory-table th[data-inventory-sort]");
   if (th) applyInventorySort(th.dataset.inventorySort);
+});
+
+// A row is one file, and the detail is what a row is for. The two buttons on
+// the name still work; the rest of the row now does the same thing, except
+// over the controls that mean something else - the manual-risk select, the
+// reason and action counts, and the copy-path button.
+function openInventoryRowDetail(row) {
+  const control = row?.querySelector("[data-inventory-expand]");
+  if (control) openAssetDetailModal(control);
+}
+
+document.addEventListener("click", (event) => {
+  const row = event.target.closest("#results-body tr[data-file-key]");
+  if (!row) return;
+  if (event.target.closest("button, select, a, input, label, [data-detail-type]")) return;
+  openInventoryRowDetail(row);
 });
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
@@ -5890,23 +5930,37 @@ function buildPostureSparkline(points) {
 // exposure the workspace has. Each category is a predicate over a file and
 // its primary findings, carries its own glyph, and is worth its own row only
 // if at least one file is in it.
+// `go` is where the row takes you and with which filter. Five of these are
+// finding-level questions the remediation queue can answer exactly, using the
+// `category` column the classifiers already write. Two - a changed hash and an
+// unreadable file - are properties of a FILE, not of a finding, so they go to
+// the inventory instead of asking the queue a question it cannot answer.
 const RISK_CATEGORIES = [
   { key: "credentials", label: "Exposed credentials", icon: "li-key-round", sev: "critical", cat: "secret",
+    go: { to: "queue", filters: { category: "credentials_secrets" } },
     test: (file, findings) => findings.some(isSecretFinding) },
   { key: "unprotected", label: "Unprotected critical files", icon: "li-shield-off", sev: "critical", cat: "record",
+    go: { to: "queue", filters: { severity: "CRITICAL" } },
     test: (file, findings, level) => level === "CRITICAL" && !isProtectedFile(file) },
   { key: "payment", label: "Payment and bank data", icon: "li-credit-card", sev: "high", cat: "finance",
+    go: { to: "queue", filters: { category: "pci_cardholder_data" } },
     test: (file, findings) => findings.some((finding) =>
       /credit card|payment card|\bpan\b|cvv|track data|iban|swift|routing|bank account|card data/i.test(findingDisplayName(finding))
       || String(finding.pci_category || "").length > 0) },
   { key: "health", label: "Health records", icon: "li-heart-pulse", sev: "high", cat: "health",
+    // No stored category groups health on its own, so this one searches - and
+    // the search box shows the term, rather than the filter looking exact.
+    go: { to: "queue", filters: { q: "health" } },
     test: (file, findings) => findings.some((finding) =>
       /health|medical|\bphi\b|diagnos|patient|mental|disabilit|genetic|biometric/i.test(findingDisplayName(finding))) },
   { key: "regulated", label: "Regulated personal data", icon: "li-id-card", sev: "high", cat: "identity",
+    go: { to: "queue", filters: { category: "pii,government_ids,biometric_data" } },
     test: (file, findings) => findings.some(isRegulatedFinding) },
   { key: "changed", label: "Changed since last scan", icon: "li-file-diff", sev: "medium", cat: "record",
+    go: { to: "inventory", search: "Hash changed" },
     test: (file) => hasHashChanged(file) },
   { key: "locked", label: "Locked or unreadable", icon: "li-lock", sev: "protected", cat: "legal",
+    go: { to: "inventory", risk: "PROTECTED" },
     test: (file) => isProtectedFile(file) },
 ];
 
@@ -5967,8 +6021,9 @@ function renderPostureCard(summary, score) {
       <p class="dash-sub">Top risks</p>
       ${risks.length
         ? risks.map((item) => `
-            <button type="button" class="risk-row plain-btn" data-remediation-jump
-                    aria-label="${escapeHtml(item.label)}, ${item.count} files — open Remediation">
+            <button type="button" class="risk-row plain-btn" data-risk-jump-key="${escapeHtml(item.key)}"
+                    aria-label="${escapeHtml(item.label)}, ${item.count} files — ${
+                      item.go?.to === "inventory" ? "open in Findings" : "open in Remediation, filtered"}">
               ${coin(item.icon, item.cat)}
               <span class="risk-row-name">${escapeHtml(item.label)}</span>
               <span class="risk-row-count">${item.count.toLocaleString()}</span>
@@ -6089,9 +6144,19 @@ function renderDataClassesCard() {
   const shown = dashListCapacity("#data-classes-card", 36, { min: 4, max: 14 });
   const stats = allStats.slice(0, shown);
   stats.total = allStats.length;
-  setCardMeta("#classes-card-meta", stats.length
-    ? `Top ${stats.length} of ${stats.total}`
-    : "No scan yet");
+  // The meta is the way in to the rest: the card shows what fits, and the
+  // count of what it did not show is the thing worth clicking.
+  const meta = document.querySelector("#classes-card-meta");
+  if (meta) {
+    if (!stats.length) {
+      meta.textContent = "No scan yet";
+    } else if (stats.total > stats.length) {
+      meta.innerHTML = `<button type="button" class="card-more plain-btn" data-open-all-classes>`
+        + `${stats.length} of ${stats.total} · <b>View all</b></button>`;
+    } else {
+      meta.textContent = `All ${stats.total}`;
+    }
+  }
   if (!stats.length) {
     card.innerHTML = '<p class="dash-empty">Data classes appear after the first scan.</p>';
     return;
@@ -6303,6 +6368,50 @@ function renderCoverageCard() {
     </div>`;
 }
 
+// ---- Every data class, in a panel that can scroll ------------------------
+// The card shows what its height allows; this shows the whole list. It is the
+// same row, so a class looks the same in both places and clicking it does the
+// same thing.
+function openAllDataClasses() {
+  const dialog = document.querySelector("#data-classes-dialog");
+  const body = document.querySelector("#data-classes-dialog-body");
+  if (!dialog || !body) return;
+  const rows = (estateFacets?.finding_types || [])
+    .map((item) => {
+      const severity = item.severity_file_counts || {};
+      return {
+        type: String(item.value || "Unknown"),
+        count: Number(item.file_count ?? item.count ?? 0),
+        critical: Number(severity.CRITICAL || 0),
+        high: Number(severity.HIGH || 0),
+        medium: Number(severity.MEDIUM || 0),
+        low: Number(severity.LOW || 0),
+      };
+    })
+    .filter((item) => item.count > 0)
+    .sort((left, right) => right.count - left.count);
+  const max = Math.max(...rows.map((item) => item.count), 1);
+  setCardMeta("#data-classes-dialog-count", `${rows.length} classes across ${
+    rows.reduce((sum, item) => sum + item.count, 0).toLocaleString()} file matches`);
+  body.innerHTML = `
+    <div class="dash-rows dash-rows-plot">
+      ${rows.map((item) => {
+        const kind = dataClassKind(item.type);
+        const share = Math.max(4, Math.round((item.count / max) * 100));
+        return `
+        <button type="button" class="class-row plain-btn" data-inventory-search="${escapeHtml(item.type)}"
+                data-cat="${escapeHtml(kind.cat)}" style="--plot-share:${share}%"
+                aria-label="${escapeHtml(item.type)}, ${item.count} files — open in Findings">
+          ${coin(kind.glyph, kind.cat)}
+          <span class="class-row-name">${escapeHtml(item.type)}</span>
+          <span class="class-row-count">${item.count.toLocaleString()}</span>
+          <span class="lolli" aria-hidden="true"><i class="lolli-stem"></i><i class="lolli-dot"></i></span>
+        </button>`;
+      }).join("")}
+    </div>`;
+  if (!dialog.open) dialog.showModal();
+}
+
 // ---- Frameworks: their own mark, and the severity of what they cover -----
 const FRAMEWORK_MARKS = {
   gdpr: { label: "GDPR", glyph: "mk-eu-stars" },
@@ -6416,13 +6525,16 @@ function renderRemediationLoad() {
     <div><span>Overdue</span><strong>${overdue.toLocaleString()}</strong><small>${Math.round((overdue / Math.max(1, open)) * 100)}% of open</small></div>
     <div><span>Resolved</span><strong>${Number(remediationSummary.resolved || 0).toLocaleString()}</strong><small>${Number(remediationSummary.risk_accepted || 0).toLocaleString()} risk accepted</small></div>
   `;
+  // The counts the pills carried live on the option labels now, so the select
+  // still says how much is behind each choice before you pick it.
   const severityCounts = remediationSummary.findings_by_severity || {};
-  remediationSeverityFilters.forEach((button) => {
-    const level = button.dataset.remediationSeverity || "ALL";
-    button.dataset.count = String(level === "ALL"
+  [...(remediationSeverityFilter?.options || [])].forEach((option) => {
+    const level = option.value || "ALL";
+    const label = option.dataset.label || (option.dataset.label = option.textContent);
+    const count = level === "ALL"
       ? Number(remediationSummary.active_findings || total || 0)
-      : Number(severityCounts[level] || 0));
-    button.classList.toggle("active", level === remediationSeverityChoice);
+      : Number(severityCounts[level] || 0);
+    option.textContent = `${label} (${count.toLocaleString()})`;
   });
   if (remediationScopeSummary) {
     const scope = remediationStatusLabel(remediationSummary.scope || "current");
@@ -6659,7 +6771,19 @@ function remediationSelectOptions(select, placeholder, values, labeler = (value)
   const selected = select.value || "ALL";
   select.innerHTML = `<option value="ALL">${escapeHtml(placeholder)}</option>${values.map((value) =>
     `<option value="${escapeHtml(value)}">${escapeHtml(labeler(value))}</option>`).join("")}`;
-  select.value = values.includes(selected) ? selected : "ALL";
+  // A filter that is applied has to stay visible in its own control. The
+  // dashboard's "Regulated personal data" is three stored categories at once,
+  // which is a legitimate filter and never a facet value, so rebuilding the
+  // options from the facets alone silently dropped it and the queue came up
+  // unfiltered. An applied value the facets do not list is re-added under the
+  // label it was applied with.
+  if (selected !== "ALL" && !values.includes(selected)) {
+    const label = select.dataset.appliedLabel || labeler(selected);
+    select.append(new Option(label, selected));
+  }
+  select.value = selected === "ALL" || values.includes(selected) || [...select.options].some((option) => option.value === selected)
+    ? selected
+    : "ALL";
 }
 
 function remediationFacetValues(name) {
@@ -6681,6 +6805,7 @@ function renderRemediationStatusOptions() {
 
 function renderRemediationFilterOptions() {
   renderRemediationStatusOptions();
+  remediationSelectOptions(remediationCategoryFilter, "Category", remediationFacetValues("categories"), remediationHumanize);
   remediationSelectOptions(remediationOwnerFilter, "Owner", remediationFacetValues("owners"), (value) => value === "__unassigned__" ? "Unassigned" : value);
   remediationSelectOptions(remediationFrameworkFilter, "Framework", remediationFacetValues("frameworks"), frameworkLabel);
   remediationSelectOptions(remediationDataFilter, "Data type", remediationFacetValues("data_types"), remediationHumanize);
@@ -6853,8 +6978,7 @@ function remediationHasNonDefaultFilters() {
   return Boolean(String(remediationSearch?.value || "").trim())
     || (remediationScopeFilter?.value || "current") !== "current"
     || (remediationStatusFilter?.value || "active") !== "active"
-    || remediationSeverityChoice !== "ALL"
-    || [remediationOwnerFilter, remediationFrameworkFilter,
+    || [remediationSeverityFilter, remediationCategoryFilter, remediationOwnerFilter, remediationFrameworkFilter,
       remediationDataFilter, remediationAssetFilter, remediationSlaFilter]
       .some((element) => element && element.value !== "ALL");
 }
@@ -6907,6 +7031,7 @@ function remediationQueryParams() {
     limit: String(REMEDIATION_PAGE_SIZE),
   });
   const filters = [
+    ["severity", remediationSeverityFilter], ["category", remediationCategoryFilter],
     ["owner", remediationOwnerFilter],
     ["framework", remediationFrameworkFilter], ["data_type", remediationDataFilter],
     ["asset", remediationAssetFilter], ["sla", remediationSlaFilter],
@@ -6914,7 +7039,6 @@ function remediationQueryParams() {
   filters.forEach(([name, element]) => {
     if (element?.value && element.value !== "ALL") params.set(name, element.value);
   });
-  if (remediationSeverityChoice !== "ALL") params.set("severity", remediationSeverityChoice);
   const query = String(remediationSearch?.value || "").trim();
   if (query) params.set("q", query);
   params.set("sort", remediationSortKey);
@@ -9755,8 +9879,14 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (event.target.closest("[data-open-all-classes]")) {
+    openAllDataClasses();
+    return;
+  }
+
   const dataClass = event.target.closest("[data-inventory-search]");
   if (dataClass) {
+    document.querySelector("#data-classes-dialog")?.close();
     switchTab("findings");
     // Typing the class name into the search box matched it as free text
     // against paths and file names too. The inventory has a Finding type
@@ -9809,7 +9939,25 @@ document.addEventListener("click", (event) => {
     return;
   }
 
-  if (event.target.closest("[data-remediation-jump]")) switchTab("risk");
+  const topRisk = event.target.closest("[data-risk-jump-key]");
+  if (topRisk) {
+    const category = RISK_CATEGORIES.find((item) => item.key === topRisk.dataset.riskJumpKey);
+    const go = category?.go;
+    if (!go) {
+      switchTab("risk");
+    } else if (go.to === "inventory") {
+      switchTab("findings");
+      if (go.risk) applyInventoryRisk(go.risk);
+      if (go.search && filterInput) {
+        filterInput.value = go.search;
+        lastInventoryQuery = "";
+        filterInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } else {
+      openRemediationFiltered({ ...(go.filters || {}), label: category.label });
+    }
+    return;
+  }
 });
 
 let lastInventoryQuery = "";
@@ -10063,36 +10211,54 @@ remediationFilters?.addEventListener("change", (event) => {
   loadRemediationSearch.cancel();
   loadRemediationFindings({ resetPage: true }).catch(() => {});
 });
-function resetRemediationFilters() {
+function resetRemediationFilters({ reload = true } = {}) {
   loadRemediationSearch.cancel();
   if (remediationSearch) remediationSearch.value = "";
-  remediationSeverityChoice = "ALL";
   if (remediationScopeFilter) remediationScopeFilter.value = "current";
   if (remediationStatusFilter) remediationStatusFilter.value = "active";
-  [remediationOwnerFilter, remediationFrameworkFilter, remediationDataFilter,
+  [remediationSeverityFilter, remediationCategoryFilter, remediationOwnerFilter,
+    remediationFrameworkFilter, remediationDataFilter,
     remediationAssetFilter, remediationSlaFilter].forEach((element) => {
-    if (element) element.value = "ALL";
+    if (!element) return;
+    delete element.dataset.appliedLabel;
+    element.value = "ALL";
   });
   remediationSortKey = "risk_score";
   remediationSortDirection = "desc";
-  remediationSeverityFilters.forEach((button) => {
-    button.classList.toggle("active", (button.dataset.remediationSeverity || "ALL") === "ALL");
+  if (reload) loadRemediationFindings({ resetPage: true }).catch(() => {});
+}
+
+// ---- Arriving from a dashboard top risk ----------------------------------
+// Opening the queue unfiltered from a card that names one kind of exposure is
+// the same as not clicking it. Each category carries the filter that answers
+// the question the card asked.
+function openRemediationFiltered(filters = {}) {
+  switchTab("risk");
+  loadRemediationSearch.cancel();
+  resetRemediationFilters({ reload: false });
+  const targets = {
+    severity: remediationSeverityFilter,
+    category: remediationCategoryFilter,
+    framework: remediationFrameworkFilter,
+    data_type: remediationDataFilter,
+    asset: remediationAssetFilter,
+  };
+  Object.entries(filters).forEach(([name, value]) => {
+    if (name === "label") return;
+    if (name === "q") {
+      if (remediationSearch) remediationSearch.value = value;
+      return;
+    }
+    const element = targets[name];
+    if (!element) return;
+    if (filters.label) element.dataset.appliedLabel = filters.label;
+    if (![...element.options].some((option) => option.value === value)) {
+      element.append(new Option(filters.label || remediationHumanize(value), value));
+    }
+    element.value = value;
   });
   loadRemediationFindings({ resetPage: true }).catch(() => {});
 }
-
-remediationSeverityFilters.forEach((button) => {
-  button.addEventListener("click", () => {
-    const level = button.dataset.remediationSeverity || "ALL";
-    if (level === remediationSeverityChoice) return;
-    remediationSeverityChoice = level;
-    remediationSeverityFilters.forEach((item) => {
-      item.classList.toggle("active", item === button);
-    });
-    loadRemediationSearch.cancel();
-    loadRemediationFindings({ resetPage: true }).catch(() => {});
-  });
-});
 remediationDrawerToggle?.addEventListener("change", () => {
   if (remediationDrawerToggle.checked) return;
   remediationDetailRequest += 1;

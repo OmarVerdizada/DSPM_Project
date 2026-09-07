@@ -2647,6 +2647,14 @@ def _remediation_filter_sql(filters: dict) -> tuple[list[str], list]:
     if data_type:
         clauses.append("data_type = ?")
         params.append(data_type)
+    # Comma-separated, because one dashboard category can span several stored
+    # ones: "regulated personal data" is pii, government_ids and biometric_data
+    # together, and splitting it into three clicks would be three answers to
+    # one question.
+    categories = [part.strip() for part in str(filters.get("category") or "").split(",") if part.strip()]
+    if categories:
+        clauses.append(f"category IN ({','.join('?' for _ in categories)})")
+        params.extend(categories)
     asset = str(filters.get("asset") or "").strip()
     if asset:
         clauses.append("(asset_id = ? OR affected_asset = ?)")
@@ -2841,6 +2849,7 @@ def _remediation_facets(tenant_id: str, scope: str) -> dict:
             "severities": values("severity", 10),
             "statuses": values("status", 20),
             "owners": values("owner", include_empty=True),
+            "categories": values("category"),
             "data_types": values("data_type"),
             "assets": values("affected_asset"),
             "frameworks": [{"value": str(row["value"]), "count": int(row["n"] or 0)} for row in framework_rows if row["value"]],
@@ -2871,7 +2880,8 @@ def _remediation_filtered_total(conn, tenant_id: str, where: str, params: list) 
 def list_remediation_findings(
     tenant_id: str, *, scope: str = "current", status: str = "active", severity: str = "",
     owner: str = "", framework: str = "", data_type: str = "", asset: str = "", sla: str = "",
-    q: str = "", sort: str = "risk_score", direction: str = "", after: str = "", limit: int = 50,
+    category: str = "", q: str = "", sort: str = "risk_score", direction: str = "",
+    after: str = "", limit: int = 50,
 ) -> dict:
     """Server-filtered, keyset-paginated lightweight finding page plus metrics."""
     normalized_scope = _remediation_scope(scope)
@@ -2884,6 +2894,7 @@ def list_remediation_findings(
     filters = {
         "scope": normalized_scope, "status": status, "severity": severity, "owner": owner,
         "framework": framework, "data_type": data_type, "asset": asset, "sla": sla, "q": q,
+        "category": category,
     }
     clauses, params = _remediation_filter_sql(filters)
     where = " AND ".join(["tenant_id = ?", *clauses])

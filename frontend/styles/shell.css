@@ -628,3 +628,95 @@ html::-webkit-scrollbar {
 @media (max-height: 640px) {
   #tab-findings.tab-panel.active { height: auto; overflow: visible; }
 }
+
+
+/* ── The all-classes sheet ────────────────────────────────────
+   The dashboard card shows what its height allows. This shows the rest, in
+   the same rows, so a class looks the same in both places. */
+.sheet {
+  width: min(560px, 92vw);
+  max-height: min(76vh, 720px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  color: var(--ink);
+}
+.sheet::backdrop { background: color-mix(in srgb, var(--ink) 52%, transparent); }
+
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--line);
+}
+.sheet-head h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+.sheet-head p {
+  margin: 2px 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.sheet-body {
+  max-height: min(60vh, 560px);
+  padding: var(--space-2) var(--space-4) var(--space-4);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.sheet-body:hover,
+.sheet-body:focus-within {
+  scrollbar-color: color-mix(in srgb, var(--ink) 26%, transparent) transparent;
+}
+.sheet-body .class-row { height: 36px; }
+
+/* The card meta becomes the way in to the full list. */
+.card-more {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-muted);
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.card-more b { color: var(--indigo-ink); font-weight: var(--weight-semibold); }
+.card-more:hover b { text-decoration: underline; }
+
+/* ── The inventory row's meta line ────────────────────────────
+   Extension, size, source and the file's flags are one sentence about the
+   file, so they read as one line. Wrapped, they pushed every row below them
+   out of rhythm and could collide with the path underneath. */
+#results-body .file-meta-line {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+}
+#results-body .file-meta-line > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+#results-body .file-meta-more {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink-muted);
+  cursor: help;
+}
+
+/* The whole row opens the file, so it says so on hover. */
+#results-body tr[data-file-key] { cursor: pointer; }
