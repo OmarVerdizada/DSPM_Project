@@ -238,6 +238,75 @@ class RenderCostTests(unittest.TestCase):
         self.assertEqual(css.count("/*"), css.count("*/"))
 
 
+class StorageTests(unittest.TestCase):
+    """Phase 2 - what the database weighs, and the two queries that grew with it."""
+
+    STORE = Path("backend/store.py").read_text(encoding="utf-8")
+
+    def test_the_write_only_blobs_are_compressed(self) -> None:
+        """2.1 - three columns the interface never reads in bulk held 360MB of
+        a 523MB database: the finding history (188), the scan baselines (110)
+        and the per-asset detail (62)."""
+        self.assertIn("_JSON_ZLIB_MAGIC", self.STORE)
+        # PostgreSQL TOASTs a large TEXT value itself; storing our own bytes
+        # there would trade transparent handling for a private format.
+        packer = self.STORE[self.STORE.index("def pack_json_text("):]
+        packer = packer[:packer.index(chr(10) + "def ", 10)]
+        self.assertIn("if db.is_postgres():", packer)
+        # `'{}'` has to stay text: two partial indexes and the read-model gate
+        # compare against it literally.
+        self.assertIn("_compression_floor()", packer)
+        # Every reader accepts text, a compressed blob, or a pre-compression
+        # blob - a store that cannot read its own history is not an upgrade.
+        reader = self.STORE[self.STORE.index("def unpack_json_text("):]
+        reader = reader[:reader.index(chr(10) + "def ", 10)]
+        self.assertIn("_JSON_ZLIB_MAGIC", reader)
+        self.assertIn("isinstance(value, (bytes, bytearray, memoryview))", reader)
+
+    def test_the_finding_history_has_a_window(self) -> None:
+        """Every scan writes one row per finding and nothing reads them in
+        bulk, so the projection grew without bound: 188MB for 25 scans."""
+        self.assertIn("def _trim_finding_index(", self.STORE)
+        self.assertIn("DSPM_FINDING_INDEX_KEEP_SCANS", self.STORE)
+        # The window runs in the transaction that adds a scan to it.
+        write = self.STORE[self.STORE.index("_write_finding_index(conn, tenant_id, report)"):]
+        self.assertIn("_trim_finding_index(conn, tenant_id)", write[:200])
+        # A trimmed row means "outside the window", not "no such finding".
+        self.assertIn("body = unpack_json_text(row[", self.STORE)
+
+    def test_a_saved_run_keeps_its_inventory_projection(self) -> None:
+        """2.2 - selecting a named scan decrypted an 8.3MB artifact and
+        re-normalised every asset: 2.3s a page, and O(report) not O(page)."""
+        with store._connect() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(scan_reports)")}
+        self.assertIn("rows_json", columns)
+        self.assertIn("def _packed_report_rows(", self.STORE)
+        # A run saved before the column existed fills it on first read, so the
+        # slow path happens once per run rather than once per process.
+        build = self.STORE[self.STORE.index("    def build() -> list[dict]:"):]
+        build = build[:build.index("return rows") + 11]
+        self.assertIn("_stored_report_rows(tenant_id, scan_id)", build)
+        self.assertIn("_store_report_rows(tenant_id, scan_id, rows)", build)
+        # Failing to build the projection must never cost the operator the scan.
+        packed = self.STORE[self.STORE.index("def _packed_report_rows("):]
+        self.assertIn("except Exception", packed[:packed.index(chr(10) + "def ", 10)])
+
+    def test_severity_sorts_on_a_number(self) -> None:
+        """2.3 - "worst first" sorted on a CASE expression, which no index can
+        serve: SQLite read the whole current set into a temp b-tree, 29ms."""
+        with store._connect() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(findings)")}
+            indexes = {row[1] for row in conn.execute("PRAGMA index_list(findings)")}
+        self.assertIn("severity_rank", columns)
+        self.assertIn("idx_findings_tenant_current_rank_id", indexes)
+        self.assertIn('"severity": ("severity_rank", False, "DESC")', self.STORE)
+        # Both writers stamp it, or a sort silently loses rows to rank 0.
+        self.assertEqual(2, self.STORE.count("severity_rank(severity),"))  # calls, not the def
+        # ...and the affected-file count is a predicate, not a CASE inside
+        # COUNT(DISTINCT), which could not use the asset index: 34.5 -> 8.2ms.
+        self.assertIn("SELECT COUNT(DISTINCT asset_id) AS n FROM findings WHERE", self.STORE)
+
+
 class ResponseSizeTests(unittest.TestCase):
     def test_responses_and_assets_are_compressed(self) -> None:
         """0.1 - 1.5MB of JS and CSS and 100-200KB JSON pages went out

@@ -9,6 +9,7 @@ import re
 import secrets
 import threading
 import time
+import zlib
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -648,7 +649,7 @@ def add_remediation_operational_index(conn) -> None:
     ).fetchall()
     for asset in assets:
         try:
-            file_obj = json.loads(asset["detail_json"] or "{}")
+            file_obj = json.loads(unpack_json_text(asset["detail_json"]) or "{}")
         except (json.JSONDecodeError, TypeError):
             continue
         tenant_id = str(asset["tenant_id"] or "")
@@ -689,7 +690,7 @@ def add_remediation_operational_index(conn) -> None:
                 "INSERT INTO findings (tenant_id, id, asset_id, rule, severity, category, framework, status, "
                 "first_seen, last_seen, scan_id, seq, is_current, risk_score, owner, sla_due, display_name, "
                 "data_type, exposure, affected_asset, file_name, file_path, source, occurrence_count, confidence, "
-                "frameworks_json, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "frameworks_json, search_text, severity_rank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (tenant_id, id) DO UPDATE SET asset_id = excluded.asset_id, rule = excluded.rule, "
                 "severity = excluded.severity, category = excluded.category, framework = excluded.framework, "
                 "status = excluded.status, last_seen = excluded.last_seen, seq = excluded.seq, is_current = 1, "
@@ -697,7 +698,8 @@ def add_remediation_operational_index(conn) -> None:
                 "display_name = excluded.display_name, data_type = excluded.data_type, exposure = excluded.exposure, "
                 "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
                 "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
-                "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text",
+                "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text, "
+                "severity_rank = excluded.severity_rank",
                 (
                     tenant_id, finding_id, asset_id, rule, severity, data_type, frameworks[0], status,
                     str(finding.get("first_seen") or last_seen), last_seen, seq, risk_score, owner,
@@ -706,6 +708,7 @@ def add_remediation_operational_index(conn) -> None:
                     str(file_obj.get("name") or asset["name"] or path.replace("\\", "/").rsplit("/", 1)[-1]), path, source,
                     occurrence_count, int(finding.get("confidence") or 0),
                     json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")), search_text,
+                    severity_rank(severity),
                 ),
             )
 
@@ -744,6 +747,13 @@ def apply_baseline_schema(conn) -> None:
             report_json TEXT NOT NULL,
             report_ref TEXT NOT NULL DEFAULT '',
             report_bytes INTEGER NOT NULL DEFAULT 0,
+            -- The inventory projection of this run: the same rows the Source
+            -- filter pages through. Selecting a named scan used to decrypt the
+            -- 8.3MB report artifact and re-normalise every asset in Python -
+            -- 2.3 seconds a page cold, and O(report) rather than O(page), so a
+            -- ten-times estate would not have answered at all. Written once,
+            -- with the run.
+            rows_json BLOB,
             created_at TEXT NOT NULL,
             PRIMARY KEY (tenant_id, scan_id)
         );
@@ -982,6 +992,10 @@ def apply_baseline_schema(conn) -> None:
             confidence INTEGER NOT NULL DEFAULT 0,
             frameworks_json TEXT NOT NULL DEFAULT '[]',
             search_text TEXT NOT NULL DEFAULT '',
+            -- Severity as an orderable number. The display value stays in
+            -- `severity`; this exists so "worst first" is an index range scan
+            -- rather than a CASE expression sorted in temp space.
+            severity_rank INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (tenant_id, id)
         );
 
@@ -1102,8 +1116,24 @@ def apply_baseline_schema(conn) -> None:
         conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''")
     # F2: bring pre-version-stamp finding_index rows up to the current
     # schema. They land with index_version='' (i.e. "unknown logic"), so
+    report_columns = db.table_columns(conn, "scan_reports")
+    if "rows_json" not in report_columns:
+        conn.execute("ALTER TABLE scan_reports ADD COLUMN rows_json BLOB")
+
     # the read-switch treats them as stale and serves the blob until a
     # backfill re-stamps them - the safe default for a migration mirror.
+    finding_columns = db.table_columns(conn, "findings")
+    if "severity_rank" not in finding_columns:
+        conn.execute("ALTER TABLE findings ADD COLUMN severity_rank INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "UPDATE findings SET severity_rank = CASE severity "
+            "WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 ELSE 0 END"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_rank_id "
+        "ON findings (tenant_id, is_current, severity_rank, id)"
+    )
+
     asset_count_columns = db.table_columns(conn, "assets")
     for column in ("reason_count", "dlp_count"):
         if column not in asset_count_columns:
@@ -1549,8 +1579,8 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                 """
                 INSERT OR REPLACE INTO scan_reports
                     (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
-                     report_json, report_ref, report_bytes, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     report_json, report_ref, report_bytes, rows_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tenant_id,
@@ -1562,6 +1592,7 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                     inline_body,
                     report_ref,
                     report_bytes,
+                    _packed_report_rows(tenant_id, report),
                     created_at,
                 ),
             )
@@ -1608,10 +1639,56 @@ def _normalized_write_is_best_effort() -> bool:
     return os.getenv("DSPM_NORMALIZED_WRITE_BEST_EFFORT", "0") == "1"
 
 
+# Three columns hold JSON the interface never reads in bulk: the per-scan
+# finding history (188MB), the incremental-scan baselines (110MB) and the
+# per-asset detail blob (62MB). 360MB of a 523MB database.
+#
+# SQLite stores what it is given, so these are zlib'd into BLOBs. PostgreSQL is
+# deliberately excluded: TOAST already compresses a large TEXT value, and
+# storing our own bytes there would trade its transparent handling for a
+# format only this module understands.
+#
+# Measured on this data: 5.6x for the baselines, 5.7x for the detail blobs,
+# 2.3x for the finding history - the last is small rows, where zlib has less
+# to work with. Base64 would have kept the columns TEXT and cost a third of
+# every gain, which is why these are BLOBs.
+_JSON_ZLIB_MAGIC = b"DSPMz1"
+
+
+def _compression_floor() -> int:
+    """Below this, the header costs more than the saving - and `'{}'` must stay
+    text, because two partial indexes and the read-model gate compare against
+    it literally."""
+    try:
+        return max(256, min(int(os.getenv("DSPM_JSON_COMPRESS_MIN", "2048")), 1_000_000))
+    except ValueError:
+        return 2048
+
+
+def pack_json_text(value: str):
+    if db.is_postgres():
+        return value
+    text = value if isinstance(value, str) else str(value or "")
+    if len(text) < _compression_floor():
+        return text
+    return _JSON_ZLIB_MAGIC + zlib.compress(text.encode("utf-8"), 6)
+
+
+def unpack_json_text(value) -> str:
+    """Accepts what any generation of this schema stored: text, a compressed
+    blob, or a blob that predates compression."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        if raw.startswith(_JSON_ZLIB_MAGIC):
+            return zlib.decompress(raw[len(_JSON_ZLIB_MAGIC):]).decode("utf-8")
+        return raw.decode("utf-8", "replace")
+    return value if isinstance(value, str) else ("" if value is None else str(value))
+
+
 def _detail_counts(detail_json) -> tuple[int, int]:
     """(reasons, dlp actions) from an asset's detail blob, at write time."""
     try:
-        detail = json.loads(detail_json or "{}")
+        detail = json.loads(unpack_json_text(detail_json) or "{}")
     except (json.JSONDecodeError, TypeError):
         return (0, 0)
     risk = detail.get("risk") if isinstance(detail, dict) else {}
@@ -1681,7 +1758,7 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
                 "UPDATE scan_object_baselines SET snapshot_json = ?, updated_at = ? "
                 "WHERE tenant_id = ? AND scope_key = ? AND object_key = ? AND last_scan_id = ?",
                 (
-                    json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                    pack_json_text(json.dumps(record, ensure_ascii=False, separators=(",", ":"))),
                     datetime.now(timezone.utc).isoformat(),
                     tenant_id,
                     scope_key,
@@ -1764,7 +1841,7 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
                 scan_id,
                 now,
                 now,
-                json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                pack_json_text(json.dumps(record, ensure_ascii=False, separators=(",", ":"))),
             )
         )
         if len(rows) >= 500:
@@ -1839,7 +1916,7 @@ def probe_incremental_object(
     if not exact or not row["snapshot_json"]:
         return {"state": "changed"}
     try:
-        detail = json.loads(row["snapshot_json"])
+        detail = json.loads(unpack_json_text(row["snapshot_json"]))
     except (TypeError, json.JSONDecodeError):
         return {"state": "changed"}
     if not isinstance(detail, dict):
@@ -1860,7 +1937,7 @@ def probe_incremental_object(
         archive_records: list[dict] = []
         for child in child_rows:
             try:
-                child_detail = json.loads(child["snapshot_json"] or "{}")
+                child_detail = json.loads(unpack_json_text(child["snapshot_json"]) or "{}")
             except (TypeError, json.JSONDecodeError):
                 child_detail = {}
             if isinstance(child_detail, dict) and child_detail:
@@ -2042,7 +2119,7 @@ def _upsert_operational_finding(
         "INSERT INTO findings (tenant_id, id, asset_id, rule, severity, category, framework, status, "
         "first_seen, last_seen, scan_id, seq, is_current, risk_score, owner, sla_due, display_name, "
         "data_type, exposure, affected_asset, file_name, file_path, source, occurrence_count, confidence, "
-        "frameworks_json, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "frameworks_json, search_text, severity_rank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT (tenant_id, id) DO UPDATE SET asset_id = excluded.asset_id, rule = excluded.rule, "
         "severity = excluded.severity, category = excluded.category, framework = excluded.framework, status = excluded.status, "
         "first_seen = COALESCE(NULLIF(findings.first_seen, ''), excluded.first_seen), last_seen = excluded.last_seen, "
@@ -2053,7 +2130,8 @@ def _upsert_operational_finding(
         "display_name = excluded.display_name, data_type = excluded.data_type, exposure = excluded.exposure, "
         "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
         "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
-        "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text",
+        "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text, "
+        "severity_rank = excluded.severity_rank",
         (
             tenant_id, finding_id, asset_id, rule, severity,
             str(finding.get("category") or finding.get("finding_category") or ""), frameworks[0], status,
@@ -2061,7 +2139,7 @@ def _upsert_operational_finding(
             sla_due, display_name, data_type,
             exposure, affected_asset, file_name, path, source, occurrence_count,
             int(finding.get("confidence") or 0), json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")),
-            search_text,
+            search_text, severity_rank(severity),
         ),
     )
 
@@ -2146,7 +2224,7 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
              asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
              asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
              asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
-             asset.finding_types, asset.framework_keys, asset.detail_json, asset.scan_label,
+             asset.finding_types, asset.framework_keys, pack_json_text(asset.detail_json), asset.scan_label,
              scan_id, observed_at, *_detail_counts(asset.detail_json)),
         )
     for version in scan.asset_versions if write_estate and refresh_current else []:
@@ -2184,6 +2262,56 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
         )
 
     _write_finding_index(conn, tenant_id, report)
+    _trim_finding_index(conn, tenant_id)
+
+
+SEVERITY_RANKS = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def severity_rank(severity) -> int:
+    return SEVERITY_RANKS.get(str(severity or "").upper(), 0)
+
+
+def _finding_index_retention() -> int:
+    """How many scans keep their full per-finding response.
+
+    `finding_index` is an immutable history projection: the interface reads one
+    row of it at a time, through the finding-detail endpoint, and never in
+    bulk. Every scan writes one row per finding, so on this estate it reached
+    188MB - a third of the database - for 25 scans. Older scans keep their
+    status row, which is what the history views actually read; only the
+    response body is dropped.
+
+    0 disables the window and keeps everything.
+    """
+    try:
+        return max(0, min(int(os.getenv("DSPM_FINDING_INDEX_KEEP_SCANS", "5")), 1000))
+    except ValueError:
+        return 5
+
+
+def _trim_finding_index(conn, tenant_id: str) -> int:
+    """Blank the response body of scans outside the retention window."""
+    keep = _finding_index_retention()
+    if not keep:
+        return 0
+    recent = [
+        str(row["scan_id"])
+        for row in conn.execute(
+            "SELECT DISTINCT scan_id FROM finding_index WHERE tenant_id = ? "
+            "ORDER BY scan_id DESC LIMIT ?",
+            (tenant_id, keep),
+        ).fetchall()
+    ]
+    if not recent:
+        return 0
+    placeholders = ",".join("?" for _ in recent)
+    result = conn.execute(
+        f"UPDATE finding_index SET response_json = '' "
+        f"WHERE tenant_id = ? AND response_json <> '' AND scan_id NOT IN ({placeholders})",
+        (tenant_id, *recent),
+    )
+    return int(result.rowcount or 0)
 
 
 def _write_finding_index(conn, tenant_id: str, report: dict) -> None:
@@ -2205,7 +2333,8 @@ def _write_finding_index(conn, tenant_id: str, report: dict) -> None:
             continue
         conn.execute(
             "INSERT INTO finding_index (tenant_id, scan_id, seq, finding_id, status, response_json, index_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (tenant_id, scan_id, seq, finding_id, _finding_status(finding), json.dumps(_finding_response(row), ensure_ascii=False), FINDING_INDEX_VERSION),
+            (tenant_id, scan_id, seq, finding_id, _finding_status(finding),
+             pack_json_text(json.dumps(_finding_response(row), ensure_ascii=False)), FINDING_INDEX_VERSION),
         )
         seq += 1
 
@@ -2459,6 +2588,48 @@ _scan_report_rows_order: list[tuple[str, str]] = []
 _scan_report_rows_lock = threading.Lock()
 
 
+def _packed_report_rows(tenant_id: str, report: dict):
+    """The run's inventory projection, compressed, or None if it cannot be
+    built. A failure here must never cost the operator the scan itself: the
+    reader falls back to the report exactly as before."""
+    try:
+        rows = _scan_report_inventory_rows(tenant_id, report)
+    except Exception as exc:  # pragma: no cover - projection is best effort
+        logger.warning("Scan-report projection not stored: %s", type(exc).__name__)
+        return None
+    if not rows:
+        return None
+    return pack_json_text(json.dumps(rows, ensure_ascii=False, separators=(",", ":")))
+
+
+def _stored_report_rows(tenant_id: str, scan_id: str) -> list[dict] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT rows_json FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+            (tenant_id, scan_id),
+        ).fetchone()
+    if not row or row["rows_json"] is None:
+        return None
+    try:
+        rows = json.loads(unpack_json_text(row["rows_json"]) or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return rows if isinstance(rows, list) and rows else None
+
+
+def _store_report_rows(tenant_id: str, scan_id: str, rows: list[dict]) -> None:
+    """Fill the projection for a run saved before this column existed, so the
+    2.3-second read happens once per run rather than once per process."""
+    if not rows:
+        return
+    with suppress(Exception):
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE scan_reports SET rows_json = ? WHERE tenant_id = ? AND scan_id = ?",
+                (pack_json_text(json.dumps(rows, ensure_ascii=False, separators=(",", ":"))), tenant_id, scan_id),
+            )
+
+
 def _scan_report_rows_cache_max() -> int:
     try:
         return max(0, min(int(os.getenv("DSPM_SCAN_REPORT_ROWS_CACHE", "4")), 32))
@@ -2539,8 +2710,13 @@ def scan_report_inventory_rows_by_label(tenant_id: str, scan_label: str) -> tupl
         return None
 
     def build() -> list[dict]:
+        stored = _stored_report_rows(tenant_id, scan_id)
+        if stored is not None:
+            return stored
         report = read_scan_report(tenant_id, scan_id)
-        return _scan_report_inventory_rows(tenant_id, report) if report else []
+        rows = _scan_report_inventory_rows(tenant_id, report) if report else []
+        _store_report_rows(tenant_id, scan_id, rows)
+        return rows
 
     return scan_id, _cached_scan_report_rows(tenant_id, scan_id, build)
 
@@ -2685,7 +2861,7 @@ REMEDIATION_ACTIVE_STATUSES = (
 )
 REMEDIATION_SORTS: dict[str, tuple[str, bool, str]] = {
     "risk_score": ("risk_score", False, "DESC"),
-    "severity": ("CASE severity WHEN 'CRITICAL' THEN 4 WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 ELSE 0 END", False, "DESC"),
+    "severity": ("severity_rank", False, "DESC"),
     "last_seen": ("COALESCE(last_seen, '')", True, "DESC"),
     "sla_due": ("COALESCE(NULLIF(sla_due, ''), '9999-12-31T23:59:59+00:00')", True, "ASC"),
     "status": ("COALESCE(status, '')", True, "ASC"),
@@ -2891,10 +3067,14 @@ def remediation_summary(tenant_id: str, scope: str = "current") -> dict:
     validation_values = ",".join(f"'{value}'" for value in REMEDIATION_STATUS_GROUPS["validation"])
     active_values = ",".join(f"'{value}'" for value in REMEDIATION_ACTIVE_STATUSES)
     with _connect() as conn:
+        affected_row = conn.execute(
+            f"SELECT COUNT(DISTINCT asset_id) AS n FROM findings WHERE {where} AND status IN ({active_values})",
+            (tenant_id, *scope_params),
+        ).fetchone()
         row = conn.execute(
             "SELECT COUNT(*) AS total_findings, COALESCE(SUM(occurrence_count), 0) AS total_occurrences, "
             f"SUM(CASE WHEN status IN ({active_values}) THEN 1 ELSE 0 END) AS active_findings, "
-            f"COUNT(DISTINCT CASE WHEN status IN ({active_values}) THEN asset_id END) AS affected_files, "
+    
             f"SUM(CASE WHEN status IN ({open_values}) THEN 1 ELSE 0 END) AS open_n, "
             f"SUM(CASE WHEN status IN ({progress_values}) THEN 1 ELSE 0 END) AS progress_n, "
             f"SUM(CASE WHEN status IN ({validation_values}) THEN 1 ELSE 0 END) AS validation_n, "
@@ -2920,7 +3100,7 @@ def remediation_summary(tenant_id: str, scope: str = "current") -> dict:
         "total_findings": int((row["total_findings"] if row else 0) or 0),
         "total_occurrences": int((row["total_occurrences"] if row else 0) or 0),
         "active_findings": int((row["active_findings"] if row else 0) or 0),
-        "affected_files": int((row["affected_files"] if row else 0) or 0),
+        "affected_files": int((affected_row["n"] if affected_row else 0) or 0),
         "open": int((row["open_n"] if row else 0) or 0),
         "in_progress": int((row["progress_n"] if row else 0) or 0),
         "pending_validation": int((row["validation_n"] if row else 0) or 0),
@@ -3040,7 +3220,7 @@ def list_remediation_findings(
     if has_more and page_rows:
         last = page_rows[-1]
         if sort_key == "severity":
-            sort_value = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}.get(str(last["severity"] or "").upper(), 0)
+            sort_value = int(last["severity_rank"] or 0)
         elif sort_key == "sla_due":
             sort_value = str(last["sla_due"] or "9999-12-31T23:59:59+00:00")
         else:
@@ -3566,7 +3746,7 @@ def inventory_reason_action_counts(tenant_id: str, ids: list) -> dict:
             ).fetchall()
             for row in rows:
                 try:
-                    risk = (json.loads(row["detail_json"] or "{}") or {}).get("risk") or {}
+                    risk = (json.loads(unpack_json_text(row["detail_json"]) or "{}") or {}).get("risk") or {}
                     counts[row["id"]] = (len(risk.get("reasons") or []), len(risk.get("dlp_recommendations") or []))
                 except Exception:
                     counts[row["id"]] = (0, 0)
@@ -4345,7 +4525,7 @@ def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dic
                 ).fetchone()
             if row:
                 try:
-                    detail = json.loads(row["detail_json"] or "{}")
+                    detail = json.loads(unpack_json_text(row["detail_json"]) or "{}")
                 except (json.JSONDecodeError, TypeError):
                     detail = {}
                 return detail | {column: row[column] for column in _INVENTORY_COLS}
@@ -4401,7 +4581,10 @@ def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict |
             """,
             (tenant_id, finding_id),
         ).fetchone()
-    return json.loads(row["response_json"]) if row and row["response_json"] else None
+    # An empty body means the scan fell outside the retention window, not that
+    # the finding never existed.
+    body = unpack_json_text(row["response_json"]) if row else ""
+    return json.loads(body) if body else None
 
 
 def get_finding(tenant_id: str, finding_id: str) -> dict | None:

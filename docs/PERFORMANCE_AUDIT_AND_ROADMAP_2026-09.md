@@ -404,6 +404,83 @@ rather than request latency; it belongs with the Phase 2 storage work.
 | 2.3 | **Remediation aggregates at scale.** Maintain the summary counters incrementally on status change (a small `remediation_counters` table) instead of re-aggregating 68k rows every 15 s; give the severity sort an integer `severity_rank` column with an index. | summary 38 → <1 ms; severity sort 27 → 0.3 ms; holds at 10× |
 | 2.4 | **Coalesce facets.** `/api/inventory/facets` runs twelve GROUP BY queries; four can be one query with conditional aggregates. Minor today, matters at 10×. | 75 → ~30 ms cold |
 
+### Phase 2 — shipped 2026-09-07 (2.1–2.3; 2.4 measured and skipped)
+
+| Metric | Before | After | Target | |
+|---|---|---|---|---|
+| Database file | 523.5 MB | **143.4 MB** | ~120 MB | close |
+| `assets.detail_json` | 61.7 MB | **10.0 MB** | ~7 MB (1.5) | met by other means |
+| `scan_object_baselines.snapshot_json` | 110.1 MB | **18.4 MB** | — | |
+| `finding_index.response_json` | 187.6 MB | **37.1 MB** | — | |
+| Severity sort | 29.1 ms | **0.1 ms** | 0.3 ms | met |
+| Affected-files count | 34.5 ms | **8.2 ms** | — | |
+| `remediation_summary` | 38 ms | **31 ms** | <1 ms | not met |
+| Named-scan filter, cold | 2,328 ms | **22 ms** | O(page) | met |
+
+**2.1 Compression, and why not the way the plan assumed.** The plan expected
+6–8× from zlib. Measured per row on this data: 5.6× for the baselines, 5.7× for
+the detail blobs and only **2.3×** for the finding history, whose rows are
+small enough that zlib has little to work with. Base64 — the obvious way to
+keep the columns TEXT — would have cost a third of every gain, so these are
+BLOBs instead, which SQLite stores unchanged in a TEXT-affinity column.
+
+PostgreSQL is deliberately excluded: TOAST already compresses a large TEXT
+value, and storing our own bytes there would trade the server's transparent
+handling for a format only `store.py` understands. `pack_json_text` returns the
+string unchanged when the backend is Postgres.
+
+Two things the floor protects: `'{}'` must stay text, because two partial
+indexes (`idx_assets_tenant_empty_detail`) and the read-model gate compare
+against it literally; and below ~2 KB the header costs more than the saving.
+
+The history window did the rest of the work on `finding_index`: keeping the
+last five scans per tenant dropped 31,817 response bodies. Older scans keep
+their status row, which is what the history views read; only the body goes.
+
+**2.2 A saved run keeps its own projection.** `scan_reports.rows_json` holds
+the inventory rows the Source filter pages through, compressed — 0.03 MB for a
+run whose report artifact is 8.3 MB. A run saved before the column existed
+fills it on first read, so the 2.3-second decrypt-and-normalise happens once
+per run rather than once per process. Building it is best-effort: a failure
+logs and falls back to the old path rather than costing the operator the scan.
+
+**2.3 Severity as a number.** "Worst first" sorted on a `CASE` expression,
+which no index can serve, so SQLite read the whole current set into a temp
+b-tree. `findings.severity_rank` with `(tenant_id, is_current, severity_rank,
+id)` makes it a range scan: 29.1 ms → 0.1. Both writers stamp it and the
+migration backfills existing rows.
+
+The summary's affected-file count was `COUNT(DISTINCT CASE WHEN status IN (…)
+THEN asset_id END)`, which cannot use the `(tenant, is_current, asset_id)`
+index and built a temp b-tree at 34.5 ms. As a predicate it is an index scan at
+8.2 ms.
+
+**The counters table was not built.** The plan called for maintaining the
+summary incrementally. `remediation_summary` is 31 ms behind a 15-second cache;
+a counters table would have to be updated by every status write, and a counter
+that disagrees with the rows is worse than a 31 ms query. It belongs with the
+PostgreSQL move, where the aggregate can be a materialised view the database
+keeps honest.
+
+**2.4 was measured and skipped.** The twelve facet GROUP BYs total **6.1 ms**,
+and the merge the plan suggested — three trivial queries into one conditional
+aggregate — measured 0.22 ms against the 0.26 ms they cost separately. Writing
+code to save 0.04 ms is not a change, it is noise. The one query worth
+remembering is the `source` group-by at 5.7 ms, which cannot use
+`idx_assets_tenant_source` because it filters on `COALESCE(scan_label,'') = ''`;
+if facets ever become hot, that predicate is the thing to fix.
+
+**1.5 is now closed by other means.** The plan was to split `detail_json` into
+an `asset_details` table. Compressing it took 61.7 MB to 10.0 with no schema
+change, no migration of the detail modal's read path, and no second table to
+keep consistent. The split is still available if the modal ever needs to read
+parts of the blob independently, but it is no longer a storage argument.
+
+**Operational:** `scripts/compact_json_columns.py` rewrites existing rows,
+applies the window and VACUUMs (it needs room for a second copy of the file
+while it runs). Re-runnable. New settings: `DSPM_JSON_COMPRESS_MIN` (2048),
+`DSPM_FINDING_INDEX_KEEP_SCANS` (5, 0 disables the window).
+
 ### Phase 3 — scale (when a customer estate crosses ~20k assets)
 
 | # | Change |
