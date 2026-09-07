@@ -46,6 +46,25 @@
      (it measured 3.97:1 in dark before this). */
   --indigo-ink: #4f46e5;
 
+  /* ── The pointer, and the choice ──────────────────────────
+     One wash says "the pointer is on this", everywhere in the product: a
+     table row, a card, a nav item, a menu item, a tab, a socket. Before this
+     there were SIXTY-THREE different hover backgrounds across a hundred and
+     eighteen rules - 3% of the accent here, 10% there, a flat #f6f7fd, two
+     gradients, a 28% blue - which is not a colour scheme, it is an
+     accumulation.
+
+     5% and not more. The old row hover measured 6.5 dE2000 against the
+     surface, which is a step you notice as a colour rather than as a
+     pointer; this is 4.3, still clearly perceptible on a 40px row but no
+     longer a flash. Alpha rather than a mix with white, so the same token
+     works over a card, over the page and over a striped row.
+
+     Selection is a different question - it survives the pointer leaving - so
+     it keeps a stronger wash, 2.6 dE2000 clear of the hover. */
+  --hover-wash: color-mix(in srgb, var(--indigo) 5%, transparent);
+  --selected-wash: color-mix(in srgb, var(--indigo) 12%, transparent);
+
   /* ── Severity — reserved ──────────────────────────────────
      These five say how bad something is. They are not available for
      decoration: if a border is red in this product, the thing behind it is
@@ -223,6 +242,10 @@
   --indigo: #6366f1;
   --indigo-wash: rgba(99, 102, 241, .14);
   --indigo-ink: #a5b4fc;
+  /* Same perceived step on dark paper: 6% measures 4.4 dE2000 against
+     #111827, where 5% would measure 4.0 on white. */
+  --hover-wash: color-mix(in srgb, var(--indigo) 6%, transparent);
+  --selected-wash: color-mix(in srgb, var(--indigo) 16%, transparent);
   /* The sidebar's secondary labels take the contract's muted ink in both
      themes; the legacy value failed AA on both grounds. */
   --sidebar-muted: #9ca3af;

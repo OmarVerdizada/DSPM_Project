@@ -796,12 +796,16 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         queue = Path("frontend/styles/remediation.css").read_text(encoding="utf-8")
         pages = Path("frontend/styles/pages.css").read_text(encoding="utf-8")
         for sheet, selector in (
-            (queue, "#remediation-workflow .remediation-table tbody tr:hover td,"),
+            (queue, "#remediation-workflow .remediation-table tbody tr:hover td {"),
             (pages, "#results-body tr[data-file-key]:hover td {"),
         ):
             block = sheet[sheet.index(selector):]
             block = block[:block.index("}")]
-            self.assertIn("var(--indigo-wash)", block)
+            self.assertIn("var(--hover-wash)", block)
+        # ...and the queue's selection is the stronger wash, so a chosen row
+        # still says so while the pointer is somewhere else on the table.
+        chosen = queue[queue.index("#remediation-workflow .remediation-table tbody tr.is-selected,"):]
+        self.assertIn("var(--selected-wash)", chosen[:chosen.index("}")])
         # Both need the panel id: the rule they beat is written
         # `:root:not([data-theme="dark"]) tbody tr:hover td`, and that :not()
         # counts, so a class and a pseudo-class alone lose to it.
@@ -823,6 +827,62 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         # The window keeps a bar for the views that are taller than it.
         html_rule = shell[shell.index("html {"):]
         self.assertIn("scrollbar-width: thin;", html_rule[:html_rule.index("}")])
+
+    def test_one_hover_wash_for_every_surface(self) -> None:
+        """Sixty-three different hover backgrounds across a hundred and
+        eighteen rules - 3% of the accent here, 10% there, a flat #f6f7fd, two
+        gradients, a 28% blue - is not a colour scheme. One token now says
+        "the pointer is on this" everywhere; only the hovers that mean
+        something else keep their own colour."""
+        sheets = {name: Path(name).read_text(encoding="utf-8") for name in (
+            "frontend/styles.css", "frontend/styles/shell.css",
+            "frontend/styles/pages.css", "frontend/styles/remediation.css")}
+        rule = re.compile(r"(?m)^([^{}]*:hover[^{}]*)\{([^{}]*)\}")
+        decl = re.compile(r"(?<!-)background(?:-color)?\s*:\s*([^;]+);")
+        values: list[str] = []
+        for body in sheets.values():
+            for _, block in rule.findall(body):
+                for match in decl.finditer(block):
+                    values.append(" ".join(match.group(1).replace("!important", "").split()))
+
+        washed = [v for v in values if v == "var(--hover-wash)"]
+        self.assertGreaterEqual(len(washed), 85, "the sweep stopped covering surfaces")
+        self.assertLessEqual(len(set(values)), 22, f"hover colours are drifting again: {sorted(set(values))}")
+
+        # A hover never announces itself with a gradient, and the only raw
+        # hexes left are the three that carry a meaning of their own: delete,
+        # export-CSV, export-Word.
+        for value in values:
+            self.assertNotIn("linear-gradient", value, f"gradient hover: {value}")
+            for hexa in re.findall(r"#[0-9a-fA-F]{3,8}", value):
+                self.assertIn(hexa.lower(), {"#dc2626", "#059669", "#2563eb"},
+                              f"raw hex hover: {value}")
+
+        # The wash itself: calm, but still there. The old row hover measured
+        # 6.5 dE2000 against the surface, which reads as a colour rather than
+        # as a pointer; below about 2 it stops being visible at all - that is
+        # what made the inventory look dead while the queue did not.
+        tokens = Path("frontend/styles/tokens.css").read_text(encoding="utf-8")
+        light = re.search(r"--hover-wash: color-mix\(in srgb, var\(--indigo\) (\d+)%", tokens)
+        self.assertIsNotNone(light, "the light hover wash is not declared as a mix of the accent")
+        share = int(light.group(1)) / 100
+        indigo = _rgb("#4f46e5")
+        mixed = "#%02x%02x%02x" % tuple(
+            round(c * share + 255 * (1 - share)) for c in indigo)
+        separation = _delta_e_2000(mixed, "#ffffff")
+        self.assertGreater(separation, 2.5, f"the hover wash is invisible ({separation:.1f} dE)")
+        self.assertLess(separation, 5.5, f"the hover wash is a flash, not a pointer ({separation:.1f} dE)")
+
+        # Selection outlasts the pointer, so it is the stronger of the two and
+        # has to be separable from it.
+        chosen = re.search(r"--selected-wash: color-mix\(in srgb, var\(--indigo\) (\d+)%", tokens)
+        self.assertIsNotNone(chosen)
+        self.assertGreater(int(chosen.group(1)), int(light.group(1)))
+        # Both themes carry both tokens: a wash defined only for light paper
+        # leaves the dark one with whatever it inherits.
+        dark = tokens[tokens.index('[data-theme="dark"]'):]
+        self.assertIn("--hover-wash:", dark)
+        self.assertIn("--selected-wash:", dark)
 
     def test_findings_is_the_inventory_and_says_so_once(self) -> None:
         """Two panels sat above the table - a detection-signal summary and a

@@ -871,6 +871,51 @@ tr:hover td` - one class and one pseudo-class - loses to it even with
 `!important` on both sides. That cost one round trip: the rule was in the
 CSSOM, matched the element, and still did not win.
 
+### 0.4v Sixty-three hover colours, and the one that replaced them
+
+Counted before the change: **118 hover rules setting a background, carrying 63
+different values.** 3% of the accent on one table, 4% on another, 6% on a
+third; `--accent-soft` on twelve controls; a flat `#f6f7fd`; `--card-2` forced
+onto every table cell; two 135-degree gradients on the sidebar; a 28% blue;
+`rgba(96,165,250,.10)` for dark. Nothing decided any of this - it accumulated,
+one page at a time, and the result was that the same gesture answered
+differently depending on where you made it.
+
+One token now: `--hover-wash`, 5% of the accent as alpha in light, 6% in dark.
+**Alpha and not a mix with white**, so the same value works over a card, over
+the page ground and over a striped row. 90 of the 118 declarations take it.
+
+The value was measured, not chosen by eye. The old row hover sat 6.5 dE2000
+from the surface, which reads as a colour rather than as a pointer - that is
+what "changes to a very bright colour" meant. `--card-2`, the forced cell
+wash, sat at 1.2, which is why the inventory looked dead while the queue
+looked lit. The new wash is 4.3 in light and 4.4 in dark: the same perceived
+step in both themes, clearly visible on a 40px row, no longer a flash. The
+contract test asserts the band 2.5-5.5 rather than a hex, because a pinned hex
+is what let the ramp collision through in 0.3.
+
+Selection needed its own value once hover had a quiet one: `--selected-wash`
+at 12% / 16%, 2.6 dE2000 clear of the hover. Before this the queue painted
+both states with the same colour, so passing the pointer down the list lit
+each row as though it had been chosen, and the row that actually was chosen
+looked no different from the one under the cursor.
+
+**What kept its own colour, and why.** A hover that means something other than
+"the pointer is here" is not part of this: a primary button darkening to
+`--accent-strong`, a delete button reddening, the CSV and Word exports taking
+their formats' green and blue, the scrollbar thumb, a toast's close button on
+its own dark card, the severity band cells that carry their own severity, and
+the risk caret - which sits ON a row that washes and would otherwise disappear
+into it. 19 values remain, and each one is a decision rather than an accident.
+
+**Seven rules had to be split by hand.** They painted hover and a persistent
+state with one declaration - `.risk-filter:hover, .risk-filter.active`, the
+sidebar tab, the two preset cards, the topbar profile toggle, the preview
+toggle, the queue's row-expand. Flattening those to the wash would have erased
+the state, so each got a `:hover:not(<state>)` of its own and the state kept
+its emphasis. That is the general shape of this trap: a selector list that
+mixes a transient state with a persistent one cannot be re-coloured wholesale.
+
 ### 0.4a The regression F3 shipped, and the fragility it exposed
 
 Deleting Remediation's second dashboard left one reference behind:

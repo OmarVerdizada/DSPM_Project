@@ -48,14 +48,14 @@
 
 #tab-risk.remediation-center .btn:not(.btn-primary):hover {
   border-color: color-mix(in srgb, var(--indigo) 32%, var(--line));
-  background: var(--indigo-wash);
+  background: var(--hover-wash);
   box-shadow: none;
   transform: none;
 }
 
 .remediation-center .btn:hover {
   border-color: color-mix(in srgb, var(--indigo) 32%, var(--line));
-  background: var(--indigo-wash);
+  background: var(--hover-wash);
 }
 
 #tab-risk.remediation-center .btn.btn-primary {
@@ -65,7 +65,7 @@
 }
 
 #tab-risk.remediation-center .btn.btn-primary:hover {
-  background: color-mix(in srgb, var(--indigo) 86%, var(--ink));
+  background: var(--hover-wash);
 }
 
 .remediation-center .btn:focus-visible,
@@ -494,10 +494,14 @@
    `:root:not([data-theme="dark"]) tbody tr:hover td`, and that `:not()`
    counts, so a class and a pseudo-class alone lose to it. */
 #remediation-workflow .remediation-table tbody tr:hover,
-#remediation-workflow .remediation-table tbody tr:hover td,
+#remediation-workflow .remediation-table tbody tr:hover td {
+  background: var(--hover-wash) !important; /* token-gate: allow — see above */
+}
+
+/* Selection outlasts the pointer, so it is the stronger of the two washes. */
 #remediation-workflow .remediation-table tbody tr.is-selected,
 #remediation-workflow .remediation-table tbody tr.is-selected td {
-  background: var(--indigo-wash) !important; /* token-gate: allow — see above */
+  background: var(--selected-wash) !important; /* token-gate: allow — see above */
 }
 
 .remediation-table tbody td {
@@ -685,7 +689,7 @@
 }
 
 .remediation-queue-menu .dropdown-content button:hover {
-  background: var(--indigo-wash);
+  background: var(--hover-wash);
 }
 
 #tab-risk.remediation-center .remediation-queue-menu .dropdown-content button {
@@ -699,7 +703,7 @@
 }
 
 #tab-risk.remediation-center .remediation-queue-menu .dropdown-content button:hover {
-  background: var(--indigo-wash);
+  background: var(--hover-wash);
   box-shadow: none;
   transform: none;
 }
@@ -1396,7 +1400,7 @@ body:has(#tab-risk dialog[open]) .app-shell > main {
   }
 
   #tab-risk.remediation-center .remediation-mobile-card:hover {
-    background: var(--indigo-wash);
+    background: var(--hover-wash);
     box-shadow: none;
     transform: none;
   }

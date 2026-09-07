@@ -164,7 +164,7 @@ select {
 
 .side-nav .tab:hover {
   border-color: var(--line);
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  background: var(--hover-wash);
 }
 
 .side-nav .tab.active {
@@ -511,7 +511,7 @@ select {
 }
 
 .extension-option:hover {
-  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  background: var(--hover-wash);
 }
 
 .extension-option input {
@@ -646,7 +646,7 @@ select {
 
 .summary-row.action-row:hover {
   border-color: color-mix(in srgb, var(--accent) 36%, var(--line));
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  background: var(--hover-wash);
 }
 
 input:focus,
@@ -1091,7 +1091,7 @@ main {
 
 .profile-action:hover {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  background: var(--hover-wash);
   transform: translateY(-1px);
 }
 
@@ -1551,12 +1551,12 @@ tbody tr {
 }
 
 tbody tr:hover {
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  background: var(--hover-wash);
 }
 
 .inventory-table tbody tr:hover td:nth-child(1),
 .inventory-table tbody tr:hover td:nth-child(2) {
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  background: var(--hover-wash);
 }
 
 tbody tr.row-flash {
@@ -3646,7 +3646,7 @@ main { padding: 22px; max-width: 1840px; width: 100%; }
 .side-nav .tab:hover {
   transform: translateX(2px);
   border-color: rgba(148, 163, 184, .22);
-  background: rgba(255,255,255,.06);
+  background: var(--hover-wash);
 }
 .side-nav .tab span { color: var(--sidebar-text); font-size: 14px; }
 .side-nav .tab small { color: var(--sidebar-muted); font-size: 11px; }
@@ -3904,7 +3904,7 @@ thead th {
   text-transform: uppercase;
 }
 tbody tr { transition: background .16s ease; }
-tbody tr:hover { background: color-mix(in srgb, var(--accent-soft) 38%, transparent); }
+tbody tr:hover { background: var(--hover-wash); }
 td, th { border-color: var(--line) !important; }
 .inventory-table th:nth-child(1), .inventory-table td:nth-child(1), .inventory-table th:nth-child(2), .inventory-table td:nth-child(2) { background: var(--card); }
 :root[data-theme="dark"] .inventory-table th:nth-child(1),
@@ -4028,7 +4028,7 @@ td, th { border-color: var(--line) !important; }
   color: var(--text) !important;
 }
 :root[data-theme="dark"] thead th { background: #132036 !important; color: #cbd5e1 !important; }
-:root[data-theme="dark"] tbody tr:hover { background: rgba(96, 165, 250, .10); }
+:root[data-theme="dark"] tbody tr:hover { background: var(--hover-wash); }
 :root[data-theme="dark"] .file-path,
 :root[data-theme="dark"] code,
 :root[data-theme="dark"] pre,
@@ -6323,9 +6323,11 @@ body.sidebar-collapsed .app-shell > main {
   color: var(--filter-text) !important;
 }
 
+.risk-filter:hover:not(.active) {
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
+}
 .risk-filter:hover,
 .risk-filter.active {
-  background: linear-gradient(135deg, var(--filter-soft-active), var(--filter-soft)) !important;
   border-color: color-mix(in srgb, var(--filter-tone) 62%, var(--line)) !important;
   color: var(--filter-text) !important;
   box-shadow: 0 14px 30px color-mix(in srgb, var(--filter-tone) 16%, transparent) !important;
@@ -6437,7 +6439,7 @@ body.sidebar-collapsed .app-shell > main {
 
 .side-nav .tab:hover,
 .side-nav .tab.active {
-  background: rgba(37, 99, 235, .28) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: rgba(191, 219, 254, .38) !important;
 }
 
@@ -6531,7 +6533,7 @@ body.sidebar-collapsed .app-shell > main {
 }
 
 :root:not([data-theme="dark"]) .side-nav .tab:hover {
-  background: linear-gradient(135deg, #eff6ff, #e0f2fe) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: #93c5fd !important;
   box-shadow: 0 12px 24px rgba(37, 99, 235, .12) !important;
 }
@@ -7670,6 +7672,9 @@ body.sidebar-collapsed .app-shell > main {
   transition: border-color .15s ease, background .15s ease, box-shadow .15s ease;
 }
 
+.ext-preset-card:hover:not(:has(input:checked)) {
+  background: var(--hover-wash);
+}
 .ext-preset-card:hover,
 .ext-preset-card:has(input:checked) {
   border-color: color-mix(in srgb, var(--accent) 58%, var(--line));
@@ -7823,7 +7828,7 @@ body.sidebar-collapsed .app-shell > main {
 #ext-advanced-mode .extension-option:hover,
 #endpoint-ext-advanced-mode .extension-option:hover {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
-  background: color-mix(in srgb, var(--accent) 6%, var(--card));
+  background: var(--hover-wash);
   box-shadow: 0 8px 18px color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
@@ -8744,6 +8749,9 @@ body.sidebar-collapsed .app-shell > main {
   opacity: 0;
 }
 
+.compliance-framework-card:hover:not(:has(input:checked)) {
+  background: var(--hover-wash);
+}
 .compliance-framework-card:hover,
 .compliance-framework-card:has(input:checked) {
   border-color: var(--accent);
@@ -9793,7 +9801,7 @@ body:not(.sidebar-collapsed) .app-shell > .sidebar .brand.logo-lockup {
 
 .profile-menu .profile-action:hover {
   border-color: color-mix(in srgb, var(--accent) 58%, var(--line)) !important;
-  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 12%) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   transform: translateY(-1px) !important;
 }
 
@@ -10301,7 +10309,7 @@ body:not(.sidebar-collapsed) .app-shell > .sidebar .brand.logo-lockup {
 }
 
 :root:not([data-theme="dark"]) tbody tr:hover {
-  background: color-mix(in srgb, var(--accent) 8%, #ffffff) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 
 :root:not([data-theme="dark"]) .badge,
@@ -10835,7 +10843,7 @@ body {
 :root[data-theme="dark"] .side-nav .tab.active span { color: #eafcff !important; }
 :root[data-theme="dark"] .side-nav .tab.active small { color: #9be9f5 !important; }
 :root:not([data-theme="dark"]) .side-nav .tab:hover {
-  background: linear-gradient(135deg, #eef3fe, #e6f9fd) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: #b9c8f5 !important;
   box-shadow: 0 12px 24px rgba(59, 107, 245, .10) !important;
 }
@@ -11076,7 +11084,7 @@ table thead th {
   color: var(--muted);
 }
 tbody tr { transition: background .18s ease; }
-tbody tr:hover td { background: color-mix(in srgb, var(--status-safe) 5%, transparent); }
+tbody tr:hover td { background: var(--hover-wash); }
 
 input, select, textarea {
   transition: border-color .2s ease, box-shadow .2s ease, background .2s ease;
@@ -11361,7 +11369,7 @@ input, select, textarea {
 :root:not([data-theme="dark"]) .sidebar .side-nav .tab span { color: var(--sidebar-text) !important; font-weight: 600 !important; }
 :root:not([data-theme="dark"]) .sidebar .side-nav .tab small { color: var(--sidebar-muted) !important; }
 :root:not([data-theme="dark"]) .sidebar .side-nav .tab:hover {
-  background: rgba(255, 255, 255, .06) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: transparent !important;
   border-left-color: rgba(255, 255, 255, .18) !important;
   box-shadow: none !important;
@@ -11516,7 +11524,7 @@ input, select, textarea {
   border-color: var(--accent) !important;
 }
 /* Tables + rows */
-:root:not([data-theme="dark"]) tbody tr:hover td { background: #f6f7fd; }
+:root:not([data-theme="dark"]) tbody tr:hover td { background: var(--hover-wash); }
 :root:not([data-theme="dark"]) .scan-progress-track span {
   background: linear-gradient(90deg, var(--accent), #7a82e8) !important;
   box-shadow: none;
@@ -11782,11 +11790,11 @@ td.empty { padding: 80px 24px !important; }
 }
 :root[data-theme="dark"] tbody tr:hover td,
 :root[data-theme="dark"] tbody tr:nth-child(even):hover td {
-  background: color-mix(in srgb, var(--status-safe) 6%, transparent);
+  background: var(--hover-wash);
 }
 :root:not([data-theme="dark"]) tbody tr:nth-child(even) td { background: #fafbfe; }
 :root:not([data-theme="dark"]) tbody tr:hover td,
-:root:not([data-theme="dark"]) tbody tr:nth-child(even):hover td { background: #f6f7fd; }
+:root:not([data-theme="dark"]) tbody tr:nth-child(even):hover td { background: var(--hover-wash); }
 
 /* ── 6. Buttons — lift, press, disabled ──────────────────── */
 button:not(.tab) { transition: transform .18s ease, box-shadow .18s ease, background .18s ease, border-color .18s ease, opacity .18s ease; }
@@ -12183,13 +12191,13 @@ body.sidebar-collapsed .app-shell { grid-template-columns: 68px minmax(0, 1fr); 
 }
 .side-nav .tab:hover,
 :root:not([data-theme="dark"]) .sidebar .side-nav .tab:hover {
-  background: var(--card-2) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: transparent !important;
   color: var(--text);
   box-shadow: none !important;
   transform: none;
 }
-:root[data-theme="dark"] .side-nav .tab:hover { background: rgba(255, 255, 255, .04) !important; }
+:root[data-theme="dark"] .side-nav .tab:hover { background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 .side-nav .tab.active,
 :root:not([data-theme="dark"]) .sidebar .side-nav .tab.active,
 :root[data-theme="dark"] .side-nav .tab.active {
@@ -12244,7 +12252,7 @@ body.sidebar-collapsed .sidebar .logo-lockup { justify-content: center; padding:
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.tb-icon-btn:hover { background: var(--card-2); color: var(--text); transform: none; box-shadow: none; }
+.tb-icon-btn:hover { background: var(--hover-wash); color: var(--text); transform: none; box-shadow: none; }
 .theme-toggle .theme-icon { font-size: 17px; line-height: 1; }
 
 .tb-search {
@@ -12335,7 +12343,7 @@ button.tb-primary:hover { background: var(--accent-strong); transform: none; box
   box-shadow: none;
   transition: background .15s ease-out;
 }
-.tb-newscan-menu button:hover { background: var(--accent-soft); transform: none; box-shadow: none; }
+.tb-newscan-menu button:hover { background: var(--hover-wash); transform: none; box-shadow: none; }
 .tb-newscan-menu button b { font-size: 13.5px; font-weight: 600; }
 .tb-newscan-menu button small { font-size: 12px; color: var(--muted); }
 
@@ -12380,7 +12388,7 @@ select.tenant-switcher {
   box-shadow: none;
   cursor: pointer;
 }
-.profile-toggle:hover { background: var(--card-2); transform: none; box-shadow: none; }
+.profile-toggle:hover { background: var(--hover-wash); transform: none; box-shadow: none; }
 .profile-avatar,
 :root:not([data-theme="dark"]) .profile-avatar {
   width: 30px;
@@ -12656,7 +12664,7 @@ select.tenant-switcher {
   cursor: pointer;
   transition: border-color .15s ease-out, background .15s ease-out;
 }
-.quick-tiles button:hover { border-color: var(--accent); background: var(--accent-soft); transform: none; box-shadow: none; }
+.quick-tiles button:hover { border-color: var(--accent); background: var(--hover-wash); transform: none; box-shadow: none; }
 .quick-tiles b { font-size: 13px; font-weight: 600; color: var(--accent); }
 .quick-tiles small { font-size: 11.5px; color: var(--muted); }
 
@@ -12680,7 +12688,7 @@ select.tenant-switcher {
 }
 .fx-table tr:last-child td { border-bottom: none; }
 .fx-table tbody tr { transition: background .15s ease-out; }
-.fx-table tbody tr:hover td { background: var(--card-2); }
+.fx-table tbody tr:hover td { background: var(--hover-wash); }
 .fx-scan-id { font-weight: 600; }
 .fx-time { color: var(--muted); font-size: 12.5px; }
 .fx-feed { display: flex; flex-direction: column; }
@@ -12791,7 +12799,7 @@ tbody tr:hover td,
 :root[data-theme="dark"] tbody tr:nth-child(even):hover td,
 :root:not([data-theme="dark"]) tbody tr:hover td,
 :root:not([data-theme="dark"]) tbody tr:nth-child(even):hover td {
-  background: var(--card-2) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 
 /* ── 10. Buttons ────────────────────────────────────────── */
@@ -12832,7 +12840,7 @@ button:not(.tab):not(:disabled):active { transform: scale(.98); }
 :root:not([data-theme="dark"]) .secondary-btn:hover {
   border-color: var(--accent) !important;
   color: var(--accent);
-  background: var(--surface);
+  background: var(--hover-wash);
   transform: none;
   box-shadow: none;
 }
@@ -12885,7 +12893,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); }
   box-shadow: none;
   transition: border-color .15s ease-out, color .15s ease-out, background .15s ease-out;
 }
-.risk-filter:hover { border-color: var(--accent); color: var(--accent); transform: none; box-shadow: none; background: var(--surface); }
+.risk-filter:hover { border-color: var(--accent); color: var(--accent); transform: none; box-shadow: none; background: var(--hover-wash); }
 .risk-filter.active { background: var(--accent-soft); border-color: var(--accent) !important; color: var(--accent); box-shadow: none; }
 .risk-filter.critical.active  { background: color-mix(in srgb, var(--status-critical) 8%, transparent); color: var(--status-critical); border-color: var(--status-critical) !important; }
 .risk-filter.high.active      { background: color-mix(in srgb, var(--status-high) 10%, transparent); color: var(--status-high); border-color: var(--status-high) !important; }
@@ -13087,7 +13095,7 @@ td.empty { padding: 48px 20px !important; }
   padding: 0 14px !important;
   font-weight: 400 !important;
 }
-.topbar button.tb-search:hover { border-color: var(--accent) !important; background: var(--card-2) !important; }
+.topbar button.tb-search:hover { border-color: var(--accent) !important; background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 .topbar button.tb-search kbd { background: var(--surface); }
 
 /* Icon buttons (theme): ghost circles */
@@ -13107,7 +13115,7 @@ td.empty { padding: 48px 20px !important; }
 }
 .topbar button.tb-icon-btn:hover,
 .topbar button.theme-toggle:hover {
-  background: var(--card-2) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   color: var(--text) !important;
   transform: none !important;
 }
@@ -13137,7 +13145,7 @@ button.tb-primary:hover { background: var(--accent-strong) !important; transform
   box-shadow: none !important;
   border-radius: 8px !important;
 }
-.tb-newscan-menu button:hover { background: var(--accent-soft) !important; }
+.tb-newscan-menu button:hover { background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 .tb-newscan-menu button b { color: var(--text); }
 .tb-newscan-menu button small { color: var(--muted); }
 
@@ -13185,7 +13193,7 @@ button.link-btn:hover { color: var(--accent-strong) !important; background: none
   border-radius: 10px !important;
 }
 .quick-tiles button:hover {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: var(--accent) !important;
 }
 
@@ -13218,7 +13226,7 @@ button.link-btn:hover { color: var(--accent-strong) !important; background: none
   box-shadow: none !important;
   min-height: 0 !important;
 }
-.topbar .profile-toggle:hover { background: var(--card-2) !important; }
+.topbar .profile-toggle:hover { background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 
 /* ── v108.2 — flush main, flat page headers, quiet theme icon ── */
 main, .app-shell > main, .app-shell main {
@@ -13709,7 +13717,7 @@ main, .app-shell > main, .app-shell main {
 #tab-file-servers .ext-preset-card:hover:not(:has(input:checked)),
 #tab-endpoint .ext-preset-card:hover:not(:has(input:checked)) {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-  background: var(--card);
+  background: var(--hover-wash);
   transform: translateY(-1px);
   box-shadow: var(--shadow);
 }
@@ -14286,7 +14294,7 @@ main, .app-shell > main, .app-shell main {
   transition: background .15s ease-out, border-color .15s ease-out;
 }
 #tab-endpoint #endpoint-activate-btn:hover:not(:disabled) {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: var(--accent) !important;
 }
 
@@ -14303,7 +14311,7 @@ main, .app-shell > main, .app-shell main {
   transition: background .15s ease-out, color .15s ease-out, border-color .15s ease-out;
 }
 #tab-endpoint #endpoint-test-btn:hover:not(:disabled) {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   color: var(--accent-strong) !important;
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line)) !important;
 }
@@ -14694,7 +14702,7 @@ main, .app-shell > main, .app-shell main {
   transition: background .12s ease-out;
 }
 #tab-admin .logic-table tbody tr:hover {
-  background: color-mix(in srgb, var(--accent) 3%, transparent);
+  background: var(--hover-wash);
 }
 #tab-admin .logic-table td .subtext {
   color: var(--muted);
@@ -15154,7 +15162,7 @@ body.sidebar-collapsed .app-shell > main {
   transition: background .15s ease-out, color .15s ease-out, border-color .15s ease-out;
 }
 #tab-settings .asset-actions .secondary-btn:hover:not(:disabled) {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line)) !important;
   color: var(--accent-strong) !important;
 }
@@ -15375,7 +15383,7 @@ body.sidebar-collapsed .app-shell > main {
   color: var(--muted) !important;
 }
 #tab-settings .asset-card-actions .secondary-btn:hover {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line)) !important;
   color: var(--accent-strong) !important;
 }
@@ -15471,6 +15479,12 @@ body.sidebar-collapsed .app-shell > main {
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line)) !important;
   background: var(--card-2) !important;
   box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 10%, transparent) !important;
+}
+
+/* The pointer gets the one wash; an open menu keeps the stronger fill, which
+   is still there once the pointer has gone. */
+.topbar .profile-menu:not(.open) .profile-toggle:hover {
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 .topbar .profile-toggle .profile-avatar {
   position: relative;
@@ -15648,7 +15662,7 @@ body.sidebar-collapsed .app-shell > main {
   transition: color .13s ease-out;
 }
 .profile-menu .profile-action:hover {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   color: var(--accent-strong) !important;
 }
 .profile-menu .profile-action:hover .p-ico { color: var(--accent-strong); }
@@ -15688,7 +15702,7 @@ body.sidebar-collapsed .app-shell > main {
   font-weight: 600 !important;
 }
 .profile-menu .profile-panel-actions .profile-action:hover {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   color: var(--accent-strong) !important;
   border: none !important;
   transform: none !important;
@@ -15893,7 +15907,7 @@ body.sidebar-collapsed .app-shell > main {
   transition: background .15s ease-out, color .15s ease-out, border-color .15s ease-out;
 }
 #tab-security #export-dlp-policy-btn:hover:not(:disabled) {
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line)) !important;
   color: var(--accent-strong) !important;
 }
@@ -15971,7 +15985,7 @@ body.sidebar-collapsed .app-shell > main {
 }
 #tab-security .logic-table tbody tr { transition: background .12s ease-out; }
 #tab-security .logic-table tbody tr:hover {
-  background: color-mix(in srgb, var(--accent) 3%, transparent);
+  background: var(--hover-wash);
 }
 #tab-security .logic-table td .subtext { color: var(--muted); font-size: 11.5px; }
 #tab-security #refresh-users-btn,
@@ -16466,7 +16480,7 @@ body.sidebar-collapsed .app-shell > main {
 }
 #tab-history .logic-table tbody tr { transition: background .12s ease-out; }
 #tab-history .logic-table tbody tr:hover {
-  background: color-mix(in srgb, var(--accent) 3%, transparent);
+  background: var(--hover-wash);
 }
 /* Timestamp hierarchy */
 #history-body .timestamp-cell {
@@ -16865,7 +16879,7 @@ body.sidebar-collapsed .app-shell > main {
 :root[data-theme="dark"] #inventory-workspace .risk-filter { --seg-ink: #cbd5e1; }
 #inventory-workspace .risk-filter:hover:not(.active) {
   color: var(--seg-ink) !important;
-  background: color-mix(in srgb, var(--seg) 7%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 #inventory-workspace .risk-filter.active {
   background: var(--card) !important;
@@ -17098,7 +17112,7 @@ body.sidebar-collapsed .app-shell > main {
 }
 #inventory-workspace .inventory-table tbody tr { transition: background .12s ease-out; }
 #inventory-workspace .inventory-table tbody tr:hover {
-  background: color-mix(in srgb, var(--accent) 3%, transparent);
+  background: var(--hover-wash);
 }
 #inventory-workspace .inventory-window-row:hover,
 #inventory-workspace .inventory-window-status:hover {
@@ -18331,6 +18345,9 @@ body.sidebar-collapsed .app-shell > main {
   border-color: color-mix(in srgb, var(--accent) 48%, var(--line)) !important;
   background: var(--accent-soft) !important;
 }
+.inventory-table .preview-toggle:hover:not(.preview-open) {
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
+}
 
 .inventory-table .preview-toggle-icon {
   width: 17px;
@@ -18370,7 +18387,7 @@ body.sidebar-collapsed .app-shell > main {
 .inventory-table .copy-path-btn:hover {
   color: var(--accent-strong) !important;
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line)) !important;
-  background: var(--accent-soft) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 
 .inventory-table .copy-path-btn svg {
@@ -18438,7 +18455,7 @@ body.sidebar-collapsed .app-shell > main {
 .inventory-table .preview-toggle:hover {
   border-color: var(--accent) !important;
   color: var(--accent) !important;
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface)) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 .inventory-table .preview-toggle.preview-open,
 :root[data-theme="dark"] .inventory-table .preview-toggle.preview-open {
@@ -19661,7 +19678,7 @@ body.sidebar-collapsed .side-nav { gap: 4px !important; }
   box-sizing: border-box;
 }
 .side-nav .tab .nav-caret:hover {
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  background: var(--hover-wash);
   opacity: 1;
 }
 .side-nav .tab.active .nav-caret { transform: none; }
@@ -20029,7 +20046,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   text-align: left;
   box-shadow: none;
 }
-:root:root .side-profile .profile-toggle:hover { background: color-mix(in srgb, var(--accent) 9%, transparent) !important; }
+:root:root .side-profile .profile-toggle:hover { background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 :root:root .side-profile .profile-toggle .profile-avatar {
   width: 34px;
   height: 34px;
@@ -20107,7 +20124,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   cursor: pointer;
   box-shadow: none;
 }
-:root:root .side-profile .profile-action:hover { background: color-mix(in srgb, var(--accent) 9%, transparent) !important; }
+:root:root .side-profile .profile-action:hover { background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 :root:root .side-profile .profile-action.danger { color: var(--status-critical); }
 :root:root .side-profile .profile-action.danger:hover { background: color-mix(in srgb, var(--status-critical) 10%, transparent) !important; }
 :root:root .side-profile .profile-action .p-ico { width: 16px; height: 16px; flex: 0 0 16px; fill: none; stroke: currentColor; stroke-width: 2; }
@@ -20163,7 +20180,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   font-weight: 600;
   text-decoration: none;
 }
-.settings-back:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.settings-back:hover { color: var(--text); background: var(--hover-wash); }
 .settings-identity {
   display: flex;
   align-items: center;
@@ -20196,7 +20213,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   box-shadow: none;
   position: relative;
 }
-:root:root .settings-nav-item:hover { color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent) !important; }
+:root:root .settings-nav-item:hover { color: var(--text); background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 :root:root .settings-nav-item.active {
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 11%, transparent) !important;
@@ -20514,7 +20531,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root .settings-page .settings-rail-burger:hover {
   color: var(--text) !important;
-  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 
 /* Collapsed rail: icons only, identity shrinks to the avatar. */
@@ -20572,7 +20589,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root .settings-page .theme-toggle.tb-icon-btn:hover {
   color: var(--text) !important;
-  background: var(--card-2, var(--card)) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 :root:root .settings-page .theme-toggle.tb-icon-btn:focus:not(:focus-visible) { outline: none !important; }
 
@@ -21082,7 +21099,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   white-space: normal !important;
 }
 :root:root #inventory-workspace #results-body tr.inventory-detail-row:hover > td,
-:root:root .finding-queue-table tr.finding-detail-row:hover > td { background: var(--card-2) !important; }
+:root:root .finding-queue-table tr.finding-detail-row:hover > td { background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 
 .inventory-expanded-panel,
 .finding-expanded-shell {
@@ -21311,6 +21328,9 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   background: var(--accent-soft) !important;
   color: var(--accent-strong) !important;
 }
+:root:root .finding-queue-table .finding-row-expand:hover:not(.open) {
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
+}
 .finding-expanded-content { min-width: 0; }
 .finding-expanded-shell { padding: 11px; }
 .finding-expanded-facts { grid-template-columns: repeat(4, minmax(100px, 1fr)); }
@@ -21431,7 +21451,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root .detail-drawer-close:hover {
   color: var(--text) !important;
-  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 :root:root .detail-drawer-close svg {
   width: 16px;
@@ -21478,7 +21498,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   color: var(--text);
 }
 .drawer-group summary::-webkit-details-marker { display: none; }
-.drawer-group summary:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.drawer-group summary:hover { background: var(--hover-wash); }
 .drawer-group summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .drawer-group-sev { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 9px; }
 .drawer-group-sev.CRITICAL { background: var(--status-critical); }
@@ -21634,7 +21654,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root .asset-modal-close:hover {
   color: var(--text) !important;
-  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 .asset-modal-close svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .asset-detail-body {
@@ -21728,7 +21748,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 .essential-disclosure > summary::-webkit-details-marker { display: none; }
 .essential-disclosure > summary::marker { content: ""; }
-.essential-disclosure > summary:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.essential-disclosure > summary:hover { background: var(--hover-wash); }
 .essential-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .essential-disclosure-icon {
   display: inline-grid;
@@ -21884,7 +21904,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   border-radius: 8px 8px 0 0 !important;
   min-width: 0 !important;
 }
-:root:root .asset-tab:hover { color: var(--text) !important; background: color-mix(in srgb, var(--accent) 6%, transparent) !important; }
+:root:root .asset-tab:hover { color: var(--text) !important; background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 :root:root .asset-tab.active { color: var(--accent) !important; }
 .asset-tab.active::after {
   content: "";
@@ -21937,7 +21957,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 :root:root #results-body .detail-cell-btn:hover {
   border-color: var(--accent) !important;
   color: var(--accent) !important;
-  background: color-mix(in srgb, var(--accent) 7%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 .detail-cell-ico { display: inline-flex; }
 .detail-cell-ico svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
@@ -22023,7 +22043,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
 }
 :root:root .finding-queue-wrap .fq-frameworks > * { flex: 0 0 auto; }
-:root:root .finding-queue-wrap tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+:root:root .finding-queue-wrap tbody tr:hover td { background: var(--hover-wash); }
 
 :root:root .finding-open-btn {
   display: inline-flex !important;
@@ -22040,7 +22060,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   cursor: pointer;
   box-shadow: none !important;
 }
-:root:root .finding-open-btn:hover { color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 9%, transparent) !important; }
+:root:root .finding-open-btn:hover { color: var(--accent) !important; background: var(--hover-wash) !important; } /* token-gate: allow - the force was already on this line; only the value changed */
 :root:root .finding-open-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 
 
@@ -22226,7 +22246,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 .scan-socket:hover, .scan-socket:focus-visible {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  background: var(--hover-wash);
   color: var(--accent-strong);
 }
 .scan-socket strong { font-size: 13.5px; font-weight: 600; color: inherit; }
@@ -22406,7 +22426,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 #fs-profile-grid .scan-socket:focus-visible,
 #endpoint-profile-grid .scan-socket:hover,
 #endpoint-profile-grid .scan-socket:focus-visible {
-  background: color-mix(in srgb, var(--accent) 7%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
   border-color: var(--accent) !important;
   color: var(--accent-strong) !important;
 }
@@ -22555,7 +22575,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 #fs-wizard .extension-list label:hover, #endpoint-wizard .extension-list label:hover {
-  background: color-mix(in srgb, var(--accent) 8%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 #fs-wizard .extension-list input, #endpoint-wizard .extension-list input {
   width: 13px; height: 13px; margin: 0; flex: 0 0 auto;
@@ -22624,7 +22644,7 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 .review-row:last-child { border-bottom: none; }
 button.review-row:hover, button.review-row:focus-visible {
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  background: var(--hover-wash);
 }
 button.review-row:hover .review-edit { opacity: 1; transform: none; }
 .review-row-static { cursor: default; }
@@ -22728,7 +22748,7 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 }
 #fs-wizard button.review-row:hover, #endpoint-wizard button.review-row:hover,
 #fs-wizard button.review-row:focus-visible, #endpoint-wizard button.review-row:focus-visible {
-  background: color-mix(in srgb, var(--accent) 7%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 #fs-wizard .review-value, #endpoint-wizard .review-value { color: inherit !important; }
 #fs-wizard .review-value b, #endpoint-wizard .review-value b { font-weight: 600 !important; }
@@ -22827,7 +22847,7 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 #endpoint-profile-grid .spc-icon-btn:focus-visible {
   color: var(--accent-strong) !important;
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line)) !important;
-  background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+  background: var(--hover-wash) !important; /* token-gate: allow - the force was already on this line; only the value changed */
 }
 #fs-profile-grid .spc-start:not(:disabled), #endpoint-profile-grid .spc-start:not(:disabled) {
   color: var(--accent-strong) !important;

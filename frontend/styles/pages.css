@@ -391,8 +391,8 @@ button.ledger-cell:hover { background: var(--band-wash); }
 .class-row:first-child,
 .fw-row:first-child { border-top: 0; }
 .risk-row:hover,
-.class-row:hover { background: var(--indigo-wash); }
-.fw-row:hover { background: color-mix(in srgb, var(--row-mark, var(--indigo)) 7%, var(--surface)); }
+.class-row:hover { background: var(--hover-wash); }
+.fw-row:hover { background: var(--hover-wash); }
 .fw-row[data-mark="gdpr"]                     { --row-mark: var(--mark-gdpr); }
 .fw-row[data-mark="pci_dss"]                  { --row-mark: var(--mark-pci); }
 .fw-row[data-mark="nist_sp800_60_enterprise"],
@@ -566,7 +566,7 @@ button.ledger-cell:hover { background: var(--band-wash); }
   transition: background-color var(--motion-fast) var(--ease-out);
 }
 .place-row:first-child { border-top: 0; }
-.place-row:hover { background: var(--indigo-wash); }
+.place-row:hover { background: var(--hover-wash); }
 
 /* The indent moves the folder and its name; the bar and the count keep their
    own columns, so every meter in the card starts on the same line. Indenting
@@ -787,7 +787,7 @@ button.ledger-cell:hover { background: var(--band-wash); }
   cursor: pointer;
   transition: background-color var(--motion-fast) var(--ease-out);
 }
-.gauge-band:hover { background: var(--indigo-wash); }
+.gauge-band:hover { background: var(--hover-wash); }
 .gauge-band-dot { width: 8px; height: 8px; border-radius: 50%; }
 .gauge-band-label {
   color: var(--ink-muted);
@@ -1141,5 +1141,5 @@ button.ledger-cell:hover { background: var(--band-wash); }
    token-gate: allow — the rule being beaten is itself !important. */
 #results-body tr[data-file-key]:hover,
 #results-body tr[data-file-key]:hover td {
-  background: var(--indigo-wash) !important; /* token-gate: allow — see above */
+  background: var(--hover-wash) !important; /* token-gate: allow — see above */
 }
