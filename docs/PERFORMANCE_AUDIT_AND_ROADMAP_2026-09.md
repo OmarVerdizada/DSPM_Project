@@ -489,6 +489,77 @@ while it runs). Re-runnable. New settings: `DSPM_JSON_COMPRESS_MIN` (2048),
 | 3.2 | **Row virtualisation** for the inventory and the queue — see §6. Only worthwhile after Phase 1 has cut the per-row cost; virtualising 6.8 KB rows just moves the problem. |
 | 3.3 | **Multiple workers** (`uvicorn --workers N`) once the DB is Postgres or WAL SQLite with the in-process caches made process-safe (or dropped in favour of the DB). |
 
+### Phase 3 — started 2026-09-07 (3.1 partly; 3.3 shipped; 3.2 declined)
+
+This phase was written as "when a customer estate crosses ~20k assets". The
+estate here is 463. Two of its three items turned out to be worth doing anyway,
+for reasons that are not about scale, and the third is worth *not* doing — with
+numbers.
+
+**3.1 PostgreSQL — one real bug found, live verification blocked.**
+
+Phases 0–2 added SQLite-specific behaviour (zlib blobs, pragmas, ANALYZE), so
+the PostgreSQL path needed re-checking. It did not survive: Phase 2 declared
+`scan_reports.rows_json` as **`BLOB`**, and `translate_schema` rewrites exactly
+two constructs — `AUTOINCREMENT` and `REAL`. PostgreSQL has no `BLOB` type, so
+**every PostgreSQL install would have failed at `init_db`**. The column is
+`TEXT` now, like the other three compressed columns: SQLite stores a blob
+unchanged in a TEXT-affinity column, and PostgreSQL keeps plain text there
+because `pack_json_text` returns the string unchanged on that backend (TOAST
+does the compressing).
+
+Nothing caught it because the live PostgreSQL suite requires a reachable
+server, and it had never run on this machine. `PortableSchemaTests` now
+asserts, offline, that every declared column type is one the seam can
+translate — so the next `BLOB` fails in CI rather than at a customer's first
+start.
+
+The live run is blocked, not skipped. PostgreSQL 18 is running locally and the
+app role connects (`sentro_app@sentro_dev`), but `init_db` stops at
+`permission denied for schema public` — PostgreSQL 15+ revoked `CREATE` on
+`public` from `PUBLIC`, and this role was never granted it. Fixing that needs
+an admin connection, and the test suite additionally refuses to run against a
+PostgreSQL DSN without `DSPM_PG_TEST_RESET=1` because it truncates for
+isolation. Neither is mine to decide: granting privileges and wiping a database
+are the operator's calls.
+
+**3.3 Multiple workers — shipped, as a safety property rather than a speedup.**
+
+`main.py serve` takes `--workers` now. The reason it did not before is that
+Phase 0 bought its speed with caches that live in one process and are
+invalidated by that same process. With several workers each keeps its own copy,
+so a write in one is invisible to the others until the entry expires. Three of
+those are a staleness question; **one is a security question** — a token
+revoked in worker A would still be accepted by worker B for up to 30 seconds.
+
+So asking for workers turns them off, before uvicorn starts, rather than
+printing a warning the operator may not read:
+`DSPM_TOKEN_REVOCATION_CACHE_SECONDS`, `DSPM_TENANT_EXISTS_CACHE_SECONDS`,
+`DSPM_READINESS_CACHE_SECONDS`, `DSPM_INVENTORY_COUNT_CACHE_SECONDS`,
+`DSPM_INVENTORY_FACETS_CACHE_SECONDS`. The tenant-existence cache had a
+hard-coded 30-second TTL and no off-switch; it has one now. `--reload` with
+`--workers` is refused rather than silently ignoring one of them, and asking
+for workers on SQLite says plainly that readers scale while writers still
+serialise across processes.
+
+**3.2 Row virtualisation — declined, and the reason is a number.**
+
+The audit said this was "only worthwhile after Phase 1 has cut the per-row
+cost". Phase 1 cut it: a row is 4,545 bytes and 63 nodes, and 100 of them
+render in 31 ms inside a 101 ms tab open. Virtualising to the ~20 rows on
+screen would save perhaps 25 ms of that.
+
+The argument against is stronger than the small saving, though. **The page is
+bounded at 100 rows by keyset pagination, whatever the estate holds** — 463
+assets or 46,000. So unlike every other item in this roadmap, virtualisation's
+benefit does not grow with scale; it is a fixed ~25 ms. Against that it wants
+scroll-position management, a sticky header, keyboard navigation and
+find-in-page behaviour on a table whose first column is frozen at `left: 0` —
+the one component the frontend roadmap already records as un-borrowable.
+
+It becomes worth doing if the page size is raised (the API caps at 500). Until
+then it is complexity bought with someone else's money.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

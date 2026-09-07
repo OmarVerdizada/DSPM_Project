@@ -5,6 +5,7 @@ edit that undoes one fails against the number rather than against an opinion.
 """
 from __future__ import annotations
 
+import os
 import re
 import unittest
 from pathlib import Path
@@ -305,6 +306,116 @@ class StorageTests(unittest.TestCase):
         # ...and the affected-file count is a predicate, not a CASE inside
         # COUNT(DISTINCT), which could not use the asset index: 34.5 -> 8.2ms.
         self.assertIn("SELECT COUNT(DISTINCT asset_id) AS n FROM findings WHERE", self.STORE)
+
+
+class PortableSchemaTests(unittest.TestCase):
+    """3.1 - the compression work of Phase 2 is SQLite-only, and it nearly took
+    the PostgreSQL path with it."""
+
+    STORE = Path("backend/store.py").read_text(encoding="utf-8")
+
+    def test_the_schema_uses_only_types_the_seam_can_translate(self) -> None:
+        """`translate_schema` rewrites exactly two constructs - AUTOINCREMENT
+        and REAL - so everything else in the DDL has to be valid PostgreSQL as
+        written. A `rows_json BLOB` column shipped in Phase 2 and would have
+        failed every PostgreSQL install at `init_db`, because PostgreSQL has no
+        BLOB type. Nothing caught it, because the live PostgreSQL suite needs a
+        reachable server and had never run here.
+        """
+        skip = ("--", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT")
+        declared = set()
+        # A table body ends at a `);` on its own indented line; a bare `);`
+        # also appears inside one.
+        pattern = "CREATE TABLE IF NOT EXISTS (\\w+) \\((.*?)" + chr(10) + "        \\);"
+        for table in re.finditer(pattern, self.STORE, re.S):
+            for line in table.group(2).splitlines():
+                line = line.strip().rstrip(",")
+                if not line or line.startswith(skip):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    declared.add(parts[1].upper())
+        for _, column_type in re.findall("ADD COLUMN (\\w+) (\\w+)", self.STORE):
+            declared.add(column_type.upper())
+
+        self.assertGreater(len(declared), 2, "the schema scan matched nothing")
+        portable = {"TEXT", "INTEGER", "BIGINT", "REAL"}
+        self.assertEqual(
+            set(), declared - portable,
+            "non-portable column type in the schema: " + repr(sorted(declared - portable)))
+
+    def test_the_compressed_columns_are_declared_text(self) -> None:
+        """SQLite stores a BLOB unchanged in a TEXT-affinity column, so all four
+        compressed columns are declared TEXT and work on both backends:
+        PostgreSQL keeps plain text there and TOASTs it, SQLite keeps zlib
+        bytes."""
+        for column in ("detail_json", "snapshot_json", "response_json", "rows_json"):
+            self.assertNotIn(column + " BLOB", self.STORE)
+
+    def test_sqlite_only_work_is_gated(self) -> None:
+        """Everything Phase 0 and Phase 2 added for SQLite has to be a no-op on
+        a server that manages its own storage and statistics."""
+        db_source = Path("backend/db.py").read_text(encoding="utf-8")
+        optimize = db_source[db_source.index("def optimize_sqlite("):]
+        self.assertIn("if is_postgres():", optimize[:optimize.find(chr(10) + "def ", 10)])
+        packer = self.STORE[self.STORE.index("def pack_json_text("):]
+        self.assertIn("if db.is_postgres():", packer[:packer.find(chr(10) + "def ", 10)])
+        # The pragmas are set inside connect()'s SQLite branch only.
+        self.assertIn("_apply_sqlite_pragmas(conn)", db_source)
+        self.assertNotIn("_apply_sqlite_pragmas(raw)", db_source)
+
+
+
+class MultiWorkerSafetyTests(unittest.TestCase):
+    """3.3 - Phase 0 bought its speed with caches that live in one process and
+    are invalidated by that same process. Several workers each keep their own
+    copy, so a write in one is invisible to the others until the entry expires.
+    Three of those are a staleness question; the revocation one is a security
+    question."""
+
+    MAIN = Path("main.py").read_text(encoding="utf-8")
+
+    def test_asking_for_workers_turns_the_per_process_caches_off(self) -> None:
+        self.assertIn("_PER_PROCESS_CACHE_SETTINGS", self.MAIN)
+        for setting in ("DSPM_TOKEN_REVOCATION_CACHE_SECONDS",
+                        "DSPM_TENANT_EXISTS_CACHE_SECONDS",
+                        "DSPM_READINESS_CACHE_SECONDS",
+                        "DSPM_INVENTORY_COUNT_CACHE_SECONDS",
+                        "DSPM_INVENTORY_FACETS_CACHE_SECONDS"):
+            self.assertIn(setting, self.MAIN, setting)
+        # Turning them off is not advice printed to a log the operator may not
+        # read - it happens before uvicorn starts.
+        self.assertIn("_disable_per_process_caches(logger)", self.MAIN)
+        # ...and every one of them has to be honoured by the store, or the
+        # switch is decoration.
+        store_source = Path("backend/store.py").read_text(encoding="utf-8")
+        for reader in ("_revocation_cache_seconds", "_tenant_exists_cache_seconds",
+                       "_readiness_cache_seconds", "_inventory_count_cache_seconds",
+                       "_inventory_facets_cache_seconds"):
+            self.assertIn("def " + reader + "(", store_source, reader)
+
+    def test_zero_disables_rather_than_shortens(self) -> None:
+        """A TTL of 0 has to mean "ask the database every time", not "expire
+        immediately and race"."""
+        for name, default in (("DSPM_TOKEN_REVOCATION_CACHE_SECONDS", store.is_token_revoked),
+                              ("DSPM_TENANT_EXISTS_CACHE_SECONDS", store.tenant_exists)):
+            del default  # the setting is what is under test
+            previous = os.environ.get(name)
+            os.environ[name] = "0"
+            try:
+                self.assertEqual(0.0, {
+                    "DSPM_TOKEN_REVOCATION_CACHE_SECONDS": store._revocation_cache_seconds,
+                    "DSPM_TENANT_EXISTS_CACHE_SECONDS": store._tenant_exists_cache_seconds,
+                }[name]())
+            finally:
+                if previous is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = previous
+
+    def test_reload_and_workers_are_refused_together(self) -> None:
+        # --reload runs one process; accepting both would silently ignore one.
+        self.assertIn("--reload runs a single process", self.MAIN)
 
 
 class ResponseSizeTests(unittest.TestCase):

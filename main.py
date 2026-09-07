@@ -47,11 +47,51 @@ def run_scan(args: argparse.Namespace) -> None:
     logger.info("Report saved to %s", output_path)
 
 
+# Caches that live in one process and are invalidated by that same process.
+# With several workers each keeps its own copy, so a write in one is invisible
+# to the others until the entry expires. Two of these are only a staleness
+# question; the revocation one is a security question, because a token revoked
+# in worker A would still be accepted by worker B for the length of its TTL.
+# Asking for workers therefore turns them off rather than leaving the operator
+# to read a warning.
+_PER_PROCESS_CACHE_SETTINGS = (
+    ("DSPM_TOKEN_REVOCATION_CACHE_SECONDS", "a revoked token would outlive its revocation in the other workers"),
+    ("DSPM_TENANT_EXISTS_CACHE_SECONDS", "a deleted tenant would keep resolving in the other workers"),
+    ("DSPM_READINESS_CACHE_SECONDS", "a completed backfill would not be seen by the other workers"),
+    ("DSPM_INVENTORY_COUNT_CACHE_SECONDS", "a saved scan would not clear the other workers' counts"),
+    ("DSPM_INVENTORY_FACETS_CACHE_SECONDS", "a saved scan would not clear the other workers' facets"),
+)
+
+
+def _disable_per_process_caches(logger) -> None:
+    for name, why in _PER_PROCESS_CACHE_SETTINGS:
+        if os.environ.get(name) == "0":
+            continue
+        os.environ[name] = "0"
+        logger.warning("Multiple workers: %s=0 - %s.", name, why)
+
+
 def serve(args: argparse.Namespace) -> None:
     is_production = os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}
     if args.reload and is_production:
         raise SystemExit("--reload is disabled when DSPM_ENV=production")
-    uvicorn.run("backend.app:app", host=args.host, port=args.port, reload=args.reload)
+    workers = max(1, int(getattr(args, "workers", 1) or 1))
+    if workers > 1:
+        if args.reload:
+            raise SystemExit("--reload runs a single process; drop it to use --workers")
+        # SQLite serialises writers across processes even in WAL, so several
+        # workers help a read-heavy console and hurt during a scan. PostgreSQL
+        # is the backend this flag exists for.
+        if not os.getenv("DSPM_DB_URL", "").strip():
+            logger.warning(
+                "Multiple workers on SQLite: reads scale, but writers still serialise "
+                "across processes. PostgreSQL (DSPM_DB_URL) is the backend for this."
+            )
+        _disable_per_process_caches(logger)
+    uvicorn.run(
+        "backend.app:app", host=args.host, port=args.port,
+        reload=args.reload, workers=workers if workers > 1 else None,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +119,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--reload", action="store_true")
+    serve_parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Worker processes. More than one disables the per-process caches "
+             "(see DSPM_* cache settings); PostgreSQL is the backend it is for.",
+    )
     serve_parser.set_defaults(func=serve)
 
     parser.set_defaults(func=serve)

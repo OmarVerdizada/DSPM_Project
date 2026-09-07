@@ -753,7 +753,7 @@ def apply_baseline_schema(conn) -> None:
             -- 2.3 seconds a page cold, and O(report) rather than O(page), so a
             -- ten-times estate would not have answered at all. Written once,
             -- with the run.
-            rows_json BLOB,
+            rows_json TEXT,
             created_at TEXT NOT NULL,
             PRIMARY KEY (tenant_id, scan_id)
         );
@@ -1118,7 +1118,7 @@ def apply_baseline_schema(conn) -> None:
     # schema. They land with index_version='' (i.e. "unknown logic"), so
     report_columns = db.table_columns(conn, "scan_reports")
     if "rows_json" not in report_columns:
-        conn.execute("ALTER TABLE scan_reports ADD COLUMN rows_json BLOB")
+        conn.execute("ALTER TABLE scan_reports ADD COLUMN rows_json TEXT")
 
     # the read-switch treats them as stale and serves the blob until a
     # backfill re-stamps them - the safe default for a migration mirror.
@@ -4944,6 +4944,16 @@ _tenant_exists_cache: dict[str, tuple[float, bool]] = {}
 _tenant_exists_lock = threading.Lock()
 
 
+def _tenant_exists_cache_seconds() -> float:
+    """Off-switchable, because a tenant deleted in one worker would otherwise
+    keep resolving in the others for the length of this window."""
+    try:
+        value = float(os.getenv("DSPM_TENANT_EXISTS_CACHE_SECONDS", "30"))
+    except ValueError:
+        value = 30.0
+    return max(0.0, min(value, 300.0))
+
+
 def _forget_tenant_existence() -> None:
     with _tenant_exists_lock:
         _tenant_exists_cache.clear()
@@ -4954,18 +4964,21 @@ def tenant_exists(tenant_id: str) -> bool:
     paths clear the entry, so the cache cannot answer for a tenant that has
     since gone."""
     key = str(tenant_id or "")
+    ttl = _tenant_exists_cache_seconds()
     now_mono = time.monotonic()
-    with _tenant_exists_lock:
-        cached = _tenant_exists_cache.get(key)
-        if cached and now_mono - cached[0] <= 30.0:
-            return cached[1]
+    if ttl:
+        with _tenant_exists_lock:
+            cached = _tenant_exists_cache.get(key)
+            if cached and now_mono - cached[0] <= ttl:
+                return cached[1]
     with _connect() as conn:
         row = conn.execute("SELECT 1 FROM tenants WHERE tenant_id = ?", (tenant_id,)).fetchone()
     exists = row is not None
-    with _tenant_exists_lock:
-        if len(_tenant_exists_cache) > 256:
-            _tenant_exists_cache.clear()
-        _tenant_exists_cache[key] = (now_mono, exists)
+    if ttl:
+        with _tenant_exists_lock:
+            if len(_tenant_exists_cache) > 256:
+                _tenant_exists_cache.clear()
+            _tenant_exists_cache[key] = (now_mono, exists)
     return exists
 
 
