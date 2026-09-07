@@ -499,6 +499,79 @@ def current_tenant_scope() -> str | None:
     return _tenant_scope_var.get()
 
 
+# ``journal_mode`` is a property of the FILE, not of a connection, so it is set
+# once per path rather than on every open. The set is bounded because tests and
+# benchmarks each create their own database.
+_SQLITE_TUNED: set[str] = set()
+_SQLITE_TUNED_MAX = 64
+_sqlite_tune_lock = threading.Lock()
+
+
+def _sqlite_journal_mode() -> str:
+    """WAL by default. Readers no longer wait for a writer's commit, and a
+    commit writes each page once instead of twice.
+
+    Two operational consequences, both acceptable for an on-prem single-node
+    install and both reversible by setting this to ``delete``:
+      * the database is three files - ``x``, ``x-wal``, ``x-shm``. A manual copy
+        of ``data/`` must take all three, or take none and use the product's own
+        backup. They live in the same 0700 directory the hardening already
+        covers.
+      * WAL needs real file locking, so a database on an SMB/NFS share must stay
+        on ``delete``.
+    """
+    mode = os.getenv("DSPM_SQLITE_JOURNAL_MODE", "wal").strip().lower()
+    return mode if mode in {"wal", "delete", "truncate", "persist", "memory", "off"} else "wal"
+
+
+def _tune_sqlite_file(conn, path: str) -> None:
+    if path in _SQLITE_TUNED:
+        return
+    with _sqlite_tune_lock:
+        if path in _SQLITE_TUNED:
+            return
+        try:
+            conn.execute(f"PRAGMA journal_mode = {_sqlite_journal_mode()}")
+        except sqlite3.DatabaseError:
+            # A locked or read-only file keeps whatever mode it has; every other
+            # pragma below is per-connection and still applies.
+            pass
+        if len(_SQLITE_TUNED) >= _SQLITE_TUNED_MAX:
+            _SQLITE_TUNED.clear()
+        _SQLITE_TUNED.add(path)
+
+
+def _apply_sqlite_pragmas(conn) -> None:
+    """Per-connection settings. The defaults are sized for one 500MB database
+    read by one process: a 2MB page cache against that file evicts the working
+    set between requests, which is why a cold query paid disk on every page."""
+    conn.execute("PRAGMA foreign_keys = ON")
+    # NORMAL is the documented companion to WAL: a power loss can cost the last
+    # transaction, never the file. Under a rollback journal it would also risk
+    # the file, so it is only relaxed where WAL makes it safe.
+    if _sqlite_journal_mode() == "wal":
+        conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute(f"PRAGMA cache_size = -{int(_env_number('DSPM_SQLITE_CACHE_KB', 65536, 2048, 1048576, int))}")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    mmap_bytes = int(_env_number("DSPM_SQLITE_MMAP_MB", 256, 0, 4096, int)) * 1024 * 1024
+    if mmap_bytes:
+        conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+
+
+def optimize_sqlite(sqlite_path: Path) -> None:
+    """Refresh the planner's statistics. SQLite ships with none until ANALYZE
+    runs, and ``PRAGMA optimize`` re-analyses only what has drifted, so this is
+    cheap enough to call after a scan save and at shutdown."""
+    if is_postgres():
+        return
+    try:
+        with connect(sqlite_path) as conn:
+            conn.execute("PRAGMA analysis_limit = 400")
+            conn.execute("PRAGMA optimize")
+    except sqlite3.DatabaseError:
+        pass
+
+
 @contextmanager
 def connect(sqlite_path: Path):
     """Yield a connection for the active backend, commit on clean exit, always close.
@@ -530,7 +603,8 @@ def connect(sqlite_path: Path):
         conn = sqlite3.connect(sqlite_path)
         try:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
+            _tune_sqlite_file(conn, str(sqlite_path))
+            _apply_sqlite_pragmas(conn)
             yield conn
             conn.commit()
         finally:

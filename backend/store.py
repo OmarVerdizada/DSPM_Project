@@ -9,7 +9,7 @@ import re
 import secrets
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -914,6 +914,13 @@ def apply_baseline_schema(conn) -> None:
             scan_label TEXT NOT NULL DEFAULT '',
             current_scan_id TEXT NOT NULL DEFAULT '',
             observed_at TEXT NOT NULL DEFAULT '',
+            -- The collapsed table shows how many reasons and DLP actions a file
+            -- carries. Those are two lengths inside detail_json, and reading
+            -- them per page meant fetching and parsing the whole blob for every
+            -- row: 11.3MB and 127ms for a page of 100, measured. They are
+            -- written here once, when the blob that defines them is written.
+            reason_count INTEGER NOT NULL DEFAULT 0,
+            dlp_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (tenant_id, id)
         );
 
@@ -1097,6 +1104,10 @@ def apply_baseline_schema(conn) -> None:
     # schema. They land with index_version='' (i.e. "unknown logic"), so
     # the read-switch treats them as stale and serves the blob until a
     # backfill re-stamps them - the safe default for a migration mirror.
+    asset_count_columns = db.table_columns(conn, "assets")
+    for column in ("reason_count", "dlp_count"):
+        if column not in asset_count_columns:
+            conn.execute(f"ALTER TABLE assets ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
     fi_columns = db.table_columns(conn, "finding_index")
     if "index_version" not in fi_columns:
         conn.execute("ALTER TABLE finding_index ADD COLUMN index_version TEXT NOT NULL DEFAULT ''")
@@ -1556,6 +1567,11 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
             )
     _invalidate_inventory_query_cache(tenant_id)
     _invalidate_remediation_query_cache(tenant_id)
+    # A scan is the only thing that changes the shape of this data, so it is
+    # also the only moment the planner's statistics need refreshing. SQLite
+    # ships with none until ANALYZE has run.
+    with suppress(Exception):
+        db.optimize_sqlite(DB_PATH)
     # S-F dual-write is an optional, best-effort projection and deliberately
     # runs after the authoritative DB transaction/lock has completed. Search
     # outages must never roll back or delay ownership of the saved scan.
@@ -1590,6 +1606,17 @@ def _normalized_write_is_best_effort() -> bool:
     a restart.
     """
     return os.getenv("DSPM_NORMALIZED_WRITE_BEST_EFFORT", "0") == "1"
+
+
+def _detail_counts(detail_json) -> tuple[int, int]:
+    """(reasons, dlp actions) from an asset's detail blob, at write time."""
+    try:
+        detail = json.loads(detail_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return (0, 0)
+    risk = detail.get("risk") if isinstance(detail, dict) else {}
+    risk = risk if isinstance(risk, dict) else {}
+    return (len(risk.get("reasons") or []), len(risk.get("dlp_recommendations") or []))
 
 
 def _dual_write_normalized(conn, tenant_id: str, report: dict, *, is_new_scan: bool = True) -> bool:
@@ -2100,8 +2127,9 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
             "risk_level, risk_score, size, owner, modified_at, finding_count, "
             "top_frameworks, is_hidden, is_system, is_protected, search_text, "
-            "finding_types, framework_keys, detail_json, scan_label, current_scan_id, observed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "finding_types, framework_keys, detail_json, scan_label, current_scan_id, observed_at, "
+            "reason_count, dlp_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (tenant_id, id) DO UPDATE SET "
             "source = excluded.source, stable_object_id = excluded.stable_object_id, "
             "path = excluded.path, name = excluded.name, extension = excluded.extension, "
@@ -2112,13 +2140,14 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "is_protected = excluded.is_protected, search_text = excluded.search_text, "
             "finding_types = excluded.finding_types, framework_keys = excluded.framework_keys, "
             "detail_json = excluded.detail_json, scan_label = excluded.scan_label, "
-            "current_scan_id = excluded.current_scan_id, observed_at = excluded.observed_at",
+            "current_scan_id = excluded.current_scan_id, observed_at = excluded.observed_at, "
+            "reason_count = excluded.reason_count, dlp_count = excluded.dlp_count",
             (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
              asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
              asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
              asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
              asset.finding_types, asset.framework_keys, asset.detail_json, asset.scan_label,
-             scan_id, observed_at),
+             scan_id, observed_at, *_detail_counts(asset.detail_json)),
         )
     for version in scan.asset_versions if write_estate and refresh_current else []:
         conn.execute(
@@ -2423,6 +2452,97 @@ def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
     with _connect() as conn:
         row = conn.execute(query, params).fetchone()
     return _report_body(tenant_id, row) if row else None
+
+
+_scan_report_rows_cache: dict[tuple[str, str], list[dict]] = {}
+_scan_report_rows_order: list[tuple[str, str]] = []
+_scan_report_rows_lock = threading.Lock()
+
+
+def _scan_report_rows_cache_max() -> int:
+    try:
+        return max(0, min(int(os.getenv("DSPM_SCAN_REPORT_ROWS_CACHE", "4")), 32))
+    except ValueError:
+        return 4
+
+
+def _forget_scan_report_rows(tenant_id: str | None = None) -> None:
+    with _scan_report_rows_lock:
+        if tenant_id is None:
+            _scan_report_rows_cache.clear()
+            _scan_report_rows_order.clear()
+            return
+        for key in [item for item in _scan_report_rows_cache if item[0] == tenant_id]:
+            _scan_report_rows_cache.pop(key, None)
+            if key in _scan_report_rows_order:
+                _scan_report_rows_order.remove(key)
+
+
+def _cached_scan_report_rows(tenant_id: str, scan_id: str, build) -> list[dict]:
+    """Memoise one run's inventory projection. A saved run never changes, and a
+    re-save of the same scan id invalidates through `_forget_scan_report_rows`."""
+    limit = _scan_report_rows_cache_max()
+    key = (str(tenant_id), str(scan_id or ""))
+    if not limit or not key[1]:
+        return build()
+    with _scan_report_rows_lock:
+        cached = _scan_report_rows_cache.get(key)
+        if cached is not None:
+            _scan_report_rows_order.remove(key)
+            _scan_report_rows_order.append(key)
+            return cached
+    rows = build()
+    with _scan_report_rows_lock:
+        _scan_report_rows_cache[key] = rows
+        if key in _scan_report_rows_order:
+            _scan_report_rows_order.remove(key)
+        _scan_report_rows_order.append(key)
+        while len(_scan_report_rows_order) > limit:
+            _scan_report_rows_cache.pop(_scan_report_rows_order.pop(0), None)
+    return rows
+
+
+@_tenant_scoped
+def latest_scan_id_by_label(tenant_id: str, scan_label: str) -> str:
+    """The newest saved run for one configured scan name, as an id.
+
+    Separated from reading the report so the caller can check its cache before
+    paying for an 8MB decrypt and parse.
+    """
+    label = str(scan_label or "").strip()[:80]
+    if not label:
+        return ""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT scan_id FROM scan_reports WHERE tenant_id = ? AND scan_label = ? "
+            "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
+            (tenant_id, label),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "SELECT scan_id FROM scan_reports WHERE tenant_id = ? AND lower(scan_label) = ? "
+                "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
+                (tenant_id, label.lower()),
+            ).fetchone()
+    return str(row["scan_id"]) if row else ""
+
+
+@_tenant_scoped
+def scan_report_inventory_rows_by_label(tenant_id: str, scan_label: str) -> tuple[str, list[dict]] | None:
+    """(scan_id, projected rows) for a configured scan name, or None.
+
+    On a cache hit this costs one indexed lookup; on a miss it falls back to the
+    original path - read the report, project it - and remembers the result.
+    """
+    scan_id = latest_scan_id_by_label(tenant_id, scan_label)
+    if not scan_id:
+        return None
+
+    def build() -> list[dict]:
+        report = read_scan_report(tenant_id, scan_id)
+        return _scan_report_inventory_rows(tenant_id, report) if report else []
+
+    return scan_id, _cached_scan_report_rows(tenant_id, scan_id, build)
 
 
 @_tenant_scoped
@@ -2957,6 +3077,10 @@ def _list_findings_normalized(tenant_id: str, status: str, limit: int) -> list[d
 
 
 def _normalized_ready(tenant_id: str) -> bool:
+    return _cached_readiness("normalized", tenant_id, lambda: _normalized_ready_uncached(tenant_id))
+
+
+def _normalized_ready_uncached(tenant_id: str) -> bool:
     """True only when the normalized mirror can be trusted to answer for this
     tenant (F2). Guards the two ways the read-switch could silently return wrong
     data, so on either the caller serves the authoritative blob instead:
@@ -3026,6 +3150,8 @@ _INVENTORY_COLS = (
     "top_frameworks", "is_hidden", "is_system", "is_protected",
     "finding_types", "framework_keys", "scan_label",
 )
+# Persisted per row, so the collapsed table's two numbers cost nothing to read.
+_INVENTORY_READ_COLS = (*_INVENTORY_COLS, "reason_count", "dlp_count")
 _INVENTORY_COUNT_CAP = 10000
 _INVENTORY_CURSOR_VERSION = "sc-v3"
 _INVENTORY_COUNT_CACHE_MAX = 256
@@ -3040,6 +3166,8 @@ class InventoryReadUnavailable(RuntimeError):
 
 def _invalidate_inventory_query_cache(tenant_id: str | None = None) -> None:
     """Invalidate short-lived inventory aggregates after an authoritative write."""
+    _forget_readiness(tenant_id)
+    _forget_scan_report_rows(tenant_id)
     with _inventory_query_cache_lock:
         if tenant_id is None:
             _inventory_count_cache.clear()
@@ -3087,7 +3215,61 @@ def _capped_inventory_total(conn, tenant_id: str, where: list[str], params: list
     return total
 
 
+_readiness_cache: dict[tuple[str, str], tuple[float, bool]] = {}
+_readiness_cache_lock = threading.Lock()
+
+
+def _readiness_cache_seconds() -> float:
+    try:
+        value = float(os.getenv("DSPM_READINESS_CACHE_SECONDS", "60"))
+    except ValueError:
+        value = 60.0
+    return max(0.0, min(value, 600.0))
+
+
+def _cached_readiness(kind: str, tenant_id: str, probe) -> bool:
+    ttl = _readiness_cache_seconds()
+    if not ttl:
+        return probe()
+    key = (kind, tenant_id)
+    now_mono = time.monotonic()
+    with _readiness_cache_lock:
+        cached = _readiness_cache.get(key)
+        if cached and now_mono - cached[0] <= ttl:
+            return cached[1]
+    answer = probe()
+    with _readiness_cache_lock:
+        if len(_readiness_cache) > 256:
+            _readiness_cache.clear()
+        _readiness_cache[key] = (now_mono, answer)
+    return answer
+
+
+def refresh_read_model_state(tenant_id: str | None = None) -> None:
+    """Forget which read model is ready.
+
+    The gate answers "is the normalized mirror complete and current", and every
+    in-process transition - a scan save, a backfill - already invalidates it.
+    Call this after changing the underlying rows by any other route, including
+    from a test or a maintenance script.
+    """
+    _forget_readiness(tenant_id)
+
+
+def _forget_readiness(tenant_id: str | None = None) -> None:
+    with _readiness_cache_lock:
+        if tenant_id is None:
+            _readiness_cache.clear()
+            return
+        for key in [item for item in _readiness_cache if item[1] == tenant_id]:
+            _readiness_cache.pop(key, None)
+
+
 def _inventory_ready(tenant_id: str) -> bool:
+    return _cached_readiness("inventory", tenant_id, lambda: _inventory_ready_uncached(tenant_id))
+
+
+def _inventory_ready_uncached(tenant_id: str) -> bool:
     """True when every persisted scan has been mirrored - a scan_report with no
     matching scan_run means the assets mirror is missing that scan (assets are
     written in the same savepoint as scan_runs)."""
@@ -3286,12 +3468,16 @@ def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framewor
     # result", not "show current assets whose most recent observation still
     # happens to carry this label".  Resolve the immutable run before choosing
     # the current-estate normalized/search paths.
-    selected_report = read_latest_scan_report_by_label(tenant_id, source) if source and not filt.get("source_group") else None
-    if selected_report is not None:
-        result = _list_inventory_scan_report(tenant_id, selected_report, filt, sort, cursor, limit, direction)
+    selected = (scan_report_inventory_rows_by_label(tenant_id, source)
+                if source and not filt.get("source_group") else None)
+    if selected is not None:
+        scan_id, report_rows = selected
+        result = _inventory_page_from_rows(
+            report_rows, filt, sort, cursor, limit, direction, source_already_matched=True,
+        )
         result["source"] = "scan-report"
-        result["scan_id"] = str(selected_report.get("scan_id") or "")
-        result["scan_label"] = str(selected_report.get("scan_label") or "")
+        result["scan_id"] = scan_id
+        result["scan_label"] = str(source or "")
         return result
     # S-F valve: only text searches opt into the dedicated engine. Placeholder
     # inventory browsing keeps S-C keyset pagination. A separate read-enable
@@ -3346,7 +3532,7 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
             params.extend([cv, cv, cid])
 
     sql = (
-        f"SELECT {', '.join(_INVENTORY_COLS)} FROM assets WHERE {' AND '.join(where)} "
+        f"SELECT {', '.join(_INVENTORY_READ_COLS)} FROM assets WHERE {' AND '.join(where)} "
         f"ORDER BY {order_expr} {direction}, {id_expr} {direction} LIMIT ?"
     )
     params.append(limit + 1)
@@ -3355,7 +3541,7 @@ def _list_inventory_normalized(tenant_id: str, filt: dict, sort: str, cursor: st
         total = _capped_inventory_total(conn, tenant_id, count_where, count_params)
 
     return _inventory_page(
-        [{c: r[c] for c in _INVENTORY_COLS} for r in rows], sort, col, is_text, limit, total, direction
+        [{c: r[c] for c in _INVENTORY_READ_COLS} for r in rows], sort, col, is_text, limit, total, direction
     )
 
 
@@ -3452,14 +3638,7 @@ def _scan_report_inventory_rows(tenant_id: str, report: dict) -> list[dict]:
         row = {column: getattr(asset, column) for column in _INVENTORY_COLS}
         row["search_text"] = asset.search_text
         row["scan_id"] = scan_id
-        try:
-            detail = json.loads(asset.detail_json or "{}")
-        except (json.JSONDecodeError, TypeError):
-            detail = {}
-        risk_detail = detail.get("risk") if isinstance(detail, dict) else {}
-        risk_detail = risk_detail if isinstance(risk_detail, dict) else {}
-        row["reason_count"] = len(risk_detail.get("reasons") or [])
-        row["dlp_count"] = len(risk_detail.get("dlp_recommendations") or [])
+        row["reason_count"], row["dlp_count"] = _detail_counts(asset.detail_json)
         rows.append(row)
     return rows
 
@@ -3535,7 +3714,11 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
         if not report:
             continue
         for asset in normalize_scan_report(tenant_id, report).assets:
-            latest[asset.id] = {c: getattr(asset, c) for c in _INVENTORY_COLS} | {"search_text": asset.search_text}
+            reasons, actions = _detail_counts(asset.detail_json)
+            latest[asset.id] = (
+                {c: getattr(asset, c) for c in _INVENTORY_COLS}
+                | {"search_text": asset.search_text, "reason_count": reasons, "dlp_count": actions}
+            )
     return _inventory_page_from_rows(list(latest.values()), filt, sort, cursor, limit, direction)
 
 
@@ -3924,12 +4107,9 @@ def inventory_facets(tenant_id: str, source: str = "") -> dict:
                 return cached[1]
             if cached:
                 _inventory_facets_cache.pop(cache_key, None)
-    selected_report = read_latest_scan_report_by_label(tenant_id, source) if source else None
-    if selected_report is not None:
-        return _cache_inventory_facets(
-            cache_key,
-            _facets_from_rows(_scan_report_inventory_rows(tenant_id, selected_report), "scan-report"),
-        )
+    selected = scan_report_inventory_rows_by_label(tenant_id, source) if source else None
+    if selected is not None:
+        return _cache_inventory_facets(cache_key, _facets_from_rows(selected[1], "scan-report"))
     if _read_inventory_from_normalized(tenant_id):
         try:
             with _connect() as conn:
@@ -4577,10 +4757,33 @@ def list_tenants(tenant_id: str | None = None) -> list[dict]:
     return tenants
 
 
+_tenant_exists_cache: dict[str, tuple[float, bool]] = {}
+_tenant_exists_lock = threading.Lock()
+
+
+def _forget_tenant_existence() -> None:
+    with _tenant_exists_lock:
+        _tenant_exists_cache.clear()
+
+
 def tenant_exists(tenant_id: str) -> bool:
+    """Cached: a tenant is created or deleted through this process, and both
+    paths clear the entry, so the cache cannot answer for a tenant that has
+    since gone."""
+    key = str(tenant_id or "")
+    now_mono = time.monotonic()
+    with _tenant_exists_lock:
+        cached = _tenant_exists_cache.get(key)
+        if cached and now_mono - cached[0] <= 30.0:
+            return cached[1]
     with _connect() as conn:
         row = conn.execute("SELECT 1 FROM tenants WHERE tenant_id = ?", (tenant_id,)).fetchone()
-    return row is not None
+    exists = row is not None
+    with _tenant_exists_lock:
+        if len(_tenant_exists_cache) > 256:
+            _tenant_exists_cache.clear()
+        _tenant_exists_cache[key] = (now_mono, exists)
+    return exists
 
 
 def create_tenant(tenant_id: str, display_name: str = "") -> dict:
@@ -4596,6 +4799,7 @@ def create_tenant(tenant_id: str, display_name: str = "") -> dict:
                 """,
                 (tenant_id, name, registration_code, now, now),
             )
+    _forget_tenant_existence()
     tenant = get_tenant(tenant_id)
     if tenant is None:
         raise RuntimeError("Tenant was not created")
@@ -4629,7 +4833,9 @@ def delete_tenant(tenant_id: str) -> bool:
     with _lock:
         with _connect() as conn:
             result = conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))
-            return result.rowcount > 0
+            deleted = result.rowcount > 0
+    _forget_tenant_existence()
+    return deleted
 
 
 _TENANT_ERASURE_TABLES = (
@@ -4755,6 +4961,7 @@ def delete_tenant_with_data(tenant_id: str) -> dict:
             # detects and removes documents that no longer exist in the DB.
             conn.execute("DELETE FROM search_reconciliation_state")
     _invalidate_inventory_query_cache(tenant_id)
+    _forget_tenant_existence()
     return usage
 
 
@@ -5153,22 +5360,60 @@ def revoke_token_jti(jti: str, expires_at: int) -> None:
     cutoff = int(__import__("time").time())
     with _lock:
         with _connect() as conn:
+            # Pruning belongs with the write: it used to run on every read.
             conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (cutoff,))
             conn.execute(
                 "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
                 (jti, int(expires_at), now),
             )
+    # This process just made the cached answer wrong.
+    _forget_revocation()
+
+
+_revocation_cache: dict[str, tuple[float, bool]] = {}
+_revocation_cache_lock = threading.Lock()
+_REVOCATION_CACHE_MAX = 4096
+
+
+def _revocation_cache_seconds() -> float:
+    try:
+        value = float(os.getenv("DSPM_TOKEN_REVOCATION_CACHE_SECONDS", "30"))
+    except ValueError:
+        value = 30.0
+    return max(0.0, min(value, 300.0))
+
+
+def _forget_revocation(jti: str = "") -> None:
+    with _revocation_cache_lock:
+        if jti:
+            _revocation_cache.pop(jti, None)
+        else:
+            _revocation_cache.clear()
 
 
 def is_token_revoked(jti: str) -> bool:
     if not jti:
         return True
-    cutoff = int(__import__("time").time())
+    ttl = _revocation_cache_seconds()
+    now_mono = time.monotonic()
+    if ttl:
+        with _revocation_cache_lock:
+            cached = _revocation_cache.get(jti)
+            if cached and now_mono - cached[0] <= ttl:
+                return cached[1]
     with _lock:
         with _connect() as conn:
-            conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (cutoff,))
-            row = conn.execute("SELECT 1 FROM revoked_tokens WHERE jti = ?", (jti,)).fetchone()
-    return row is not None
+            row = conn.execute(
+                "SELECT 1 FROM revoked_tokens WHERE jti = ? AND expires_at >= ?",
+                (jti, int(time.time())),
+            ).fetchone()
+    revoked = row is not None
+    if ttl:
+        with _revocation_cache_lock:
+            if len(_revocation_cache) >= _REVOCATION_CACHE_MAX:
+                _revocation_cache.clear()
+            _revocation_cache[jti] = (now_mono, revoked)
+    return revoked
 
 
 

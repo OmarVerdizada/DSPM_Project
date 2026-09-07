@@ -384,6 +384,49 @@ let tenantContextVersion = 0;
 let currentUser = safeSessionGet("dspm-user") || "admin";
 let currentRole = safeSessionGet("dspm-role") || "admin";
 let customExtensions = loadCustomExtensions();
+// Panels that owe a render because they were hidden when their data changed.
+const pendingPanelRenders = new Map();
+
+function panelIsVisible(panelId) {
+  const panel = document.getElementById(panelId);
+  return Boolean(panel && panel.classList.contains("active"));
+}
+
+/**
+ * True when the caller should skip its work. The render is remembered against
+ * the panel and replayed by `flushPanelRenders` when the panel is shown.
+ */
+function deferWhileHidden(panelId, key, replay) {
+  if (panelIsVisible(panelId)) return false;
+  pendingPanelRenders.set(`${panelId}:${key}`, { panelId, replay });
+  return true;
+}
+
+function flushPanelRenders(panelId) {
+  for (const [key, entry] of [...pendingPanelRenders]) {
+    if (entry.panelId !== panelId) continue;
+    pendingPanelRenders.delete(key);
+    try {
+      entry.replay();
+    } catch (error) {
+      console.warn("deferred render failed", key, error);
+    }
+  }
+}
+
+// Work a tab needs the first time it is opened, rather than at boot.
+const tabFirstOpened = new Set();
+
+function onFirstTabOpen(tabName, run) {
+  if (tabFirstOpened.has(tabName)) return;
+  tabFirstOpened.add(tabName);
+  try {
+    run();
+  } catch (error) {
+    console.warn("tab first-open work failed", tabName, error);
+  }
+}
+
 let latestFiles = [];
 let latestReport = null;
 let latestScanKind = "";
@@ -1847,6 +1890,9 @@ function applyScanReport(report, scanKind = "file-server", { refreshEstate = tru
 let workspaceSliceRequest = 0;
 async function hydrateWorkspaceSlice() {
   if (!latestReport?.files_omitted) return;
+  // 200 rows for the Findings workspace. Fetching them while that tab is
+  // hidden bought 203KB and 9,685 nodes nobody had asked to see.
+  if (deferWhileHidden("tab-findings", "slice", () => hydrateWorkspaceSlice())) return;
   const context = captureTenantContext();
   const requestId = ++workspaceSliceRequest;
   const resultsBody = document.getElementById("results-body");
@@ -1945,6 +1991,7 @@ function renderScanRunningContext(scanKind, message) {
 // table's own first rows, so both panels are gone. What is left is the one
 // thing this function still owns - the page's first-run state.
 function renderFindingsWorkspace() {
+  if (deferWhileHidden("tab-findings", "workspace", renderFindingsWorkspace)) return;
   document.querySelector("#tab-findings")
     ?.classList.toggle("findings-pristine", !hasCompletedInventoryScan());
 }
@@ -2703,6 +2750,7 @@ function fileMetaLine({ extension, size, source, hashChanged, duplicateHashPath,
 }
 
 function renderRows(files, options = {}) {
+  if (deferWhileHidden("tab-findings", "rows", () => renderRows(files, options))) return;
   if (!options.serverPage && inventoryPageWindow.active && currentInventoryPage()) {
     const current = currentInventoryPage();
     renderRows(current.items, { serverPage: current });
@@ -3422,8 +3470,25 @@ function switchTab(tabName) {
   }
   tabPanels.forEach((panel) => panel.classList.toggle("active", panel === activePanel));
 
-  if (resolvedTab === "risk" && !remediationLoaded && !remediationLoading) {
+  flushPanelRenders(`tab-${resolvedTab}`);
+
+  if (resolvedTab === "risk" && !remediationLoaded) {
     loadRemediationFindings().catch(() => {});
+  }
+  // The 200-row workspace slice used to be fetched at boot for a tab that was
+  // not on screen: 203KB and 9,685 nodes nobody had asked for.
+  if (resolvedTab === "findings") {
+    onFirstTabOpen("findings", () => hydrateWorkspaceSlice());
+  }
+  if (resolvedTab === "logic") {
+    onFirstTabOpen("logic", () => { if (accessToken) loadProtectedMetadata(); });
+  }
+  if (resolvedTab === "security") {
+    onFirstTabOpen("security", () => {
+      if (!accessToken) return;
+      loadAudit().catch(() => {});
+      loadUsers().catch(() => {});
+    });
   }
 
   // One transition for a page change. The console used to run three at once
@@ -5449,6 +5514,7 @@ function safeSessionSet(key, value) {
 }
 
 function renderReportPreview() {
+  if (deferWhileHidden("tab-reports", "preview", renderReportPreview)) return;
   if (!activeReportFileCount()) {
     reportPreview.innerHTML = `
       <div class="report-empty product-report-empty">
@@ -7034,6 +7100,7 @@ function remediationPaginationMarkup() {
 }
 
 function renderRemediationWorkspace() {
+  if (deferWhileHidden("tab-risk", "workspace", renderRemediationWorkspace)) return;
   if (!remediationWorkflow) return;
   renderRemediationLoad();
   if (remediationError) remediationError.hidden = !remediationLoadError;
@@ -7117,7 +7184,14 @@ async function loadRemediationFindings({ showLoading = true, resetPage = false }
     renderRemediationWorkspace();
   } catch (error) {
     if (!isCurrentTenantContext(context) || requestId !== remediationListRequest) return;
-    if (error?.name === "AbortError") return;
+    if (error?.name === "AbortError") {
+      // Only the newest attempt owns the flag; an older one must not clear it.
+      if (requestId === remediationListRequest) {
+        remediationLoading = false;
+        renderRemediationWorkspace();
+      }
+      return;
+    }
     remediationLoading = false;
     remediationLoadError = error.message || "Unable to load findings";
     renderRemediationWorkspace();
@@ -9120,26 +9194,33 @@ async function loadHistory() {
     return;
   }
   const context = captureTenantContext();
-  const [history, dashboard, hashComparison, estateFacetResponse] = await Promise.all([
+  const [history, dashboard, estateFacetResponse] = await Promise.all([
     api("/api/history", null, "GET"),
     api("/api/executive-dashboard", null, "GET"),
-    loadHashComparison(),
     api("/api/inventory/facets", null, "GET").catch(() => null),
   ]);
   if (!isCurrentTenantContext(context, history)
       || !isCurrentTenantContext(context, dashboard)
-      || (hashComparison && !isCurrentTenantContext(context, hashComparison))
       || (estateFacetResponse && !isCurrentTenantContext(context, estateFacetResponse))) return;
   loadScanProfiles(context).catch(() => {});
   latestDashboard = dashboard;
-  latestHashComparison = hashComparison;
   estateFacets = estateFacetResponse;
   estateSummary = estateFacetResponse ? facetsToEstateSummary(estateFacetResponse) : null;
   renderHistory(history.history || []);
-  await restoreLatestSavedReport(history.history || [], context);
-  if (!isCurrentTenantContext(context)) return;
   renderExecutiveExperience();
   loadTenants().catch(() => {});
+
+  // Everything below feeds panels on other tabs. Waiting for it before the
+  // first paint cost two seconds of a dashboard that was already answerable.
+  loadHashComparison().then((hashComparison) => {
+    if (!hashComparison || !isCurrentTenantContext(context, hashComparison)) return;
+    latestHashComparison = hashComparison;
+    renderFindingsWorkspace();
+  }).catch(() => {});
+  restoreLatestSavedReport(history.history || [], context).then(() => {
+    if (!isCurrentTenantContext(context)) return;
+    renderExecutiveExperience();
+  }).catch(() => {});
 }
 
 async function loadHashComparison() {
@@ -10735,11 +10816,9 @@ async function loadProtectedMetadata() {
 }
 
 if (accessToken) {
-  loadProtectedMetadata();
-  loadRemediationFindings().catch(() => {});
+  // Only the dashboard's own data at boot. Everything else is registered
+  // against the tab it paints and runs the first time that tab is opened.
   loadHistory().catch(() => {});
-  loadAudit().catch(() => {});
-  loadUsers().catch(() => {});
 } else {
   loadProtectedMetadata();
 }

@@ -21,6 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -262,6 +263,10 @@ app = FastAPI(
 
 if TRUSTED_HOSTS:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=TRUSTED_HOSTS)
+
+# 1.5MB of JS and CSS, and JSON pages of 100-200KB, were served uncompressed.
+# The 1000-byte floor keeps the small status responses off the compressor.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.add_middleware(
     CORSMiddleware,
@@ -2011,20 +2016,26 @@ def inventory_index(
         finding_type=finding_type, protected=protected, q=q, extension=extension,
         sort=sort, direction=direction, cursor=after, limit=limit,
     )
-    # The collapsed table shows real reason/action numbers without a detail
-    # fetch per row.
-    try:
-        from backend.store import inventory_reason_action_counts
+    # The collapsed table shows real reason/action numbers. They are columns on
+    # the row now; reading them from detail_json cost 11.3MB and 127ms of a
+    # 165ms request. Only rows an older build wrote - and the backfill has not
+    # reached - still need the blob.
+    missing = [
+        str(item.get("id") or "")
+        for item in result.get("items", [])
+        if item.get("reason_count") is None or item.get("dlp_count") is None
+    ]
+    if missing:
+        try:
+            from backend.store import inventory_reason_action_counts
 
-        counts = inventory_reason_action_counts(
-            principal.tenant_id, [item.get("id") for item in result.get("items", [])]
-        )
-        for item in result.get("items", []):
-            pair = counts.get(str(item.get("id") or ""))
-            if pair is not None and ("reason_count" not in item or "dlp_count" not in item):
-                item["reason_count"], item["dlp_count"] = pair
-    except Exception:
-        pass
+            counts = inventory_reason_action_counts(principal.tenant_id, missing)
+            for item in result.get("items", []):
+                pair = counts.get(str(item.get("id") or ""))
+                if pair is not None:
+                    item["reason_count"], item["dlp_count"] = pair
+        except Exception:
+            pass
     # Echo the effective server-side scope so the browser can reject a stale
     # response if an MSSP administrator changes tenant while this request is in
     # flight. The data query itself is already tenant-predicated above.
