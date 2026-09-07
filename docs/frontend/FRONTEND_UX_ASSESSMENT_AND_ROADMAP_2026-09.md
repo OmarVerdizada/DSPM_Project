@@ -842,6 +842,35 @@ for four tabs of content, and a list of classes is one column that should stop
 where the list ends. `.sheet`, `.sheet::backdrop` and `.sheet-head` are
 deleted; `.sheet-body` stays because it is the list, not the frame.
 
+### 0.4u Black glyphs, and a hover only one table had
+
+**The all-classes panel drew every coin as a solid black blob.** Moving it out
+of `#tab-overview` and onto the end of the document (0.4t) took it out of
+`#tab-overview .f-ico`, which is where the dashboard states its own glyph
+geometry - `fill: none; stroke: currentColor`. Without a rule an SVG falls
+back to the browser's default, which is a black fill and no stroke, so the
+category colour that the coin still carried was painted over by its own
+silhouette. The selector names the panel as well now. Worth remembering: the
+console's line icons are per-panel sprites with no global rule, so anything
+moved out of a panel loses its icon styling silently - the markup is
+unchanged and only the paint is wrong.
+
+**A hovered row now looks the same on both tables.** The queue washed the
+hovered row in `--indigo-wash`; the inventory did not, and the reason is not
+that it lacked a rule. styles.css forces `tbody tr:hover td` to `--card-2`,
+one or two percent off the surface, over every table in the product. On the
+queue's 40px rows that near-white still reads as a band; across the
+inventory's 108px rows, broken up by chips, badges and buttons, it disappears
+- so one table looked responsive and the other looked dead.
+
+Both tables now state the wash on the row *and its cells*, because the forced
+rule paints the cells. Both also need a panel id in the selector: the rule to
+beat is written `:root:not([data-theme="dark"]) tbody tr:hover td`, and the
+`:not()` argument counts toward specificity, so `.remediation-table tbody
+tr:hover td` - one class and one pseudo-class - loses to it even with
+`!important` on both sides. That cost one round trip: the rule was in the
+CSSOM, matched the element, and still did not win.
+
 ### 0.4a The regression F3 shipped, and the fragility it exposed
 
 Deleting Remediation's second dashboard left one reference behind:

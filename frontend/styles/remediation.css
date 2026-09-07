@@ -488,9 +488,16 @@
   transition: background-color var(--motion-fast) var(--ease-out);
 }
 
-.remediation-table tbody tr:hover,
-.remediation-table tbody tr.is-selected {
-  background: var(--indigo-wash);
+/* The cells carry the wash as well as the row: styles.css forces a near-white
+   onto `tbody tr:hover td`, which paints over anything the row itself sets.
+   The panel id is needed as well as the force - the rule to beat is written
+   `:root:not([data-theme="dark"]) tbody tr:hover td`, and that `:not()`
+   counts, so a class and a pseudo-class alone lose to it. */
+#remediation-workflow .remediation-table tbody tr:hover,
+#remediation-workflow .remediation-table tbody tr:hover td,
+#remediation-workflow .remediation-table tbody tr.is-selected,
+#remediation-workflow .remediation-table tbody tr.is-selected td {
+  background: var(--indigo-wash) !important; /* token-gate: allow — see above */
 }
 
 .remediation-table tbody td {

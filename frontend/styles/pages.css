@@ -112,8 +112,14 @@ button.ledger-cell:hover { background: var(--band-wash); }
    is. That is the whole point of the split: severity has the ramp and its own
    shapes, the category scale has the coin, and because they never share a
    shape they can sit 12px apart without being confusable. A row is
-   recognisable before it is read. */
-#tab-overview .f-ico {
+   recognisable before it is read.
+
+   The all-classes panel draws these same rows from the end of the document
+   rather than from inside the tab, so it has to be named here too: without
+   the rule an SVG falls back to the browser's default, which is a black fill
+   and no stroke - every glyph in that panel rendered as a solid black blob. */
+#tab-overview .f-ico,
+.classes-modal .f-ico {
   width: 16px;
   height: 16px;
   flex: none;
@@ -1118,4 +1124,22 @@ button.ledger-cell:hover { background: var(--band-wash); }
 #results-body .risk-note {
   white-space: normal;
   line-height: 1.25;
+}
+
+
+/* ── A hovered row looks the same on both tables ──────────────
+   The queue says which row the pointer is on with a clear indigo wash. The
+   inventory had the wash too, in principle - but styles.css forces
+   `tbody tr:hover td` to a near-white one or two percent off the surface,
+   which paints over it. On the queue's 40px rows that near-white still reads
+   as a band; across the inventory's 108px rows, broken up by chips and
+   badges, it disappears entirely, which is why one table looked responsive
+   and the other did not.
+
+   Same wash, same rule shape as the queue's, so the two tables answer the
+   pointer the same way.
+   token-gate: allow — the rule being beaten is itself !important. */
+#results-body tr[data-file-key]:hover,
+#results-body tr[data-file-key]:hover td {
+  background: var(--indigo-wash) !important; /* token-gate: allow — see above */
 }

@@ -776,6 +776,36 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertNotIn("<dialog", panel)
         self.assertIn("function closeClassesModal(", self.app_js)
         self.assertIn('event.target.closest("[data-close-classes-modal]")', self.app_js)
+        # The panel draws the dashboard's rows from the end of the document,
+        # so the dashboard's glyph rule has to name it: an SVG with no rule
+        # falls back to a black fill and no stroke, and every coin in the
+        # panel rendered as a solid black blob.
+        pages = Path("frontend/styles/pages.css").read_text(encoding="utf-8")
+        glyphs = pages[pages.index("#tab-overview .f-ico"):]
+        glyphs = glyphs[:glyphs.index("}")]
+        self.assertIn(".classes-modal .f-ico", glyphs)
+        self.assertIn("fill: none;", glyphs)
+        self.assertIn("stroke: currentColor;", glyphs)
+
+    def test_a_hovered_row_looks_the_same_on_both_tables(self) -> None:
+        """The queue said which row the pointer was on with an indigo wash.
+        The inventory did not - styles.css forces `tbody tr:hover td` to a
+        near-white one or two percent off the surface, which paints over the
+        row's own colour. On 40px queue rows that still reads as a band;
+        across 108px inventory rows broken up by chips it disappears."""
+        queue = Path("frontend/styles/remediation.css").read_text(encoding="utf-8")
+        pages = Path("frontend/styles/pages.css").read_text(encoding="utf-8")
+        for sheet, selector in (
+            (queue, "#remediation-workflow .remediation-table tbody tr:hover td,"),
+            (pages, "#results-body tr[data-file-key]:hover td {"),
+        ):
+            block = sheet[sheet.index(selector):]
+            block = block[:block.index("}")]
+            self.assertIn("var(--indigo-wash)", block)
+        # Both need the panel id: the rule they beat is written
+        # `:root:not([data-theme="dark"]) tbody tr:hover td`, and that :not()
+        # counts, so a class and a pseudo-class alone lose to it.
+        self.assertIn("#remediation-workflow .remediation-table tbody tr:hover,", queue)
 
         # One place decides what a scrollbar looks like. styles.css declared it
         # sixty-three times - 8px, 12px, 14px forced - several with a thumb
