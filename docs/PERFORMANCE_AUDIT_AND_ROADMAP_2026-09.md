@@ -667,6 +667,78 @@ data class of 423 files rather than two — a two-entry alias map, merged with
 first. The Compliance frameworks card says NIST. And the queue can be ordered
 by Category, Data type, Affected asset and Owner, text columns starting at A.
 
+### Console polish — 2026-09-08
+
+Nine items, and what each turned out to be underneath.
+
+**Top risks was counting the wrong set.** The card looked capped at four rows
+in a space with room for seven. `dashListCapacity` was never the limit: the
+seven categories were tested against `latestFiles`, the 200-row window the
+workspace holds sorted by risk score. "Locked or unreadable" read zero on an
+estate with a locked file, "Health records" could not appear at all, and the
+four rows that did show were counts of a sample, not of the estate. Each
+category now declares the inventory query that answers it exactly — a list of
+data classes for credentials/payment/health, `framework=gdpr,pci_dss,hipaa,
+nist_sp800_60_enterprise` for regulated, `risk=CRITICAL&protected=false` for
+unprotected, and the facets' own `protected` for locked. Six bounded COUNTs at
+14–26 ms each, issued together, once per estate, cached until it changes.
+
+| | Before | After |
+|---|---|---|
+| Rows shown | 4 | **5** (health is genuinely zero here; *changed* needs the hash comparison) |
+| Dead space under the last row | 138px | **34px** (card padding) |
+| Exposed credentials | 151 (of 200 sampled) | **149** (of 463) |
+| Regulated personal data | 196 | **448** |
+| Payment and bank data | 114 | **259** |
+
+The multi-value `finding_type` filter from the previous round is what made
+this possible: a category is a set of classes, and one request can now ask for
+all of them.
+
+**The queue's table was outside the box drawn for it.** Measured: workspace
+90→876, table 321→**933**. Four blocks in `styles.css`, written for a card
+list this page has not had since the queue became a table, each pinned with
+`!important` and each disagreeing with the last — `display: block` against the
+flex column `remediation.css` declares, a 430px cap, and a second border,
+background, radius and padding drawn inside the workspace's own. Deleted
+rather than out-specified. The spacing came from the same place: three
+children adding margins on top of the workspace's own 12px gap, giving
+24 / 40 / 28 where Findings runs 12 / 12 / 6. The gap is the only spacing on
+that axis now, and the context strip moved from a transparent line under the
+filters to a surface directly above the rows it describes, spread across the
+width instead of packed into the left three quarters.
+
+**Findings' facets took two lines to hold five.** Label beside control cost
+each facet its label's width as well as its own — 1,571px of content in a
+1,314px row, so Folder / path and both buttons dropped to a second, otherwise
+empty line. Stacked, the same five facets and both buttons fit one 63px line
+with 130px to spare. Three legacy grid pins were removed to allow it,
+including the one that let a select size to its longest option ("Org chart,
+employee directory, or reporting hierarchy" made Finding type 411px wide).
+
+**Six smaller ones.** The facet menu lives on the body so no card can clip it,
+which also meant nothing hid it when its page went away — `switchTab` closes
+it. The per-facet Clear button went: a checkbox is its own undo, and the
+page-level Clear filters still resets all of them. Search and Clear filters
+became one pair that wraps together. `scrollbar-gutter: stable both-edges`
+reserved the bar's width on the side it appears and on the side it never does
+— 13 of those became `stable`, and a block headed "make key risk-dashboard
+scrollbars visible on purpose" (targeting seven elements that no longer exist,
+with two raw-hex custom properties) was deleted; hovering a card, workspace,
+modal or drawer now reveals the bar inside it, not just hovering the list
+itself. Sorting Findings called `setStatus`, which writes to
+`#connection-status` — the File Server scan page's result box — so the
+inventory printed "Sorted every file by risk score, lowest first." over the
+last scan's outcome on a different page; it has its own live region now, and a
+file name sorts A to Z rather than "lowest first".
+
+**And one regression, reversed.** A queue row had been routed to the Findings
+page on the reasoning that a finding is about a file. It is not: a queue row
+is a unit of work — where a finding is assigned, commented on, validated and
+closed — and sending the click away replaced that workflow with a file
+listing. The row opens its drawer again; the file is one click away in the row
+menu.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

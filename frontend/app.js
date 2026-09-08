@@ -1810,6 +1810,7 @@ async function refreshEstateSummary() {
       if (!isCurrentTenantContext(context, facets)) return null;
       estateFacets = facets;
       estateSummary = facetsToEstateSummary(facets);
+      refreshRiskCategoryCounts().catch(() => {});
     } catch {
       if (!isCurrentTenantContext(context)) return null;
       estateFacets = null;
@@ -3138,6 +3139,11 @@ function syncInventorySortHeaders() {
   });
 }
 
+function announceInventorySort(message) {
+  const region = document.querySelector("#inventory-sort-status");
+  if (region) region.textContent = message;
+}
+
 async function applyInventorySort(key) {
   if (!INVENTORY_SORT_LABELS[key]) return;
   if (key === inventorySortKey) {
@@ -3146,15 +3152,24 @@ async function applyInventorySort(key) {
     inventorySortKey = key;
     inventorySortDirection = INVENTORY_SORT_DEFAULT_DIRECTIONS[key] || "asc";
   }
-  const directionLabel = inventorySortDirection === "desc" ? "highest first" : "lowest first";
+  // "lowest first" is what a score does; a file name goes A to Z.
+  const isText = ["name", "scan_label"].includes(key);
+  const directionLabel = isText
+    ? (inventorySortDirection === "desc" ? "Z to A" : "A to Z")
+    : (inventorySortDirection === "desc" ? "highest first" : "lowest first");
   syncInventorySortHeaders();
-  setStatus(`Sorting all files by ${INVENTORY_SORT_LABELS[key]}, ${directionLabel}...`);
+  // setStatus() writes to #connection-status, which is the File Server scan
+  // page's result box - so sorting the inventory printed "Sorted every file by
+  // risk score, lowest first." over the last scan's outcome, on a different
+  // page. The sort is already visible in the column header; the announcement
+  // is for screen readers and belongs to Findings.
+  announceInventorySort(`Sorting all files by ${INVENTORY_SORT_LABELS[key]}, ${directionLabel}…`);
   try {
     resetInventoryPageWindow();
     await refreshInventoryPageWindow();
-    setStatus(`Sorted every file by ${INVENTORY_SORT_LABELS[key]}, ${directionLabel}.`);
+    announceInventorySort(`Sorted every file by ${INVENTORY_SORT_LABELS[key]}, ${directionLabel}.`);
   } catch (error) {
-    setStatus(`Sort failed: ${error.message}`);
+    announceInventorySort(`Sort failed: ${error.message}`);
   }
 }
 
@@ -3573,6 +3588,11 @@ function switchTab(tabName) {
   const resolvedTab = permittedTabName(tabName);
   const activePanel = document.getElementById(`tab-${resolvedTab}`);
   if (!activePanel) return;
+
+  // The facet menu is positioned against a control on the page being left,
+  // and it lives on the body so that no card can clip it - which also means
+  // nothing hides it when that page does.
+  closeFacetMenu();
 
   // A setup wizard lives INSIDE its scan panel, so navigating to that panel
   // (or away from it) must dismiss it - otherwise the sidebar changes the URL
@@ -6140,37 +6160,116 @@ function buildPostureSparkline(points) {
 // `category` column the classifiers already write. Two - a changed hash and an
 // unreadable file - are properties of a FILE, not of a finding, so they go to
 // the inventory instead of asking the queue a question it cannot answer.
+// Each category also says how the WHOLE estate answers it. The browser was
+// testing `latestFiles` - the 200-row window the workspace holds, sorted by
+// risk score - so "Locked or unreadable" read zero on an estate that has
+// locked files, "Health records" could never appear, and the four rows that
+// did show were capped at whatever the window happened to contain. Three of
+// the seven rows were missing and the card had a hand's width of dead space
+// under them.
+//
+// `estate` returns the inventory query that counts the category exactly, or a
+// number when the facets already hold it. Each is a bounded COUNT the API
+// answers in 14-26 ms, they are issued together once per estate, and the
+// result is cached until the estate changes. `test` stays as the fallback for
+// the pre-scan and offline paths.
 const RISK_CATEGORIES = [
   { key: "credentials", label: "Exposed credentials", icon: "li-key-round", sev: "critical", cat: "secret",
     go: { to: "queue", filters: { category: "credentials_secrets" } },
+    estate: (classes) => classQuery(classes, isSecretFinding),
     test: (file, findings) => findings.some(isSecretFinding) },
   { key: "unprotected", label: "Unprotected critical files", icon: "li-shield-off", sev: "critical", cat: "record",
     go: { to: "queue", filters: { severity: "CRITICAL" } },
+    estate: () => ({ risk: "CRITICAL", protected: "false" }),
     test: (file, findings, level) => level === "CRITICAL" && !isProtectedFile(file) },
   { key: "payment", label: "Payment and bank data", icon: "li-credit-card", sev: "high", cat: "finance",
     go: { to: "queue", filters: { category: "pci_cardholder_data" } },
-    test: (file, findings) => findings.some((finding) =>
-      /credit card|payment card|\bpan\b|cvv|track data|iban|swift|routing|bank account|card data/i.test(findingDisplayName(finding))
-      || String(finding.pci_category || "").length > 0) },
+    estate: (classes) => classQuery(classes, isPaymentFinding),
+    test: (file, findings) => findings.some(isPaymentFinding) },
   { key: "health", label: "Health records", icon: "li-heart-pulse", sev: "high", cat: "health",
     // No stored category groups health on its own, so this one searches - and
     // the search box shows the term, rather than the filter looking exact.
     go: { to: "queue", filters: { q: "health" } },
-    test: (file, findings) => findings.some((finding) =>
-      /health|medical|\bphi\b|diagnos|patient|mental|disabilit|genetic|biometric/i.test(findingDisplayName(finding))) },
+    estate: (classes) => classQuery(classes, isHealthFinding),
+    test: (file, findings) => findings.some(isHealthFinding) },
   { key: "regulated", label: "Regulated personal data", icon: "li-id-card", sev: "high", cat: "identity",
     go: { to: "queue", filters: { category: "pii,government_ids,biometric_data" } },
+    // The regulated test is about frameworks, and the inventory indexes those.
+    estate: () => ({ framework: "gdpr,pci_dss,hipaa,nist_sp800_60_enterprise" }),
     test: (file, findings) => findings.some(isRegulatedFinding) },
   { key: "changed", label: "Changed since last scan", icon: "li-file-diff", sev: "medium", cat: "record",
     go: { to: "inventory", search: "Hash changed" },
     test: (file) => hasHashChanged(file) },
   { key: "locked", label: "Locked or unreadable", icon: "li-lock", sev: "protected", cat: "legal",
     go: { to: "inventory", risk: "PROTECTED" },
+    // Already counted in the facets the dashboard has, so it costs nothing.
+    estate: () => Number(estateFacets?.protected || 0),
     test: (file) => isProtectedFile(file) },
 ];
 
+// "Changed since last scan" has no estate query on purpose: it needs the hash
+// comparison between two saved runs, which is loaded when Findings opens.
+
+function isPaymentFinding(finding = {}) {
+  return /credit card|payment card|\bpan\b|cvv|track data|iban|swift|routing|bank account|card data|cardholder/i
+    .test(findingDisplayName(finding)) || String(finding.pci_category || "").length > 0;
+}
+
+function isHealthFinding(finding = {}) {
+  return /health|medical|\bphi\b|diagnos|patient|mental|disabilit|genetic|biometric/i
+    .test(findingDisplayName(finding));
+}
+
+// A category that is a set of data classes asks for all of them at once, which
+// is exactly what a multi-value finding_type filter is for.
+function classQuery(classes, predicate) {
+  const wanted = classes.filter((name) => predicate({ type: name }));
+  return wanted.length ? { finding_type: wanted.join(",") } : 0;
+}
+
+let riskCategoryCounts = null;
+let riskCategoryCountsKey = "";
+let riskCategoryCountsInFlight = null;
+
+function estateSignature(facets = estateFacets) {
+  return facets ? `${facets.tenant_id || ""}:${facets.total || 0}:${(facets.finding_types || []).length}` : "";
+}
+
+async function refreshRiskCategoryCounts() {
+  if (!accessToken || !estateFacets) return null;
+  const key = estateSignature();
+  if (key && key === riskCategoryCountsKey) return riskCategoryCounts;
+  if (riskCategoryCountsInFlight) return riskCategoryCountsInFlight;
+  const classes = (estateFacets.finding_types || []).map((item) => String(item.value || "")).filter(Boolean);
+  const context = captureTenantContext();
+  riskCategoryCountsInFlight = (async () => {
+    const counts = {};
+    await Promise.all(RISK_CATEGORIES.map(async (item) => {
+      const query = item.estate?.(classes);
+      if (query === undefined || query === null) return;
+      if (typeof query === "number") {
+        counts[item.key] = query;
+        return;
+      }
+      const params = new URLSearchParams({ ...query, limit: "1" });
+      try {
+        const page = await api(`/api/inventory?${params}`, null, "GET");
+        counts[item.key] = Number(page?.total || 0);
+      } catch { /* one category short is better than an empty card */ }
+    }));
+    if (!isCurrentTenantContext(context)) return null;
+    riskCategoryCounts = counts;
+    riskCategoryCountsKey = key;
+    renderPostureCard(latestReport?.summary || buildCurrentSummary(), getCurrentPostureScore());
+    return counts;
+  })().finally(() => { riskCategoryCountsInFlight = null; });
+  return riskCategoryCountsInFlight;
+}
+
 function riskCategories(limit = 6) {
   const counts = new Map(RISK_CATEGORIES.map((item) => [item.key, 0]));
+  // One pass over the window still answers "changed since last scan", and
+  // covers every category before the estate counts land.
   latestFiles.forEach((file) => {
     const findings = primaryFindingsForFile(file);
     const level = String(getEffectiveRisk(file).level || "LOW").toUpperCase();
@@ -6181,7 +6280,10 @@ function riskCategories(limit = 6) {
     });
   });
   return RISK_CATEGORIES
-    .map((item) => ({ ...item, count: counts.get(item.key) }))
+    .map((item) => ({
+      ...item,
+      count: riskCategoryCounts?.[item.key] ?? counts.get(item.key),
+    }))
     .filter((item) => item.count > 0)
     .sort((a, b) => SEVERITY_RANK.indexOf(b.sev.toUpperCase()) - SEVERITY_RANK.indexOf(a.sev.toUpperCase()) || b.count - a.count)
     .slice(0, limit);
@@ -7097,6 +7199,7 @@ function remediationActionLabel(action = "") {
 
 function remediationActionMenu(finding = {}) {
   const findingId = escapeHtml(finding.finding_id || "");
+  const filePath = String(finding.file?.path || "");
   const actions = remediationCanManage(finding) ? remediationActionSet(finding) : [];
   const primary = actions.filter((action) => !["risk_acceptance", "false_positive", "suppress"].includes(action));
   const exceptions = actions.filter((action) => ["risk_acceptance", "false_positive", "suppress"].includes(action));
@@ -7107,6 +7210,7 @@ function remediationActionMenu(finding = {}) {
       </summary>
       <div class="dropdown-content">
         <button type="button" data-remediation-open="${findingId}">View details</button>
+        ${filePath ? `<button type="button" data-remediation-file-open="${escapeHtml(filePath)}">Open file in Findings</button>` : ""}
         ${primary.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}
         ${exceptions.length ? `<hr />${exceptions.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}` : ""}
       </div>
@@ -9297,6 +9401,10 @@ async function loadHistory() {
   latestDashboard = dashboard;
   estateFacets = estateFacetResponse;
   estateSummary = estateFacetResponse ? facetsToEstateSummary(estateFacetResponse) : null;
+  // The boot path sets the facets directly rather than through
+  // refreshEstateSummary(), which is where Top risks learns the class names it
+  // needs to count. Both entry points ask; the second one returns the cache.
+  refreshRiskCategoryCounts().catch(() => {});
   renderHistory(history.history || []);
   renderExecutiveExperience();
   loadTenants().catch(() => {});
@@ -10297,17 +10405,13 @@ function ensureFacetMenu() {
   menu.className = "facet-menu";
   menu.setAttribute("role", "dialog");
   menu.hidden = true;
+  // No Clear button: every option is a checkbox, so unticking is the undo,
+  // and the row of one-per-facet Clears was four buttons doing what four
+  // clicks already did. The page-level Clear filters still resets all of them.
   menu.innerHTML = `<div class="facet-menu-head"><strong class="facet-menu-title"></strong>`
-    + `<button type="button" class="facet-menu-clear plain-btn">Clear</button></div>`
+    + `<span class="facet-menu-chosen"></span></div>`
     + `<label class="facet-menu-search" hidden><input type="search" placeholder="Filter options" aria-label="Filter options" autocomplete="off" /></label>`
     + `<div class="facet-menu-list"></div>`;
-  menu.querySelector(".facet-menu-clear").addEventListener("click", () => {
-    if (!facetMenuOwner) return;
-    facetPending.set(facetMenuOwner.id, new Set());
-    syncFacetSummary(facetMenuOwner);
-    renderFacetApplyState(facetGroupOf(facetMenuOwner.id));
-    renderFacetMenuList();
-  });
   menu.querySelector(".facet-menu-search input").addEventListener("input", () => renderFacetMenuList());
   menu.querySelector(".facet-menu-list").addEventListener("change", (event) => {
     const box = event.target.closest("input[type=checkbox]");
@@ -10328,9 +10432,7 @@ function updateFacetMenuHead() {
   if (!facetMenuOwner || !facetMenuElement) return;
   const chosen = facetPendingValues(facetMenuOwner.id).length;
   facetMenuElement.querySelector(".facet-menu-title").textContent = facetLabelName(facetMenuOwner);
-  const clear = facetMenuElement.querySelector(".facet-menu-clear");
-  clear.disabled = !chosen;
-  clear.textContent = chosen ? `Clear ${chosen}` : "Clear";
+  facetMenuElement.querySelector(".facet-menu-chosen").textContent = chosen ? `${chosen} selected` : "";
 }
 
 function renderFacetMenuList() {
@@ -10794,13 +10896,15 @@ document.addEventListener("click", (event) => {
     loadRemediationFindings({ showLoading: false }).catch(() => {});
     return;
   }
-  // A finding is about a file, and the file's full context - every finding on
-  // it, its reasons, its recommended actions - already has a page. The queue
-  // row now goes there rather than making the reader open a drawer and then
-  // go looking for the same file by hand.
-  const queueRow = event.target.closest?.("[data-remediation-file]");
-  if (queueRow && !event.target.closest("[data-remediation-action], [data-remediation-open], .remediation-queue-menu")) {
-    openFileInInventory(queueRow.dataset.remediationFile);
+  // A queue row is a unit of WORK, not a file: it is where a finding is
+  // assigned, commented on, validated and closed. Sending the row click to
+  // the Findings page took the reader out of the queue and gave them a file
+  // listing instead of the workflow, so the row opens its drawer again. The
+  // file is still one click away, from the row menu.
+  const fileButton = event.target.closest?.("[data-remediation-file-open]");
+  if (fileButton) {
+    fileButton.closest("details")?.removeAttribute("open");
+    openFileInInventory(fileButton.dataset.remediationFileOpen);
     return;
   }
 

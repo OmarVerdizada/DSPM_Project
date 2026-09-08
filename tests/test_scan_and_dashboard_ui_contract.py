@@ -232,7 +232,8 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertNotIn('params.set("sort", "risk_score")', query_body)
         # Applying a sort refetches from the server instead of sorting locally.
         apply_start = self.app_js.index("async function applyInventorySort(")
-        apply_body = self.app_js[apply_start:apply_start + 700]
+        apply_body = self.app_js[apply_start:]
+        apply_body = apply_body[:apply_body.index(chr(10) + "}" + chr(10))]
         self.assertIn("resetInventoryPageWindow()", apply_body)
         self.assertIn("refreshInventoryPageWindow()", apply_body)
         self.assertIn("inventorySortDirection = inventorySortDirection === \"asc\" ? \"desc\" : \"asc\"", apply_body)

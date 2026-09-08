@@ -499,22 +499,34 @@ abbr[title] {
   overflow: visible !important;
 }
 
-:root:root:root #inventory-workspace .inventory-facet-row > label {
-  display: inline-flex !important;
+/* Label above control, not beside it. Beside it, each facet cost its label's
+   width as well as its own - five of them plus the actions came to 1,571px in
+   a 1,314px row, so Folder / path and the two buttons dropped to a second
+   line that was otherwise empty. Above it, the same five facets and both
+   buttons fit one 63px line with 130px to spare, and the row reads the way
+   the queue's nine already do. */
+:root:root:root:root #inventory-workspace .inventory-facet-row > label {
+  display: grid;
   flex: 0 1 auto;
-  align-items: center !important;
-  gap: 6px;
-  width: auto !important;
-  margin: 0 !important;
-  grid-template-columns: none !important;
+  align-items: stretch;
+  gap: 2px;
+  width: auto;
+  min-width: 0;
+  max-width: 184px;
+  margin: 0;
+  grid-template-columns: none;
+  font-size: var(--text-xs);
   white-space: nowrap;
 }
 
-:root:root:root #inventory-workspace .inventory-facet-row .facet-shell,
-:root:root:root #inventory-workspace .inventory-facet-row .facet-shell select {
-  width: auto !important;
-  min-width: 118px !important;
-  max-width: 190px !important;
+/* The control fills its facet; the facet decides the width. Without the cap a
+   select sizes to its longest option - "Org chart, employee directory, or
+   reporting hierarchy" made Finding type 411px wide on its own. */
+:root:root:root:root #inventory-workspace .inventory-facet-row .facet-shell,
+:root:root:root:root #inventory-workspace .inventory-facet-row .facet-shell select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 :root:root:root #inventory-workspace .inventory-facet-row select {
@@ -523,7 +535,7 @@ abbr[title] {
   margin-top: 0 !important;
 }
 
-:root:root:root #inventory-workspace .inventory-facet-row .secondary-btn { margin-left: auto; }
+:root:root:root #inventory-workspace .inventory-facet-row > .facet-actions { margin-left: auto; }
 
 /* The strip was clipping its last chip against a hidden overflow. */
 :root:root #inventory-workspace #inventory-context-metrics {
@@ -595,6 +607,28 @@ html:hover {
   background-clip: content-box;
 }
 ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── The widget reveals its own bar ───────────────────────────
+   `:hover` on a scrolling element means the pointer is inside THAT element -
+   over the list, the table body, the rows. Over the card's title, its header
+   or the padding around it, the bar a reader is looking for stays invisible,
+   which reads as no scrollbar at all. The box a bar belongs to reveals it. */
+:is(.dash-card, .workspace, .modal-box, .sheet, .remediation-drawer-panel,
+    .drawer-content, .facet-menu):hover
+:is(.dash-card-body, .dash-rows, .scroll-card-list, .table-wrap,
+    .inventory-table-wrap, .remediation-table-wrap, .remediation-drawer-body,
+    .sheet-body, .detail-list, .facet-menu-list) {
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
+}
+
+:is(.dash-card, .workspace, .modal-box, .sheet, .remediation-drawer-panel,
+    .drawer-content, .facet-menu):hover
+:is(.dash-card-body, .dash-rows, .scroll-card-list, .table-wrap,
+    .inventory-table-wrap, .remediation-table-wrap, .remediation-drawer-body,
+    .sheet-body, .detail-list, .facet-menu-list)::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 34%, transparent);
+  background-clip: content-box;
+}
 
 @media (prefers-reduced-motion: reduce) {
   :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap) {
@@ -816,18 +850,12 @@ html:hover {
   letter-spacing: var(--tracking-eyebrow);
 }
 
-.facet-menu-clear {
-  padding: 0;
-  border: 0;
-  background: none;
+/* No Clear button per facet: a checkbox is its own undo, and four of them in
+   a row of facets was four controls doing what four clicks already did. What
+   is worth saying is how many are ticked. */
+.facet-menu-chosen {
   color: var(--indigo);
   font-size: var(--text-xs);
-  cursor: pointer;
-}
-
-.facet-menu-clear:disabled {
-  color: var(--ink-muted);
-  cursor: default;
 }
 
 /* `label` carries a display rule of its own, which outranks the UA's
@@ -946,5 +974,13 @@ html:hover {
   box-shadow: 0 0 0 3px var(--indigo-wash);
 }
 
-#inventory-workspace .inventory-facet-row .facet-apply { margin-left: auto; }
-#inventory-workspace .inventory-facet-row .facet-apply + .secondary-btn { margin-left: 0; }
+/* Search and Clear filters are one pair: they end the facet row together and
+   wrap together, rather than Clear dropping to a line of its own. */
+.facet-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+#inventory-workspace .inventory-facet-row .facet-actions { margin-left: auto; }
+#inventory-workspace .inventory-facet-row .facet-actions .secondary-btn { margin-left: 0; }

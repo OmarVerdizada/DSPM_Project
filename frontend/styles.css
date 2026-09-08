@@ -1057,7 +1057,7 @@ main {
 
 .inventory-table-wrap {
   max-height: min(68vh, 720px);
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
 }
 
 table {
@@ -5324,18 +5324,6 @@ body.sidebar-collapsed .app-shell > main {
   --scrollbar-size: 10px;
 }
 
-#tab-risk #remediation-workflow,
-#tab-risk .remediation-workflow {
-  display: block !important;
-  max-height: 560px !important;
-  overflow: auto !important;
-  padding: 10px !important;
-  border-radius: var(--radius-lg, 22px) !important;
-  border: 1px solid var(--line) !important;
-  background: color-mix(in srgb, var(--card) 94%, transparent) !important;
-  scrollbar-gutter: stable both-edges;
-}
-
 #tab-risk #remediation-workflow .scroll-card-list,
 #tab-risk .remediation-list,
 #tab-risk .remediation-list.remediation-kanban {
@@ -5353,7 +5341,7 @@ body.sidebar-collapsed .app-shell > main {
 #tab-risk #signal-matrix {
   max-height: 390px !important;
   overflow: auto !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
   border-radius: var(--radius-lg, 22px) !important;
   border: 1px solid var(--line) !important;
   background: color-mix(in srgb, var(--card) 94%, transparent) !important;
@@ -5476,7 +5464,7 @@ body.sidebar-collapsed .app-shell > main {
 #risk-heatmap {
   max-height: 340px !important;
   overflow: auto !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
 }
 
 #risk-heatmap .heatmap-grid {
@@ -5537,7 +5525,7 @@ body.sidebar-collapsed .app-shell > main {
 #tab-risk .posture-trend {
   max-height: 300px !important;
   overflow: auto !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
   padding-bottom: 8px !important;
 }
 
@@ -5550,22 +5538,6 @@ body.sidebar-collapsed .app-shell > main {
 
 #posture-trend .trend-bar {
   grid-template-rows: minmax(76px, 1fr) auto auto !important;
-}
-
-#tab-risk #remediation-workflow,
-#tab-risk .remediation-workflow {
-  min-height: 0 !important;
-  max-height: 430px !important;
-  padding: 8px !important;
-}
-
-#tab-risk #remediation-workflow:has(.empty),
-#tab-risk .remediation-workflow:has(.empty) {
-  height: auto !important;
-  max-height: none !important;
-  padding: 0 !important;
-  border: 0 !important;
-  background: transparent !important;
 }
 
 #tab-risk #remediation-workflow .scroll-card-list,
@@ -5589,7 +5561,7 @@ body.sidebar-collapsed .app-shell > main {
 #department-risk {
   max-height: 340px !important;
   overflow: auto !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
   padding-right: 4px !important;
 }
 
@@ -5611,7 +5583,7 @@ body.sidebar-collapsed .app-shell > main {
 #scan-comparison {
   max-height: 260px !important;
   overflow: auto !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
 }
 
 #scan-comparison .scan-comparison-list {
@@ -5713,7 +5685,7 @@ body.sidebar-collapsed .app-shell > main {
 #priority-risk-files {
   max-height: 430px !important;
   overflow: auto !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
 }
 
 #priority-risk-files .priority-file-list,
@@ -5766,7 +5738,7 @@ body.sidebar-collapsed .app-shell > main {
   min-height: 300px !important;
   overflow: auto !important;
   padding: 0 12px 8px 0 !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
 }
 
 #department-risk .department-risk-list {
@@ -5822,44 +5794,13 @@ body.sidebar-collapsed .app-shell > main {
   padding-bottom: 12px !important;
 }
 
-/* DSPM v102 local: make key risk-dashboard scrollbars visible on purpose. */
-:root {
-  --risk-scrollbar-thumb: #8da2c0;
-  --risk-scrollbar-track: color-mix(in srgb, var(--surface-soft) 72%, #0f172a);
-}
-
-#posture-trend {
-  overflow-x: scroll !important;
-  overflow-y: hidden !important;
-  padding-bottom: 18px !important;
-  scrollbar-gutter: stable both-edges !important;
-  scrollbar-width: thin;
-}
-
-#risk-heatmap,
-#department-risk {
-  overflow-y: scroll !important;
-  overflow-x: auto !important;
-  padding-right: 16px !important;
-  scrollbar-gutter: stable both-edges !important;
-  scrollbar-width: thin;
-}
-
-#remediation-workflow,
-#signal-matrix,
-#priority-risk-files,
-#scan-comparison,
-#risk-topology {
-  scrollbar-width: thin;
-}
-
 /* DSPM v108 local: report center rebuilt as bounded scroll cards. */
 #tab-reports .report-preview,
 #report-preview {
   max-height: min(74vh, 760px) !important;
   overflow: auto !important;
   padding: 14px !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 
@@ -5894,7 +5835,7 @@ body.sidebar-collapsed .app-shell > main {
   max-height: 340px !important;
   overflow: auto !important;
   padding: 14px !important;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 
@@ -6108,7 +6049,7 @@ body.sidebar-collapsed .app-shell > main {
 .table-wrap:has(#audit-body) {
   max-height: min(58vh, 560px);
   overflow: auto;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
   scrollbar-width: thin;
 }
 
@@ -6896,7 +6837,7 @@ body.sidebar-collapsed .app-shell > main {
 .report-register-wrap {
   max-height: 520px;
   overflow: auto;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable;
 }
 
 .report-register-table {
@@ -16139,10 +16080,6 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   gap: 8px 14px !important;
 }
 #inventory-workspace .inventory-facet-row > label {
-  display: inline-flex !important;
-  flex-flow: row nowrap !important;
-  align-items: center !important;
-  gap: 8px !important;
   white-space: nowrap !important;
   width: auto !important;
   min-width: 0 !important;
@@ -16994,11 +16931,6 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 /* The live list carries .remediation-queue (not .remediation-kanban), so
    the single-column tier never matched - an auto-fit rule packed five
    277px columns and squeezed the file names out entirely. */
-:root:root #tab-risk #remediation-workflow {
-  scrollbar-gutter: auto !important;
-  padding: 8px 10px !important;
-}
-
 /* Scan comparison: quiet, compact type. */
 :root:root #tab-risk > section.visual-panel h4 { font-size: 14px !important; }
 
@@ -17100,17 +17032,8 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root #inventory-workspace .inventory-facet-row > label {
   display: grid !important;
-  grid-template-columns: auto minmax(0, 1fr) !important;
-  align-items: center !important;
-  gap: 6px !important;
-}
-:root:root #inventory-workspace .inventory-facet-row .facet-shell,
-:root:root #inventory-workspace .inventory-facet-row .facet-shell select {
-  width: 100% !important;
-  max-width: none !important;
 }
 :root:root #inventory-workspace .inventory-facet-row > .inventory-scan-facet {
-  grid-template-columns: auto 180px !important;
   justify-self: start !important;
   width: auto !important;
 }

@@ -1556,3 +1556,47 @@ body:has(#tab-risk dialog[open]) .app-shell > main {
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--ease-out);
 }
+
+
+/* ── One box, one rhythm ──────────────────────────────────────
+   The workspace is a flex column with a 12px gap, and its three children each
+   added margins on top of that: 24px under the search bar, 40px above the
+   filters, 28px above the table. Measured against Findings, which reads
+   correctly at 12 / 12 / 6, the queue was running at 24 / 40 / 28 - the same
+   parts, three different distances, none of them declared on purpose.
+
+   The gap is now the only spacing on this axis. */
+#remediation-workspace > .table-toolbar { margin-bottom: 0; }
+
+#remediation-workspace > .inventory-command-bar {
+  margin: 0;
+  gap: var(--space-1);
+}
+
+/* The table is the page. It fills whatever the chrome above it leaves and
+   scrolls inside itself, so the last row lands on the workspace's own edge
+   instead of 58px past it. */
+#remediation-workspace > .remediation-workflow {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0;
+}
+
+/* ── The context strip belongs to the table ───────────────────
+   Five figures about the queue sat in a transparent line closer to the
+   filters than to the rows they describe, and packed into the left three
+   quarters of a 1,330px row. They read as a caption for the table now: the
+   same surface Findings gives its own, spread across the width, one gap above
+   the rows. */
+#remediation-workspace .inventory-context-metrics {
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+}
+
+#remediation-workspace .inventory-context-metrics > div {
+  background: none;
+  border: 0;
+}
