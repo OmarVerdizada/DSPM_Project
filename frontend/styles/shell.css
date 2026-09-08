@@ -70,6 +70,22 @@
   padding-right: var(--shell-head-reserve);
   min-height: 34px;
 }
+/* ── The header cluster is the dashboard's ────────────────────
+   Search, New Scan, the theme toggle, the connection pill and the tenant
+   selector sat over every page's title row, reserving 640px of it on eight
+   panels for controls that answer questions the dashboard asks. They stay on
+   the dashboard; every other page gets its full title row back.
+
+   The guard is on the attribute's PRESENCE as well as its value: a load
+   straight onto /dashboard never calls switchTab, so the attribute is absent
+   there and a bare :not() would hide the cluster on the one page it belongs
+   to. */
+body[data-tab]:not([data-tab="overview"]) .topbar { display: none; }
+
+body[data-tab]:not([data-tab="overview"]) :is(.section-header, .asset-header, .report-header, .history-toolbar) {
+  padding-right: 0;
+}
+
 .title-with-action {
   display: flex;
   align-items: center;
@@ -822,6 +838,13 @@ html:hover {
 /* The menu lives on the body, not in the facet row: the row scrolls, the
    command bar clips, and a popover that is clipped is a popover that is
    half there. */
+/* `element.hidden = true` sets an attribute the UA styles as
+   [hidden]{display:none} - and that UA rule loses to ANY author rule with a
+   class in it, including the one below. So closeFacetMenu() has been setting
+   the attribute on a menu that stayed on screen: through a click elsewhere,
+   through picking another facet, through navigating to another page. */
+.facet-menu[hidden] { display: none; }
+
 .facet-menu {
   position: fixed;
   z-index: var(--z-overlay);

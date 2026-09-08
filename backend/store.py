@@ -3716,8 +3716,15 @@ _INVENTORY_SOURCE_GROUPS = {
 }
 
 
-# The Finding type facet lists locked files as a class of their own.
+# Three entries in the Finding type facet are not data classes at all: they
+# are the three states the dashboard's Assessment coverage card counts. Locked
+# files were already listed this way; "Classified" and "Clear" are the other
+# two columns of that card, which had nowhere to send a reader because no
+# filter could express "carries at least one finding" or "read successfully
+# and found nothing".
 INVENTORY_PROTECTED_TYPE = "protected / locked"
+INVENTORY_CLASSIFIED_TYPE = "classified"
+INVENTORY_CLEAR_TYPE = "clear"
 
 
 def _inventory_filters(risk: str, source: str, framework: str, q: str, extension: str,
@@ -3748,12 +3755,17 @@ def _inventory_filters(risk: str, source: str, framework: str, q: str, extension
     risks = [value for value in risks if value != "PROTECTED"]
     finding_types = filter_values(finding_type, lower=True)
     protected_type = INVENTORY_PROTECTED_TYPE in finding_types
-    finding_types = [value for value in finding_types if value != INVENTORY_PROTECTED_TYPE]
+    classified_type = INVENTORY_CLASSIFIED_TYPE in finding_types
+    clear_type = INVENTORY_CLEAR_TYPE in finding_types
+    finding_types = [value for value in finding_types
+                     if value not in (INVENTORY_PROTECTED_TYPE, INVENTORY_CLASSIFIED_TYPE, INVENTORY_CLEAR_TYPE)]
     return {
         "risk": risks[0] if len(risks) == 1 else "",
         "risks": risks,
         "protected_risk": protected_risk,
         "protected_type": protected_type,
+        "classified_type": classified_type,
+        "clear_type": clear_type,
         "source": plain_sources[0] if len(plain_sources) == 1 else "",
         "sources": plain_sources,
         "source_group": tuple(source_group),
@@ -3818,6 +3830,10 @@ def _inventory_normalized_where(tenant_id: str, filt: dict) -> tuple[list[str], 
     params.extend(_json_member_pattern(name) for name in wanted_types)
     if filt.get("protected_type"):
         type_clauses.append("is_protected = 1")
+    if filt.get("classified_type"):
+        type_clauses.append("COALESCE(finding_count, 0) > 0")
+    if filt.get("clear_type"):
+        type_clauses.append("(COALESCE(finding_count, 0) = 0 AND is_protected = 0)")
     if type_clauses:
         where.append(f"({' OR '.join(type_clauses)})")
     if filt["frameworks"]:
@@ -4059,9 +4075,13 @@ def _inventory_page_from_rows(
         wanted = set()
         for value in filt.get("finding_types") or ([filt["finding_type"]] if filt.get("finding_type") else []):
             wanted |= {name.lower() for name in finding_type_alias_group(value)}
-        if wanted or filt.get("protected_type"):
+        if wanted or filt.get("protected_type") or filt.get("classified_type") or filt.get("clear_type"):
+            found = int(row.get("finding_count") or 0)
+            locked = bool(row.get("is_protected"))
             if not ((wanted & finding_types)
-                    or (filt.get("protected_type") and bool(row.get("is_protected")))):
+                    or (filt.get("protected_type") and locked)
+                    or (filt.get("classified_type") and found > 0)
+                    or (filt.get("clear_type") and found == 0 and not locked)):
                 return False
         framework_keys = {str(value).lower() for value in _decode_string_list(row.get("framework_keys"))}
         if filt["frameworks"] and not any(value in framework_keys for value in filt["frameworks"]):
@@ -4454,6 +4474,15 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
                 by_severity[risk] = by_severity.get(risk, 0) + 1
     if protected_count:
         finding_counts["Protected / locked"] = protected_count
+    classified_count = sum(1 for row in rows if int(row.get("finding_count") or 0) > 0)
+    if classified_count:
+        finding_counts["Classified"] = classified_count
+    clear_count = sum(
+        1 for row in rows
+        if int(row.get("finding_count") or 0) == 0 and not row.get("is_protected")
+    )
+    if clear_count:
+        finding_counts["Clear"] = clear_count
     return {
         "total": len(rows), "risk_counts": risk_counts, "protected": protected_count,
         "sources": _facet_items(source_counts), "scans": _facet_items(scan_label_counts),
@@ -4660,6 +4689,14 @@ def inventory_facets(tenant_id: str, source: str = "") -> dict:
             protected_count = int(protected_row["n"] if protected_row else 0)
             if protected_count:
                 finding_counts["Protected / locked"] = protected_count
+            # The same three coverage states the card counts, so the facet and
+            # the card cannot disagree about what they mean.
+            classified_count = int((estate_row["sensitive_n"] if estate_row else 0) or 0)
+            if classified_count:
+                finding_counts["Classified"] = classified_count
+            clear_count = max(0, int(total_row["n"] if total_row else 0) - classified_count - protected_count)
+            if clear_count:
+                finding_counts["Clear"] = clear_count
             return _cache_inventory_facets(cache_key, {
                 "total": int(total_row["n"] if total_row else 0),
                 "risk_counts": {str(row["risk_level"] or "").upper(): int(row["n"]) for row in risk_rows if row["risk_level"]},

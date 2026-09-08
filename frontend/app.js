@@ -620,6 +620,10 @@ let inventoryRiskFacets = new Set();
 let inventorySourceFacets = new Set();
 let inventoryFindingFacets = new Set();
 let inventoryFacetSourceKey = "";
+// Not a facet: no control offers it, and it exists only so a dashboard card
+// that counted "critical and not locked" can open the same set. Cleared with
+// the facets.
+let inventoryProtectedFacet = null;
 
 // ---- Facets that take more than one answer -------------------------------
 // Every filter on Findings and the queue was a <select>: one question, one
@@ -1385,6 +1389,7 @@ function clearFindingsFacetState() {
   inventorySourceFacets = new Set();
   inventoryFindingFacets = new Set();
   inventoryFrameworkFacets = new Set();
+  inventoryProtectedFacet = null;
   FACET_GROUPS.findings.forEach((id) => setFacetSelection(id, []));
   commitFacetGroup("findings");
 }
@@ -2511,7 +2516,18 @@ function resetInventoryPageWindow(active = false) {
 
 function applyInventoryRisk(level) {
   const value = String(level || "ALL").toUpperCase();
-  setFacetSelection("inventory-risk-filter", value === "ALL" ? [] : [value]);
+  // Every caller is a dashboard figure saying "show me these files", so the
+  // page starts clean. Setting only the severity left whatever an earlier jump
+  // had put in the other facets, and the list then contradicted the number
+  // that was clicked - most visibly on "All files", which prints the estate
+  // total and opened a filtered page.
+  FACET_GROUPS.findings.forEach((id) => setFacetSelection(id, []));
+  if (filterInput) {
+    filterInput.value = "";
+    lastInventoryQuery = "";
+  }
+  if (value !== "ALL") setFacetSelection("inventory-risk-filter", [value]);
+  inventoryProtectedFacet = null;
   applyFindingsFacets();
 }
 
@@ -2599,6 +2615,7 @@ function inventoryFilterParams() {
   if (inventorySourceFacets.size) params.set("source", [...inventorySourceFacets].join(","));
   if (inventoryFindingFacets.size) params.set("finding_type", [...inventoryFindingFacets].join(","));
   if (inventoryFrameworkFacets.size) params.set("framework", [...inventoryFrameworkFacets].join(","));
+  if (inventoryProtectedFacet !== null) params.set("protected", inventoryProtectedFacet);
   if (query) params.set("q", query);
   return params;
 }
@@ -3075,9 +3092,13 @@ function getVisibleInventoryFiles(files = latestFiles) {
       && ![...inventorySourceFacets].some((source) => inventorySourceMatches(file, source))) return false;
     if (inventoryFindingFacets.size) {
       const types = getFileFindingTypes(file);
-      const matched = [...inventoryFindingFacets].some((type) => (type === "Protected / locked"
-        ? isProtectedFile(file)
-        : types.includes(type)));
+      const matched = [...inventoryFindingFacets].some((type) => {
+        // Three of the options in this facet are coverage states, not classes.
+        if (type === "Protected / locked") return isProtectedFile(file);
+        if (type === "Classified") return getFileFindingTypes(file).length > 0;
+        if (type === "Clear") return !isProtectedFile(file) && getFileFindingTypes(file).length === 0;
+        return types.includes(type);
+      });
       if (!matched) return false;
     }
     if (inventoryFrameworkFacets.size) {
@@ -3614,6 +3635,10 @@ function switchTab(tabName) {
   navPinnedGroups.forEach((group) => navOpenGroups.add(group));
   navOpenGroups.add(destination);
   currentNavTab = resolvedTab;
+  // Which page is open, where a stylesheet can read it. switchTab is the only
+  // thing that toggles .active on a panel, and the popstate handler routes
+  // through here too, so this covers every way the console navigates.
+  document.body.dataset.tab = resolvedTab;
   syncNavGroups();
   const targetUrl = tabUrl(resolvedTab);
   if (location.pathname + location.hash !== targetUrl && PATH_DEFAULT_TAB[location.pathname]) {
@@ -6266,6 +6291,30 @@ async function refreshRiskCategoryCounts() {
   return riskCategoryCountsInFlight;
 }
 
+// A category's estate query is {finding_type}, {framework} or {risk} - the
+// same three facets Findings offers - so it can be applied to the page
+// directly. `protected` is the one key with no facet of its own; it is carried
+// beside them so "critical AND not locked" stays the question the card counted.
+function applyRiskCategoryToFindings(category) {
+  if (!category?.estate) return false;
+  const classes = (estateFacets?.finding_types || []).map((item) => String(item.value || "")).filter(Boolean);
+  let query = category.estate(classes);
+  if (typeof query === "number") query = category.go?.risk ? { risk: category.go.risk } : null;
+  if (!query || typeof query !== "object") return false;
+  switchTab("findings");
+  FACET_GROUPS.findings.forEach((id) => setFacetSelection(id, []));
+  if (filterInput) {
+    filterInput.value = "";
+    lastInventoryQuery = "";
+  }
+  if (query.risk) setFacetSelection("inventory-risk-filter", String(query.risk).split(","));
+  if (query.finding_type) setFacetSelection("inventory-finding-filter", String(query.finding_type).split(","));
+  if (query.framework) setFacetSelection("inventory-framework-select", String(query.framework).split(","));
+  inventoryProtectedFacet = query.protected === undefined ? null : String(query.protected);
+  applyFindingsFacets();
+  return true;
+}
+
 function riskCategories(limit = 6) {
   const counts = new Map(RISK_CATEGORIES.map((item) => [item.key, 0]));
   // One pass over the window still answers "changed since last scan", and
@@ -6435,10 +6484,21 @@ function dashListCapacity(bodySelector, rowHeight, { min, max, reserve = 0 }) {
   return Math.max(min, Math.min(max, Math.floor(room / rowHeight)));
 }
 
+// Three entries in the Finding type facet are coverage states, not data
+// classes: they say whether a file was read and whether anything was found in
+// it. They are filters worth having - the Assessment coverage card opens them
+// - but a list headed "Top data classes" is not where they belong, and
+// "Classified" would sit at the top of it by definition.
+const COVERAGE_FACET_VALUES = new Set(["Classified", "Clear", "Protected / locked"]);
+
+function isDataClass(value) {
+  return !COVERAGE_FACET_VALUES.has(String(value || "").trim());
+}
+
 function renderDataClassesCard() {
   const card = document.querySelector("#data-classes-card");
   if (!card) return;
-  const allStats = (estateFacets?.finding_types || []).map((item) => {
+  const allStats = (estateFacets?.finding_types || []).filter((item) => isDataClass(item.value)).map((item) => {
     const severityCounts = item.severity_file_counts || {};
     return {
       type: String(item.value || "Unknown"),
@@ -6551,7 +6611,7 @@ function renderLocationsCard() {
         <button type="button" class="place-row plain-btn" data-location-jump="${escapeHtml(entry.label)}"
                 data-depth="${entry.depth}" ${last ? "data-last" : ""}
                 style="--fw-share:${Math.max(10, Math.round((entry.total / max) * 100))}%"
-                aria-label="${escapeHtml(entry.name)}, ${entry.total} files, ${escapeHtml(mix)} — open in Findings">
+                aria-label="${escapeHtml(entry.label)}, ${entry.total} files, ${escapeHtml(mix)} — open in Findings">
           <span class="place-lead">
             <span class="place-mark" aria-hidden="true">${glyph(entry.depth ? "li-folder" : "li-database")}</span>
             <span class="place-row-name">${escapeHtml(entry.label)}</span>
@@ -6625,12 +6685,12 @@ function renderStaleCard() {
     </div>
     <div class="gauge-bands">
       ${AGE_BANDS.map(([key, label, note]) => `
-        <button type="button" class="gauge-band plain-btn" data-age-jump="${key}" title="${escapeHtml(note)}"
+        <div class="gauge-band" title="${escapeHtml(note)}"
                 aria-label="${escapeHtml(label)}, ${counts[key].toLocaleString()} files — ${escapeHtml(note.toLowerCase())}">
           <span class="gauge-band-dot" data-age="${key}" aria-hidden="true"></span>
           <span class="gauge-band-label">${escapeHtml(label)}</span>
           <b>${counts[key].toLocaleString()}</b>
-        </button>`).join("")}
+        </div>`).join("")}
     </div>`;
 }
 
@@ -6657,10 +6717,15 @@ function renderCoverageCard() {
   // "nothing found" and "unreadable" are two orders of magnitude apart - both
   // were slivers. Columns give the small values a readable footing and a
   // label, and the card gets shorter for it.
+  // Each column is now a filter the inventory can answer, so the three
+  // figures and the three lists they open agree. Before this, two of the three
+  // carried "ALL" - the same jump, which cleared the severity facet and opened
+  // an unfiltered page - and the third was unreachable anyway because the
+  // click handler was looking for a class name the markup never had.
   const columns = [
-    ["classified", classified, "Classified", "ALL"],
-    ["clear", clear, "Clear", "ALL"],
-    ["unreadable", unreadable, "Unreadable", "PROTECTED"],
+    ["classified", classified, "Classified", "Classified"],
+    ["clear", clear, "Clear", "Clear"],
+    ["unreadable", unreadable, "Unreadable", "Protected / locked"],
   ];
   const tallest = Math.max(...columns.map(([, count]) => count), 1);
   card.innerHTML = `
@@ -6668,7 +6733,7 @@ function renderCoverageCard() {
     <div class="col-chart" role="img"
          aria-label="${columns.map(([, count, label]) => `${count.toLocaleString()} ${label.toLowerCase()}`).join(", ")}">
       ${columns.map(([kind, count, label, jump]) => `
-        <button type="button" class="col-item plain-btn" data-risk-jump="${jump}" data-kind="${kind}"
+        <button type="button" class="col-item plain-btn" data-coverage-jump="${escapeHtml(jump)}" data-kind="${kind}"
                 style="--col-height:${Math.max(14, Math.round((count / tallest) * 100))}%"
                 aria-label="${escapeHtml(label)}, ${count.toLocaleString()} files — open in Findings">
           <span class="col-value">${count.toLocaleString()}</span>
@@ -6687,6 +6752,7 @@ function openAllDataClasses() {
   const body = document.querySelector("#data-classes-dialog-body");
   if (!dialog || !body) return;
   const rows = (estateFacets?.finding_types || [])
+    .filter((item) => isDataClass(item.value))
     .map((item) => {
       const severity = item.severity_file_counts || {};
       return {
@@ -9524,6 +9590,13 @@ function renderTenantOptions() {
   }
 }
 
+// A tenant's name, and the id under it only when the two differ. Compared
+// without case because the seeded tenant is "Default" over "default", which is
+// the same string printed twice as far as a reader is concerned.
+function tenantLabel(tenant = {}) {
+  return String(tenant.display_name || tenant.tenant_id || "");
+}
+
 function renderTenantsTable(tenants) {
   if (!accessToken || currentRole !== "admin") {
     tenantsBody.innerHTML = '<tr><td colspan="6" class="empty">Admin role is required to manage tenants.</td></tr>';
@@ -9542,8 +9615,10 @@ function renderTenantsTable(tenants) {
       return `
         <tr>
           <td>
-            <strong>${escapeHtml(tenant.display_name || tenant.tenant_id)}</strong>
-            <div class="subtext">${escapeHtml(tenant.tenant_id)}</div>
+            <strong>${escapeHtml(tenantLabel(tenant))}</strong>
+            ${tenantLabel(tenant).toLowerCase() === String(tenant.tenant_id || "").toLowerCase()
+              ? ""
+              : `<div class="subtext">${escapeHtml(tenant.tenant_id)}</div>`}
           </td>
           <td>
             <div class="inline-control tenant-code-control">
@@ -9771,7 +9846,9 @@ function renderUsers(users) {
         <tr data-user-row="${escapeHtml(user.username)}">
           <td>
             <strong>${escapeHtml(user.username)}</strong>
-            <div class="subtext">${escapeHtml(user.full_name || "No full name")}</div>
+            ${user.full_name && user.full_name !== user.username
+              ? `<div class="subtext">${escapeHtml(user.full_name)}</div>`
+              : ""}
           </td>
           <td><input class="table-input" data-user-tenant="${escapeHtml(user.username)}" value="${escapeHtml(user.tenant_id || "default")}" /></td>
           <td>
@@ -10235,19 +10312,35 @@ document.addEventListener("click", (event) => {
   const place = event.target.closest("[data-location-jump]");
   if (place) {
     switchTab("findings");
+    const wanted = place.dataset.locationJump;
     if (filterInput) {
-      filterInput.value = place.dataset.locationJump;
+      filterInput.value = wanted;
       filterInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    // The Folder / path control drives this same search, so it has to show
+    // what is applied - otherwise the page is filtered by a folder and the
+    // only control that could say so reads "Anywhere". Set directly: its own
+    // change listener would re-run the search that just ran.
+    if (inventoryFolderSelect && [...inventoryFolderSelect.options].some((option) => option.value === wanted)) {
+      inventoryFolderSelect.value = wanted;
     }
     return;
   }
 
-  // The coverage legend is not a ledger cell, but it points at the same
-  // filters: "unreadable" is the protected risk level, the rest is everything.
-  const coverage = event.target.closest(".coverage-item[data-risk-jump]");
+  // Assessment coverage: three states of the same estate, each one an entry
+  // in the Finding type facet. The handler used to look for `.coverage-item`,
+  // a class this markup has never carried, so all three columns were focusable
+  // buttons that did nothing at all.
+  const coverage = event.target.closest("[data-coverage-jump]");
   if (coverage) {
     switchTab("findings");
-    applyInventoryRisk(coverage.dataset.riskJump);
+    FACET_GROUPS.findings.forEach((id) => setFacetSelection(id, []));
+    setFacetSelection("inventory-finding-filter", [coverage.dataset.coverageJump]);
+    if (filterInput) {
+      filterInput.value = "";
+      lastInventoryQuery = "";
+    }
+    applyFindingsFacets();
     return;
   }
 
@@ -10262,6 +10355,13 @@ document.addEventListener("click", (event) => {
   const topRisk = event.target.closest("[data-risk-jump-key]");
   if (topRisk) {
     const category = RISK_CATEGORIES.find((item) => item.key === topRisk.dataset.riskJumpKey);
+    // The row's number is a count of FILES, and it is computed by asking the
+    // inventory a question the inventory can be asked again. So the row opens
+    // Findings holding exactly that question, and the list it lands on has as
+    // many rows as the card said. Sending it to the queue instead answered a
+    // different question - findings, not files - with a category string that
+    // did not always match how the finding was stored.
+    if (applyRiskCategoryToFindings(category)) return;
     const go = category?.go;
     if (!go) {
       switchTab("risk");

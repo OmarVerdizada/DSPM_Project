@@ -739,6 +739,89 @@ closed — and sending the click away replaced that workflow with a file
 listing. The row opens its drawer again; the file is one click away in the row
 menu.
 
+### One page standard — 2026-09-08
+
+Audited across eight parallel investigations, each re-read by a skeptic before
+anything was changed. Seven findings, all confirmed against the files.
+
+**The filter menu never closed.** `closeFacetMenu()` sets `element.hidden`, and
+the UA's `[hidden]{display:none}` loses to any author rule carrying a class -
+including `.facet-menu { display: flex }`. So the attribute was being set on a
+menu that stayed on screen through a click elsewhere, through picking another
+facet, and through navigating away. One guard rule fixes all three. The sweep
+found three other elements toggled the same way (`.facet-menu-search`,
+`.remediation-error`, `.tb-suggest`); all three already had their guard.
+
+**One gutter.** `.tab-panel { padding: 24px }` is the console's only page
+gutter — `main` is flushed to zero — and exactly one panel overrode it:
+`:root:root #tab-findings { padding-left: 16px !important }`. Findings sat 8px
+closer to the sidebar than the other ten pages, and 8px past them on the right.
+Measured after the deletion: all eleven panels start at the same x.
+
+| | Before | After |
+|---|---|---|
+| Panels starting at the same x | 10 of 11 | **11 of 11** |
+| Title row y | 24 / 30 / 42 | **30**, or 24 where the page has a subtitle |
+| Panels that are themselves cards | 2 | **0** |
+
+**Two pages were their own box.** History & audit and Risk logic carried
+`.workspace` on the panel element, so each was both the page and the card on
+it — which put their page title *inside* the card, unlike every other page.
+History's toolbar had additionally grown a border, radius, background, shadow
+and an animated sweep: a card inside a card that also drew the title. Both now
+read like Findings — title on the page, content under it — and Risk logic's
+five sections are the boxes rather than being wrapped in a sixth.
+
+**A box inside a box, once.** `:root:not([data-theme="dark"]) .table-wrap` drew
+a white block with a 34px drop shadow (and two raw hex values) on the card it
+already sat in. `.logic-section` was a card whose grid was a card whose items
+were cards. Administration and Settings padded their inner panels 20px and
+rounded them 16px inside a card that pads nothing and rounds 12. Two stacked
+workspaces on Administration had nothing between them at all.
+
+**The header cluster belongs to the dashboard.** Search, New Scan, the theme
+toggle, the connection pill and the tenant selector sat over every page's title
+row and reserved 640px of it — on eight panels — for controls that answer the
+dashboard's questions. `switchTab` now publishes the active tab on `<body>`,
+and the cluster and its reserve are scoped to the dashboard. Guarded on the
+attribute's presence as well as its value: a load straight onto /dashboard
+never calls `switchTab`, so a bare `:not()` would have hidden the cluster on
+the one page it belongs to. **Consequence, stated:** switching tenant is now a
+dashboard action.
+
+**A tenant's name, printed once.** `create_tenant` falls back to the id when
+the display name is blank, and the schema backfill sets `display_name =
+tenant_id` for every tenant it discovers on an upgraded database — so the admin
+list printed the same string bold and again underneath, on every row. The id
+now shows only when it differs, compared without case because the seeded row is
+"Default" over "default".
+
+**The dashboard's dead links.** Assessment coverage's three columns were
+buttons bound to `.coverage-item`, a class the markup has never carried — and
+a contract test was pinning that selector in place. Two of the three carried
+the same jump anyway, `ALL`, which *clears* a facet rather than setting one,
+because no filter could express "carries at least one finding" or "was read and
+nothing was found". Both are now entries in the Finding type facet alongside
+the locked one, computed in the same pass as every other facet:
+
+```
+Classified 448 + Clear 14 + Protected/locked 1 = 463 = the estate
+```
+
+Each column opens exactly the list it counted. The Stale sensitive data card's
+three age bands were the same shape — `data-age-jump` with no handler anywhere
+and no age parameter to route to — so they stopped advertising a click they
+cannot perform.
+
+**Top risks opens the files it counted.** The row's number is a count of files,
+produced by asking the inventory a question; the row now asks it again and
+lands on Findings. Every row's landing page holds as many files as the card
+printed: unprotected 151, credentials 149, regulated 448, payment 259, locked 1.
+`applyInventoryRisk` also stopped leaving earlier facets applied — "All files"
+prints the estate total and used to open a filtered page.
+
+960 tests, 25 skipped.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

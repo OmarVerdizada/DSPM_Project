@@ -99,6 +99,22 @@ class FacetMenuTests(unittest.TestCase):
         switch = APP_JS[APP_JS.index("function switchTab(tabName) {"):]
         self.assertIn("closeFacetMenu();", switch[:switch.index("const destination")])
 
+    def test_setting_hidden_actually_hides_it(self) -> None:
+        """`element.hidden = true` sets an attribute the UA styles as
+        [hidden]{display:none}, and that UA rule loses to ANY author rule with a
+        class in it - including `.facet-menu { display: flex }`. So the menu was
+        being "closed" by an attribute nothing acted on: it survived a click
+        elsewhere, a different facet, and navigating to another page."""
+        self.assertIn(".facet-menu[hidden] { display: none; }", SHELL_CSS)
+        guard = SHELL_CSS.index(".facet-menu[hidden]")
+        declaration = SHELL_CSS.index(".facet-menu {")
+        self.assertLess(guard, declaration, "the guard has to be able to see what it is guarding against")
+        # The three ways out, all of which depend on the guard above.
+        self.assertIn('document.addEventListener("pointerdown", (event) => {', APP_JS)
+        outside = APP_JS[APP_JS.index('document.addEventListener("pointerdown", (event) => {'):]
+        self.assertIn("closeFacetMenu();", outside[:400])
+        self.assertIn('if (event.key === "Escape" && facetMenuOwner)', APP_JS)
+
     def test_no_clear_button_inside_a_list_of_checkboxes(self) -> None:
         self.assertNotIn("facet-menu-clear", APP_JS)
         self.assertNotIn(".facet-menu-clear", SHELL_CSS)

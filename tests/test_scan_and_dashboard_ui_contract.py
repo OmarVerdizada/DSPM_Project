@@ -586,7 +586,10 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
             self.assertIn(f'id="{select}"', self.index_html)
         self.assertNotIn('data-risk-filter="CRITICAL"', self.index_html)
         self.assertIn("function applyInventoryRisk(", self.app_js)
-        self.assertIn('.coverage-item[data-risk-jump]', self.app_js)
+        # The coverage columns route on their own attribute. The handler used
+        # to look for `.coverage-item`, a class the markup has never carried,
+        # so this assertion was pinning the bug in place.
+        self.assertIn('event.target.closest("[data-coverage-jump]")', self.app_js)
 
         # A card cannot claim "no scan yet" when the truth is that this build
         # of the service does not send the field. That mis-report sent an

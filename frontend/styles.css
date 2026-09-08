@@ -540,7 +540,6 @@ select:focus {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
-  margin-top: 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--line));
   border-radius: 8px;
   background:
@@ -1029,10 +1028,6 @@ main {
 
 #tab-overview .workspace {
   margin-top: 18px;
-}
-
-.risk-logic {
-  margin-top: 24px;
 }
 
 .table-toolbar {
@@ -2442,21 +2437,8 @@ progress::-moz-progress-bar {
 
 .risk-logic-board {
   display: grid;
-  gap: 18px;
 }
 
-
-.logic-section {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: 0 14px 34px rgba(23, 32, 42, 0.05);
-}
-
-
-.logic-section {
-  padding: 18px;
-}
 
 .logic-section-title {
   display: flex;
@@ -3644,7 +3626,7 @@ body:not(.role-admin) [data-admin-only] { display: none !important; } /* token-g
 .inventory-context-metrics {
   border: 1px solid var(--line);
   background: linear-gradient(145deg, color-mix(in srgb, var(--surface) 94%, var(--accent) 4%), color-mix(in srgb, var(--surface-soft) 82%, transparent));
-  border-radius: 22px;
+  border-radius: var(--radius-control);
   box-shadow: var(--shadow);
 }
 
@@ -4652,7 +4634,7 @@ body {
 
 /* Risk Logic had a more-specific fixed 4-column rule with 210px minimums.
    This caused clipped cards on smaller / zoomed viewports. */
-#tab-logic.workspace.risk-logic {
+#tab-logic.risk-logic {
   overflow-x: clip !important;
 }
 
@@ -7426,10 +7408,6 @@ body.sidebar-collapsed .app-shell > main {
 .risk-logic .compliance-logic-section {
   position: relative;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line)) !important;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, transparent), transparent 34%),
-    linear-gradient(180deg, color-mix(in srgb, var(--surface) 96%, var(--accent) 4%), var(--surface)) !important;
 }
 
 .risk-logic .compliance-logic-section .logic-section-title {
@@ -7972,13 +7950,6 @@ body.sidebar-collapsed .app-shell > main {
   padding-bottom: 18px !important;
 }
 
-.compliance-logic-section {
-  border-color: color-mix(in srgb, var(--accent) 26%, var(--line)) !important;
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent 42%),
-    var(--surface) !important;
-}
-
 .compliance-logic-item {
   box-shadow: 0 12px 26px rgba(15, 23, 42, 0.05);
 }
@@ -8453,13 +8424,6 @@ body:not(.sidebar-collapsed) .app-shell > .sidebar .brand.logo-lockup {
 :root:not([data-theme="dark"]) .table-input:focus {
   border-color: color-mix(in srgb, var(--accent) 62%, #c9d8e6) !important;
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 16%, transparent) !important;
-}
-
-:root:not([data-theme="dark"]) .table-wrap,
-:root:not([data-theme="dark"]) .inventory-table-wrap {
-  border-color: #cfdeeb !important;
-  background: #ffffff !important;
-  box-shadow: 0 14px 34px rgba(15, 23, 42, .06) !important;
 }
 
 :root:not([data-theme="dark"]) thead th {
@@ -11027,7 +10991,6 @@ main, .app-shell > main, .app-shell main {
   background: none !important;
   border: none !important;
   box-shadow: none !important;
-  margin: 0 0 20px !important;
   border-radius: 0 !important;
 }
 .theme-toggle .theme-icon,
@@ -12455,9 +12418,7 @@ body.sidebar-collapsed .app-shell > main {
 #tab-settings .asset-editor {
   display: grid;
   gap: 14px;
-  padding: 20px !important;
   border: 1px solid var(--line) !important;
-  border-radius: 16px !important;
   background: var(--card) !important;
   box-shadow: var(--shadow-soft) !important;
   margin-bottom: 16px;
@@ -12695,7 +12656,7 @@ body.sidebar-collapsed .app-shell > main {
 #tab-reports .report-header,
 :root:not([data-theme="dark"]) #tab-reports .report-header {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
@@ -12975,9 +12936,7 @@ body.sidebar-collapsed .app-shell > main {
   display: grid;
   gap: 14px;
   align-content: start;
-  padding: 20px !important;
   border: 1px solid var(--line) !important;
-  border-radius: 16px !important;
   background: var(--card) !important;
   box-shadow: var(--shadow-soft) !important;
 }
@@ -13397,12 +13356,6 @@ body.sidebar-collapsed .app-shell > main {
   gap: 16px;
   flex-wrap: wrap;
   padding: 18px 20px !important;
-  border: 1px solid var(--line) !important;
-  border-radius: 16px !important;
-  background: var(--card) !important;
-  box-shadow: var(--shadow-soft) !important;
-  overflow: hidden;
-  margin-bottom: 16px;
 }
 #tab-history .history-toolbar > div:not(.toolbar-fx) {
   position: relative;
@@ -13529,7 +13482,6 @@ body.sidebar-collapsed .app-shell > main {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 16px;
 }
 #executive-summary .history-card {
   --met: var(--accent);
@@ -16177,9 +16129,6 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root td.empty::before { display: block; margin: 0 auto 14px; }
 
-/* Findings: the search-results table gets the widest, tallest area the
-   tab can give it. */
-:root:root #tab-findings { padding-left: 16px !important; padding-right: 16px !important; }
 :root:root #inventory-workspace .inventory-table-wrap {
   max-height: calc(100vh - 230px) !important;
   padding-left: 0 !important;

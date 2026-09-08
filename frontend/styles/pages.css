@@ -784,10 +784,8 @@ button.ledger-cell:hover { background: var(--band-wash); }
   border: 0;
   border-radius: var(--radius-control);
   background: none;
-  cursor: pointer;
   transition: background-color var(--motion-fast) var(--ease-out);
 }
-.gauge-band:hover { background: var(--hover-wash); }
 .gauge-band-dot { width: 8px; height: 8px; border-radius: 50%; }
 .gauge-band-label {
   color: var(--ink-muted);
@@ -820,10 +818,16 @@ button.ledger-cell:hover { background: var(--band-wash); }
   height: 100dvh;
   overflow: hidden;
 }
-#tab-risk > .section-header,
-#tab-risk > .ledger-row { flex: 0 0 auto; }
-#tab-risk > .section-header { margin-bottom: 0; }
-#tab-risk .ledger-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* The queue's header is a grandchild of the panel - it sits inside the drawer
+   and then inside .remediation-page-content - so a child combinator on
+   #tab-risk matched nothing at all. That content column carries its own gap,
+   so the header adds no margin of its own.
+   `.ledger-row` lives only on the dashboard; both #tab-risk rules for it were
+   addressing an element this page has never had. */
+#tab-risk .remediation-page-content > .section-header {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
 
 .remediation-board {
   flex: 1 1 auto;
@@ -979,7 +983,7 @@ button.ledger-cell:hover { background: var(--band-wash); }
 /* Colour changes on this page are state changes, so they take the same
    duration as everything else rather than snapping. */
 #tab-overview .dash-card,
-#tab-overview :is(.class-row, .risk-row, .place-row, .fw-row, .col-item, .gauge-band, .coverage-item) {
+#tab-overview :is(.class-row, .risk-row, .place-row, .fw-row, .col-item, .gauge-band) {
   transition:
     background-color var(--motion-fast) var(--ease-out),
     box-shadow var(--motion-base) var(--ease-out),
@@ -988,7 +992,7 @@ button.ledger-cell:hover { background: var(--band-wash); }
 
 @media (prefers-reduced-motion: reduce) {
   #tab-overview .dash-card,
-  #tab-overview :is(.class-row, .risk-row, .place-row, .fw-row, .col-item, .gauge-band, .coverage-item),
+  #tab-overview :is(.class-row, .risk-row, .place-row, .fw-row, .col-item, .gauge-band),
   .lolli-stem,
   .lolli-dot,
   .col-bar,
@@ -1143,3 +1147,21 @@ button.ledger-cell:hover { background: var(--band-wash); }
 #results-body tr[data-file-key]:hover td {
   background: var(--hover-wash) !important; /* token-gate: allow — see above */
 }
+
+
+/* ── History & audit, and Administration ──────────────────────
+   History's title used to live inside its toolbar, and the toolbar had grown a
+   border, a radius, a background, a shadow and an animated sweep - a card
+   inside the card the panel itself was drawing. It reads like Findings now:
+   the title on the page, one workspace under it, and the workspace's gap as
+   the only spacing between the toolbar, the summary grid and the table. */
+#history-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Two workspaces stacked as direct children of a block panel, with nothing
+   between them - the users table sat on the audit trail. */
+#tab-security > .workspace + .workspace { margin-top: var(--space-4); }
+
