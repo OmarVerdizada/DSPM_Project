@@ -640,8 +640,8 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         facet holding exactly these values."""
         routing = self.app_js[self.app_js.index('const dataClass = event.target.closest("[data-inventory-search]")'):]
         routing = routing[:routing.index("const framework =")]
-        self.assertIn("inventoryFindingFilter.value = wanted", routing)
-        self.assertIn('inventoryFindingFilter.dispatchEvent(new Event("change"', routing)
+        self.assertIn('setFacetSelection("inventory-finding-filter", [wanted])', routing)
+        self.assertIn("applyFindingsFacets()", routing)
         # The search box is cleared, or the two filters would compound.
         self.assertIn('filterInput.value = ""', routing)
 

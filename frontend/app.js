@@ -29,6 +29,7 @@ const inventoryFolderSelect = document.querySelector("#inventory-folder-filter")
 const inventorySourceFilter = document.querySelector("#inventory-source-filter");
 const inventoryFindingFilter = document.querySelector("#inventory-finding-filter");
 const inventoryClearFiltersBtn = document.querySelector("#clear-inventory-filters");
+const inventoryApplyFiltersBtn = document.querySelector("#inventory-apply-filters");
 const inventoryExportCsvBtn = document.querySelector("#inventory-export-csv");
 const inventoryExportNdjsonBtn = document.querySelector("#inventory-export-ndjson");
 const inventoryExportStatus = document.querySelector("#inventory-export-status");
@@ -82,6 +83,7 @@ const remediationWorkflow = document.querySelector("#remediation-workflow");
 const remediationDrawerToggle = document.querySelector("#remediation-drawer-toggle");
 const remediationDrawerBody = document.querySelector("#remediation-drawer-body");
 const remediationFilters = document.querySelector("#remediation-filters");
+const remediationApplyFiltersBtn = document.querySelector("#remediation-apply-filters");
 const remediationSearch = document.querySelector("#remediation-search");
 const remediationScopeFilter = document.querySelector("#remediation-scope-filter");
 const remediationSeverityFilter = document.querySelector("#remediation-severity-filter");
@@ -611,6 +613,43 @@ let inventoryRiskFilter = "ALL";
 let inventorySourceFacet = "ALL";
 let inventoryFindingFacet = "ALL";
 let inventoryFrameworkFacets = new Set();
+// Each facet holds a set now, and the single-value globals above are the
+// first answer in it - kept for the browser-local filters that predate the
+// server-side inventory and still read one value.
+let inventoryRiskFacets = new Set();
+let inventorySourceFacets = new Set();
+let inventoryFindingFacets = new Set();
+let inventoryFacetSourceKey = "";
+
+// ---- Facets that take more than one answer -------------------------------
+// Every filter on Findings and the queue was a <select>: one question, one
+// answer. The question an operator actually asks is "critical AND high", or
+// three owners at once, so each becomes a checkbox menu.
+//
+// The <select> stays where it is. It is where a dozen renderers write their
+// option lists, it draws the control - leading glyph, caret, ellipsis, and
+// the width rules pinned across four layers of styles.css - and it displays
+// the current answer through a synthetic first option. Only its input is
+// taken away: a transparent trigger covers it, and one menu shared by every
+// facet on the page holds the checkboxes.
+const FACET_SUMMARY_VALUE = "__facet_summary__";
+// Scope is exclusive by nature. Folder has no parameter of its own - it
+// drives the free-text search, which takes one string. Both stay single.
+const FACET_SINGLE_IDS = new Set(["inventory-folder-filter", "remediation-scope-filter"]);
+const FACET_GROUPS = {
+  findings: ["inventory-risk-filter", "inventory-source-filter", "inventory-finding-filter",
+    "inventory-framework-select"],
+  risk: ["remediation-severity-filter", "remediation-category-filter", "remediation-status-filter",
+    "remediation-owner-filter", "remediation-framework-filter", "remediation-data-filter",
+    "remediation-asset-filter", "remediation-sla-filter"],
+};
+// Pending is what the menus show; applied is what the last search asked for.
+// Nothing between the two reaches the server, which is the point: narrowing
+// by three facets used to cost three round trips and two thrown-away renders.
+const facetPending = new Map();
+const facetApplied = new Map();
+let facetMenuOwner = null;
+let facetMenuElement = null;
 let fileSearchIndex = new WeakMap();
 
 function captureTenantContext() {
@@ -1333,13 +1372,21 @@ function clearResultsFilter() {
   if (filterInput) {
     filterInput.value = "";
   }
+  clearFindingsFacetState();
+  renderInventoryFrameworkFilter();
+}
+
+// Both the Clear button and a change of tenant unset every Findings facet.
+function clearFindingsFacetState() {
   inventoryRiskFilter = "ALL";
   inventorySourceFacet = "ALL";
   inventoryFindingFacet = "ALL";
+  inventoryRiskFacets = new Set();
+  inventorySourceFacets = new Set();
+  inventoryFindingFacets = new Set();
   inventoryFrameworkFacets = new Set();
-  if (inventorySourceFilter) inventorySourceFilter.value = "ALL";
-  if (inventoryFindingFilter) inventoryFindingFilter.value = "ALL";
-  renderInventoryFrameworkFilter();
+  FACET_GROUPS.findings.forEach((id) => setFacetSelection(id, []));
+  commitFacetGroup("findings");
 }
 
 function summarizeExtensions(files = [], backendCounts = null) {
@@ -2182,10 +2229,26 @@ function isRegulatedFinding(finding = {}) {
   return frameworks.some((item) => ["gdpr", "pci_dss", "hipaa", "nist_sp800_60_enterprise"].includes(item)) || domain.startsWith("regulated") || domain.startsWith("privacy") || domain.startsWith("nist") || category.startsWith("pci_") || category.startsWith("nist_");
 }
 
+// The names the detectors give a credential, generic and framework alike.
+// Matched as whole names rather than by substring so "Password" cannot be
+// found inside an unrelated label.
+const SECRET_FINDING_NAMES = new Set([
+  "api key", "aws access key", "github token", "password", "private key",
+  "connection string", "jwt", "session token",
+  "api key, access token, oauth secret, or service token",
+  "password, passphrase, or password hash",
+  "private key, certificate secret, ssh key, or keystore material",
+  "session token, jwt, refresh token, or auth cookie",
+  "database connection string or database uri",
+]);
+
 function isSecretFinding(finding = {}) {
   const domain = String(finding.classification_domain || "").toLowerCase();
   const category = String(finding.data_category || finding.category || finding.finding_category || "").toLowerCase();
-  return domain === "secrets" || category.includes("credential") || category.includes("secret");
+  if (domain === "secrets" || category.includes("credential") || category.includes("secret")) return true;
+  // An inventory page's findings carry a name and nothing else, so the name
+  // has to be enough on its own.
+  return SECRET_FINDING_NAMES.has(String(findingDisplayName(finding) || "").trim().toLowerCase());
 }
 
 function selectedFrameworkScope() {
@@ -2446,14 +2509,13 @@ function resetInventoryPageWindow(active = false) {
 }
 
 function applyInventoryRisk(level) {
-  inventoryRiskFilter = String(level || "ALL").toUpperCase();
-  if (inventoryRiskSelect) inventoryRiskSelect.value = inventoryRiskFilter;
-  renderedRowsLimit = ROW_PAGE_SIZE;
-  refreshInventoryPageWindow();
+  const value = String(level || "ALL").toUpperCase();
+  setFacetSelection("inventory-risk-filter", value === "ALL" ? [] : [value]);
+  applyFindingsFacets();
 }
 
 function renderInventoryRiskSelection() {
-  if (inventoryRiskSelect) inventoryRiskSelect.value = inventoryRiskFilter;
+  syncFacetSummary(inventoryRiskSelect);
 }
 
 function canUseInventoryPageWindow() {
@@ -2529,11 +2591,12 @@ function hydrateInventoryPageItem(item = {}) {
 function inventoryFilterParams() {
   const params = new URLSearchParams();
   const query = filterInput?.value?.trim() || "";
-  if (!["ALL", "PROTECTED"].includes(inventoryRiskFilter)) params.set("risk", inventoryRiskFilter);
-  if (inventoryRiskFilter === "PROTECTED") params.set("protected", "true");
-  if (inventorySourceFacet !== "ALL") params.set("source", inventorySourceFacet);
-  if (inventoryFindingFacet === "Protected / locked") params.set("protected", "true");
-  else if (inventoryFindingFacet !== "ALL") params.set("finding_type", inventoryFindingFacet);
+  // "Protected" in the Severity list and "Protected / locked" in the Finding
+  // type list are the same stored flag, and the server knows to OR each of
+  // them into the facet it was ticked in - so both travel as ordinary values.
+  if (inventoryRiskFacets.size) params.set("risk", [...inventoryRiskFacets].join(","));
+  if (inventorySourceFacets.size) params.set("source", [...inventorySourceFacets].join(","));
+  if (inventoryFindingFacets.size) params.set("finding_type", [...inventoryFindingFacets].join(","));
   if (inventoryFrameworkFacets.size) params.set("framework", [...inventoryFrameworkFacets].join(","));
   if (query) params.set("q", query);
   return params;
@@ -2613,15 +2676,20 @@ async function streamInventoryExport(format) {
   }
 }
 
+function inventoryFacetSource() {
+  const sources = [...inventorySourceFacets];
+  return sources.length === 1 ? sources[0] : "ALL";
+}
+
 async function refreshInventoryFacets() {
   if (!canUseInventoryPageWindow()) return;
   const context = captureTenantContext();
-  const selectedSource = inventorySourceFacet;
+  const selectedSource = inventoryFacetSource();
   const requestId = ++inventoryFacetRequest;
   try {
     if (selectedSource === "ALL") {
       const canonical = estateFacets || await refreshEstateSummary();
-      if (!canonical || !isCurrentTenantContext(context, canonical) || requestId !== inventoryFacetRequest || inventorySourceFacet !== selectedSource) return;
+      if (!canonical || !isCurrentTenantContext(context, canonical) || requestId !== inventoryFacetRequest || inventoryFacetSource() !== selectedSource) return;
       inventoryFacets = canonical;
       const page = currentInventoryPage();
       if (page) renderRows(page.items, { serverPage: page });
@@ -2630,7 +2698,7 @@ async function refreshInventoryFacets() {
     const params = new URLSearchParams();
     if (selectedSource !== "ALL") params.set("source", selectedSource);
     const facets = await api(`/api/inventory/facets${params.size ? `?${params}` : ""}`, null, "GET");
-    if (!isCurrentTenantContext(context, facets) || requestId !== inventoryFacetRequest || inventorySourceFacet !== selectedSource) return;
+    if (!isCurrentTenantContext(context, facets) || requestId !== inventoryFacetRequest || inventoryFacetSource() !== selectedSource) return;
     inventoryFacets = facets;
     const page = currentInventoryPage();
     if (page) renderRows(page.items, { serverPage: page });
@@ -3000,10 +3068,17 @@ function getVisibleInventoryFiles(files = latestFiles) {
   const query = filterInput?.value?.trim().toLowerCase() || "";
   return (files || []).filter((file) => {
     const risk = getEffectiveRisk(file).level;
-    if (inventoryRiskFilter === "PROTECTED" && !isProtectedFile(file)) return false;
-    if (!["ALL", "PROTECTED"].includes(inventoryRiskFilter) && risk !== inventoryRiskFilter) return false;
-    if (inventorySourceFacet !== "ALL" && !inventorySourceMatches(file, inventorySourceFacet)) return false;
-    if (inventoryFindingFacet !== "ALL" && !getFileFindingTypes(file).includes(inventoryFindingFacet)) return false;
+    if (inventoryRiskFacets.size
+      && !(inventoryRiskFacets.has(risk) || (inventoryRiskFacets.has("PROTECTED") && isProtectedFile(file)))) return false;
+    if (inventorySourceFacets.size
+      && ![...inventorySourceFacets].some((source) => inventorySourceMatches(file, source))) return false;
+    if (inventoryFindingFacets.size) {
+      const types = getFileFindingTypes(file);
+      const matched = [...inventoryFindingFacets].some((type) => (type === "Protected / locked"
+        ? isProtectedFile(file)
+        : types.includes(type)));
+      if (!matched) return false;
+    }
     if (inventoryFrameworkFacets.size) {
       const frameworks = getFileFrameworks(file);
       if (![...inventoryFrameworkFacets].some((framework) => frameworks.includes(framework))) return false;
@@ -3015,7 +3090,7 @@ function getVisibleInventoryFiles(files = latestFiles) {
 function renderInventoryControlState(files = latestFiles, visible = getVisibleInventoryFiles(files), serverPage = null) {
   updateInventoryFilterOptions(files || []);
   renderInventoryRiskSelection();
-  [...(inventoryRiskSelect?.options || [])].forEach((option) => {
+  facetRealOptions(inventoryRiskSelect).forEach((option) => {
     const risk = option.value || "ALL";
     const serverCounts = serverPage && inventoryFacets ? inventoryFacets.risk_counts || {} : null;
     const count = serverCounts
@@ -3140,22 +3215,18 @@ function isCommonInventoryScanSource(value) {
 function renderInventoryScanOptions() {
   if (inventorySourceFilter) {
     const scanNames = completedInventoryScanNames();
-    const current = scanNames.includes(inventorySourceFacet) || isCommonInventoryScanSource(inventorySourceFacet)
-      ? inventorySourceFacet
-      : "ALL";
-    inventorySourceFacet = current;
-    const selected = (value) => value === current ? "selected" : "";
     const savedScans = scanNames.length
-      ? `<optgroup label="Scans">${scanNames.map((name) => `<option value="${escapeHtml(name)}" ${selected(name)}>${escapeHtml(name)}</option>`).join("")}</optgroup>`
+      ? `<optgroup label="Scans">${scanNames.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("")}</optgroup>`
       : "";
     const commonSources = COMMON_INVENTORY_SCAN_SOURCES
-      .map((source) => `<option value="${source.value}" ${selected(source.value)}>${source.label}</option>`)
+      .map((source) => `<option value="${source.value}">${source.label}</option>`)
       .join("");
     inventorySourceFilter.innerHTML = `
-      <option value="ALL" ${selected("ALL")}>All scans</option>
+      <option value="ALL">All scans</option>
       ${savedScans}
       <optgroup label="Common scan sources">${commonSources}</optgroup>
     `;
+    facetKeepChosen(inventorySourceFilter, [...scanNames, ...COMMON_INVENTORY_SCAN_SOURCES.map((source) => source.value)]);
   }
 }
 
@@ -3165,11 +3236,10 @@ function updateInventoryFilterOptions(files = latestFiles) {
     const findings = inventoryFacets
       ? (inventoryFacets.finding_types || []).map((item) => String(item.value || "")).filter(Boolean)
       : [...new Set(files.flatMap(getFileFindingTypes))].sort((a, b) => a.localeCompare(b));
-    const current = findings.includes(inventoryFindingFacet) ? inventoryFindingFacet : "ALL";
-    inventoryFindingFacet = current;
     inventoryFindingFilter.innerHTML = ["ALL", ...findings]
-      .map((value) => `<option value="${escapeHtml(value)}" ${value === current ? "selected" : ""}>${escapeHtml(value === "ALL" ? "All finding types" : value)}</option>`)
+      .map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value === "ALL" ? "All finding types" : value)}</option>`)
       .join("");
+    facetKeepChosen(inventoryFindingFilter, findings);
   }
   renderInventoryFrameworkFilter(files);
 }
@@ -3208,7 +3278,7 @@ function renderInventoryFrameworkFilter(files = latestFiles) {
     inventoryFrameworkSelect.innerHTML = `<option value="ALL">All frameworks</option>${
       options.map(({ id, label, count }) =>
         `<option value="${escapeHtml(id)}">${escapeHtml(label)} (${Number(count).toLocaleString()})</option>`).join("")}`;
-    inventoryFrameworkSelect.value = options.some((item) => item.id === selected) ? selected : "ALL";
+    syncFacetSummary(inventoryFrameworkSelect);
   }
   // The folder list is the dashboard's own location tree, so the two pages
   // name the same places the same way.
@@ -6585,7 +6655,7 @@ document.addEventListener("keydown", (event) => {
 const FRAMEWORK_MARKS = {
   gdpr: { label: "GDPR", glyph: "mk-eu-stars" },
   pci_dss: { label: "PCI DSS", glyph: "li-credit-card" },
-  nist_sp800_60_enterprise: { label: "NIST SP 800-60", glyph: "li-shield-check" },
+  nist_sp800_60_enterprise: { label: "NIST", glyph: "li-shield-check" },
   nist_csf: { label: "NIST CSF", glyph: "li-shield-check" },
   hipaa: { label: "HIPAA", glyph: "li-plus" },
   iso27001: { label: "ISO/IEC 27001", glyph: "li-lock" },
@@ -6697,7 +6767,7 @@ function renderRemediationLoad() {
   // The counts the pills carried live on the option labels now, so the select
   // still says how much is behind each choice before you pick it.
   const severityCounts = remediationSummary.findings_by_severity || {};
-  [...(remediationSeverityFilter?.options || [])].forEach((option) => {
+  facetRealOptions(remediationSeverityFilter).forEach((option) => {
     const level = option.value || "ALL";
     const label = option.dataset.label || (option.dataset.label = option.textContent);
     const count = level === "ALL"
@@ -6705,6 +6775,7 @@ function renderRemediationLoad() {
       : Number(severityCounts[level] || 0);
     option.textContent = `${label} (${count.toLocaleString()})`;
   });
+  syncFacetSummary(remediationSeverityFilter);
   if (remediationScopeSummary) {
     const scope = remediationStatusLabel(remediationSummary.scope || "current");
     remediationScopeSummary.textContent = `${scope} scope · ${Number(remediationSummary.active_findings || 0).toLocaleString()} active findings across ${affected.toLocaleString()} affected files`;
@@ -6881,6 +6952,12 @@ function remediationAsset(finding = {}) {
   );
 }
 
+// The canonical risk category the Risk-category filter reads, shown so the
+// column the queue sorts by is the column it displays.
+function remediationCategory(finding = {}) {
+  return remediationHumanize(finding.finding_category || finding.category || finding.data_type || "Unclassified");
+}
+
 function remediationDataType(finding = {}) {
   const domain = String(finding.classification_domain || "").toLowerCase();
   if (domain === "secrets" || domain.includes("credential")) return "Credential";
@@ -6937,22 +7014,15 @@ function remediationOwner(finding = {}) {
 
 function remediationSelectOptions(select, placeholder, values, labeler = (value) => value) {
   if (!select) return;
-  const selected = select.value || "ALL";
-  select.innerHTML = `<option value="ALL">${escapeHtml(placeholder)}</option>${values.map((value) =>
-    `<option value="${escapeHtml(value)}">${escapeHtml(labeler(value))}</option>`).join("")}`;
-  // A filter that is applied has to stay visible in its own control. The
+  // A filter that is chosen has to stay visible in its own control. The
   // dashboard's "Regulated personal data" is three stored categories at once,
   // which is a legitimate filter and never a facet value, so rebuilding the
   // options from the facets alone silently dropped it and the queue came up
-  // unfiltered. An applied value the facets do not list is re-added under the
+  // unfiltered. A chosen value the facets do not list is re-added under the
   // label it was applied with.
-  if (selected !== "ALL" && !values.includes(selected)) {
-    const label = select.dataset.appliedLabel || labeler(selected);
-    select.append(new Option(label, selected));
-  }
-  select.value = selected === "ALL" || values.includes(selected) || [...select.options].some((option) => option.value === selected)
-    ? selected
-    : "ALL";
+  select.innerHTML = `<option value="ALL">${escapeHtml(placeholder)}</option>${values.map((value) =>
+    `<option value="${escapeHtml(value)}">${escapeHtml(labeler(value))}</option>`).join("")}`;
+  facetKeepChosen(select, values, labeler);
 }
 
 function remediationFacetValues(name) {
@@ -6961,7 +7031,6 @@ function remediationFacetValues(name) {
 
 function renderRemediationStatusOptions() {
   if (!remediationStatusFilter) return;
-  const selected = remediationStatusFilter.value || "active";
   const groups = [
     ["active", "Active findings"], ["open", "Open group"], ["in_progress", "In progress group"],
     ["validation", "Validation group"], ["resolved", "Resolved group"], ["exceptions", "Exceptions"], ["all", "All statuses"],
@@ -6969,7 +7038,7 @@ function renderRemediationStatusOptions() {
   remediationStatusFilter.innerHTML = `
     <optgroup label="Workflow groups">${groups.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}</optgroup>
     <optgroup label="Lifecycle status">${REMEDIATION_LIFECYCLE_STATUSES.map((value) => `<option value="${value}">${escapeHtml(remediationStatusLabel(value))}</option>`).join("")}</optgroup>`;
-  remediationStatusFilter.value = [...groups.map(([value]) => value), ...REMEDIATION_LIFECYCLE_STATUSES].includes(selected) ? selected : "active";
+  syncFacetSummary(remediationStatusFilter);
 }
 
 let remediationFacetSignature = "";
@@ -7049,6 +7118,10 @@ function remediationActionMenu(finding = {}) {
 const REMEDIATION_SORT_LABELS = {
   severity: "severity",
   finding_name: "finding name",
+  category: "risk category",
+  data_type: "data type",
+  asset: "affected asset",
+  owner: "owner",
   status: "status",
   sla_due: "SLA date",
   risk_score: "risk score",
@@ -7062,14 +7135,19 @@ function remediationHeadCell(key, label, className = "") {
     title="Sort the queue by ${escapeHtml(REMEDIATION_SORT_LABELS[key] || label)}">${escapeHtml(label)}<span class="inv-sort-ind" aria-hidden="true"></span></th>`;
 }
 
+// Severity, risk and SLA are worst-first questions. A name, a category, an
+// owner or an asset is a where-is-it question, and those start at A.
+const REMEDIATION_SORT_ASC_FIRST = new Set([
+  "finding_name", "status", "category", "data_type", "asset", "owner",
+]);
+
 function applyRemediationSort(key) {
   if (!REMEDIATION_SORT_LABELS[key]) return;
   if (remediationSortKey === key) {
     remediationSortDirection = remediationSortDirection === "asc" ? "desc" : "asc";
   } else {
     remediationSortKey = key;
-    // Severity, risk and SLA are worst-first questions; a name is not.
-    remediationSortDirection = key === "finding_name" || key === "status" ? "asc" : "desc";
+    remediationSortDirection = REMEDIATION_SORT_ASC_FIRST.has(key) ? "asc" : "desc";
   }
   loadRemediationFindings({ resetPage: true }).catch(() => {});
 }
@@ -7114,7 +7192,7 @@ function remediationTableMarkup(rows = []) {
   return `
     <div class="table-wrap inventory-table-wrap remediation-table-wrap">
       <table class="remediation-table" aria-label="Remediation findings">
-        <thead><tr>${remediationHeadCell("severity", "Severity")}${remediationHeadCell("finding_name", "Finding")}<th scope="col" class="remediation-col-data">Data type</th><th scope="col">Affected asset</th>${remediationHeadCell("risk_score", "Exposure / risk", "remediation-col-exposure")}<th scope="col" class="remediation-col-owner">Owner</th>${remediationHeadCell("status", "Status")}${remediationHeadCell("sla_due", "SLA")}<th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+        <thead><tr>${remediationHeadCell("severity", "Severity")}${remediationHeadCell("finding_name", "Finding")}${remediationHeadCell("category", "Category", "remediation-col-category")}${remediationHeadCell("data_type", "Data type", "remediation-col-data")}${remediationHeadCell("asset", "Affected asset")}${remediationHeadCell("risk_score", "Exposure / risk", "remediation-col-exposure")}${remediationHeadCell("owner", "Owner", "remediation-col-owner")}${remediationHeadCell("status", "Status")}${remediationHeadCell("sla_due", "SLA")}<th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
         <tbody>${rows.map((finding) => {
           const findingId = escapeHtml(finding.finding_id || "");
           const filePath = String(finding.file?.path || "");
@@ -7122,6 +7200,7 @@ function remediationTableMarkup(rows = []) {
             class="${selectedRemediationFindingId === finding.finding_id ? "is-selected" : ""}">
             <td>${remediationBadge(finding)}</td>
             <td><button type="button" class="remediation-row-button plain-btn" data-remediation-open="${findingId}"><strong>${escapeHtml(findingDisplayName(finding))}</strong><span title="${escapeHtml(filePath)}">${escapeHtml(remediationFileName(finding))}</span></button></td>
+            <td class="remediation-col-category" title="${escapeHtml(remediationCategory(finding))}">${escapeHtml(remediationCategory(finding))}</td>
             <td class="remediation-col-data" title="${escapeHtml(remediationDataType(finding))}">${escapeHtml(remediationDataType(finding))}</td>
             <td><span class="remediation-asset-name" title="${escapeHtml(remediationAsset(finding))}">${escapeHtml(remediationAsset(finding))}</span></td>
             <td class="remediation-col-exposure"><span class="remediation-exposure" title="${escapeHtml(remediationExposure(finding))}">${escapeHtml(remediationExposure(finding))}</span><span class="remediation-cell-secondary">Risk ${remediationRiskScore(finding)}</span></td>
@@ -7155,10 +7234,8 @@ function remediationEmptyMarkup(filtered = false) {
 function remediationHasNonDefaultFilters() {
   return Boolean(String(remediationSearch?.value || "").trim())
     || (remediationScopeFilter?.value || "current") !== "current"
-    || (remediationStatusFilter?.value || "active") !== "active"
-    || [remediationSeverityFilter, remediationCategoryFilter, remediationOwnerFilter, remediationFrameworkFilter,
-      remediationDataFilter, remediationAssetFilter, remediationSlaFilter]
-      .some((element) => element && element.value !== "ALL");
+    || facetAppliedParam("remediation-status-filter") !== "active"
+    || REMEDIATION_FILTER_PARAMS.some(([, id]) => facetAppliedValues(id).length);
 }
 
 function remediationPaginationMarkup() {
@@ -7203,20 +7280,24 @@ function resetRemediationPage() {
   remediationPage = { total: 0, hasMore: false, nextCursor: "", pageIndex: 0, pageStarts: [""] };
 }
 
+const REMEDIATION_FILTER_PARAMS = [
+  ["severity", "remediation-severity-filter"], ["category", "remediation-category-filter"],
+  ["owner", "remediation-owner-filter"], ["framework", "remediation-framework-filter"],
+  ["data_type", "remediation-data-filter"], ["asset", "remediation-asset-filter"],
+  ["sla", "remediation-sla-filter"],
+];
+
 function remediationQueryParams() {
+  const statuses = facetAppliedValues("remediation-status-filter");
   const params = new URLSearchParams({
     scope: remediationScopeFilter?.value || "current",
-    status: remediationStatusFilter?.value || "active",
+    // No status ticked is a question about every status, not about none.
+    status: statuses.length ? statuses.join(",") : "all",
     limit: String(REMEDIATION_PAGE_SIZE),
   });
-  const filters = [
-    ["severity", remediationSeverityFilter], ["category", remediationCategoryFilter],
-    ["owner", remediationOwnerFilter],
-    ["framework", remediationFrameworkFilter], ["data_type", remediationDataFilter],
-    ["asset", remediationAssetFilter], ["sla", remediationSlaFilter],
-  ];
-  filters.forEach(([name, element]) => {
-    if (element?.value && element.value !== "ALL") params.set(name, element.value);
+  REMEDIATION_FILTER_PARAMS.forEach(([name, id]) => {
+    const value = facetAppliedParam(id);
+    if (value) params.set(name, value);
   });
   const query = String(remediationSearch?.value || "").trim();
   if (query) params.set("q", query);
@@ -8662,7 +8743,7 @@ function buildWordReportHtml() {
               <p class="muted">All scanned files sorted by effective risk score. This replaces the old "additional files" placeholder and keeps every row available when requested.</p>
               <table class="full-register-table">
                 <thead><tr><th>File</th><th>Source</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Findings</th><th>Reasons</th><th>DLP / action</th></tr></thead>
-                <tbody>${fullRows || '<tr><td colspan="9">No file evidence rows available.</td></tr>'}</tbody>
+                <tbody>${fullRows || '<tr><td colspan="10">No file evidence rows available.</td></tr>'}</tbody>
               </table>
             </section>
             <section class="full-register-section page-break">
@@ -10034,8 +10115,8 @@ document.addEventListener("click", (event) => {
         filterInput.value = "";
         lastInventoryQuery = "";
       }
-      inventoryFindingFilter.value = wanted;
-      inventoryFindingFilter.dispatchEvent(new Event("change", { bubbles: true }));
+      setFacetSelection("inventory-finding-filter", [wanted]);
+      applyFindingsFacets();
     } else if (filterInput) {
       filterInput.value = wanted;
       filterInput.dispatchEvent(new Event("input", { bubbles: true }));
@@ -10065,11 +10146,8 @@ document.addEventListener("click", (event) => {
   const framework = event.target.closest("[data-framework-jump]");
   if (framework) {
     switchTab("findings");
-    const wanted = framework.dataset.frameworkJump;
-    if (inventoryFrameworkSelect) {
-      inventoryFrameworkSelect.value = wanted;
-      inventoryFrameworkSelect.dispatchEvent(new Event("change", { bubbles: true }));
-    }
+    setFacetSelection("inventory-framework-select", [framework.dataset.frameworkJump]);
+    applyFindingsFacets();
     return;
   }
 
@@ -10111,16 +10189,304 @@ filterInput.addEventListener("keydown", (event) => {
   }
 });
 
-inventoryRiskSelect?.addEventListener("change", () => {
-  applyInventoryRisk(inventoryRiskSelect.value);
+function facetSet(store, id) {
+  let set = store.get(id);
+  if (!set) {
+    set = new Set();
+    store.set(id, set);
+  }
+  return set;
+}
+
+function facetPendingValues(id) { return [...facetSet(facetPending, id)]; }
+function facetAppliedValues(id) { return [...facetSet(facetApplied, id)]; }
+function facetAppliedParam(id) { return facetAppliedValues(id).join(","); }
+function facetGroupOf(id) { return FACET_GROUPS.risk.includes(id) ? "risk" : "findings"; }
+
+function facetLabelName(select) {
+  const label = select.closest("label");
+  const named = label?.querySelector(".facet-name");
+  if (named) return named.textContent.trim();
+  const text = [...(label?.childNodes || [])].find((node) => node.nodeType === 3 && node.textContent.trim());
+  return text ? text.textContent.trim() : "Filter";
+}
+
+function facetRealOptions(select) {
+  return [...(select?.options || [])].filter((option) => option.value !== FACET_SUMMARY_VALUE);
+}
+
+// "All severities" is not a choice, it is the absence of one: an empty set.
+function facetChoiceOptions(select) {
+  return facetRealOptions(select).filter((option) => option.value && option.value !== "ALL");
+}
+
+function facetPlaceholder(select) {
+  const all = facetRealOptions(select).find((option) => option.value === "ALL");
+  return all ? all.textContent : facetLabelName(select);
+}
+
+function facetSummaryOption(select) {
+  let option = select.querySelector(`option[value="${FACET_SUMMARY_VALUE}"]`);
+  if (!option) {
+    option = new Option("", FACET_SUMMARY_VALUE);
+    option.dataset.facetSummary = "1";
+    select.insertBefore(option, select.firstChild);
+  }
+  return option;
+}
+
+function syncFacetSummary(select) {
+  if (!select?.dataset.facetMulti) return;
+  const values = facetPendingValues(select.id);
+  const option = facetSummaryOption(select);
+  const chosen = facetRealOptions(select).filter((item) => values.includes(item.value));
+  option.textContent = !values.length
+    ? facetPlaceholder(select)
+    : values.length === 1
+      ? (chosen[0]?.textContent || values[0])
+      : `${facetLabelName(select)} · ${values.length} selected`;
+  select.value = FACET_SUMMARY_VALUE;
+  const trigger = select.parentElement?.querySelector(".facet-trigger");
+  if (!trigger) return;
+  trigger.setAttribute("aria-label", `${facetLabelName(select)}: ${option.textContent}`);
+  if (values.length) trigger.dataset.facetCount = String(values.length);
+  else delete trigger.dataset.facetCount;
+}
+
+// A chosen value the freshly-rendered option list does not contain is still
+// chosen: a saved scan can drop out of the facets while its filter is applied.
+function facetKeepChosen(select, values, labeler = (value) => value) {
+  if (!select?.dataset.facetMulti) return;
+  const known = new Set(values);
+  [...new Set([...facetPendingValues(select.id), ...facetAppliedValues(select.id)])]
+    .filter((value) => !known.has(value))
+    .forEach((value) => select.append(new Option(select.dataset.appliedLabel || labeler(value), value)));
+  syncFacetSummary(select);
+}
+
+function attachFacetMulti(select) {
+  if (!select || select.dataset.facetMulti || FACET_SINGLE_IDS.has(select.id)) return;
+  select.dataset.facetMulti = "1";
+  select.tabIndex = -1;
+  select.setAttribute("aria-hidden", "true");
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  // `plain-btn` is the stylesheet's own opt-out from the four rules that
+  // paint every <button> as a primary action - without it the trigger fills
+  // its facet with an indigo block and hides the control underneath.
+  trigger.className = "facet-trigger plain-btn";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.addEventListener("click", () => {
+    if (facetMenuOwner === select) closeFacetMenu();
+    else openFacetMenu(select);
+  });
+  select.parentElement?.append(trigger);
+  // Every one of these option lists is rebuilt with innerHTML by its own
+  // renderer, which takes the summary option with it.
+  new MutationObserver(() => {
+    syncFacetSummary(select);
+    if (facetMenuOwner === select) renderFacetMenuList();
+  }).observe(select, { childList: true });
+  syncFacetSummary(select);
+}
+
+function ensureFacetMenu() {
+  if (facetMenuElement) return facetMenuElement;
+  const menu = document.createElement("div");
+  menu.className = "facet-menu";
+  menu.setAttribute("role", "dialog");
+  menu.hidden = true;
+  menu.innerHTML = `<div class="facet-menu-head"><strong class="facet-menu-title"></strong>`
+    + `<button type="button" class="facet-menu-clear plain-btn">Clear</button></div>`
+    + `<label class="facet-menu-search" hidden><input type="search" placeholder="Filter options" aria-label="Filter options" autocomplete="off" /></label>`
+    + `<div class="facet-menu-list"></div>`;
+  menu.querySelector(".facet-menu-clear").addEventListener("click", () => {
+    if (!facetMenuOwner) return;
+    facetPending.set(facetMenuOwner.id, new Set());
+    syncFacetSummary(facetMenuOwner);
+    renderFacetApplyState(facetGroupOf(facetMenuOwner.id));
+    renderFacetMenuList();
+  });
+  menu.querySelector(".facet-menu-search input").addEventListener("input", () => renderFacetMenuList());
+  menu.querySelector(".facet-menu-list").addEventListener("change", (event) => {
+    const box = event.target.closest("input[type=checkbox]");
+    if (!box || !facetMenuOwner) return;
+    const set = facetSet(facetPending, facetMenuOwner.id);
+    if (box.checked) set.add(box.value);
+    else set.delete(box.value);
+    syncFacetSummary(facetMenuOwner);
+    renderFacetApplyState(facetGroupOf(facetMenuOwner.id));
+    updateFacetMenuHead();
+  });
+  document.body.append(menu);
+  facetMenuElement = menu;
+  return menu;
+}
+
+function updateFacetMenuHead() {
+  if (!facetMenuOwner || !facetMenuElement) return;
+  const chosen = facetPendingValues(facetMenuOwner.id).length;
+  facetMenuElement.querySelector(".facet-menu-title").textContent = facetLabelName(facetMenuOwner);
+  const clear = facetMenuElement.querySelector(".facet-menu-clear");
+  clear.disabled = !chosen;
+  clear.textContent = chosen ? `Clear ${chosen}` : "Clear";
+}
+
+function renderFacetMenuList() {
+  if (!facetMenuOwner || !facetMenuElement) return;
+  const options = facetChoiceOptions(facetMenuOwner);
+  const search = facetMenuElement.querySelector(".facet-menu-search");
+  // A dozen owners can be read; two hundred assets have to be searched.
+  search.hidden = options.length < 12;
+  const query = search.hidden ? "" : search.querySelector("input").value.trim().toLowerCase();
+  const chosen = new Set(facetPendingValues(facetMenuOwner.id));
+  const list = facetMenuElement.querySelector(".facet-menu-list");
+  const visible = options.filter((option) => !query || option.textContent.toLowerCase().includes(query));
+  list.textContent = "";
+  if (!visible.length) {
+    const empty = document.createElement("p");
+    empty.className = "facet-menu-empty";
+    empty.textContent = options.length ? "No option matches." : "Nothing to filter on yet.";
+    list.append(empty);
+  }
+  visible.forEach((option) => {
+    const row = document.createElement("label");
+    row.className = "facet-menu-item";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = option.value;
+    box.checked = chosen.has(option.value);
+    const text = document.createElement("span");
+    text.textContent = option.textContent;
+    row.append(box, text);
+    list.append(row);
+  });
+  updateFacetMenuHead();
+}
+
+function positionFacetMenu() {
+  if (!facetMenuOwner || !facetMenuElement) return;
+  const rect = facetMenuOwner.parentElement.getBoundingClientRect();
+  const menu = facetMenuElement;
+  menu.style.minWidth = `${Math.max(rect.width, 210)}px`;
+  menu.style.maxWidth = `${Math.min(360, window.innerWidth - 16)}px`;
+  const height = menu.offsetHeight;
+  const room = window.innerHeight - rect.bottom - 8;
+  const top = room < height && rect.top > height + 8 ? rect.top - height - 6 : rect.bottom + 6;
+  menu.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+}
+
+function openFacetMenu(select) {
+  const menu = ensureFacetMenu();
+  facetMenuOwner = select;
+  menu.hidden = false;
+  const searchInput = menu.querySelector(".facet-menu-search input");
+  searchInput.value = "";
+  renderFacetMenuList();
+  positionFacetMenu();
+  select.parentElement?.querySelector(".facet-trigger")?.setAttribute("aria-expanded", "true");
+  if (!menu.querySelector(".facet-menu-search").hidden) searchInput.focus();
+}
+
+function closeFacetMenu() {
+  if (!facetMenuOwner) return;
+  facetMenuOwner.parentElement?.querySelector(".facet-trigger")?.setAttribute("aria-expanded", "false");
+  facetMenuOwner = null;
+  if (facetMenuElement) facetMenuElement.hidden = true;
+}
+
+document.addEventListener("pointerdown", (event) => {
+  if (!facetMenuOwner) return;
+  if (event.target.closest(".facet-menu") || event.target.closest(".facet-trigger")) return;
+  closeFacetMenu();
 });
 
-inventoryFrameworkSelect?.addEventListener("change", () => {
-  const value = inventoryFrameworkSelect.value || "ALL";
-  inventoryFrameworkFacets = value === "ALL" ? new Set() : new Set([value]);
-  renderedRowsLimit = ROW_PAGE_SIZE;
-  refreshInventoryPageWindow();
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && facetMenuOwner) {
+    const trigger = facetMenuOwner.parentElement?.querySelector(".facet-trigger");
+    closeFacetMenu();
+    trigger?.focus();
+  }
 });
+
+window.addEventListener("resize", () => positionFacetMenu());
+document.addEventListener("scroll", () => { if (facetMenuOwner) positionFacetMenu(); }, true);
+
+function facetSelectionsEqual(left, right) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function facetGroupDirty(group) {
+  return FACET_GROUPS[group].some((id) => !facetSelectionsEqual(facetSet(facetPending, id), facetSet(facetApplied, id)));
+}
+
+function renderFacetApplyState(group) {
+  const button = document.getElementById(group === "risk" ? "remediation-apply-filters" : "inventory-apply-filters");
+  if (!button) return;
+  if (facetGroupDirty(group)) button.dataset.facetDirty = "1";
+  else delete button.dataset.facetDirty;
+}
+
+function commitFacetGroup(group) {
+  FACET_GROUPS[group].forEach((id) => facetApplied.set(id, new Set(facetSet(facetPending, id))));
+  renderFacetApplyState(group);
+}
+
+// Dashboard cards arrive with their filter already chosen; they set it and
+// search in one move, because the operator asked for it by clicking.
+function setFacetSelection(id, values) {
+  const wanted = (Array.isArray(values) ? values : [values]).filter((value) => value && value !== "ALL");
+  facetPending.set(id, new Set(wanted));
+  const select = document.getElementById(id);
+  // A value the facets do not list is still a legitimate filter - the
+  // dashboard's "Regulated personal data" is three stored categories at once.
+  if (select && wanted.length) {
+    wanted.forEach((value) => {
+      if (![...select.options].some((option) => option.value === value)) {
+        select.append(new Option(remediationHumanize(value), value));
+      }
+    });
+  }
+  syncFacetSummary(select);
+  renderFacetApplyState(facetGroupOf(id));
+}
+
+function applyFindingsFacets({ reload = true } = {}) {
+  commitFacetGroup("findings");
+  inventoryRiskFacets = new Set(facetAppliedValues("inventory-risk-filter"));
+  inventorySourceFacets = new Set(facetAppliedValues("inventory-source-filter"));
+  inventoryFindingFacets = new Set(facetAppliedValues("inventory-finding-filter"));
+  inventoryFrameworkFacets = new Set(facetAppliedValues("inventory-framework-select"));
+  inventoryRiskFilter = inventoryRiskFacets.size === 1 ? [...inventoryRiskFacets][0] : "ALL";
+  inventorySourceFacet = inventorySourceFacets.size === 1 ? [...inventorySourceFacets][0] : "ALL";
+  inventoryFindingFacet = inventoryFindingFacets.size === 1 ? [...inventoryFindingFacets][0] : "ALL";
+  // The facet counts are computed per scan source, so only a change of source
+  // invalidates them. Refetching them on every search undoes the saving.
+  const sourceKey = facetAppliedParam("inventory-source-filter");
+  if (sourceKey !== inventoryFacetSourceKey) {
+    inventoryFacetSourceKey = sourceKey;
+    inventoryFacetRequest += 1;
+    inventoryFacets = null;
+  }
+  renderedRowsLimit = ROW_PAGE_SIZE;
+  if (reload) refreshInventoryPageWindow();
+}
+
+function applyRemediationFacets({ resetPage = true } = {}) {
+  commitFacetGroup("risk");
+  loadRemediationSearch.cancel();
+  loadRemediationFindings({ resetPage }).catch(() => {});
+}
+
+function initFacetMultiSelects() {
+  Object.values(FACET_GROUPS).flat().forEach((id) => attachFacetMulti(document.getElementById(id)));
+  // The queue opens on active findings, as it always has.
+  setFacetSelection("remediation-status-filter", ["active"]);
+  commitFacetGroup("findings");
+  commitFacetGroup("risk");
+}
 
 // The inventory has no folder filter of its own, so this drives the same
 // text search the dashboard's location rows use. The select is the point:
@@ -10133,33 +10499,22 @@ inventoryFolderSelect?.addEventListener("change", () => {
   }
 });
 
-inventorySourceFilter?.addEventListener("change", () => {
-  inventorySourceFacet = inventorySourceFilter.value || "ALL";
-  inventoryFacetRequest += 1;
-  inventoryFacets = null;
-  renderedRowsLimit = ROW_PAGE_SIZE;
-  refreshInventoryPageWindow();
-});
+initFacetMultiSelects();
 
-inventoryFindingFilter?.addEventListener("change", () => {
-  inventoryFindingFacet = inventoryFindingFilter.value || "ALL";
-  renderedRowsLimit = ROW_PAGE_SIZE;
-  refreshInventoryPageWindow();
+inventoryApplyFiltersBtn?.addEventListener("click", () => {
+  closeFacetMenu();
+  applyFindingsFacets();
 });
-
 
 inventoryClearFiltersBtn?.addEventListener("click", () => {
-  inventoryRiskFilter = "ALL";
-  inventorySourceFacet = "ALL";
-  inventoryFindingFacet = "ALL";
-  inventoryFrameworkFacets = new Set();
-  if (filterInput) filterInput.value = "";
-  if (inventorySourceFilter) inventorySourceFilter.value = "ALL";
-  if (inventoryFindingFilter) inventoryFindingFilter.value = "ALL";
-  inventoryFacetRequest += 1;
-  inventoryFacets = null;
-  renderedRowsLimit = ROW_PAGE_SIZE;
-  refreshInventoryPageWindow();
+  closeFacetMenu();
+  FACET_GROUPS.findings.forEach((id) => setFacetSelection(id, []));
+  if (filterInput) {
+    filterInput.value = "";
+    lastInventoryQuery = "";
+  }
+  if (inventoryFolderSelect) inventoryFolderSelect.value = "ALL";
+  applyFindingsFacets();
   renderFindingsWorkspace();
 });
 
@@ -10340,23 +10695,32 @@ const loadRemediationSearch = debounce(() => {
   loadRemediationFindings({ resetPage: true }).catch(() => {});
 }, 300);
 remediationSearch?.addEventListener("input", loadRemediationSearch);
-remediationFilters?.addEventListener("change", (event) => {
-  if (event.target === remediationSearch) return;
+remediationApplyFiltersBtn?.addEventListener("click", () => {
+  closeFacetMenu();
+  applyRemediationFacets();
+});
+// The facet row is a form, so Enter searches rather than reloading the page.
+remediationFilters?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  closeFacetMenu();
+  applyRemediationFacets();
+});
+// Scope is the one facet left that answers on its own: it changes which rows
+// exist, not which of them are shown.
+remediationScopeFilter?.addEventListener("change", () => {
   loadRemediationSearch.cancel();
   loadRemediationFindings({ resetPage: true }).catch(() => {});
 });
 function resetRemediationFilters({ reload = true } = {}) {
   loadRemediationSearch.cancel();
+  closeFacetMenu();
   if (remediationSearch) remediationSearch.value = "";
   if (remediationScopeFilter) remediationScopeFilter.value = "current";
-  if (remediationStatusFilter) remediationStatusFilter.value = "active";
-  [remediationSeverityFilter, remediationCategoryFilter, remediationOwnerFilter,
-    remediationFrameworkFilter, remediationDataFilter,
-    remediationAssetFilter, remediationSlaFilter].forEach((element) => {
-    if (!element) return;
-    delete element.dataset.appliedLabel;
-    element.value = "ALL";
+  FACET_GROUPS.risk.forEach((id) => {
+    delete document.getElementById(id)?.dataset.appliedLabel;
+    setFacetSelection(id, id === "remediation-status-filter" ? ["active"] : []);
   });
+  commitFacetGroup("risk");
   remediationSortKey = "risk_score";
   remediationSortDirection = "desc";
   if (reload) loadRemediationFindings({ resetPage: true }).catch(() => {});
@@ -10371,11 +10735,11 @@ function openRemediationFiltered(filters = {}) {
   loadRemediationSearch.cancel();
   resetRemediationFilters({ reload: false });
   const targets = {
-    severity: remediationSeverityFilter,
-    category: remediationCategoryFilter,
-    framework: remediationFrameworkFilter,
-    data_type: remediationDataFilter,
-    asset: remediationAssetFilter,
+    severity: "remediation-severity-filter",
+    category: "remediation-category-filter",
+    framework: "remediation-framework-filter",
+    data_type: "remediation-data-filter",
+    asset: "remediation-asset-filter",
   };
   Object.entries(filters).forEach(([name, value]) => {
     if (name === "label") return;
@@ -10383,15 +10747,16 @@ function openRemediationFiltered(filters = {}) {
       if (remediationSearch) remediationSearch.value = value;
       return;
     }
-    const element = targets[name];
+    const id = targets[name];
+    const element = id && document.getElementById(id);
     if (!element) return;
     if (filters.label) element.dataset.appliedLabel = filters.label;
     if (![...element.options].some((option) => option.value === value)) {
       element.append(new Option(filters.label || remediationHumanize(value), value));
     }
-    element.value = value;
+    setFacetSelection(id, [value]);
   });
-  loadRemediationFindings({ resetPage: true }).catch(() => {});
+  applyRemediationFacets();
 }
 remediationDrawerToggle?.addEventListener("change", () => {
   if (remediationDrawerToggle.checked) return;
@@ -10691,10 +11056,7 @@ tenantSwitcher.addEventListener("change", async () => {
   selectedRemediationFindingId = "";
   selectedRemediationFinding = null;
   if (remediationDrawerToggle) remediationDrawerToggle.checked = false;
-  inventoryRiskFilter = "ALL";
-  inventorySourceFacet = "ALL";
-  inventoryFindingFacet = "ALL";
-  inventoryFrameworkFacets = new Set();
+  clearFindingsFacetState();
   expandedInventoryKeys.clear();
   inventoryDetailRequests.clear();
   lastRenderedFileKeys = new Set();

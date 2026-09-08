@@ -437,33 +437,40 @@
   white-space: nowrap;
 }
 
-/* These are the queue's columns. */
+/* These are the queue's columns: severity, finding, category, data type,
+   asset, exposure, owner, status, SLA, actions. Category was added when the
+   table became sortable by every column it shows; the finding column gives up
+   the width for it, since the file name below it already carries the detail. */
 #remediation-workflow .remediation-table th:nth-child(1),
 #remediation-workflow .remediation-table td:nth-child(1) { width: 80px; }
 #remediation-workflow .remediation-table th:nth-child(2),
-#remediation-workflow .remediation-table td:nth-child(2) { width: 220px; }
+#remediation-workflow .remediation-table td:nth-child(2) { width: 190px; }
 #remediation-workflow .remediation-table th:nth-child(3),
-#remediation-workflow .remediation-table td:nth-child(3) { width: 118px; }
+#remediation-workflow .remediation-table td:nth-child(3) { width: 122px; }
 #remediation-workflow .remediation-table th:nth-child(4),
-#remediation-workflow .remediation-table td:nth-child(4) { width: 120px; }
+#remediation-workflow .remediation-table td:nth-child(4) { width: 112px; }
 #remediation-workflow .remediation-table th:nth-child(5),
-#remediation-workflow .remediation-table td:nth-child(5) { width: 118px; }
+#remediation-workflow .remediation-table td:nth-child(5) { width: 112px; }
 #remediation-workflow .remediation-table th:nth-child(6),
-#remediation-workflow .remediation-table td:nth-child(6) { width: 150px; }
+#remediation-workflow .remediation-table td:nth-child(6) { width: 118px; }
 #remediation-workflow .remediation-table th:nth-child(7),
-#remediation-workflow .remediation-table td:nth-child(7) { width: 95px; }
+#remediation-workflow .remediation-table td:nth-child(7) { width: 140px; }
 #remediation-workflow .remediation-table th:nth-child(8),
-#remediation-workflow .remediation-table td:nth-child(8) { width: 86px; }
+#remediation-workflow .remediation-table td:nth-child(8) { width: 95px; }
+#remediation-workflow .remediation-table th:nth-child(9),
+#remediation-workflow .remediation-table td:nth-child(9) { width: 86px; }
+/* A fixed-width cell that wraps makes every row in the queue taller. */
 #remediation-workflow .remediation-table td:nth-child(3),
 #remediation-workflow .remediation-table td:nth-child(4),
-#remediation-workflow .remediation-table td:nth-child(6) {
+#remediation-workflow .remediation-table td:nth-child(5),
+#remediation-workflow .remediation-table td:nth-child(7) {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-#remediation-workflow .remediation-table th:nth-child(9),
-#remediation-workflow .remediation-table td:nth-child(9) { width: 41px; }
+#remediation-workflow .remediation-table th:nth-child(10),
+#remediation-workflow .remediation-table td:nth-child(10) { width: 41px; }
 
 .remediation-table thead {
   position: sticky;

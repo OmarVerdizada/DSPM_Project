@@ -2952,6 +2952,14 @@ REMEDIATION_SORTS: dict[str, tuple[str, bool, str]] = {
     "sla_due": ("COALESCE(NULLIF(sla_due, ''), '9999-12-31T23:59:59+00:00')", True, "ASC"),
     "status": ("COALESCE(status, '')", True, "ASC"),
     "finding_name": ("COALESCE(display_name, '')", True, "ASC"),
+    # Everything the table puts in a column can order it. `category` is the
+    # canonical risk category the Risk-category filter already reads.
+    # The same expression the row builder shows as `finding_category`, so the
+    # order matches the column rather than a field behind it.
+    "category": ("COALESCE(NULLIF(category, ''), data_type, '')", True, "ASC"),
+    "data_type": ("COALESCE(data_type, '')", True, "ASC"),
+    "asset": ("COALESCE(affected_asset, '')", True, "ASC"),
+    "owner": ("COALESCE(owner, '')", True, "ASC"),
 }
 _REMEDIATION_CURSOR_VERSION = "rf-v1"
 _remediation_cache: dict[tuple, tuple[float, dict]] = {}
@@ -2972,16 +2980,32 @@ def _invalidate_remediation_query_cache(tenant_id: str | None = None) -> None:
 
 
 def remediation_statuses(value: str = "") -> tuple[str, ...]:
-    """One canonical lifecycle grouping used by queries, metrics and clients."""
-    key = str(value or "").strip().lower().replace("-", "_")
-    if not key or key == "all":
+    """One canonical lifecycle grouping used by queries, metrics and clients.
+
+    Several groups can be asked for at once - "open" and "in progress" is a
+    reasonable question - so this unions them. "all" anywhere means no filter
+    at all, because a set that contains everything is not a filter.
+    """
+    # Split here rather than through filter_values: "all" is a real group
+    # name in this facet, and the splitter drops it as the absence of a filter.
+    raw = value if isinstance(value, (list, tuple, set)) else str(value or "").split(",")
+    keys = [str(part).strip().lower().replace("-", "_") for part in raw][:20]
+    keys = [key for key in keys if key]
+    if not keys or "all" in keys:
         return ()
-    if key == "active":
-        return REMEDIATION_ACTIVE_STATUSES
-    if key in REMEDIATION_STATUS_GROUPS:
-        return REMEDIATION_STATUS_GROUPS[key]
-    exact = key.upper()
-    return (exact,) if exact in FINDING_LIFECYCLE_STATUSES else ()
+    statuses: list[str] = []
+    for key in keys:
+        if key == "active":
+            group: tuple[str, ...] = REMEDIATION_ACTIVE_STATUSES
+        elif key in REMEDIATION_STATUS_GROUPS:
+            group = tuple(REMEDIATION_STATUS_GROUPS[key])
+        else:
+            exact = key.upper()
+            group = (exact,) if exact in FINDING_LIFECYCLE_STATUSES else ()
+        for status in group:
+            if status not in statuses:
+                statuses.append(status)
+    return tuple(statuses)
 
 
 def _remediation_scope(scope: str) -> str:
@@ -3006,55 +3030,72 @@ def _remediation_filter_sql(filters: dict) -> tuple[list[str], list]:
     if statuses:
         clauses.append(f"status IN ({','.join('?' for _ in statuses)})")
         params.extend(statuses)
-    severity = str(filters.get("severity") or "").strip().upper()
-    if severity in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
-        clauses.append("severity = ?")
-        params.append(severity)
-    owner = str(filters.get("owner") or "").strip()
-    if owner:
-        if owner == "__unassigned__":
-            clauses.append("owner = ''")
-        else:
-            clauses.append("owner = ?")
-            params.append(owner)
-    framework = str(filters.get("framework") or "").strip().lower()
-    if framework:
-        if db.is_postgres():
-            clauses.append("jsonb_exists(COALESCE(frameworks_json, '[]')::jsonb, ?)")
-            params.append(framework)
-        else:
-            clauses.append("lower(frameworks_json) LIKE ? ESCAPE '\\'")
-            params.append(f'%"{_like_escape(framework)}"%')
-    data_type = str(filters.get("data_type") or "").strip()
-    if data_type:
-        clauses.append("data_type = ?")
-        params.append(data_type)
+    severities = [value for value in filter_values(filters.get("severity"), upper=True)
+                  if value in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}]
+    if severities:
+        clauses.append(f"severity IN ({','.join('?' for _ in severities)})")
+        params.extend(severities)
+    owners = filter_values(filters.get("owner"))
+    if owners:
+        owner_clauses = []
+        for owner in owners:
+            if owner == "__unassigned__":
+                owner_clauses.append("owner = ''")
+            else:
+                owner_clauses.append("owner = ?")
+                params.append(owner)
+        clauses.append(f"({' OR '.join(owner_clauses)})")
+    frameworks = filter_values(filters.get("framework"), lower=True)
+    if frameworks:
+        framework_clauses = []
+        for framework in frameworks:
+            if db.is_postgres():
+                framework_clauses.append("jsonb_exists(COALESCE(frameworks_json, '[]')::jsonb, ?)")
+                params.append(framework)
+            else:
+                framework_clauses.append("lower(frameworks_json) LIKE ? ESCAPE '\\'")
+                params.append(f'%"{_like_escape(framework)}"%')
+        clauses.append(f"({' OR '.join(framework_clauses)})")
+    data_types = filter_values(filters.get("data_type"))
+    if data_types:
+        clauses.append(f"data_type IN ({','.join('?' for _ in data_types)})")
+        params.extend(data_types)
     # Comma-separated, because one dashboard category can span several stored
     # ones: "regulated personal data" is pii, government_ids and biometric_data
     # together, and splitting it into three clicks would be three answers to
     # one question.
-    categories = [part.strip() for part in str(filters.get("category") or "").split(",") if part.strip()]
+    categories = filter_values(filters.get("category"))
     if categories:
         clauses.append(f"category IN ({','.join('?' for _ in categories)})")
         params.extend(categories)
-    asset = str(filters.get("asset") or "").strip()
-    if asset:
-        clauses.append("(asset_id = ? OR affected_asset = ?)")
-        params.extend((asset, asset))
-    sla = str(filters.get("sla") or "").strip().upper()
+    assets = filter_values(filters.get("asset"))
+    if assets:
+        asset_clauses = []
+        for asset in assets:
+            asset_clauses.append("(asset_id = ? OR affected_asset = ?)")
+            params.extend((asset, asset))
+        clauses.append(f"({' OR '.join(asset_clauses)})")
+    # SLA states are windows on one column, so several ticked states are a
+    # union of windows rather than an intersection that could match nothing.
     now = datetime.now(timezone.utc)
     now_text = now.isoformat()
-    if sla == "OVERDUE":
-        clauses.extend(("sla_due <> ''", "sla_due < ?", f"status IN ({','.join('?' for _ in REMEDIATION_ACTIVE_STATUSES)})"))
-        params.extend((now_text, *REMEDIATION_ACTIVE_STATUSES))
-    elif sla == "DUE_SOON":
-        clauses.extend(("sla_due >= ?", "sla_due <= ?"))
-        params.extend((now_text, (now + timedelta(hours=24)).isoformat()))
-    elif sla == "ON_TRACK":
-        clauses.append("sla_due > ?")
-        params.append((now + timedelta(hours=24)).isoformat())
-    elif sla == "NO_SLA":
-        clauses.append("sla_due = ''")
+    soon_text = (now + timedelta(hours=24)).isoformat()
+    sla_clauses = []
+    for sla in filter_values(filters.get("sla"), upper=True):
+        if sla == "OVERDUE":
+            sla_clauses.append(
+                f"(sla_due <> '' AND sla_due < ? AND status IN ({','.join('?' for _ in REMEDIATION_ACTIVE_STATUSES)}))")
+            params.extend((now_text, *REMEDIATION_ACTIVE_STATUSES))
+        elif sla == "DUE_SOON":
+            sla_clauses.append("(sla_due >= ? AND sla_due <= ?)")
+            params.extend((now_text, soon_text))
+        elif sla == "ON_TRACK":
+            sla_clauses.append("sla_due > ?")
+            params.append(soon_text)
+        elif sla == "NO_SLA":
+            sla_clauses.append("sla_due = ''")
+    if sla_clauses:
+        clauses.append(f"({' OR '.join(sla_clauses)})")
     query = str(filters.get("q") or "").strip().lower()
     if query:
         clauses.append("lower(search_text) LIKE ? ESCAPE '\\'")
@@ -3310,7 +3351,7 @@ def list_remediation_findings(
         elif sort_key == "sla_due":
             sort_value = str(last["sla_due"] or "9999-12-31T23:59:59+00:00")
         else:
-            column = {"finding_name": "display_name"}.get(sort_key, sort_key)
+            column = {"finding_name": "display_name", "asset": "affected_asset"}.get(sort_key, sort_key)
             sort_value = str(last[column] or "") if is_text else int(last[column] or 0)
         next_cursor = _encode_remediation_cursor(sort_key, sort_direction, sort_value, str(last["id"] or ""))
     items = [_remediation_row(row) for row in page_rows]
@@ -3640,28 +3681,88 @@ def _decode_cursor(cursor: str, sort: str, direction: str, is_text: bool):
         return None  # malformed cursor -> serve the first page rather than error
 
 
+def filter_values(raw, *, lower: bool = False, upper: bool = False, limit: int = 40) -> list[str]:
+    """A filter's selected values, from a comma-separated parameter.
+
+    The console lets an operator tick several boxes in one facet, so every
+    filter reads as a list and a single value is simply a list of one. Blank
+    and "ALL" entries drop out - "ALL" is the absence of a filter, not a value
+    to match - and duplicates collapse, so a repeated tick cannot multiply the
+    clauses. The cap is there because the string arrives from a URL.
+    """
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(item) for item in raw]
+    else:
+        parts = str(raw or "").split(",")
+    seen: list[str] = []
+    for part in parts:
+        value = part.strip()
+        if not value or value.upper() == "ALL":
+            continue
+        if lower:
+            value = value.lower()
+        if upper:
+            value = value.upper()
+        if value not in seen:
+            seen.append(value)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
 _INVENTORY_SOURCE_GROUPS = {
     "scan-kind:file-server": ("local", "smb"),
     "scan-kind:endpoint": ("endpoint", "endpoint-local", "endpoint-winrm"),
 }
 
 
+# The Finding type facet lists locked files as a class of their own.
+INVENTORY_PROTECTED_TYPE = "protected / locked"
+
+
 def _inventory_filters(risk: str, source: str, framework: str, q: str, extension: str,
                        protected: bool | None = None, finding_type: str = "") -> dict:
-    frameworks = [part.strip().lower() for part in str(framework or "").split(",") if part.strip()]
-    source_value = str(source or "").strip().lower()
-    source_group = _INVENTORY_SOURCE_GROUPS.get(source_value, ())
+    frameworks = filter_values(framework, lower=True)
+    sources = filter_values(source, lower=True)
+    # A scan kind expands to the collector sources it covers; a named scan or a
+    # raw protocol keeps its exact meaning. Both can be ticked at once.
+    source_group: list[str] = []
+    plain_sources: list[str] = []
+    for value in sources:
+        group = _INVENTORY_SOURCE_GROUPS.get(value, ())
+        if group:
+            source_group.extend(item for item in group if item not in source_group)
+        elif value not in plain_sources:
+            plain_sources.append(value)
+    # Two facet entries are not stored values at all. The Severity list ends
+    # with "Protected", and the Finding type list with "Protected / locked" -
+    # both are the is_protected flag wearing a costume. A single-select could
+    # translate either into `protected=true` and be done; a multi-select
+    # cannot, because ticking "Critical" and "Protected" asks for files that
+    # are EITHER, and an AND on the flag would answer with almost nothing.
+    # So each pseudo-value joins the OR group of the facet it was ticked in,
+    # and the standalone `protected` parameter keeps its own AND meaning for
+    # the callers that pass it directly.
+    risks = filter_values(risk, upper=True)
+    protected_risk = "PROTECTED" in risks
+    risks = [value for value in risks if value != "PROTECTED"]
+    finding_types = filter_values(finding_type, lower=True)
+    protected_type = INVENTORY_PROTECTED_TYPE in finding_types
+    finding_types = [value for value in finding_types if value != INVENTORY_PROTECTED_TYPE]
     return {
-        "risk": str(risk or "").strip().upper(),
-        # Named scans and raw protocol sources retain their existing exact
-        # semantics. The UI's two common scan kinds expand to collector source
-        # families only within the already-mandatory tenant predicate.
-        "source": "" if source_group else source_value,
-        "source_group": source_group,
-        "extension": str(extension or "").strip().lower(),
+        "risk": risks[0] if len(risks) == 1 else "",
+        "risks": risks,
+        "protected_risk": protected_risk,
+        "protected_type": protected_type,
+        "source": plain_sources[0] if len(plain_sources) == 1 else "",
+        "sources": plain_sources,
+        "source_group": tuple(source_group),
+        "extension": "",
+        "extensions": filter_values(extension, lower=True),
         "framework": frameworks[0] if len(frameworks) == 1 else "",
         "frameworks": frameworks,
-        "finding_type": str(finding_type or "").strip().lower(),
+        "finding_type": "",
+        "finding_types": finding_types,
         "protected": protected,
         "q": str(q or "").strip().lower(),
     }
@@ -3677,25 +3778,48 @@ def _inventory_normalized_where(tenant_id: str, filt: dict) -> tuple[list[str], 
     """Build the shared tenant/filter predicate for inventory reads and exports."""
     where = ["tenant_id = ?"]
     params: list = [tenant_id]
-    if filt["risk"]:
-        where.append("risk_level = ?"); params.append(filt["risk"])
+    risks = filt.get("risks") or ([filt["risk"]] if filt.get("risk") else [])
+    risk_clauses: list[str] = []
+    if risks:
+        risk_clauses.append(f"risk_level IN ({', '.join('?' for _ in risks)})")
+        params.extend(risks)
+    if filt.get("protected_risk"):
+        risk_clauses.append("is_protected = 1")
+    if risk_clauses:
+        where.append(f"({' OR '.join(risk_clauses)})")
+    # Ticking a scan kind and a named scan means "either", so the two forms
+    # join with OR rather than narrowing each other to nothing.
+    source_clauses: list[str] = []
     if filt.get("source_group"):
-        placeholders = ", ".join("?" for _ in filt["source_group"])
-        where.append(f"source IN ({placeholders})")
+        source_clauses.append(f"source IN ({', '.join('?' for _ in filt['source_group'])})")
         params.extend(filt["source_group"])
-    elif filt["source"]:
+    for value in filt.get("sources") or ([filt["source"]] if filt.get("source") else []):
         # The Source filter accepts either a collector protocol ("smb") or the
         # operator-facing scan name ("HR file share"), so the inventory can be
         # narrowed to one configured scan without a second parameter.
-        where.append("(source = ? OR lower(COALESCE(scan_label, '')) = ?)")
-        params.extend([filt["source"], filt["source"]])
-    if filt["extension"]:
-        where.append("extension = ?"); params.append(filt["extension"])
+        source_clauses.append("(source = ? OR lower(COALESCE(scan_label, '')) = ?)")
+        params.extend([value, value])
+    if source_clauses:
+        where.append(f"({' OR '.join(source_clauses)})")
+    extensions = filt.get("extensions") or ([filt["extension"]] if filt.get("extension") else [])
+    if extensions:
+        where.append(f"extension IN ({', '.join('?' for _ in extensions)})")
+        params.extend(extensions)
     if filt["protected"] is not None:
         where.append("is_protected = ?"); params.append(1 if filt["protected"] else 0)
-    if filt["finding_type"]:
-        where.append("lower(COALESCE(finding_types, '[]')) LIKE ? ESCAPE '\\'")
-        params.append(_json_member_pattern(filt["finding_type"]))
+    # Each selected class stands for every stored spelling of itself, and
+    # several selected classes mean "any of these".
+    wanted_types: list[str] = []
+    for value in filt.get("finding_types") or ([filt["finding_type"]] if filt.get("finding_type") else []):
+        for name in finding_type_alias_group(value):
+            if name.lower() not in {item.lower() for item in wanted_types}:
+                wanted_types.append(name)
+    type_clauses = ["lower(COALESCE(finding_types, '[]')) LIKE ? ESCAPE '\\'" for _ in wanted_types]
+    params.extend(_json_member_pattern(name) for name in wanted_types)
+    if filt.get("protected_type"):
+        type_clauses.append("is_protected = 1")
+    if type_clauses:
+        where.append(f"({' OR '.join(type_clauses)})")
     if filt["frameworks"]:
         clauses = ["lower(COALESCE(framework_keys, '[]')) LIKE ? ESCAPE '\\'" for _ in filt["frameworks"]]
         where.append(f"({' OR '.join(clauses)})")
@@ -3917,21 +4041,28 @@ def _inventory_page_from_rows(
     reverse = direction == "DESC"
 
     def _matches(row: dict) -> bool:
-        if filt["risk"] and str(row.get("risk_level") or "") != filt["risk"]:
+        risks = filt.get("risks") or ([filt["risk"]] if filt.get("risk") else [])
+        if risks or filt.get("protected_risk"):
+            if not (str(row.get("risk_level") or "") in risks
+                    or (filt.get("protected_risk") and bool(row.get("is_protected")))):
+                return False
+        source_values = {str(row.get("source") or "").lower(), str(row.get("scan_label") or "").lower()}
+        wanted_sources = set(filt.get("source_group") or ()) | set(filt.get("sources") or [])
+        if wanted_sources and not source_already_matched and not (wanted_sources & source_values):
             return False
-        if filt.get("source_group") and str(row.get("source") or "").lower() not in filt["source_group"]:
-            return False
-        if filt["source"] and not source_already_matched and filt["source"] not in {
-            str(row.get("source") or "").lower(), str(row.get("scan_label") or "").lower(),
-        }:
-            return False
-        if filt["extension"] and str(row.get("extension") or "") != filt["extension"]:
+        extensions = filt.get("extensions") or ([filt["extension"]] if filt.get("extension") else [])
+        if extensions and str(row.get("extension") or "") not in extensions:
             return False
         if filt["protected"] is not None and bool(row.get("is_protected")) is not filt["protected"]:
             return False
         finding_types = {str(value).lower() for value in _decode_string_list(row.get("finding_types"))}
-        if filt["finding_type"] and filt["finding_type"] not in finding_types:
-            return False
+        wanted = set()
+        for value in filt.get("finding_types") or ([filt["finding_type"]] if filt.get("finding_type") else []):
+            wanted |= {name.lower() for name in finding_type_alias_group(value)}
+        if wanted or filt.get("protected_type"):
+            if not ((wanted & finding_types)
+                    or (filt.get("protected_type") and bool(row.get("is_protected")))):
+                return False
         framework_keys = {str(value).lower() for value in _decode_string_list(row.get("framework_keys"))}
         if filt["frameworks"] and not any(value in framework_keys for value in filt["frameworks"]):
             return False
@@ -4193,7 +4324,61 @@ def _location_facet_items(counts: dict[str, int], severity_counts: dict[str, dic
     ]
 
 
+# Two detectors can name the same thing twice. The generic content detector
+# calls an address "Email"; the GDPR catalogue's `gdpr_email_address` calls it
+# "Email address". Both resolve to the canonical entity EMAIL_ADDRESS, so the
+# inventory listed one data class as two rows of 423 files each.
+#
+# This map is deliberately tiny, and the bar for adding to it is high: the two
+# names must denote the SAME entity, not merely a related one. The generic
+# `api_key` detector and `gdpr_api_token_oauth_secret` are NOT here - the
+# second covers OAuth secrets and service tokens the first does not, and their
+# canonical types differ (API_KEY against the coarse CREDENTIALS_SECRETS).
+# `phone_number` and `gdpr_phone_number` need no entry: they already share a
+# display name, which is what made email the odd one out.
+FINDING_TYPE_ALIASES: dict[str, str] = {
+    "email address": "Email",
+}
+
+
+def canonical_finding_type(value: str) -> str:
+    """The one name a data class is listed under."""
+    return FINDING_TYPE_ALIASES.get(str(value or "").strip().lower(), str(value or "").strip())
+
+
+def finding_type_alias_group(value: str) -> list[str]:
+    """Every stored name that means the given data class, so filtering on the
+    canonical one still matches rows written under either."""
+    canonical = canonical_finding_type(value)
+    group = {canonical}
+    for stored, target in FINDING_TYPE_ALIASES.items():
+        if target.lower() == canonical.lower():
+            group.add(stored)
+    return sorted(group)
+
+
+def _merge_finding_type_aliases(
+    counts: dict[str, int], severity_counts: dict[str, dict[str, int]]
+) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+    """Fold aliased names into their canonical one.
+
+    Counts are files, and a file carrying both names must not be counted twice
+    - but the facet rows only carry totals, so the merged total is the LARGER
+    of the two rather than their sum. On this estate that is exactly right:
+    every file with "Email address" also has "Email"."""
+    merged_counts: dict[str, int] = {}
+    merged_severity: dict[str, dict[str, int]] = {}
+    for value, count in counts.items():
+        canonical = canonical_finding_type(value)
+        merged_counts[canonical] = max(merged_counts.get(canonical, 0), count)
+        target = merged_severity.setdefault(canonical, {})
+        for level, level_count in (severity_counts.get(value) or {}).items():
+            target[level] = max(target.get(level, 0), level_count)
+    return merged_counts, merged_severity
+
+
 def _finding_type_facet_items(counts: dict[str, int], severity_counts: dict[str, dict[str, int]]) -> list[dict]:
+    counts, severity_counts = _merge_finding_type_aliases(counts, severity_counts)
     return [
         {
             "value": value,

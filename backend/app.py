@@ -1965,14 +1965,14 @@ def saved_scan_report(
 def findings_index(
     principal: Principal = Depends(require_role("viewer")),
     scope: str = Query(default="current", max_length=20),
-    status: str = Query(default="active", max_length=40),
-    severity: str = Query(default="", max_length=20),
-    owner: str = Query(default="", max_length=160),
-    framework: str = Query(default="", max_length=120),
-    data_type: str = Query(default="", max_length=160),
-    category: str = Query(default="", max_length=240),
-    asset: str = Query(default="", max_length=240),
-    sla: str = Query(default="", max_length=40),
+    status: str = Query(default="active", max_length=200),
+    severity: str = Query(default="", max_length=120),
+    owner: str = Query(default="", max_length=600),
+    framework: str = Query(default="", max_length=400),
+    data_type: str = Query(default="", max_length=600),
+    category: str = Query(default="", max_length=400),
+    asset: str = Query(default="", max_length=600),
+    sla: str = Query(default="", max_length=120),
     q: str = Query(default="", max_length=200),
     sort: str = Query(default="risk_score", max_length=30),
     direction: str = Query(default="", max_length=4),
@@ -2009,13 +2009,13 @@ def findings_index(
 @app.get("/api/inventory")
 def inventory_index(
     principal: Principal = Depends(require_role("viewer")),
-    risk: str = Query(default="", max_length=20),
-    source: str = Query(default="", max_length=80),
-    framework: str = Query(default="", max_length=200),
-    finding_type: str = Query(default="", max_length=160),
+    risk: str = Query(default="", max_length=200),
+    source: str = Query(default="", max_length=400),
+    framework: str = Query(default="", max_length=400),
+    finding_type: str = Query(default="", max_length=600),
     protected: bool | None = Query(default=None),
     q: str = Query(default="", max_length=200),
-    extension: str = Query(default="", max_length=20),
+    extension: str = Query(default="", max_length=200),
     sort: str = Query(default="risk_score", max_length=20),
     direction: str = Query(default="", max_length=4),
     after: str = Query(default="", max_length=512),
@@ -2059,13 +2059,13 @@ def inventory_index(
 def inventory_export(
     principal: Principal = Depends(require_role("viewer")),
     format: str = Query(default="csv", pattern="^(csv|ndjson)$"),
-    risk: str = Query(default="", max_length=20),
-    source: str = Query(default="", max_length=80),
-    framework: str = Query(default="", max_length=200),
-    finding_type: str = Query(default="", max_length=160),
+    risk: str = Query(default="", max_length=200),
+    source: str = Query(default="", max_length=400),
+    framework: str = Query(default="", max_length=400),
+    finding_type: str = Query(default="", max_length=600),
     protected: bool | None = Query(default=None),
     q: str = Query(default="", max_length=200),
-    extension: str = Query(default="", max_length=20),
+    extension: str = Query(default="", max_length=200),
 ) -> StreamingResponse:
     """S-G: tenant-scoped keyset export with bounded DB and response chunks."""
     if not inventory_export_ready(principal.tenant_id):
@@ -2104,7 +2104,7 @@ def inventory_export(
 @app.get("/api/inventory/facets")
 def inventory_facet_index(
     principal: Principal = Depends(require_role("viewer")),
-    source: str = Query(default="", max_length=80),
+    source: str = Query(default="", max_length=400),
 ) -> dict:
     return {
         **inventory_facets(principal.tenant_id, source=source),

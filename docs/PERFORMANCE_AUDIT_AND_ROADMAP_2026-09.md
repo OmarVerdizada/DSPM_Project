@@ -614,6 +614,59 @@ counters table, 2.4 and 3.2 stand declined with their numbers. 3.1's live
 PostgreSQL run stays blocked on an admin grant and a truncation consent that
 are the operator's to give.
 
+### Facet fan-out — closed 2026-09-08 (A.7, first two bullets)
+
+The audit recorded it as a shape, not a number: "Filter/sort/search change →
+the same three [requests]" on Findings, and "any filter change" on the queue.
+Each facet was a `<select>`, and a `<select>` answers the moment it is touched,
+so narrowing a question by three facets cost three round trips and two renders
+of a table nobody was going to read.
+
+| | Before | After |
+|---|---|---|
+| Findings, three facets narrowed | 3 × (`/api/inventory` + `/api/inventory/facets` + detail counts) | **1**, on Search |
+| Queue, two facets narrowed | 2 × `/api/findings` | **1**, on Search |
+| `/api/inventory/facets` per search | one per facet change | only when the **scan source** changes (the counts are computed per source; nothing else invalidates them) |
+| Answers per facet | 1 | up to 40 |
+
+Measured on tenant 23 at 1600×900: ticking Critical and High and pressing
+Search issues exactly one `GET /api/inventory?risk=CRITICAL%2CHIGH&…` and the
+table does not move until it is pressed. Severity + SLA on the queue: one
+`GET /api/findings?…severity=CRITICAL%2CHIGH&sla=OVERDUE…`, 6,831 → 3,508.
+
+**The control stayed a `<select>`.** It is where a dozen renderers write their
+option lists, and it draws the leading glyph, the caret, the ellipsis and the
+width rules pinned across four layers of `styles.css`. Replacing it meant
+re-deriving all of that. So it keeps the job of *drawing*, showing the current
+answer through a synthetic first option, and loses only the job of *taking*
+one: a transparent trigger covers it and one menu on `document.body` — outside
+every clipping ancestor — holds the checkboxes. A `MutationObserver` per facet
+re-syncs after each `innerHTML` rebuild, and `facetKeepChosen` re-appends a
+chosen value the fresh list does not contain, which is how the dashboard's
+"Regulated personal data" (three stored categories at once) survives.
+
+**Two facet entries are flags in costume.** "Protected" in the Severity list
+and "Protected / locked" in the Finding type list are both `is_protected`. A
+single-select could translate either into `protected=true`; a multi-select
+cannot, because "Critical **or** Protected" is a union and an AND on the flag
+answers with almost nothing — the locked file in this estate is HIGH. Each now
+joins the OR group of the facet it was ticked in (`_inventory_filters` splits
+them out as `protected_risk` / `protected_type`), and the standalone
+`protected` parameter keeps its AND meaning for callers that pass it directly.
+
+**Two facets stay single, on purpose.** Scope is exclusive by nature. Folder /
+path has no parameter of its own — it drives the free-text search, which takes
+one string.
+
+**Also in this round, product-side.** Top risks now sizes itself with the same
+`dashListCapacity` call as Top data classes (the capacity was always 7; four
+of the seven categories never matched, because a finding on an inventory page
+carries a name and no category at all). "Email" and "Email address" are one
+data class of 423 files rather than two — a two-entry alias map, merged with
+`max()` rather than a sum because every file carrying the second carries the
+first. The Compliance frameworks card says NIST. And the queue can be ordered
+by Category, Data type, Affected asset and Owner, text columns starting at A.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

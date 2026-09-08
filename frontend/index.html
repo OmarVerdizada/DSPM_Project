@@ -13,9 +13,9 @@
     <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=9" />
     <link rel="stylesheet" href="/static/styles.css?v=248" />
-    <link rel="stylesheet" href="/static/styles/shell.css?v=13" />
+    <link rel="stylesheet" href="/static/styles/shell.css?v=14" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=18" />
-    <link rel="stylesheet" href="/static/styles/remediation.css?v=10" />
+    <link rel="stylesheet" href="/static/styles/remediation.css?v=11" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -688,6 +688,7 @@
                     <option value="ALL">Anywhere</option>
                   </select></span>
                 </label>
+                <button type="button" id="inventory-apply-filters" class="facet-apply"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-search"/></svg>Search</button>
                 <button type="button" id="clear-inventory-filters" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Clear filters</button>
               </div>
               <div id="inventory-context-metrics" class="inventory-context-metrics">
@@ -745,6 +746,7 @@
                       <input id="remediation-search" type="search" placeholder="Search finding, file, asset, owner, status..." autocomplete="off" />
                     </div>
                     <div class="inventory-export-actions">
+                      <button type="button" id="remediation-apply-filters" class="facet-apply"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-search"/></svg>Search</button>
                       <button type="button" id="remediation-reset-filters" class="secondary-btn mini-btn" data-remediation-reset><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-list-filter"/></svg>Clear filters</button>
                       <button type="button" id="refresh-executive-btn" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
                     </div>
@@ -1589,7 +1591,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=220"></script>
+    <script src="/static/app.js?v=222"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

@@ -43,9 +43,20 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         # Named historical/demo runs can be queried even when no report was
         # restored into the current-estate workspace.
         self.assertIn("latestHistoryItems.length", body)
-        self.assertIn('params.set("protected", "true")', self.script)
-        self.assertIn('params.set("finding_type", inventoryFindingFacet)', self.script)
+        # Every facet takes a set of answers and sends all of them.
+        self.assertIn('params.set("risk", [...inventoryRiskFacets].join(","))', self.script)
+        self.assertIn('params.set("source", [...inventorySourceFacets].join(","))', self.script)
+        self.assertIn('params.set("finding_type", [...inventoryFindingFacets].join(","))', self.script)
         self.assertIn('[...inventoryFrameworkFacets].join(",")', self.script)
+        # "Protected" is a flag, not a severity, and "Protected / locked" is a
+        # flag, not a data class. Translating either into `protected=true` was
+        # the browser's job while one answer was all a facet could hold; with
+        # several it is an OR inside the facet it was ticked in, which only the
+        # query builder can express.
+        store = Path("backend/store.py").read_text(encoding="utf-8")
+        self.assertIn('protected_risk = "PROTECTED" in risks', store)
+        self.assertIn('risk_clauses.append("is_protected = 1")', store)
+        self.assertIn('type_clauses.append("is_protected = 1")', store)
 
     def test_compact_restore_facets_and_detail_are_on_demand(self) -> None:
         self.assertIn("include_files=${includeFiles", self.script)
@@ -64,13 +75,15 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         self.assertIn("inventoryPageAbortController?.abort()", self.script)
         self.assertIn("{ signal: controller.signal }", self.script)
         self.assertIn("error?.name === \"AbortError\"", self.script)
-        # Severity is a select now, and both it and the dashboard's band jumps
+        # Severity is a facet now, and both it and the dashboard's band jumps
         # go through one entry point, so the state and the fetch cannot drift.
+        # A band jump still searches at once - the operator asked for it by
+        # clicking - where ticking a facet waits for the Search button.
         apply_risk = self.script[self.script.index("function applyInventoryRisk("):]
         apply_risk = apply_risk[:apply_risk.index(chr(10) + "}" + chr(10))]
-        self.assertLess(apply_risk.index("inventoryRiskSelect.value = inventoryRiskFilter"),
-                        apply_risk.index("refreshInventoryPageWindow()"))
-        self.assertIn("applyInventoryRisk(inventoryRiskSelect.value)", self.script)
+        self.assertLess(apply_risk.index('setFacetSelection("inventory-risk-filter"'),
+                        apply_risk.index("applyFindingsFacets()"))
+        self.assertIn("inventoryApplyFiltersBtn?.addEventListener", self.script)
 
     def test_manual_risk_change_rerenders_without_a_database_round_trip(self) -> None:
         start = self.script.index('resultsBody.addEventListener("change"')
