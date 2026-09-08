@@ -560,6 +560,60 @@ the one component the frontend roadmap already records as un-borrowable.
 It becomes worth doing if the page size is raised (the API caps at 500). Until
 then it is complexity bought with someone else's money.
 
+### Polish pass — 2026-09-07: the items each phase record marked "not met"
+
+| Item | Before | After |
+|---|---|---|
+| Saved report at boot (`include_files=false`) — 0.5, second half | 1,429 ms cold (decrypt + parse 8 MB to discard the files) | **20–38 ms**, served from `scan_reports.compact_json` |
+| `hash-changes` at boot — 0.2, last item | 1.1 s on the boot path | **not at boot**; loads once when Findings first opens |
+| Workspace slice fetches (boot + Findings open) | **5** (3 before the first landed, 2 more on open) | **1** |
+| Boot API calls / transfer | 12 / 186 KB | **10 / 329 KB** (see note) |
+| Slowest boot call | 2,323 ms (report) | **88 ms** (`inventory/facets`) |
+| `PRAGMA optimize` at shutdown — 0.6 | scan-save half only | wired in the lifespan `finally` |
+
+**The compact report is stored, not derived.** `compact_scan_report` moved from
+`app.py` into the store so the save path can call it; the metadata-only form
+(everything but the file array, ~6 KB on the wire) is written with the run and
+filled on first read for runs saved before the column existed — the same
+pattern as `rows_json`. Building it is best-effort: a failure logs and the
+endpoint falls back to the full read.
+
+**Boot transfer went *up* (186 → 329 KB) while the call count went down.**
+That is the 200-row workspace slice now arriving once, at boot, because the
+dashboard's top-risk card asks for it (Phase 1) — previously it arrived after
+the measured window or several times. One honest fetch of data the visible
+card needs, versus three racing ones, is the right trade.
+
+**A deletion that a call-shaped grep could not see.** `buildScanComparison`
+formatted a scan-comparison panel the refit had removed from the page; my
+"no callers" check (`buildScanComparison(`) found nothing and the removal
+guard agreed. Both were blind to `setPanelHtml(scanComparison,
+buildScanComparison)` — the builder passed **by reference**, no paren — inside
+`renderExecutiveExperience`. `setPanelHtml` null-guards its target, but the
+argument is evaluated first, so every dashboard render raised `ReferenceError`
+at that line until the call and its orphaned `#scan-comparison` handle were
+removed. The suite cannot catch this (nothing executes `app.js`); the browser
+did, and the contract now asserts the bare identifier is absent. Rule for the
+file: a dead-code check must grep the *name*, not the *call*.
+
+**Two things looked broken and were not.** The "Duplicate hash path" flag is
+rendered — as the `+1` on the meta line whose title carries it, exactly as
+Request G designed the line; a `.hash-change-chip` count is the wrong probe.
+And the hash *summary* text never appeared because its only formatter was the
+unmounted builder above; the comparison's live job — flagging rows — was
+never affected.
+
+**Left as recorded, deliberately.** `hash-changes` still costs 1.1–1.3 s
+server-side when Findings opens: it decrypts the two newest artifacts to diff
+path→hash maps. The right fix reads `asset_versions` instead, but that table
+is keyed by version rather than by scan, so it is a redesign of the endpoint,
+not a polish. `remediationLoading` can still end up `true` after boot from an
+abort-before-fetch; the guard no longer reads it, and no top-level caller
+could be identified, so it is inert and noted rather than chased. 2.3's
+counters table, 2.4 and 3.2 stand declined with their numbers. 3.1's live
+PostgreSQL run stays blocked on an admin grant and a truncation consent that
+are the operator's to give.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

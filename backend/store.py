@@ -754,6 +754,11 @@ def apply_baseline_schema(conn) -> None:
             -- ten-times estate would not have answered at all. Written once,
             -- with the run.
             rows_json TEXT,
+            -- The metadata-only form of the report: everything but the file
+            -- array. The console restores it at every boot, and deriving it
+            -- meant decrypting and parsing the whole artifact to throw the
+            -- files away - 1.0s, measured, on the boot critical path.
+            compact_json TEXT,
             created_at TEXT NOT NULL,
             PRIMARY KEY (tenant_id, scan_id)
         );
@@ -1119,6 +1124,8 @@ def apply_baseline_schema(conn) -> None:
     report_columns = db.table_columns(conn, "scan_reports")
     if "rows_json" not in report_columns:
         conn.execute("ALTER TABLE scan_reports ADD COLUMN rows_json TEXT")
+    if "compact_json" not in report_columns:
+        conn.execute("ALTER TABLE scan_reports ADD COLUMN compact_json TEXT")
 
     # the read-switch treats them as stale and serves the blob until a
     # backfill re-stamps them - the safe default for a migration mirror.
@@ -1579,8 +1586,8 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                 """
                 INSERT OR REPLACE INTO scan_reports
                     (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
-                     report_json, report_ref, report_bytes, rows_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     report_json, report_ref, report_bytes, rows_json, compact_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     tenant_id,
@@ -1593,6 +1600,7 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                     report_ref,
                     report_bytes,
                     _packed_report_rows(tenant_id, report),
+                    _packed_compact_report(report),
                     created_at,
                 ),
             )
@@ -2586,6 +2594,84 @@ def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
 _scan_report_rows_cache: dict[tuple[str, str], list[dict]] = {}
 _scan_report_rows_order: list[tuple[str, str]] = []
 _scan_report_rows_lock = threading.Lock()
+
+
+_SAMPLE_DATA_PATH = re.compile(
+    r"(^|[\\/])enterprise_test_data([\\/]|$)|(^|[\\/])README_enterprise_dataset\.md$|(^|[\\/])_manifest\.json$",
+    re.IGNORECASE,
+)
+
+
+def compact_scan_report(report: dict) -> dict:
+    """Metadata-only scan payload used by the windowed console.
+
+    Full reports remain available to explicit API callers. The compact form
+    preserves summaries and diagnostics but replaces the unbounded file array
+    with an omission marker so browsers never deserialise it accidentally.
+    """
+    compact = dict(report or {})
+    files = report.get("files") if isinstance(report, dict) else []
+    files = files if isinstance(files, list) else []
+    file_count = len(files) or int((compact.get("summary") or {}).get("total_files") or 0)
+    sample_count = sum(
+        1 for file_obj in files
+        if _SAMPLE_DATA_PATH.search(str(file_obj.get("path") or file_obj.get("full_path") or file_obj.get("name") or ""))
+    )
+    compact["files"] = []
+    compact["files_omitted"] = True
+    compact["file_count"] = file_count
+    compact["result_file_count"] = file_count
+    compact["result_truncated"] = bool(file_count)
+    compact["is_demo_sample"] = bool(compact.get("is_demo_sample") or (files and sample_count / len(files) >= 0.5))
+    return compact
+
+
+def _packed_compact_report(report: dict):
+    try:
+        return pack_json_text(json.dumps(compact_scan_report(report), ensure_ascii=False, separators=(",", ":")))
+    except Exception as exc:  # pragma: no cover - best effort, the reader falls back
+        logger.warning("Compact scan report not stored: %s", type(exc).__name__)
+        return None
+
+
+@_tenant_scoped
+def read_scan_report_compact(tenant_id: str, scan_id: str | None = None) -> dict | None:
+    """The report without its files. Served from the stored form when the run
+    has one; otherwise built from the full report once and stored, so the
+    decrypt-and-parse happens once per run rather than once per boot."""
+    with _connect() as conn:
+        if scan_id:
+            row = conn.execute(
+                "SELECT scan_id, compact_json FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+                (tenant_id, scan_id),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT scan_id, compact_json FROM scan_reports WHERE tenant_id = ? "
+                "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
+                (tenant_id,),
+            ).fetchone()
+    if row is None:
+        return None
+    if row["compact_json"] is not None:
+        try:
+            stored = json.loads(unpack_json_text(row["compact_json"]) or "")
+            if isinstance(stored, dict) and stored:
+                return stored
+        except (json.JSONDecodeError, TypeError):
+            pass
+    report = read_scan_report(tenant_id, str(row["scan_id"]))
+    if report is None:
+        return None
+    compact = compact_scan_report(report)
+    with suppress(Exception):
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE scan_reports SET compact_json = ? WHERE tenant_id = ? AND scan_id = ?",
+                (pack_json_text(json.dumps(compact, ensure_ascii=False, separators=(",", ":"))),
+                 tenant_id, str(row["scan_id"])),
+            )
+    return compact
 
 
 def _packed_report_rows(tenant_id: str, report: dict):

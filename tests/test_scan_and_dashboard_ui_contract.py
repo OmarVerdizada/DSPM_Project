@@ -120,13 +120,21 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         self.assertIn("try {", poll_body)
         self.assertIn("catch (err)", poll_body)
 
-    def test_scan_comparison_delta_has_explanatory_tooltip(self) -> None:
-        self.assertIn("scan-comparison-hint", self.app_js)
-        self.assertIn("Change vs previous scan", self.app_js)
-        # Each delta value carries a title/aria-label explaining the sign.
-        self.assertIn("deltaTitle", self.app_js)
-        self.assertIn("fewer", self.app_js)
-        self.assertIn("previous scan", self.app_js)
+    def test_the_hash_comparison_drives_the_rows_not_a_panel(self) -> None:
+        """This used to assert the tooltip text inside `buildScanComparison`.
+        The frontend refit removed the scan-comparison panel from the page and
+        left the builder behind with no callers - so the test was pinning
+        markup that had not been mounted anywhere. What the comparison data
+        does do is flag rows: a changed hash and a duplicate hash path each
+        become a chip on the file's meta line (folded into the +N when the
+        line is full), and that is what is asserted now."""
+        self.assertNotIn("function buildScanComparison(", self.app_js)
+        for live in ("function hasHashChanged(", "function hasDuplicateHashPath(",
+                     "function duplicateHashKeys(", "Duplicate hash path", "Hash changed"):
+            self.assertIn(live, self.app_js, live)
+        # ...and the comparison is fetched by the tab that uses it, not by boot.
+        self.assertIn("function loadHashFlagsForFindings(", self.app_js)
+        self.assertIn("loadHashFlagsForFindings();", self.app_js)
 
     def test_scan_progress_is_driven_by_backend_progress_and_message(self) -> None:
         # The async poll loop must render the backend's authoritative progress

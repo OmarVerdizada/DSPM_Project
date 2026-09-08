@@ -418,6 +418,85 @@ class MultiWorkerSafetyTests(unittest.TestCase):
         self.assertIn("--reload runs a single process", self.MAIN)
 
 
+class LooseEndTests(unittest.TestCase):
+    """The items the phase records marked as not met, and what closed them."""
+
+    STORE = Path("backend/store.py").read_text(encoding="utf-8")
+    APP = Path("backend/app.py").read_text(encoding="utf-8")
+    APP_JS = Path("frontend/app.js").read_text(encoding="utf-8")
+
+    def test_the_compact_report_is_stored_not_derived(self) -> None:
+        """0.5, second half. The console restores the newest report at every
+        boot without its files, and deriving that form meant decrypting and
+        parsing the whole 8MB artifact to throw the file array away: 1,429ms
+        cold, 20ms served, measured."""
+        with store._connect() as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(scan_reports)")}
+        self.assertIn("compact_json", columns)
+        self.assertIn("def compact_scan_report(", self.STORE)
+        self.assertIn("def read_scan_report_compact(", self.STORE)
+        # Written with the run...
+        self.assertIn("_packed_compact_report(report),", self.STORE)
+        # ...and filled on first read for runs saved before the column existed.
+        reader = self.STORE[self.STORE.index("def read_scan_report_compact("):]
+        reader = reader[:reader.find(chr(10) + "def ", 10)]
+        self.assertIn("UPDATE scan_reports SET compact_json = ?", reader)
+        # app.py keeps its old name but no longer owns the logic.
+        self.assertIn("_compact_scan_report = compact_scan_report", self.APP)
+        self.assertNotIn("def _compact_scan_report(", self.APP)
+        endpoint = self.APP[self.APP.index('@app.get("/api/history/{scan_id}/report")'):]
+        endpoint = endpoint[:endpoint.index("@app.get", 10)]
+        self.assertIn("read_scan_report_compact(principal.tenant_id, scan_id)", endpoint)
+
+    def test_the_hash_comparison_belongs_to_findings(self) -> None:
+        """0.2, last item. Two 8MB artifacts decrypted at every boot - 1.1s of
+        server time - for flags on a tab that may never open. Nothing on the
+        dashboard reads latestHashComparison."""
+        boot = self.APP_JS[self.APP_JS.index("async function loadHistory("):]
+        # The function's own closing brace, not the next `async function` -
+        # the helper that DOES call loadHashComparison sits right after it.
+        boot = boot[:boot.index(chr(10) + "}" + chr(10), 10)]
+        self.assertNotIn("loadHashComparison", boot)
+        opened = self.APP_JS[self.APP_JS.index('onFirstTabOpen("findings"'):]
+        self.assertIn("loadHashFlagsForFindings();", opened[:220])
+        # Rows already on screen repaint when it lands, so the flags appear
+        # without a reload.
+        loader = self.APP_JS[self.APP_JS.index("function loadHashFlagsForFindings("):]
+        loader = loader[:loader.find(chr(10) + "}" + chr(10), 10)]
+        self.assertIn("renderRows(", loader)
+        self.assertIn("renderFindingsWorkspace()", loader)
+
+    def test_the_workspace_slice_is_fetched_once_per_report(self) -> None:
+        """Phase 1's `force` path let every dashboard render with an empty
+        latestFiles start another fetch: three at boot before the first
+        landed, two more when Findings opened. One per report now."""
+        self.assertIn("let workspaceSliceInFlight = null;", self.APP_JS)
+        self.assertIn("let workspaceSliceScanId = \"\";", self.APP_JS)
+        gate = self.APP_JS[self.APP_JS.index("async function hydrateWorkspaceSlice("):]
+        gate = gate[:gate.index("async function hydrateWorkspaceSliceNow(")]
+        self.assertIn("if (workspaceSliceInFlight) return workspaceSliceInFlight;", gate)
+        self.assertIn("scanId === workspaceSliceScanId && latestFiles.length", gate)
+        # The landed slice records which report it belongs to.
+        self.assertIn("workspaceSliceScanId = scanId;", self.APP_JS)
+
+    def test_statistics_are_refreshed_at_shutdown_too(self) -> None:
+        """0.6 said 'after each scan save and at shutdown'; only the first
+        half was wired."""
+        lifespan = self.APP[self.APP.index("async def app_lifespan("):]
+        lifespan = lifespan[:lifespan.index("@app.", 10)] if "@app." in lifespan[10:] else lifespan[:4000]
+        after_yield = lifespan[lifespan.index("yield"):]
+        self.assertIn("optimize_sqlite(", after_yield)
+
+    def test_no_builder_for_a_panel_the_page_does_not_have(self) -> None:
+        """`buildScanComparison` formatted a scan-comparison card the refit
+        removed from the page. Nothing called it; a test pinned its tooltip
+        text for months without the text ever reaching a screen."""
+        # The bare name, deliberately: the one surviving reference was passed
+        # BY REFERENCE to setPanelHtml, with no paren for a call-shaped grep
+        # to find - and it raised at render time for exactly that reason.
+        self.assertNotIn("buildScanComparison", self.APP_JS)
+
+
 class ResponseSizeTests(unittest.TestCase):
     def test_responses_and_assets_are_compressed(self) -> None:
         """0.1 - 1.5MB of JS and CSS and 100-200KB JSON pages went out

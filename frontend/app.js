@@ -76,7 +76,6 @@ const riskTopology = document.querySelector("#risk-topology");
 const executiveTopFiles = document.querySelector("#executive-top-files");
 const priorityRiskFiles = document.querySelector("#priority-risk-files");
 const departmentRisk = document.querySelector("#department-risk");
-const scanComparison = document.querySelector("#scan-comparison");
 const topRiskyFolders = document.querySelector("#top-risky-folders");
 const postureTrend = document.querySelector("#posture-trend");
 const remediationWorkflow = document.querySelector("#remediation-workflow");
@@ -1888,8 +1887,21 @@ function applyScanReport(report, scanKind = "file-server", { refreshEstate = tru
 // workspaces from it. Tiles keep using the report summary (see
 // updateSummaryFromFiles), so the slice never skews the numbers.
 let workspaceSliceRequest = 0;
+let workspaceSliceInFlight = null;
+let workspaceSliceScanId = "";
 async function hydrateWorkspaceSlice({ force = false } = {}) {
   if (!latestReport?.files_omitted) return;
+  const scanId = String(latestReport?.scan_id || "");
+  // Already hydrated for this report, or a fetch for it is on its way.
+  if (scanId && scanId === workspaceSliceScanId && latestFiles.length) return;
+  if (workspaceSliceInFlight) return workspaceSliceInFlight;
+  workspaceSliceInFlight = hydrateWorkspaceSliceNow({ force, scanId }).finally(() => {
+    workspaceSliceInFlight = null;
+  });
+  return workspaceSliceInFlight;
+}
+
+async function hydrateWorkspaceSliceNow({ force = false, scanId = "" } = {}) {
   // 200 rows for the Findings workspace. Fetching them while nothing on screen
   // needs them bought 203KB and 9,685 nodes nobody had asked to see. `force`
   // is the dashboard saying it does need them: its top-risk list counts per
@@ -1912,6 +1924,7 @@ async function hydrateWorkspaceSlice({ force = false } = {}) {
     const items = (data?.items || []).map((item) => hydrateInventoryPageItem(item));
     if (!items.length) return;
     latestFiles = items;
+    workspaceSliceScanId = scanId;
     fileSearchIndex = new WeakMap();
     renderReportPreview();
     renderExecutiveExperience();
@@ -3526,7 +3539,10 @@ function switchTab(tabName) {
   // The 200-row workspace slice used to be fetched at boot for a tab that was
   // not on screen: 203KB and 9,685 nodes nobody had asked for.
   if (resolvedTab === "findings") {
-    onFirstTabOpen("findings", () => hydrateWorkspaceSlice());
+    onFirstTabOpen("findings", () => {
+      hydrateWorkspaceSlice();
+      loadHashFlagsForFindings();
+    });
   }
   if (resolvedTab === "logic") {
     onFirstTabOpen("logic", () => { if (accessToken) loadProtectedMetadata(); });
@@ -5905,7 +5921,6 @@ function renderExecutiveExperience() {
   setPanelHtml(msspPortfolio, buildMsspPortfolio);
   setPanelHtml(priorityRiskFiles, buildPriorityRiskFiles);
   setPanelHtml(departmentRisk, buildDepartmentRisk);
-  setPanelHtml(scanComparison, buildScanComparison);
   setPanelHtml(signalMatrix, buildSignalMatrix);
   setPanelHtml(riskHeatmap, () => buildHeatmap(latestFiles));
   setPanelHtml(riskTopology, () => buildRiskTopology(summary));
@@ -7825,83 +7840,6 @@ function inferDepartment(file) {
   return file.share || parts.slice(-3, -2)[0] || file.source || "-";
 }
 
-function buildScanComparison() {
-  const trend = latestDashboard?.trend || [];
-  if (trend.length < 2) {
-    return '<div class="empty compact">Save at least two scans to compare posture changes.</div>';
-  }
-
-  const previous = trend[trend.length - 2];
-  const latest = trend[trend.length - 1];
-  const previousSummary = previous.summary || {};
-  const latestSummary = latest.summary || {};
-  const rows = [
-    ["Critical", latestSummary.critical || 0, previousSummary.critical || 0],
-    ["High", latestSummary.high || 0, previousSummary.high || 0],
-    ["Medium", latestSummary.medium || 0, previousSummary.medium || 0],
-    ["Low", latestSummary.low || 0, previousSummary.low || 0],
-    ["Total", latestSummary.total_files || 0, previousSummary.total_files || 0],
-  ];
-  const hashChanges = latestHashComparison?.changed || [];
-  const duplicateHashPaths = latestHashComparison?.duplicate_hash_paths || [];
-  const hashSummary = latestHashComparison
-    ? `
-      <details class="scan-advanced hash-comparison-details">
-        <summary>Integrity comparison &mdash; SHA-256 changes &amp; duplicates</summary>
-      <div class="hash-comparison-card">
-        <div>
-          <span>Integrity comparison</span>
-          <strong>${escapeHtml(latestHashComparison.algorithm || "SHA-256")}</strong>
-          <small>${escapeHtml(latestHashComparison.changed_count || 0)} changed &middot; ${escapeHtml(latestHashComparison.added_count || 0)} added &middot; ${escapeHtml(latestHashComparison.removed_count || 0)} removed &middot; ${escapeHtml(latestHashComparison.duplicate_hash_path_count || 0)} duplicate hash groups</small>
-        </div>
-        ${hashChanges.length ? `
-          <div class="hash-change-list">
-            ${hashChanges.slice(0, 5).map((item) => `
-              <div class="hash-change-row">
-                <strong>${escapeHtml(item.name || "Changed file")}</strong>
-                <span>${escapeHtml(item.path || item.source || "")}</span>
-                <code title="${escapeHtml(item.current_hash || "")}">${escapeHtml(shortHash(item.current_hash || ""))}</code>
-              </div>
-            `).join("")}
-          </div>
-        ` : '<p class="subtext">No SHA-256 changes detected between the latest two saved scans.</p>'}
-        ${duplicateHashPaths.length ? `
-          <div class="hash-change-list">
-            ${duplicateHashPaths.slice(0, 5).map((item) => `
-              <div class="hash-change-row duplicate-hash-row">
-                <strong>${escapeHtml(item.name || "Duplicate content")}</strong>
-                <span>${escapeHtml((item.paths || []).slice(0, 2).map((path) => path.path || path.name || "").filter(Boolean).join(" | "))}</span>
-                <code title="${escapeHtml(item.hash || "")}">${escapeHtml(shortHash(item.hash || ""))}</code>
-              </div>
-            `).join("")}
-          </div>
-        ` : '<p class="subtext">No identical SHA-256 values found across different paths in the latest scan.</p>'}
-      </div>
-      </details>
-    `
-    : "";
-
-  return `
-    <div class="scan-comparison-list">
-      <p class="subtext scan-comparison-hint">Change vs previous scan (latest − previous). A minus value means fewer than last scan.</p>
-      ${rows.map(([label, current, prior]) => {
-        const delta = Number(current) - Number(prior);
-        const sign = delta > 0 ? "+" : "";
-        const deltaTitle = delta === 0
-          ? `${label}: no change vs previous scan`
-          : `${label}: ${Math.abs(delta)} ${delta < 0 ? "fewer" : "more"} than previous scan (latest ${current} − previous ${prior})`;
-        return `
-          <div class="scan-comparison-row">
-            <span>${escapeHtml(label)}</span>
-            <strong>${current}</strong>
-            <small class="${delta > 0 ? "worse" : delta < 0 ? "better" : ""}" title="${escapeHtml(deltaTitle)}" aria-label="${escapeHtml(deltaTitle)}">${sign}${delta}</small>
-          </div>
-        `;
-      }).join("")}
-    </div>
-    ${hashSummary}
-  `;
-}
 
 function buildTopRiskyFolders() {
   const folders = groupFilesByFolder(latestFiles);
@@ -9284,14 +9222,23 @@ async function loadHistory() {
 
   // Everything below feeds panels on other tabs. Waiting for it before the
   // first paint cost two seconds of a dashboard that was already answerable.
-  loadHashComparison().then((hashComparison) => {
-    if (!hashComparison || !isCurrentTenantContext(context, hashComparison)) return;
-    latestHashComparison = hashComparison;
-    renderFindingsWorkspace();
-  }).catch(() => {});
   restoreLatestSavedReport(history.history || [], context).then(() => {
     if (!isCurrentTenantContext(context)) return;
     renderExecutiveExperience();
+  }).catch(() => {});
+}
+
+// Rows already on screen re-render when the comparison lands, so the changed
+// and duplicate flags appear without anyone reloading.
+function loadHashFlagsForFindings() {
+  const context = captureTenantContext();
+  loadHashComparison().then((hashComparison) => {
+    if (!hashComparison || !isCurrentTenantContext(context, hashComparison)) return;
+    latestHashComparison = hashComparison;
+    const page = currentInventoryPage();
+    if (page) renderRows(page.items, { serverPage: page });
+    else if (latestFiles.length) renderRows(latestFiles);
+    renderFindingsWorkspace();
   }).catch(() => {});
 }
 

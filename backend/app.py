@@ -62,6 +62,8 @@ from backend.store import (
     read_job,
     read_scan_history,
     read_scan_report,
+    read_scan_report_compact,
+    compact_scan_report,
     recover_interrupted_jobs,
     record_login_failure,
     rotate_registration_code,
@@ -240,6 +242,13 @@ async def app_lifespan(_: FastAPI):
     try:
         yield
     finally:
+        # The planner's statistics are cheap to refresh at shutdown and
+        # expensive to be without at the next start.
+        with suppress(Exception):
+            from backend import db as _db
+            from backend.store import DB_PATH as _db_path
+
+            _db.optimize_sqlite(_db_path)
         with suppress(Exception):
             from backend.search import stop_search_reconciler
 
@@ -1943,10 +1952,13 @@ def saved_scan_report(
     principal: Principal = Depends(require_role("viewer")),
     include_files: bool = Query(default=True),
 ) -> dict:
-    report = read_scan_report(principal.tenant_id, scan_id)
+    if include_files:
+        report = read_scan_report(principal.tenant_id, scan_id)
+    else:
+        report = read_scan_report_compact(principal.tenant_id, scan_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Saved scan report not found")
-    return {"report": report if include_files else _compact_scan_report(report)}
+    return {"report": report}
 
 
 @app.get("/api/findings")
@@ -2621,33 +2633,7 @@ def _posture_score(summary: dict) -> int:
     return max(0, min(100, round(100 - exposure)))
 
 
-def _compact_scan_report(report: dict) -> dict:
-    """Metadata-only scan payload used by the windowed console.
-
-    Full reports remain available to explicit API callers. The compact form
-    preserves summaries/diagnostics but replaces the unbounded file array with
-    an omission marker so browsers never deserialize it accidentally.
-    """
-    compact = dict(report or {})
-    files = report.get("files") if isinstance(report, dict) else []
-    files = files if isinstance(files, list) else []
-    file_count = len(files) or int((compact.get("summary") or {}).get("total_files") or 0)
-    sample_count = sum(
-        1 for file_obj in files
-        if re.search(
-            r"(^|[\\/])enterprise_test_data([\\/]|$)|(^|[\\/])README_enterprise_dataset\.md$|(^|[\\/])_manifest\.json$",
-            str(file_obj.get("path") or file_obj.get("full_path") or file_obj.get("name") or ""),
-            flags=re.IGNORECASE,
-        )
-    )
-    compact["files"] = []
-    compact["files_omitted"] = True
-    compact["file_count"] = file_count
-    compact["result_file_count"] = file_count
-    compact["result_truncated"] = bool(file_count)
-    compact["is_demo_sample"] = bool(compact.get("is_demo_sample") or (files and sample_count / len(files) >= 0.5))
-    return compact
-
+_compact_scan_report = compact_scan_report
 
 def _scan_extension_settings(extensions: list[str], enabled: bool) -> tuple[list[str], bool]:
     normalized = sorted(normalize_extension_filter(extensions))
