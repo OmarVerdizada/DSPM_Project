@@ -209,7 +209,9 @@ class PlatformRegressionTests(unittest.TestCase):
         }
         engine = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["pci_dss"], persistent_cache_enabled=False))
 
-        with patch("discovery.discovery_engine.classify_pci_content", side_effect=ValueError("invalid literal for int() with base 16: ''")):
+        # The detectors moved into discovery.detector_stage so they can run in
+        # a worker process; this patches where they are actually called.
+        with patch("discovery.detector_stage.classify_pci_content", side_effect=ValueError("invalid literal for int() with base 16: ''")):
             analyzed = engine._analyze_record_safe(dict(record))
 
         self.assertEqual(analyzed["findings"], [])

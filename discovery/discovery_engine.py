@@ -15,17 +15,18 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from classification.compliance import classify_gdpr_content, classify_nist_content, classify_pci_content
 from classification.compliance.canonical_entities import apply_canonical_entity_registry
 from classification.compliance.canonical_model import apply_canonical_finding_model
 from classification.compliance.gdpr_classifier import GDPR_DETECTOR_VERSION, GDPR_RULE_CATALOG_VERSION
 from classification.compliance.keyword_library import custom_keyword_groups_for_scan, keyword_catalog_status
 from classification.compliance.nist_catalog import nist_catalog_status
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
-from classification.regex_classifier import RULES, classify_content
+from classification.regex_classifier import RULES
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
 from discovery import triage
+from discovery.detector_pool import build_pool
+from discovery.detector_stage import run_detector_stage, timed_detector
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
 from permissions.acl_analyzer import analyze_acl
 from risk.risk_engine import RiskAssessment, calculate_risk
@@ -139,6 +140,10 @@ class DSPMDiscoveryEngine:
         self._keyword_lock = threading.RLock()
         self._version_signature: tuple | None = None
         self._parallelism_plan: ParallelismPlan | None = None
+        # Classification is the scan's cost and it is pure Python, so the
+        # analysis threads share one core between them. The pool warms in the
+        # background and is used only once every worker is ready.
+        self._detector_pool = build_pool(compliance_enabled=bool(config.compliance_enabled))
         self._deadline: float | None = None
         self._incremental_lock = threading.Lock()
         self._meta_index_lock = threading.Lock()
@@ -209,13 +214,17 @@ class DSPMDiscoveryEngine:
         # M14: arm the wall-clock deadline for this scan (collection + analysis).
         self._deadline = (time.monotonic() + SCAN_MAX_SECONDS) if SCAN_MAX_SECONDS > 0 else None
         plan = self._parallelism()
-        if plan.pipeline_enabled:
-            records, analyzed_files = self._collect_and_analyze_pipelined(plan)
-        else:
-            records = self._collect_records()
-            self._emit_progress("collected", len(records), len(records))
-            analyzed_files = self._analyze_records(normalize_records(records))
+        try:
+            if plan.pipeline_enabled:
+                records, analyzed_files = self._collect_and_analyze_pipelined(plan)
+            else:
+                records = self._collect_records()
+                self._emit_progress("collected", len(records), len(records))
+                analyzed_files = self._analyze_records(normalize_records(records))
+        finally:
+            self._detector_pool.shutdown()
         summary = self._build_summary(analyzed_files)
+        self._set_detector_pool_diagnostics()
         self._finalize_incremental_diagnostics(analyzed_files)
         self.flush_meta_index()
 
@@ -312,8 +321,12 @@ class DSPMDiscoveryEngine:
                 all_futures.append(future)
                 with state_lock:
                     state["submitted"] += 1
+                    submitted = state["submitted"]
                     state["in_flight"] += 1
                     state["peak_in_flight"] = max(state["peak_in_flight"], state["in_flight"])
+                # The collector is ahead of the analyzer here, which is the
+                # window where warming the workers is free.
+                self._detector_pool.consider_start(submitted)
 
                 def completed(_future) -> None:
                     with state_lock:
@@ -377,6 +390,7 @@ class DSPMDiscoveryEngine:
         return records, analyzed
 
     def _analyze_records(self, records: list[dict]) -> list[dict]:
+        self._detector_pool.consider_start(len(records))
         plan = self._parallelism()
         worker_count = max(1, min(plan.analysis_workers, len(records) or 1))
         total_records = len(records)
@@ -1134,61 +1148,26 @@ class DSPMDiscoveryEngine:
             record["truncated"] = True
             record["bytes_scanned"] = decision.get("sampled_chars", len(content))
 
-        generic_findings, row = self._timed_detector("generic", lambda: classify_content(content), timeout_seconds)
-        detector_rows.append(row)
-        findings.extend(generic_findings)
-
-        if self.config.compliance_enabled:
-            existing = {finding.get("type") for finding in findings}
-            if "gdpr" in framework_ids:
-                custom_keywords = self._custom_keywords_for_framework("gdpr")
-                gdpr_findings, row = self._timed_detector("gdpr", lambda: classify_gdpr_content(content, record, custom_keywords), timeout_seconds)
-                detector_rows.append(row)
-                for finding in gdpr_findings:
-                    if finding.get("type") not in existing:
-                        findings.append(finding)
-                        existing.add(finding.get("type"))
-            if "pci_dss" in framework_ids:
-                custom_keywords = self._custom_keywords_for_framework("pci_dss")
-                pci_findings, row = self._timed_detector("pci_dss", lambda: classify_pci_content(content, record, custom_keywords), timeout_seconds)
-                detector_rows.append(row)
-                for finding in pci_findings:
-                    dedupe_key = (
-                        finding.get("type"),
-                        finding.get("protection_state"),
-                        tuple(finding.get("secure_fingerprints") or []),
-                    )
-                    existing_keys = {
-                        (
-                            item.get("type"),
-                            item.get("protection_state"),
-                            tuple(item.get("secure_fingerprints") or []),
-                        )
-                        for item in findings
-                    }
-                    if dedupe_key not in existing_keys:
-                        findings.append(finding)
-            if NIST_FRAMEWORK_ID in framework_ids:
-                custom_keywords = self._custom_keywords_for_framework(NIST_FRAMEWORK_ID)
-                nist_findings, row = self._timed_detector(NIST_FRAMEWORK_ID, lambda: classify_nist_content(content, record, custom_keywords), timeout_seconds)
-                detector_rows.append(row)
-                existing_keys = {
-                    (
-                        item.get("framework"),
-                        item.get("rule_id") or item.get("type"),
-                        item.get("logical_boundary_id") or item.get("location_id"),
-                    )
-                    for item in findings
-                }
-                for finding in nist_findings:
-                    dedupe_key = (
-                        finding.get("framework"),
-                        finding.get("rule_id") or finding.get("type"),
-                        finding.get("logical_boundary_id") or finding.get("location_id"),
-                    )
-                    if dedupe_key not in existing_keys:
-                        findings.append(finding)
-                        existing_keys.add(dedupe_key)
+        payload = {
+            "content": content,
+            "record": record,
+            "framework_ids": sorted(framework_ids),
+            "compliance_enabled": bool(self.config.compliance_enabled),
+            "timeout_seconds": timeout_seconds,
+            "custom_keywords": self._custom_keywords_payload(framework_ids),
+        }
+        result = self._detector_pool.run(payload) if self._detector_pool.enabled else None
+        if result is None:
+            result = run_detector_stage(payload)
+        else:
+            # A worker annotates its own copy of the record (the detectors write
+            # scan_completeness and friends onto it), so the annotations come
+            # back with the findings rather than being lost across the boundary.
+            returned = result.get("record")
+            if isinstance(returned, dict):
+                record.update(returned)
+        findings = result["findings"]
+        detector_rows.extend(result["detector_rows"])
 
         slow = [
             row
@@ -1208,26 +1187,24 @@ class DSPMDiscoveryEngine:
         return findings, metrics
 
     def _timed_detector(self, name: str, detector: Callable[[], list[dict]], timeout_seconds: float) -> tuple[list[dict], dict]:
-        started = time.perf_counter()
-        try:
-            findings = detector()
-            error = ""
-        except Exception as exc:
-            findings = []
-            error = str(exc)
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-        timed_out = bool(timeout_seconds and elapsed_ms > timeout_seconds * 1000)
-        row = {
-            "name": name,
-            "elapsed_ms": elapsed_ms,
-            "finding_groups": len(findings),
-            "timeout_seconds": timeout_seconds,
-            "timed_out": timed_out,
-            "degraded_mode": timed_out or bool(error),
-        }
-        if error:
-            row["error"] = error
-        return findings, row
+        """Kept as the engine's own entry point; the stage owns the logic now
+        so that a worker process and this process time a detector the same."""
+        return timed_detector(name, detector, timeout_seconds)
+
+    def _custom_keywords_payload(self, framework_ids: set[str]) -> dict[str, list[dict]]:
+        """The tenant's custom keyword groups, resolved once per scan.
+
+        A worker has no database, so the groups travel with the file. They are
+        empty on most installs and identical for every file in a scan.
+        """
+        if not self.config.compliance_enabled:
+            return {}
+        return {framework: self._custom_keywords_for_framework(framework) for framework in sorted(framework_ids)}
+
+    def _set_detector_pool_diagnostics(self) -> None:
+        diagnostics = dict(self.last_scan_diagnostics or {})
+        diagnostics["detector_pool"] = self._detector_pool.diagnostics()
+        self.last_scan_diagnostics = diagnostics
 
     def _custom_keywords_for_framework(self, framework: str) -> list[dict]:
         with self._keyword_lock:

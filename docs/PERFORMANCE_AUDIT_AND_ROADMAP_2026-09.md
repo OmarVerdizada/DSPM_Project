@@ -899,6 +899,74 @@ this is a GIL build, so the existing `ThreadPoolExecutor` over files cannot
 speed it up. Process-based parallelism would, at the cost of pickling and one
 copy of the 46,000-term catalog per worker.
 
+### Compliance scanning, part two: more than one core — 2026-09-08
+
+The previous round made the detectors ~5.7x cheaper. This one runs them on the
+other five cores. Measured on a 2,160-file estate with GDPR, PCI DSS and NIST
+enabled, through the real discovery engine:
+
+```
+before this work at all   412.4 s     191 ms/file
+after the detector work    75.1 s      35 ms/file      5.5x
+after process parallelism  30.1 s      14 ms/file     13.7x  <- end to end
+```
+
+Classification is pure-Python CPU work, so on a GIL build the engine's existing
+`ThreadPoolExecutor` never helped it: six analysis threads overlapped one file's
+I/O with another file's analysis, but never two analyses. Six cores ran one.
+
+**The detectors moved out of the engine.** `discovery/detector_stage.py` is the
+whole detector run as a function of its inputs — content, record, which
+frameworks are on, the tenant's custom keyword groups — touching no engine
+state. The engine keeps everything impure: triage counters, the finding cache,
+diagnostics. That split is what makes the stage safe to run anywhere, and it
+gives the detectors one call site instead of two that could drift.
+
+**The pool obeys three rules**, because a scan must never be worse off for
+having tried:
+
+1. *Never block on it.* Until every worker has built its catalogs the caller
+   runs the stage in-process. A cold pool costs a scan nothing.
+2. *Never fail because of it.* A worker that dies, a payload that will not
+   pickle, a platform that refuses to spawn — each falls back to in-process and
+   disables the pool for the rest of the scan, once rather than per file. This
+   is not theoretical: the first harness run hit exactly this (an unguarded
+   `__main__` on Windows spawn), the scan completed, and the findings were
+   identical.
+3. *Never start it when it cannot pay.*
+
+**Rule 3 was the hard one, and two attempts were wrong before the numbers
+settled it.** Warming five workers costs ~12s of CPU — 2.5s each, to import the
+detectors and compile the 46,000-term GDPR catalog — and it comes out of the
+same cores the scan is using.
+
+| attempt | 44-file scan | 360-file scan |
+|---|---|---|
+| start at scan start, always | **6.3 s** (vs 3.6 off — 75% *slower*) | 9.8 s (vs 15.0 off) |
+| start lazily, on the Nth analysed file | 3.6 s ✓ | **22.5 s** — *slower than no pool* |
+| start on the Nth **collected** file | 3.7 s ✓ | 13.0 s ✓ |
+
+The second attempt is the instructive one: moving the trigger later meant the
+warm-ups ran while analysis was already saturating the cores, and the scan
+became slower than not having a pool at all. Warming has to overlap
+**collection**, which is I/O — so the trigger is the collector's count, not the
+analyzer's, and the threshold (96 files) is high enough that a scan which would
+finish before the workers are warm never starts them.
+
+**Identical output, checked at field level.** The full scan report was dumped
+with the pool on and off — 360 files, 4,748 findings, 187 distinct fields per
+finding — and compared. The only differences were wall-clock values
+(`last_scanned_at`, `sla_due`, per-detector elapsed times); everything else
+matched exactly, including the HMAC evidence fingerprints, which are stable
+across processes because the key is persisted rather than per-process.
+
+Verified through the production path as well: a scan issued to `POST /api/scan`
+under uvicorn started five workers and ran 198 of 362 files in them.
+
+`DSPM_DETECTOR_PROCESSES=0` turns it off; a number sets the worker count. The
+default leaves one core for the parent, which is still collecting, extracting
+and writing while the workers classify, and disables itself below three cores.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.
