@@ -12,11 +12,12 @@
     />
     <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=9" />
-    <link rel="stylesheet" href="/static/styles.css?v=251" />
+    <link rel="stylesheet" href="/static/styles.css?v=252" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=19" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
     <link rel="stylesheet" href="/static/styles/reports.css?v=4" />
+    <link rel="stylesheet" href="/static/styles/history.css?v=1" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -1071,40 +1072,78 @@
               <h2 class="page-title">History & audit</h2>
             </div>
           </div>
-          <section class="workspace" id="history-workspace">
-          <div class="table-toolbar history-toolbar">
-            <div class="history-controls">
-                <span class="field-shell history-filter-shell"><svg class="f-ico field-ico dropdown-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg><select id="history-range" class="tenant-switcher" title="Filter scan history">
-                <option value="all">All scans</option>
-                <option value="1">Last 24 hours</option>
-                <option value="5">Last 5 days</option>
-                <option value="7">Last 7 days</option>
-                <option value="30">Last 30 days</option>
-                <option value="custom">Custom range</option>
-              </select></span>
-              <input id="history-from" class="history-date hidden" type="date" title="From date" />
-              <input id="history-to" class="history-date hidden" type="date" title="To date" />
-              <button type="button" id="refresh-history-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+          <!-- Two halves, because the page is named for two things and only ever
+               had one of them: what the scanner found, and what people did. The
+               scan table's last column is the point of it - absolute counts make
+               a reader do arithmetic; the change against the last comparable
+               scan is the history. -->
+          <section class="panel history-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Scan history</h3>
+                <p class="panel-note" id="history-context">Loading scan history&hellip;</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Range</span>
+                  <select id="history-range" title="Filter scan history">
+                    <option value="all">All scans</option>
+                    <option value="1">Last 24 hours</option>
+                    <option value="5">Last 5 days</option>
+                    <option value="7">Last 7 days</option>
+                    <option value="30">Last 30 days</option>
+                    <option value="custom">Custom range</option>
+                  </select>
+                </label>
+                <input id="history-from" class="history-date hidden" type="date" title="From date" />
+                <input id="history-to" class="history-date hidden" type="date" title="To date" />
+                <button type="button" id="refresh-history-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+              </div>
             </div>
-          </div>
-          <div id="executive-summary" class="history-grid"></div>
-          <div class="table-wrap">
-            <table class="logic-table">
-              <thead>
-                <tr>
-                  <th>Timestamp</th>
-                  <th>Scan</th>
-                  <th>Critical</th>
-                  <th>High</th>
-                  <th>Medium</th>
-                  <th>Low</th>
-                </tr>
-              </thead>
-              <tbody id="history-body">
-                <tr><td colspan="6" class="empty">Sign in to load scan history.</td></tr>
-              </tbody>
-            </table>
-          </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table" id="history-table">
+                <thead id="history-head"></thead>
+                <tbody id="history-body">
+                  <tr><td colspan="9" class="empty">Loading scan history&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="panel-foot">Change compares each scan with the most recent earlier scan that covered
+              comparable ground, and counts critical and high findings together. A scan with no comparable
+              predecessor is a baseline.</p>
+          </section>
+
+          <section class="panel history-panel" id="audit-section" hidden>
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Audit trail</h3>
+                <p class="panel-note">Every action taken in this workspace, recorded as it happens and never edited.</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Range</span>
+                  <select id="audit-range" title="Filter audit trail">
+                    <option value="all">All events</option>
+                    <option value="1">Last 24 hours</option>
+                    <option value="5">Last 5 days</option>
+                    <option value="7">Last 7 days</option>
+                    <option value="30">Last 30 days</option>
+                    <option value="custom">Custom range</option>
+                  </select>
+                </label>
+                <input id="audit-from" class="history-date hidden" type="date" title="Audit from date" />
+                <input id="audit-to" class="history-date hidden" type="date" title="Audit to date" />
+                <button type="button" id="refresh-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table" id="audit-table">
+                <thead id="audit-head"></thead>
+                <tbody id="audit-body">
+                  <tr><td colspan="4" class="empty">Loading audit events&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
           </section>
         </section>
 
@@ -1537,42 +1576,6 @@
             </div>
           </section>
 
-          <section class="workspace">
-            <div class="table-toolbar">
-              <div>
-                <h3><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-scroll-text"/></svg></span>Audit trail</h3>
-                <p>Every action in this workspace, recorded as it happens and never edited.</p>
-              </div>
-              <div class="history-controls audit-controls">
-                <span class="field-shell audit-filter-shell"><svg class="f-ico field-ico dropdown-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg><select id="audit-range" class="tenant-switcher" title="Filter audit trail">
-                  <option value="all">All events</option>
-                  <option value="1">Last 24 hours</option>
-                  <option value="5">Last 5 days</option>
-                  <option value="7">Last 7 days</option>
-                  <option value="30">Last 30 days</option>
-                  <option value="custom">Custom range</option>
-                </select></span>
-                <input id="audit-from" class="history-date hidden" type="date" title="Audit from date" />
-                <input id="audit-to" class="history-date hidden" type="date" title="Audit to date" />
-                <button type="button" id="refresh-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh audit</button>
-              </div>
-            </div>
-            <div class="table-wrap">
-              <table class="logic-table">
-                <thead>
-                  <tr>
-                    <th>Timestamp</th>
-                    <th>Actor</th>
-                    <th>Action</th>
-                    <th>Detail</th>
-                  </tr>
-                </thead>
-                <tbody id="audit-body">
-                  <tr><td colspan="4" class="empty">Sign in as admin to load audit events.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
         </section>
 
         <section id="tab-admin" class="tab-panel" data-admin-only>
@@ -1699,7 +1702,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=227"></script>
+    <script src="/static/app.js?v=228"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

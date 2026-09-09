@@ -75,7 +75,10 @@ const historyRange = document.querySelector("#history-range");
 const historyFrom = document.querySelector("#history-from");
 const historyTo = document.querySelector("#history-to");
 const historyBody = document.querySelector("#history-body");
-const executiveSummary = document.querySelector("#executive-summary");
+const historyContext = document.querySelector("#history-context");
+const historyHead = document.querySelector("#history-head");
+const auditHead = document.querySelector("#audit-head");
+const auditSection = document.querySelector("#audit-section");
 const fileServerContext = document.querySelector("#file-server-context");
 const endpointContext = document.querySelector("#endpoint-context");
 const refreshExecutiveBtn = document.querySelector("#refresh-executive-btn");
@@ -9321,6 +9324,9 @@ async function loadHistory() {
   // needs to count. Both entry points ask; the second one returns the cache.
   refreshRiskCategoryCounts().catch(() => {});
   renderHistory(history.history || []);
+  // The audit trail lives on this page now, so this page fetches it. It is
+  // admin-only at the API and loadAudit() returns early for anyone else.
+  loadAudit().catch(() => {});
   renderExecutiveExperience();
   loadTenants().catch(() => {});
 
@@ -9486,41 +9492,6 @@ function renderTenantsTable(tenants) {
     .join("");
 }
 
-function renderHistory(items) {
-  latestHistoryItems = items || [];
-  publishTenantDashboardAnalytics();
-  renderInventoryScanOptions();
-  const visibleItems = filterHistoryItems(latestHistoryItems);
-  updateRangeStatus(historyRange, visibleItems.length, latestHistoryItems.length);
-  renderExecutiveDashboard(latestDashboard, visibleItems);
-  if (!latestHistoryItems.length) {
-    historyBody.innerHTML = '<tr><td colspan="6" class="empty">No scans saved for this tenant yet.</td></tr>';
-    return;
-  }
-  if (!visibleItems.length) {
-    historyBody.innerHTML = '<tr><td colspan="6" class="empty">No scans match the selected date range.</td></tr>';
-    return;
-  }
-  historyBody.innerHTML = visibleItems
-    .slice()
-    .reverse()
-    .map((item) => {
-      const summary = item.summary || {};
-      const timestamp = getItemTimestampValue(item);
-      return `
-        <tr>
-          <td><span class="timestamp-cell">${escapeHtml(getFriendlyTimestamp(timestamp))}</span><small>${escapeHtml(timestamp)}</small></td>
-          <td class="file-path">${escapeHtml(item.scan_id || "")}</td>
-          <td>${summary.critical || 0}</td>
-          <td>${summary.high || 0}</td>
-          <td>${summary.medium || 0}</td>
-          <td>${summary.low || 0}</td>
-        </tr>
-      `;
-    })
-    .join("");
-}
-
 function publishTenantDashboardAnalytics() {
   // sentro-fx owns only presentation. Its previous independent fetches did
   // not carry X-Tenant-ID, so an MSSP admin's widgets stayed on the token's
@@ -9568,20 +9539,244 @@ function updateHistoryFilterControls() {
   historyTo?.classList.toggle("hidden", !custom);
 }
 
-function renderExecutiveDashboard(data = {}, visibleHistoryItems = filterHistoryItems(latestHistoryItems)) {
-  data = data || {};
-  const filteredItems = Array.isArray(visibleHistoryItems) ? visibleHistoryItems : [];
-  const latestVisible = filteredItems.at(-1);
-  const latest = latestVisible?.summary || data.latest?.summary || {};
-  const reports = filteredItems.length || (latestHistoryItems.length ? 0 : data.retention?.report_count || 0);
-  const score = latest.total_files ? calculatePostureScore(latest) : filteredItems.length ? 100 : data.risk_posture_score ?? 100;
-  executiveSummary.innerHTML = `
-    <div class="history-card"><span>Posture score</span><strong>${escapeHtml(score)}</strong></div>
-    <div class="history-card"><span>Tenant</span><strong>${escapeHtml(data.tenant_id || currentTenant)}</strong></div>
-    <div class="history-card"><span>Reports</span><strong>${escapeHtml(reports)}</strong></div>
-    <div class="history-card"><span>Open critical</span><strong>${escapeHtml(latest.critical || 0)}</strong></div>
-  `;
+// ---- History & audit -----------------------------------------------------
+// The page answers one question: what has happened in this workspace, and is
+// the estate getting better or worse? History is the scans; audit is the
+// actions taken. It had the first half, showing absolute counts and a raw scan
+// id, which makes a reader do arithmetic to learn anything.
+
+const HISTORY_COLUMNS = [
+  { key: "when", label: "When", value: (row) => row.at },
+  { key: "scan", label: "Scan", value: (row) => (row.name || "Unnamed run").toLowerCase(), text: true },
+  { key: "source", label: "Source", value: (row) => row.source.toLowerCase(), text: true },
+  { key: "files", label: "Files", value: (row) => row.files, numeric: true },
+  { key: "critical", label: "Critical", value: (row) => row.critical, numeric: true },
+  { key: "high", label: "High", value: (row) => row.high, numeric: true },
+  { key: "medium", label: "Medium", value: (row) => row.medium, numeric: true },
+  { key: "low", label: "Low", value: (row) => row.low, numeric: true },
+  // Sorts by the size of the move, so "what changed most" is one click.
+  { key: "change", label: "Change", value: (row) => (row.change ? row.change.serious : Number.NEGATIVE_INFINITY), numeric: true },
+];
+
+const AUDIT_COLUMNS = [
+  { key: "when", label: "When", value: (row) => row.at },
+  { key: "actor", label: "Who", value: (row) => row.actor.toLowerCase(), text: true },
+  { key: "what", label: "What happened", value: (row) => row.label.toLowerCase(), text: true },
+];
+
+let historySort = { key: "when", dir: -1 };
+let auditSort = { key: "when", dir: -1 };
+
+// Two scans are comparable when the smaller covered at least 60% of the
+// larger's files - the same rule and the same constant the dashboard's posture
+// delta uses, so the two never disagree. Without it the 2-file endpoint check
+// that follows a 539-file sweep reads as "174 critical resolved", an
+// improvement that never happened.
+function historyComparableIndex(items, index) {
+  const files = Number(items[index]?.summary?.total_files || 0);
+  if (!files) return -1;
+  for (let earlier = index - 1; earlier >= 0; earlier -= 1) {
+    const before = Number(items[earlier]?.summary?.total_files || 0);
+    if (!before) continue;
+    if (Math.min(before, files) / Math.max(before, files) >= POSTURE_COMPARABLE_RATIO) return earlier;
+  }
+  return -1;
 }
+
+function historySeverityCounts(summary = {}) {
+  return {
+    critical: Number(summary.critical || 0),
+    high: Number(summary.high || 0),
+    medium: Number(summary.medium || 0),
+    low: Number(summary.low || 0),
+  };
+}
+
+function buildHistoryRows(items) {
+  return items.map((item, index) => {
+    const summary = item.summary || {};
+    const counts = historySeverityCounts(summary);
+    const serious = counts.critical + counts.high;
+    const against = historyComparableIndex(items, index);
+    let change = null;
+    if (against >= 0) {
+      const before = historySeverityCounts(items[against].summary || {});
+      const moved = REPORT_SEVERITY_ORDER
+        .map((level) => [severityLabel(level), counts[level.toLowerCase()] - before[level.toLowerCase()]])
+        .filter(([, delta]) => delta !== 0)
+        .map(([label, delta]) => `${label} ${delta > 0 ? "+" : "−"}${Math.abs(delta)}`);
+      change = {
+        serious: serious - (before.critical + before.high),
+        detail: moved.length ? moved.join(", ") : "Nothing moved",
+        against: historyScanName(items[against]),
+      };
+    }
+    return {
+      ...counts,
+      serious,
+      change,
+      at: Date.parse(getItemTimestampValue(item)) || 0,
+      when: getItemTimestampValue(item),
+      name: historyScanName(item),
+      source: historySourceLabel(item.source),
+      files: Number(summary.total_files || 0),
+      withFindings: Number(summary.sensitive_files || 0),
+      scanId: String(item.scan_id || ""),
+    };
+  });
+}
+
+// A scan id is twenty digits of timestamp. It identifies a run; it does not
+// name one, and the old table put it in the column headed "Scan".
+function historyScanName(item = {}) {
+  return String(item.scan_label || "").trim();
+}
+
+// A scan id is a twenty-digit timestamp. The last six identify a run inside
+// its day, which is what somebody reads out to support.
+function shortScanId(scanId) {
+  const value = String(scanId || "");
+  return value.length > 6 ? `#${value.slice(-6)}` : value;
+}
+
+function historySourceLabel(source) {
+  const value = String(source || "").trim();
+  return {
+    smb: "File server",
+    local: "Local disk",
+    "endpoint-winrm": "Endpoint",
+    endpoint: "Endpoint",
+  }[value] || (value ? value.charAt(0).toUpperCase() + value.slice(1) : "");
+}
+
+function sortTableRows(rows, sort, columns) {
+  const column = columns.find((item) => item.key === sort.key) || columns[0];
+  return [...rows].sort((a, b) => {
+    const left = column.value(a);
+    const right = column.value(b);
+    if (column.text) return String(left).localeCompare(String(right)) * sort.dir;
+    return (Number(left) - Number(right)) * sort.dir;
+  });
+}
+
+function sortableHeader(column, sort) {
+  const active = sort.key === column.key;
+  const ariaSort = active ? (sort.dir === 1 ? "ascending" : "descending") : "none";
+  const numeric = column.numeric ? ' class="is-numeric"' : "";
+  return `<th data-sort="${column.key}" aria-sort="${ariaSort}"${numeric}>${escapeHtml(column.label)}</th>`;
+}
+
+// Clicking a column sorts by it; clicking the one already sorted turns it
+// around. A number column opens biggest-first, a name column A-to-Z, because
+// that is the answer each is usually asked for.
+function toggleSort(sort, key, columns) {
+  const column = columns.find((item) => item.key === key);
+  if (!column) return sort;
+  if (sort.key === key) return { key, dir: sort.dir * -1 };
+  return { key, dir: column.text ? 1 : -1 };
+}
+
+function renderHistory(items) {
+  latestHistoryItems = items || [];
+  publishTenantDashboardAnalytics();
+  renderInventoryScanOptions();
+  const visibleItems = filterHistoryItems(latestHistoryItems);
+  updateRangeStatus(historyRange, visibleItems.length, latestHistoryItems.length);
+  renderHistoryContext(visibleItems);
+  renderHistoryTable(visibleItems);
+  syncAuditVisibility();
+}
+
+// Replaces four cards that read Posture score / Tenant / Reports / Open
+// critical. Tenant repeated the sidebar, and the other three are the
+// dashboard's job; this says what the table below covers, which is the one
+// thing the table cannot say about itself.
+function renderHistoryContext(visibleItems) {
+  if (!historyContext) return;
+  if (!visibleItems.length) {
+    historyContext.textContent = latestHistoryItems.length
+      ? "No scans in this range."
+      : "No scans saved for this workspace yet.";
+    return;
+  }
+  const first = getItemTimestampValue(visibleItems[0]);
+  const last = getItemTimestampValue(visibleItems.at(-1));
+  const files = visibleItems.reduce((total, item) => total + Number(item.summary?.total_files || 0), 0);
+  historyContext.textContent = [
+    `${visibleItems.length} ${visibleItems.length === 1 ? "scan" : "scans"}`,
+    visibleItems.length > 1 ? `${formatReportDate(first)} to ${formatReportDate(last)}` : formatReportDate(last),
+    `${files.toLocaleString()} files analysed in total`,
+  ].join(" · ");
+}
+
+function renderHistoryTable(visibleItems = filterHistoryItems(latestHistoryItems)) {
+  if (!historyBody) return;
+  if (historyHead) {
+    historyHead.innerHTML = `<tr>${HISTORY_COLUMNS.map((column) => sortableHeader(column, historySort)).join("")}</tr>`;
+  }
+  const span = HISTORY_COLUMNS.length;
+  if (!latestHistoryItems.length) {
+    historyBody.innerHTML = `<tr><td colspan="${span}" class="empty">No scans saved yet. Run one from the Scan page and it will be listed here.</td></tr>`;
+    return;
+  }
+  if (!visibleItems.length) {
+    historyBody.innerHTML = `<tr><td colspan="${span}" class="empty">No scans in the selected range. Widen it to see more.</td></tr>`;
+    return;
+  }
+  // Built in chronological order so each row can look backwards, then sorted.
+  const rows = sortTableRows(buildHistoryRows(visibleItems), historySort, HISTORY_COLUMNS);
+  historyBody.innerHTML = rows.map((row) => `
+    <tr>
+      <td>
+        <span class="history-when">${escapeHtml(getFriendlyTimestamp(row.when))}</span>
+        <span class="history-ago">${escapeHtml(relativeAge(row.when))}</span>
+      </td>
+      <td>
+        <span class="history-name"${row.name ? "" : ' data-unnamed="true"'}>${escapeHtml(row.name || "Unnamed run")}</span>
+        <span class="history-sub" title="${escapeHtml(row.scanId)}">${escapeHtml(shortScanId(row.scanId))}</span>
+      </td>
+      <td>${escapeHtml(row.source)}</td>
+      <td class="is-numeric">${row.files.toLocaleString()}<span class="history-sub">${row.withFindings.toLocaleString()} with findings</span></td>
+      ${["critical", "high", "medium", "low"].map((level) => `
+        <td class="is-numeric"><span class="history-count" data-severity="${level.toUpperCase()}"${row[level] ? "" : ' data-zero="true"'}>${row[level].toLocaleString()}</span></td>`).join("")}
+      <td class="is-numeric">${historyChangeCell(row)}</td>
+    </tr>`).join("");
+}
+
+// The one column that turns a list of counts into a history: how the serious
+// findings - critical and high together - moved against the last scan that
+// covered comparable ground.
+function historyChangeCell(row) {
+  if (!row.change) {
+    return '<span class="history-change" data-move="none" title="No earlier scan covered comparable ground, so there is nothing to compare against.">Baseline</span>';
+  }
+  const moved = row.change.serious;
+  const title = `${row.change.detail} · against ${row.change.against}`;
+  if (!moved) {
+    return `<span class="history-change" data-move="flat" title="${escapeHtml(title)}">No change</span>`;
+  }
+  const arrow = moved > 0 ? "▲" : "▼";
+  const sign = moved > 0 ? "+" : "−";
+  return `<span class="history-change" data-move="${moved > 0 ? "up" : "down"}" title="${escapeHtml(title)}">${arrow} ${sign}${Math.abs(moved).toLocaleString()}</span>`;
+}
+
+function relativeAge(value) {
+  const at = Date.parse(value);
+  if (!at) return "";
+  const days = Math.floor((Date.now() - at) / 86_400_000);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 30) return `${days} days ago`;
+  const months = Math.round(days / 30);
+  return months === 1 ? "a month ago" : `${months} months ago`;
+}
+
+historyHead?.addEventListener("click", (event) => {
+  const header = event.target.closest("th[data-sort]");
+  if (!header) return;
+  historySort = toggleSort(historySort, header.dataset.sort, HISTORY_COLUMNS);
+  renderHistoryTable();
+});
 
 async function loadAudit() {
   if (!accessToken || !isAdminRole()) {
@@ -9598,33 +9793,162 @@ async function loadAudit() {
   }
 }
 
+// Every action string the product records, in the words an operator would use
+// for it. The raw strings are namespaced identifiers - "scan_profile.saved",
+// "user.role_updated" - which are precise and unreadable; the table used to
+// print them, and a JSON blob beside them.
+const AUDIT_ACTIONS = {
+  "auth.login": "Signed in",
+  "auth.logout": "Signed out",
+  "api_key.created": "Created an API key",
+  "api_key.revoked": "Revoked an API key",
+  "connection.test": "Tested a file server connection",
+  "credential.stored": "Stored a credential",
+  "endpoint.connection.test": "Tested an endpoint connection",
+  "endpoint.scan.queued": "Queued an endpoint scan",
+  "endpoint.scan.completed": "Finished an endpoint scan",
+  "scan.queued": "Queued a scan",
+  "scan.completed": "Finished a scan",
+  "scan.cancel": "Cancelled a scan",
+  "scan.secondary_operations_degraded": "Scan finished with a degraded step",
+  "scan_profile.saved": "Saved a scan profile",
+  "scan_profile.deleted": "Deleted a scan profile",
+  "settings.feature_toggled": "Changed a feature setting",
+  "nist.catalog.imported": "Imported a NIST catalogue",
+  "nist.catalog.validated": "Validated a NIST catalogue",
+  "nist.catalog.activated": "Activated a NIST catalogue",
+  "nist.catalog.rollback": "Rolled back a NIST catalogue",
+  "db.activity.viewed": "Viewed database activity",
+  "db.slow_queries.viewed": "Viewed slow queries",
+  "tenant.created": "Created a workspace",
+  "tenant.deleted": "Deleted a workspace",
+  "tenant.invite_created": "Invited someone",
+  "tenant.invite_revoked": "Revoked an invitation",
+  "tenant.registration_code_rotated": "Rotated the registration code",
+  "user.created": "Added a user",
+  "user.deleted": "Removed a user",
+  "user.registered": "Registered an account",
+  "user.role_updated": "Changed a user's role",
+  "user.status_updated": "Changed a user's status",
+  "user.password_changed": "Changed a password",
+  "user.password_reset": "Reset a password",
+  "user.profile_updated": "Updated a profile",
+  "user.avatar_updated": "Updated an avatar",
+  "compliance_keywords.imported": "Imported a compliance keyword set",
+  "demo_data.generated": "Generated demo data",
+  "endpoint.winrm.activate": "Enabled WinRM on an endpoint",
+  "endpoint.winrm.activate_local": "Enabled WinRM locally",
+  "endpoint.winrm.repair": "Repaired an endpoint's WinRM setup",
+  "finding.workflow_updated": "Moved a finding through its workflow",
+  "inventory.export.started": "Started an inventory export",
+  "tenant.legal_hold.set": "Changed the legal hold",
+};
+
+// An unmapped action still reads as a sentence rather than as an identifier.
+function auditActionLabel(action) {
+  const key = String(action || "").trim();
+  if (AUDIT_ACTIONS[key]) return AUDIT_ACTIONS[key];
+  if (!key) return "Unrecorded action";
+  const words = key.replace(/[._]/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+// Which half of the product the action belongs to, so the trail can be read by
+// area without a filter for it.
+function auditActionArea(action) {
+  const head = String(action || "").split(".")[0];
+  return {
+    auth: "Access", user: "Access", api_key: "Access", tenant: "Access",
+    scan: "Scanning", scan_profile: "Scanning", endpoint: "Scanning",
+    connection: "Scanning", credential: "Scanning",
+    nist: "Compliance", settings: "Settings", db: "Settings",
+  }[head] || "Other";
+}
+
+// The detail is a small object - a scan id, a host, a list of warnings. It was
+// printed as JSON.stringify inside a <code>. These are the same facts as
+// labelled pairs, with anything long left to the title.
+function auditDetailPairs(detail) {
+  if (!detail || typeof detail !== "object") return [];
+  return Object.entries(detail).map(([key, value]) => {
+    const name = key.replace(/[._]/g, " ");
+    if (Array.isArray(value)) {
+      const first = value[0];
+      const summary = value.length === 1 && first && typeof first === "object"
+        ? Object.values(first).map((entry) => String(entry)).join(" · ")
+        : `${value.length} ${value.length === 1 ? "entry" : "entries"}`;
+      return [name, summary];
+    }
+    if (value && typeof value === "object") return [name, Object.keys(value).length ? "details" : ""];
+    return [name, String(value ?? "")];
+  }).filter(([, value]) => value !== "");
+}
+
+function buildAuditRows(events) {
+  return events.map((event) => ({
+    at: Date.parse(getItemTimestampValue(event)) || 0,
+    when: getItemTimestampValue(event),
+    actor: String(event.actor || "").trim() || "system",
+    action: String(event.action || ""),
+    label: auditActionLabel(event.action),
+    area: auditActionArea(event.action),
+    pairs: auditDetailPairs(event.detail),
+  }));
+}
+
 function renderAudit(events) {
   latestAuditEvents = events || [];
   publishTenantDashboardAnalytics();
   const visibleEvents = filterTimedItems(latestAuditEvents, auditRange, auditFrom, auditTo);
   updateRangeStatus(auditRange, visibleEvents.length, latestAuditEvents.length);
+  renderAuditTable(visibleEvents);
+}
+
+function renderAuditTable(visibleEvents = filterTimedItems(latestAuditEvents, auditRange, auditFrom, auditTo)) {
+  if (!auditBody) return;
+  if (auditHead) {
+    auditHead.innerHTML = `<tr>${AUDIT_COLUMNS.map((column) => sortableHeader(column, auditSort)).join("")}<th>Details</th></tr>`;
+  }
+  const span = AUDIT_COLUMNS.length + 1;
   if (!latestAuditEvents.length) {
-    auditBody.innerHTML = '<tr><td colspan="4" class="empty">No audit events for this tenant yet.</td></tr>';
+    auditBody.innerHTML = `<tr><td colspan="${span}" class="empty">Nothing has been recorded for this workspace yet.</td></tr>`;
     return;
   }
   if (!visibleEvents.length) {
-    auditBody.innerHTML = '<tr><td colspan="4" class="empty">No audit events match the selected date range.</td></tr>';
+    auditBody.innerHTML = `<tr><td colspan="${span}" class="empty">No events in the selected range. Widen it to see more.</td></tr>`;
     return;
   }
-  auditBody.innerHTML = visibleEvents
-    .slice()
-    .reverse()
-    .map(
-      (event) => `
-        <tr>
-          <td><span class="timestamp-cell">${escapeHtml(getFriendlyTimestamp(getItemTimestampValue(event)))}</span><small>${escapeHtml(getItemTimestampValue(event))}</small></td>
-          <td>${escapeHtml(event.actor || "")}</td>
-          <td class="file-path"><span class="audit-action" data-action="${escapeHtml(event.action || "")}">${escapeHtml(event.action || "")}</span></td>
-          <td><code>${escapeHtml(JSON.stringify(event.detail || {}))}</code></td>
-        </tr>
-      `
-    )
-    .join("");
+  const rows = sortTableRows(buildAuditRows(visibleEvents), auditSort, AUDIT_COLUMNS);
+  auditBody.innerHTML = rows.map((row) => `
+    <tr>
+      <td>
+        <span class="history-when">${escapeHtml(getFriendlyTimestamp(row.when))}</span>
+        <span class="history-ago">${escapeHtml(relativeAge(row.when))}</span>
+      </td>
+      <td><span class="audit-actor">${escapeHtml(row.actor)}</span></td>
+      <td>
+        <span class="audit-label">${escapeHtml(row.label)}</span>
+        <span class="audit-area" data-area="${escapeHtml(row.area)}">${escapeHtml(row.area)}</span>
+      </td>
+      <td>${row.pairs.length
+        ? `<span class="audit-detail">${row.pairs.map(([name, value]) =>
+            `<span class="audit-pair"><span>${escapeHtml(name)}</span><b title="${escapeHtml(value)}">${escapeHtml(value)}</b></span>`).join("")}</span>`
+        : '<span class="audit-detail is-empty">—</span>'}</td>
+    </tr>`).join("");
+}
+
+auditHead?.addEventListener("click", (event) => {
+  const header = event.target.closest("th[data-sort]");
+  if (!header) return;
+  auditSort = toggleSort(auditSort, header.dataset.sort, AUDIT_COLUMNS);
+  renderAuditTable();
+});
+
+// The trail is admin-only at the API, so a viewer is told why the section is
+// not there rather than being shown a table that will never fill.
+function syncAuditVisibility() {
+  if (!auditSection) return;
+  auditSection.hidden = !isAdminRole();
 }
 
 function filterTimedItems(items, rangeSelect, fromInput, toInput) {

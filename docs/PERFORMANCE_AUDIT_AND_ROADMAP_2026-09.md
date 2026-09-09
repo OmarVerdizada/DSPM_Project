@@ -1071,6 +1071,43 @@ already on the wire (`summary.total_occurrences`, `findings_by_status`,
 `exposure` and `confidence` were rejected: the first is one repeated value on
 an SMB estate, the second is 0 for every non-PCI finding.
 
+### History & audit, remastered
+
+The page was the last one still wearing the previous design: 86 rules in
+styles.css that existed only to dress it, including a "premium toolbar card"
+with sweep animations, `text-transform: uppercase` at `font-weight: 750`, a
+24px figure, and four KPI tiles of which one printed the tenant id the sidebar
+already shows. All 86 are deleted and the page has a contract sheet,
+`styles/history.css`. One rule stays: `#tab-history .f-ico`, without which
+every SVG in the panel falls back to a black fill and no stroke.
+
+Two defects the deletion uncovered, both invisible until the table changed
+shape: `#history-body td:nth-child(3..6)` painted the severity columns of the
+OLD six-column table, so after the remaster it was colouring **Source** red;
+and the `low` column was `#2563eb`, blue, not the severity ramp's green.
+
+**The page is called History & audit and had no audit.** `/api/audit` exists,
+records 44 distinct actions with an actor and a detail object, and the trail
+was rendered on the Administration page instead. It now sits on the page named
+for it, admin-gated because the endpoint is, and the action strings are
+decoded: `scan_profile.saved` reads "Saved a scan profile", and the detail is
+labelled pairs rather than `JSON.stringify` in a `<code>`. A contract test
+compares the label catalogue against every `audit(...)` call in the backend, so
+a new action cannot ship unlabelled - it caught eight on the first run.
+
+**Both tables sort**, client-side, on the `data-sort` / `aria-sort` contract the
+findings queue already uses. Server-side sorting would be the wrong trade here:
+`/api/history` returns the whole list and a tenant holds tens of scans, not
+thousands.
+
+The column that makes the page worth opening is **Change**: how critical and
+high findings moved against the previous scan. It is gated on
+`POSTURE_COMPARABLE_RATIO`, the same constant the dashboard's posture delta
+uses, so the two can never disagree - on this data the 2-file endpoint check
+that follows a 539-file sweep would otherwise read as "174 critical resolved",
+an improvement that never happened. A scan with no comparable predecessor says
+"Baseline".
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

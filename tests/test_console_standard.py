@@ -56,8 +56,10 @@ class OnePageStandardTests(unittest.TestCase):
                 opening = INDEX[INDEX.index(f'<section id="{panel}"'):]
                 opening = opening[:opening.index(">")]
                 self.assertNotIn("workspace", opening)
-        # History keeps a workspace, as an inner surface like every other page.
-        self.assertIn('<section class="workspace" id="history-workspace">', INDEX)
+        # History's content still sits on inner surfaces - two of them now, one
+        # per table, since the remaster gave the page its audit half back.
+        history = INDEX[INDEX.index('<section id="tab-history"'):INDEX.index('<section id="tab-endpoint"')]
+        self.assertEqual(history.count('class="panel history-panel"'), 2)
         self.assertIn("#history-workspace {", PAGES_CSS)
         # The overflow clip that depended on the class it lost.
         self.assertIn("#tab-logic.risk-logic {", STYLES_CSS)

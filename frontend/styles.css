@@ -1457,17 +1457,6 @@ tbody tr.row-flash {
 }
 
 
-#tab-history .history-filter-shell .dropdown-ico,
-#tab-security .audit-filter-shell .dropdown-ico {
-  left: auto !important;
-  right: 12px;
-  width: 16px;
-  height: 16px;
-  color: var(--muted);
-  pointer-events: none;
-}
-
-
 /* File names are interactive text, not code pills. Remove the legacy dark block. */
 .inventory-table .file-info-toggle .file-path,
 :root[data-theme="dark"] .inventory-table .file-info-toggle .file-path {
@@ -1756,13 +1745,6 @@ progress::-moz-progress-bar {
 
 .report-row span {
   word-break: break-word;
-}
-
-.history-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(140px, 1fr));
-  gap: 12px;
-  margin-bottom: 16px;
 }
 
 .insights-grid,
@@ -3326,13 +3308,6 @@ body:not(.role-admin) [data-admin-only] { display: none !important; } /* token-g
   background: linear-gradient(135deg, color-mix(in srgb, #f59e0b 10%, var(--card)), var(--card)) !important;
 }
 
-.history-controls {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
 .history-date {
   width: 150px;
   min-height: 42px;
@@ -3989,8 +3964,6 @@ body.sidebar-collapsed .side-nav .tab {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-.audit-controls { align-items: center; }
 .timestamp-cell {
   display: block;
   font-weight: 850;
@@ -5734,10 +5707,6 @@ body.sidebar-collapsed .app-shell > main {
   white-space: nowrap;
 }
 
-.history-controls {
-  flex-wrap: wrap !important;
-}
-
 /* DSPM v110 local: scrollable detection bars and cleaner report preview spacing. */
 .signal-bars,
 #findings-signal-summary .signal-bars,
@@ -5794,75 +5763,6 @@ body.sidebar-collapsed .app-shell > main {
 .signal-bar progress::-moz-progress-bar {
   border-radius: 999px;
   background: linear-gradient(90deg, var(--accent), var(--critical));
-}
-
-
-
-
-
-
-
-
-
-
-
-
-/* DSPM v110 local: keep audit trail timestamps bounded inside the table. */
-.table-wrap:has(#audit-body) {
-  max-height: min(58vh, 560px);
-  overflow: auto;
-  scrollbar-gutter: stable;
-  scrollbar-width: thin;
-}
-
-.table-wrap:has(#audit-body) thead th {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background: var(--card);
-  box-shadow: 0 1px 0 var(--line);
-}
-
-#audit-body td {
-  vertical-align: top;
-}
-
-#audit-body td:first-child {
-  width: 220px;
-  min-width: 180px;
-  max-width: 240px;
-}
-
-#audit-body .timestamp-cell {
-  display: block;
-  max-width: 100%;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-#audit-body .timestamp-cell + small {
-  display: block;
-  max-width: 100%;
-  max-height: 42px;
-  margin-top: 4px;
-  overflow: auto;
-  padding-right: 4px;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  scrollbar-width: thin;
-}
-
-#audit-body code {
-  display: block;
-  max-width: min(48vw, 620px);
-  max-height: 88px;
-  overflow: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  scrollbar-width: thin;
 }
 
 
@@ -12503,31 +12403,6 @@ body.sidebar-collapsed .app-shell > main {
   background: color-mix(in srgb, #dc2626 9%, var(--card)) !important;
   border-color: color-mix(in srgb, #dc2626 60%, var(--line)) !important;
 }
-
-/* ---- 7. Audit trail -------------------------------------------------------- */
-#tab-security .audit-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-#tab-security .audit-filter-shell {
-  position: relative;
-  display: inline-block;
-}
-#tab-security .audit-filter-shell .field-ico {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: color-mix(in srgb, var(--muted) 82%, transparent);
-  pointer-events: none;
-  z-index: 1;
-}
-#tab-security .audit-filter-shell select {
-  padding-left: 36px !important;
-  border-radius: 10px !important;
-}
 #tab-security .range-filter-status {
   display: inline-flex;
   align-items: center;
@@ -12540,58 +12415,6 @@ body.sidebar-collapsed .app-shell > main {
   font-weight: 700;
   white-space: nowrap;
 }
-#audit-body .timestamp-cell {
-  display: block;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-  line-height: 1.35;
-}
-#audit-body .timestamp-cell + small {
-  display: block;
-  margin-top: 2px;
-  color: var(--muted);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  line-height: 1.35;
-}
-#audit-body code {
-  display: inline-block;
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: var(--card-2);
-  border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
-  color: var(--muted);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10.5px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-  max-width: 460px;
-}
-#audit-body .audit-action {
-  --pill: var(--muted);
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--pill) 32%, transparent);
-  background: color-mix(in srgb, var(--pill) 10%, var(--card));
-  color: color-mix(in srgb, var(--pill) 85%, var(--text));
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10.5px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-#audit-body .audit-action[data-action^="auth."]   { --pill: #4f46e5; }
-#audit-body .audit-action[data-action^="scan."]   { --pill: #d97706; }
-#audit-body .audit-action[data-action*="cancel"]  { --pill: #dc2626; }
-#audit-body .audit-action[data-action*="delete"],
-#audit-body .audit-action[data-action*="remove"]  { --pill: #dc2626; }
-:root[data-theme="dark"] #audit-body .audit-action[data-action^="auth."]  { color: #a5b4fc; }
-:root[data-theme="dark"] #audit-body .audit-action[data-action^="scan."]  { color: #fbbf24; }
-:root[data-theme="dark"] #audit-body .audit-action[data-action*="cancel"],
-:root[data-theme="dark"] #audit-body .audit-action[data-action*="delete"],
-:root[data-theme="dark"] #audit-body .audit-action[data-action*="remove"] { color: #f87171; }
 
 /* ---- 8. Reduced motion / responsive ---------------------------------------- */
 @media (prefers-reduced-motion: reduce) {
@@ -12642,8 +12465,10 @@ body.sidebar-collapsed .app-shell > main {
 
 /* ============================================================================
    SENTRO v120 — Scan History and Audit polish
-   Scope: #tab-history (toolbar, summary cards, history table) plus the
-   JS-rendered #executive-summary cards and #history-body rows.
+   All but one rule of this block is deleted: the page is styled by
+   styles/history.css now. What remains is the panel's icon primitive, and it
+   has to remain - an SVG in a panel with no `.f-ico` rule falls back to a
+   black fill and no stroke.
    ========================================================================== */
 
 /* ---- 1. Icon primitives ------------------------------------------------ */
@@ -12659,296 +12484,13 @@ body.sidebar-collapsed .app-shell > main {
   display: inline-block;
   vertical-align: middle;
 }
-#tab-history .btn-ico { width: 15px; height: 15px; }
-
-/* ---- 2. Header: premium toolbar card with fx ----------------------------- */
-#tab-history .history-toolbar {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  padding: 18px 20px !important;
-}
-#tab-history .history-toolbar > div:not(.toolbar-fx) {
-  position: relative;
-  z-index: 1;
-}
-#tab-history .toolbar-fx {
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  overflow: hidden;
-}
-#tab-history .toolbar-fx::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(color-mix(in srgb, var(--accent) 26%, transparent) 1px, transparent 1.2px);
-  background-size: 18px 18px;
-  opacity: .4;
-  -webkit-mask-image: radial-gradient(70% 160% at 24% 40%, #000 0%, transparent 80%);
-  mask-image: radial-gradient(70% 160% at 24% 40%, #000 0%, transparent 80%);
-}
-#tab-history .toolbar-fx::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(380px 140px at 16% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 74%);
-}
-#tab-history .toolbar-fx .fx-sweep {
-  display: block;
-  position: absolute;
-  top: -10%;
-  bottom: -10%;
-  left: -30%;
-  width: 24%;
-  transform: skewX(-14deg);
-  background: linear-gradient(90deg,
-    transparent 0%,
-    color-mix(in srgb, var(--accent) 8%, transparent) 45%,
-    color-mix(in srgb, var(--accent) 13%, transparent) 55%,
-    transparent 100%);
-  animation: ep-fx-sweep 5.4s ease-in-out infinite;
-}
-#tab-history .history-toolbar h3 {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 650;
-  letter-spacing: -.01em;
-  color: var(--text);
-}
-#tab-history .history-toolbar p:not(.ledger) {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-/* Controls: consistent heights, iconed filter and refresh */
-#tab-history .history-controls {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-#tab-history .history-filter-shell {
-  position: relative;
-  display: inline-block;
-}
-#tab-history .history-filter-shell .field-ico {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  color: color-mix(in srgb, var(--muted) 82%, transparent);
-  pointer-events: none;
-  z-index: 1;
-}
-#tab-history .history-filter-shell select {
-  padding-left: 36px !important;
-  border-radius: 10px !important;
-  height: 40px;
-}
-#tab-history .history-date {
-  height: 40px;
-  border-radius: 10px !important;
-}
-#tab-history #refresh-history-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 40px;
-  padding: 0 16px;
-  border-radius: 10px !important;
-  white-space: nowrap;
-  font-weight: 600;
-}
-/* Scan-count badge (JS-appended .range-filter-status) with Database glyph */
-#tab-history .range-filter-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: 11px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-#tab-history .range-filter-status::before {
-  content: "";
-  width: 12px;
-  height: 12px;
-  flex: none;
-  background-color: currentColor;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='9' ry='3'/%3E%3Cpath d='M3 5v14a9 3 0 0 0 18 0V5'/%3E%3Cpath d='M3 12a9 3 0 0 0 18 0'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='9' ry='3'/%3E%3Cpath d='M3 5v14a9 3 0 0 0 18 0V5'/%3E%3Cpath d='M3 12a9 3 0 0 0 18 0'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-
-/* ---- 3. Summary cards: luxury metric modules ------------------------------ */
-#tab-history .history-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-}
-#executive-summary .history-card {
-  --met: var(--accent);
-  --met-ink: var(--accent-strong);
-  position: relative;
-  display: grid !important;
-  gap: 2px;
-  align-content: center;
-  min-height: 76px;
-  padding: 14px 14px 14px 60px !important;
-  border: 1px solid var(--line) !important;
-  border-radius: 14px !important;
-  background: var(--card) !important;
-  box-shadow: none !important;
-  transition: transform .18s ease-out, border-color .18s ease-out, box-shadow .18s ease-out;
-}
-#executive-summary .history-card:hover {
-  transform: translateY(-2px);
-  border-color: color-mix(in srgb, var(--met) 42%, var(--line)) !important;
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--met) 11%, transparent) !important;
-}
-#executive-summary .history-card:nth-child(1) { --met: #4f46e5; --met-ink: #4338ca; }
-#executive-summary .history-card:nth-child(2) { --met: #2563eb; --met-ink: #1d4ed8; }
-#executive-summary .history-card:nth-child(3) { --met: #7c3aed; --met-ink: #6d28d9; }
-#executive-summary .history-card:nth-child(4) { --met: #dc2626; --met-ink: #b91c1c; }
-:root[data-theme="dark"] #executive-summary .history-card:nth-child(1) { --met-ink: #a5b4fc; }
-:root[data-theme="dark"] #executive-summary .history-card:nth-child(2) { --met-ink: #60a5fa; }
-:root[data-theme="dark"] #executive-summary .history-card:nth-child(3) { --met-ink: #c4b5fd; }
-:root[data-theme="dark"] #executive-summary .history-card:nth-child(4) { --met-ink: #f87171; }
-#executive-summary .history-card::before {
-  content: "";
-  position: absolute;
-  left: 14px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--met) 11%, var(--card));
-}
-#executive-summary .history-card::after {
-  content: "";
-  position: absolute;
-  left: 22px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 18px;
-  height: 18px;
-  background-color: var(--met-ink);
-}
-#executive-summary .history-card:nth-child(1)::after {
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m12 14 4-4'/%3E%3Cpath d='M3.34 19a10 10 0 1 1 17.32 0'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m12 14 4-4'/%3E%3Cpath d='M3.34 19a10 10 0 1 1 17.32 0'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-#executive-summary .history-card:nth-child(2)::after {
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z'/%3E%3Cpath d='M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2'/%3E%3Cpath d='M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2'/%3E%3Cpath d='M10 6h4'/%3E%3Cpath d='M10 10h4'/%3E%3Cpath d='M10 14h4'/%3E%3Cpath d='M10 18h4'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z'/%3E%3Cpath d='M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2'/%3E%3Cpath d='M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2'/%3E%3Cpath d='M10 6h4'/%3E%3Cpath d='M10 10h4'/%3E%3Cpath d='M10 14h4'/%3E%3Cpath d='M10 18h4'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-#executive-summary .history-card:nth-child(3)::after {
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/%3E%3Cpath d='M14 2v4a2 2 0 0 0 2 2h4'/%3E%3Cpath d='M8 18v-2'/%3E%3Cpath d='M12 18v-4'/%3E%3Cpath d='M16 18v-6'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/%3E%3Cpath d='M14 2v4a2 2 0 0 0 2 2h4'/%3E%3Cpath d='M8 18v-2'/%3E%3Cpath d='M12 18v-4'/%3E%3Cpath d='M16 18v-6'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-#executive-summary .history-card:nth-child(4)::after {
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='M12 8v4'/%3E%3Cpath d='M12 16h.01'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3Cpath d='M12 8v4'/%3E%3Cpath d='M12 16h.01'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-#executive-summary .history-card span {
-  color: var(--muted) !important;
-  font-size: 10.5px !important;
-  font-weight: 700 !important;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-#executive-summary .history-card strong {
-  color: var(--text) !important;
-  font-size: 24px !important;
-  font-weight: 800 !important;
-  line-height: 1.15;
-  overflow-wrap: anywhere;
-}
-
-/* ---- 4. Scan history table ------------------------------------------------ */
-#tab-history .table-wrap { overflow-x: auto; }
-#tab-history .logic-table { min-width: 680px; }
-#tab-history .logic-table th {
-  padding: 10px 14px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  background: var(--card-2);
-  border-bottom: 1px solid var(--line);
-  white-space: nowrap;
-}
-#tab-history .logic-table td {
-  padding: 12px 14px;
-  vertical-align: middle;
-  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
-}
-#tab-history .logic-table tbody tr { transition: background .12s ease-out; }
-#tab-history .logic-table tbody tr:hover {
-  background: var(--hover-wash);
-}
-/* Timestamp hierarchy */
-#history-body .timestamp-cell {
-  display: block;
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 600;
-  line-height: 1.35;
-}
-#history-body .timestamp-cell + small {
-  display: block;
-  margin-top: 2px;
-  color: var(--muted);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  line-height: 1.35;
-}
-/* Scan ID: compact code style */
-#history-body td.file-path {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  color: var(--muted);
-  letter-spacing: .01em;
-  overflow-wrap: anywhere;
-}
-/* Numeric severity columns: right-aligned, soft semantic inks */
-#tab-history .logic-table th:nth-child(n+3),
-#history-body td:nth-child(n+3) {
-  text-align: right;
-}
-#history-body td:nth-child(n+3) {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12.5px;
-  font-weight: 700;
-}
-#history-body td:nth-child(3) { color: color-mix(in srgb, #dc2626 72%, var(--text)); }
-#history-body td:nth-child(4) { color: color-mix(in srgb, #ea580c 72%, var(--text)); }
-#history-body td:nth-child(5) { color: color-mix(in srgb, #d97706 72%, var(--text)); }
-#history-body td:nth-child(6) { color: color-mix(in srgb, #2563eb 72%, var(--text)); }
 
 /* ---- 5. Reduced motion / responsive ---------------------------------------- */
 @media (prefers-reduced-motion: reduce) {
-  #tab-history .toolbar-fx .fx-sweep { animation: none !important; display: none !important; }
-  #executive-summary .history-card { transition: none !important; transform: none !important; }
 }
 @media (max-width: 980px) {
-  #tab-history .history-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 620px) {
-  #tab-history .history-grid { grid-template-columns: 1fr; }
 }
 
 /* ============================================================================
@@ -14352,36 +13894,6 @@ body.sidebar-collapsed .app-shell > main {
   margin: 0 !important;
 }
 
-#tab-history .history-filter-shell,
-#tab-security .audit-filter-shell {
-  position: relative;
-  display: inline-flex !important;
-  align-items: center;
-  min-width: 176px;
-}
-#tab-history .history-filter-shell .dropdown-ico,
-#tab-security .audit-filter-shell .dropdown-ico {
-  position: absolute;
-  left: auto !important;
-  right: 12px;
-  top: 50%;
-  width: 16px;
-  height: 16px;
-  transform: translateY(-50%);
-  color: var(--muted);
-  pointer-events: none;
-  z-index: 1;
-}
-#tab-history .history-filter-shell select,
-#tab-security .audit-filter-shell select {
-  width: 100%;
-  min-width: 176px;
-  padding-left: 13px !important;
-  padding-right: 38px !important;
-  appearance: none;
-  cursor: pointer;
-}
-
 /* ── Toast dismiss button ───────────────────────────────── */
 .toast { position: relative; padding-right: 38px !important; }
 /* !important guards against the app-wide `button:not(...)` chrome rules. */
@@ -15278,19 +14790,6 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 .tb-suggest-t { flex: 0 1 auto; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tb-suggest-item small { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* Wide-information caps (2026-08): raw trails scroll inside a bounded frame
-   instead of sprawling the page; overview insight cards go chip-height. */
-#tab-history .table-wrap {
-  max-height: 420px;
-  overflow-y: auto;
-}
-#tab-history .table-wrap thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--card);
-}
 
 
 /* == Dashboard drill-down + fit pass (2026-08) ==================== */
