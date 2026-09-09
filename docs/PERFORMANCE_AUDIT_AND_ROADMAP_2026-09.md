@@ -822,6 +822,83 @@ prints the estate total and used to open a filtered page.
 
 960 tests, 25 skipped.
 
+### Compliance scanning — 2026-09-08
+
+The collectors were never the problem. Measured per file, on one 7KB HR export:
+
+| detector | before | after |
+|---|---|---|
+| generic (no framework) | 8 ms | 8 ms |
+| GDPR | 360 ms | 44 ms |
+| PCI DSS | 158 ms | 30 ms |
+| NIST | 165 ms | 42 ms |
+
+A scan with the three frameworks enabled spent **97% of itself inside the
+compliance catalogs**, and none of that was the matching. It was work rebuilt
+on every call.
+
+**A rule's catalog was recompiled per call.** `has_keyword_context`,
+`context_values` and `context_keyword_values` each take a rule's keyword tuple
+— 600 to 1,000 terms — and each rebuilt its answer from scratch every time:
+lower-case every term, `re.escape` every term, sort, join, compile an
+alternation, scan the file. One 7KB file made 828 such calls and evaluated
+411,000 keyword comparisons.
+
+At most a handful of a catalog's terms are in any one file, so the catalog is
+narrowed to those first — one substring test per term, which is a C `memmem` —
+and everything downstream works on the handful. The narrowing is cached
+against the catalog tuple's **identity**, not its value: hashing a 1,000-item
+tuple costs about what the work it saves costs, which is why the first attempt
+with `lru_cache` measured no faster at all.
+
+**PCI built an automaton 145 times a file.** `keyword_hits_indexed` — a helper
+for *ad-hoc* keyword sets of 7 to 92 terms — did a `json.dumps`, a sha256 over
+it, a cache lookup and then a per-character Python walk of the whole blob, for
+each call. Aho-Corasick earns its keep on the 46,000-term GDPR catalog searched
+once per file; below 200 terms `str.find` asks the same question in C. Both
+paths remain and a test pins them to the same answer.
+
+**NIST re-read its own catalog per file.** `nist_catalog_status()` re-read,
+deep-copied, schema-validated (pydantic) and hashed the whole catalog on every
+file to re-learn something a `stat()` can answer; `load_nist_catalog()` then
+copied it again by `json.dumps` + `json.loads`. The status is cached against
+the file's identity and mtime, and the copy is gone entirely for the common
+case — only a caller with custom rule overlays writes into the catalog, so
+only that caller needs a private one. (`copy.deepcopy` was tried and measured
+2.7× *slower* than the round trip it replaced; it is not in the final code.)
+
+**Three loop invariants.** `_regex_hits` took `content[:250_000]` inside its
+pattern loop, copying the file's text 154 times per file; `_keyword_hits`
+case-folded the same 12KB evidence blob on all 984 calls that read it — 12MB of
+folding per file; and `_term_matches` ran `re.escape` plus a pattern build plus
+a module-cache lookup for every term of every rule, 115,000 compiles over one
+corpus.
+
+**Result**, the same 360-file estate scanned through the real discovery engine
+with GDPR, PCI DSS and NIST enabled:
+
+```
+before   86.7 s     240.7 ms/file     4,748 findings
+after    15.2 s      42.3 ms/file     4,748 findings
+```
+
+**5.7× faster, and the findings are byte-identical** — verified by dumping
+every field of all 931 findings the three detectors produce over a 140-file
+corpus, before and after, and diffing.
+
+**Not done, and why.** NIST's keyword phase is now the largest single cost
+(~50% of what remains) and would fall again by running the catalog through one
+Aho-Corasick pass instead of ~5,000 substring tests per file. It is not done
+here because the index normalizes terms and tests word boundaries differently
+from `_keyword_hits` — `[A-Za-z0-9_]` against `\w` — which diverge on exactly
+the Azerbaijani terms this catalog carries. A silent change to what a security
+scanner reports is worth more than the milliseconds.
+
+Threads are not the answer either: classification is pure-Python CPU work and
+this is a GIL build, so the existing `ThreadPoolExecutor` over files cannot
+speed it up. Process-based parallelism would, at the cost of pickling and one
+copy of the 46,000-term catalog per worker.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

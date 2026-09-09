@@ -709,12 +709,17 @@ def detect_tax_records(content: str, _: dict) -> list[str]:
     return matches
 
 
+# Built once, not once per money amount in the file: the helpers below cache
+# against the catalog's identity, and a fresh tuple per match defeats that.
+_FORECAST_CONTEXT_KEYWORDS = PRERELEASE_FINANCIAL_KEYWORDS + PRICING_MARGIN_FORECAST_KEYWORDS
+
+
 def detect_salary_compensation(content: str, _: dict) -> list[str]:
     matches: list[str] = []
     for match in MONEY_AMOUNT_RE.finditer(content):
         if (
             has_keyword_context(content, match.start(), SALARY_COMPENSATION_KEYWORDS, window=120)
-            and not has_keyword_context(content, match.start(), PRERELEASE_FINANCIAL_KEYWORDS + PRICING_MARGIN_FORECAST_KEYWORDS, window=120)
+            and not has_keyword_context(content, match.start(), _FORECAST_CONTEXT_KEYWORDS, window=120)
             and not has_keyword_context(content, match.start(), TERMINATION_LAYOFF_KEYWORDS, window=120)
             and not has_keyword_context(content, match.start(), TIMESHEET_ATTENDANCE_KEYWORDS, window=120)
         ):

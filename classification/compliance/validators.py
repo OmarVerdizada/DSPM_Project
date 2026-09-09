@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import ipaddress
 import re
+import threading
 from datetime import date
 
 
@@ -128,15 +130,84 @@ def redact(value: str) -> str:
     return f"{value[:3]}***{value[-2:]}"
 
 
-def context_values(content: str, keywords: tuple[str, ...], max_chars: int = 140) -> list[str]:
-    values: list[str] = []
-    keyword_pattern = "|".join(sorted((re.escape(item) for item in keywords if item), key=len, reverse=True))
+# ── The keyword helpers ──────────────────────────────────────────────────
+# All three answer a question about a rule's keyword catalog: does one occur
+# near this value, and what follows one. A catalog is 600 to 1,000 terms, and
+# each helper used to work against the whole of it on every call - re.escape
+# over every term, a sort, a join, and a fresh alternation compiled and run
+# across the file.
+#
+# At most a handful of those terms are in any one file. So the catalog is
+# narrowed to the ones that are, once per (file, catalog), and everything
+# below works on that handful instead. The narrowing itself is a substring
+# test per term against the lowered content, which is a C memmem and about
+# ten times cheaper than the alternation it replaces.
+#
+# Measured on one 7KB HR export against the GDPR catalog: 828 calls into these
+# helpers, 411,000 keyword comparisons, 350ms of the detector's 360ms.
+
+# Keyed by object identity, because the catalogs are module-level constants
+# reused thousands of times a file and hashing a 1,000-item tuple costs as
+# much as the work it would save. The tuple is held alongside so its id cannot
+# be reused, and the cap bounds the ad-hoc tuples some rules build by
+# concatenation.
+_LOWERED_CACHE: dict[int, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+_PRESENT_STATE = threading.local()
+
+
+def _lowered_terms(keywords: tuple[str, ...]) -> tuple[str, ...]:
+    key = id(keywords)
+    cached = _LOWERED_CACHE.get(key)
+    if cached is not None and cached[0] is keywords:
+        return cached[1]
+    if len(_LOWERED_CACHE) > 1024:
+        _LOWERED_CACHE.clear()
+    # Empty terms are kept: "" is a substring of everything, which is the
+    # answer the any()-over-`in` form gave.
+    lowered = tuple(str(item or "").lower() for item in keywords)
+    _LOWERED_CACHE[key] = (keywords, lowered)
+    return lowered
+
+
+def _present_keywords(content: str, keywords: tuple[str, ...]) -> tuple[str, ...]:
+    """The terms from this catalog that occur anywhere in this content.
+
+    A term that is not in the file cannot be in a window of it, and cannot be
+    the keyword an alternation matches - so dropping it changes no answer.
+    """
+    state = getattr(_PRESENT_STATE, "slot", None)
+    if state is None or state[0] is not content:
+        state = (content, content.lower(), {})
+        _PRESENT_STATE.slot = state
+    lowered_content = state[1]
+    per_catalog = state[2]
+    key = id(keywords)
+    cached = per_catalog.get(key)
+    if cached is not None and cached[0] is keywords:
+        return cached[1]
+    present = tuple(term for term in _lowered_terms(keywords) if term in lowered_content)
+    per_catalog[key] = (keywords, present)
+    return present
+
+
+@functools.lru_cache(maxsize=2048)
+def _context_value_pattern(terms: tuple[str, ...], max_chars: int, capture_keyword: bool) -> re.Pattern | None:
+    """Cached on the NARROWED term tuple, which is small enough to hash."""
+    keyword_pattern = "|".join(sorted((re.escape(item) for item in terms if item), key=len, reverse=True))
     if not keyword_pattern:
-        return values
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_])(?:{keyword_pattern})(?![A-Za-z0-9_])\s*(?:[:=,-]|\bis\b)?\s*([^\r\n;]{{1,{max_chars}}})",
+        return None
+    group = f"({keyword_pattern})" if capture_keyword else f"(?:{keyword_pattern})"
+    return re.compile(
+        rf"(?<![A-Za-z0-9_]){group}(?![A-Za-z0-9_])\s*(?:[:=,-]|\bis\b)?\s*([^\r\n;]{{1,{max_chars}}})",
         re.IGNORECASE,
     )
+
+
+def context_values(content: str, keywords: tuple[str, ...], max_chars: int = 140) -> list[str]:
+    values: list[str] = []
+    pattern = _context_value_pattern(_present_keywords(content, keywords), max_chars, False)
+    if pattern is None:
+        return values
     for match in pattern.finditer(content):
         value = match.group(1).strip(" \t:=-,")
         if value:
@@ -148,13 +219,9 @@ def context_values(content: str, keywords: tuple[str, ...], max_chars: int = 140
 
 def context_keyword_values(content: str, keywords: tuple[str, ...], max_chars: int = 140) -> list[tuple[str, str]]:
     values: list[tuple[str, str]] = []
-    keyword_pattern = "|".join(sorted((re.escape(item) for item in keywords if item), key=len, reverse=True))
-    if not keyword_pattern:
+    pattern = _context_value_pattern(_present_keywords(content, keywords), max_chars, True)
+    if pattern is None:
         return values
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_])({keyword_pattern})(?![A-Za-z0-9_])\s*(?:[:=,-]|\bis\b)?\s*([^\r\n;]{{1,{max_chars}}})",
-        re.IGNORECASE,
-    )
     for match in pattern.finditer(content):
         value = match.group(2).strip(" \t:=-,")
         if value:
@@ -165,8 +232,11 @@ def context_keyword_values(content: str, keywords: tuple[str, ...], max_chars: i
 
 
 def has_keyword_context(content: str, value_start: int, keywords: tuple[str, ...], window: int = 80) -> bool:
+    present = _present_keywords(content, keywords)
+    if not present:
+        return False
     left = content[max(0, value_start - window):value_start].lower()
-    return any(keyword.lower() in left for keyword in keywords)
+    return any(term in left for term in present)
 
 
 def is_valid_email(value: str) -> bool:

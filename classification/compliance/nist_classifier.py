@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import os
+import threading
 import re
 import time
 import unicodedata
@@ -10,7 +12,7 @@ from typing import Any
 
 from classification.compliance.canonical_entities import canonical_entity_fingerprint
 from classification.compliance.evidence_keys import evidence_hmac_key
-from classification.compliance.nist_catalog import load_nist_catalog, nist_catalog_status
+from classification.compliance.nist_catalog import load_nist_catalog, nist_catalog_readonly, nist_catalog_status
 from classification.compliance.nist_mappings import nist_data_categories_for_finding
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
 from classification.compliance.validators import redact
@@ -34,7 +36,8 @@ def classify_nist_content(
 
     metadata = metadata or {}
     tenant_id = str(metadata.get("tenant_id") or metadata.get("tenant") or "default")
-    catalog = load_nist_catalog()
+    # Only an overlay writes into the catalog, and only then is a copy needed.
+    catalog = load_nist_catalog() if custom_rule_overlays else nist_catalog_readonly()
     catalog_version = str((catalog.get("catalog") or {}).get("catalog_version") or "")
     catalog_hash = str(status.get("catalog_hash") or "")
     rules = _apply_overlays(catalog.get("rules") or [], custom_rule_overlays or [])
@@ -325,37 +328,66 @@ def _apply_overlays(rules: list[dict[str, Any]], overlays: list[dict[str, Any]])
     return rules
 
 
+_LOWERED_TEXT = threading.local()
+
+
+def _lowered_once(text: str) -> str:
+    """`text.lower()` for a string this scan keeps asking about.
+
+    _keyword_hits is called 984 times for one file and every call lowered the
+    same evidence blob - 12MB of case-folding per file. The blob is one object
+    for the length of a classify call, so it is folded once and held against
+    its identity; the slot is replaced as soon as a different string arrives.
+    """
+    slot = getattr(_LOWERED_TEXT, "slot", None)
+    if slot is not None and slot[0] is text:
+        return slot[1]
+    lowered = text.lower()
+    _LOWERED_TEXT.slot = (text, lowered)
+    return lowered
+
+
 def _keyword_hits(text: str, terms: list[Any]) -> list[str]:
     hits = []
-    # Lower the text ONCE and use it as a cheap substring prefilter. A word-boundary
-    # match requires the term to be present at all, so this correctly skips the
-    # expensive per-term regex (re.escape + compile + search) for the ~99% of a large
-    # catalog (thousands of terms) that never appear in a given file - the dominant
-    # NIST scan cost before this guard.
-    text_lower = text.lower()
+    # A word-boundary match requires the term to be present at all, so this
+    # substring test correctly skips the expensive per-term regex for the ~99%
+    # of a catalog that never appears in a given file.
+    text_lower = _lowered_once(text)
     for term in terms:
-        normalized = _normalize_text(str(term or ""))
+        normalized = _normalize_term(str(term or ""))
         if not normalized:
             continue
-        if normalized.lower() not in text_lower:
+        # _normalize_term casefolds, so the term is already lower - this used
+        # to call .lower() on it 1.1 million times over one corpus.
+        if normalized not in text_lower:
             continue
         if _term_matches(text, normalized):
             hits.append(str(term))
     return list(dict.fromkeys(hits))
 
 
+@functools.lru_cache(maxsize=2048)
+def _compiled_rule_pattern(raw: str, ignore_case: bool):
+    try:
+        return re.compile(raw, re.IGNORECASE if ignore_case else 0)
+    except re.error:
+        return None
+
+
 def _regex_hits(content: str, patterns: list[dict[str, Any]]) -> list[dict[str, str]]:
     hits = []
+    # `content[:250_000]` is the same slice for every pattern of every rule, and
+    # taking it inside the loop copied the file's text 154 times - the single
+    # largest cost of a NIST pass over a file with nothing in it.
+    scanned = content[:250_000]
     for pattern in patterns[:10]:
         raw = str(pattern.get("pattern") or "")
         if not raw or len(raw) > 500:
             continue
-        try:
-            flags = re.IGNORECASE if "i" in str(pattern.get("flags") or "").lower() else 0
-            compiled = re.compile(raw, flags)
-        except re.error:
+        compiled = _compiled_rule_pattern(raw, "i" in str(pattern.get("flags") or "").lower())
+        if compiled is None:
             continue
-        for match in compiled.finditer(content[:250_000]):
+        for match in compiled.finditer(scanned):
             value = match.group(0)
             hits.append({"pattern_id": str(pattern.get("id") or ""), "masked_preview": _masked_preview(value), "fingerprint_seed": value})
             if len(hits) >= 10:
@@ -363,11 +395,22 @@ def _regex_hits(content: str, patterns: list[dict[str, Any]]) -> list[dict[str, 
     return hits
 
 
+@functools.lru_cache(maxsize=16384)
+def _term_boundary_pattern(term: str):
+    """A term's word-boundary matcher, built once.
+
+    This was re.escape plus a pattern string plus a module-cache lookup on
+    every term of every rule of every file - 115,000 compiles and 66,000
+    escapes over one corpus, all of them arriving at the same few thousand
+    patterns."""
+    return re.compile(rf"(?<![\w]){re.escape(term)}(?![\w])", re.IGNORECASE)
+
+
 def _term_matches(text: str, term: str) -> bool:
     if not term:
         return False
     if term[0].isalnum() and term[-1].isalnum():
-        return re.search(rf"(?<![\w]){re.escape(term)}(?![\w])", text, flags=re.IGNORECASE) is not None
+        return _term_boundary_pattern(term).search(text) is not None
     return term in text
 
 
@@ -441,6 +484,16 @@ def _normalize_text(value: str) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     text = re.sub(r"[_/\\.\-]+", " ", text)
     return " ".join(text.split())
+
+
+@functools.lru_cache(maxsize=16384)
+def _normalize_term(value: str) -> str:
+    """The same normalization, for catalog TERMS rather than file content.
+
+    _keyword_hits normalized every term of every rule on every file - 4,828
+    NFKC-and-regex passes for one file - to arrive at the same string each
+    time. Content is never cached here: it is unbounded and never repeats."""
+    return _normalize_text(value)
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:

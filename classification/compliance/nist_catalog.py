@@ -26,20 +26,65 @@ _cache: dict[str, Any] = {"path": "", "mtime_ns": -1, "catalog": None, "status":
 
 
 def load_nist_catalog() -> dict[str, Any]:
+    """A private copy the caller may overlay rules onto."""
     status = nist_catalog_status()
     if status.get("degraded_mode") and not status.get("scanner_available"):
         return {}
     return _load_catalog_from_path(_active_or_builtin_path())
 
 
+def nist_catalog_readonly() -> dict[str, Any]:
+    """The cached catalog itself. The caller MUST NOT mutate it.
+
+    Copying it was 18 to 49ms of every file's NIST pass - the whole catalog
+    serialized and reparsed, or deep-copied node by node - purely so that a
+    caller with custom rule overlays could write into it. A scan without
+    overlays, which is the default, writes nothing and can read the cache.
+    """
+    status = nist_catalog_status()
+    if status.get("degraded_mode") and not status.get("scanner_available"):
+        return {}
+    path = _active_or_builtin_path()
+    resolved = path.resolve()
+    stat = resolved.stat()
+    with _lock:
+        if _cache["catalog"] is not None and _cache["path"] == str(resolved) and _cache["mtime_ns"] == stat.st_mtime_ns:
+            return _cache["catalog"]
+    return _load_catalog_from_path(path)
+
+
+# Reading, deep-copying, schema-validating and hashing the whole catalog on
+# every file was 60% of what the NIST detector cost, to re-learn something a
+# stat() can answer. Only the success path is cached, and only against the
+# file's identity and mtime, so a swapped catalog is still picked up on the
+# next call.
+_STATUS_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
+
+
 def nist_catalog_status() -> dict[str, Any]:
     path = _active_or_builtin_path()
+    try:
+        stat = path.resolve().stat()
+        cache_key = (str(path.resolve()), stat.st_mtime_ns)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _lock:
+            cached = _STATUS_CACHE.get(cache_key)
+        if cached is not None:
+            return dict(cached)
     try:
         catalog = _load_catalog_from_path(path)
         result = validate_nist_catalog_payload(catalog)
         if not result.valid:
             raise ValueError("; ".join(result.errors))
-        return _status_from_catalog(catalog, result.catalog_hash, path, "active" if ACTIVE_PATH.exists() else "built-in")
+        status = _status_from_catalog(catalog, result.catalog_hash, path, "active" if ACTIVE_PATH.exists() else "built-in")
+        if cache_key is not None:
+            with _lock:
+                if len(_STATUS_CACHE) > 8:
+                    _STATUS_CACHE.clear()
+                _STATUS_CACHE[cache_key] = status
+        return dict(status)
     except Exception as exc:
         _append_audit("nist.catalog.error", {"error": _safe_error(exc), "path": str(path)})
         if LAST_GOOD_PATH.exists():
@@ -212,6 +257,12 @@ def built_in_nist_keyword_groups() -> list[dict[str, Any]]:
 
 
 def _load_catalog_from_path(path: Path, *, bypass_cache: bool = False) -> dict[str, Any]:
+    """A private copy of the catalog, because callers overlay rules onto it.
+
+    The copy was a json.dumps followed by a json.loads of the whole catalog -
+    18ms of every file's NIST pass, spent re-parsing text this process wrote a
+    microsecond earlier. copy.deepcopy answers the same need directly.
+    """
     resolved = path.resolve()
     stat = resolved.stat()
     with _lock:

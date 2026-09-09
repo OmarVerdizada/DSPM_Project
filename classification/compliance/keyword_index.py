@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import functools
 import hashlib
 import json
 import re
@@ -84,25 +85,74 @@ def compiled_keyword_index(
         return index
 
 
+# The automaton earns its keep on the 46,000-term GDPR catalog, which is
+# searched once per file. It does not earn it here: this is called with 7 to 92
+# terms, 145 times for one file, and each call was paying for a json dump, a
+# sha256 over it, a cache lookup, and then a per-character Python walk of the
+# whole blob - 167ms of PCI's 168ms.
+#
+# For a handful of terms, str.find is the same question asked in C. Above the
+# threshold the trie is still the better answer, so both paths stay.
+_ADHOC_TRIE_THRESHOLD = 200
+
+
+@functools.lru_cache(maxsize=512)
+def _adhoc_terms(keywords: tuple) -> tuple[str, ...]:
+    """The cleaned, normalized terms for one ad-hoc keyword set.
+
+    Stripping and normalizing them ran on every call - 2.8 million strips and
+    1.6 million case-folds over one scan - to rebuild the same short list from
+    the same constants each time."""
+    return tuple(dict.fromkeys(
+        term for term in (_normalize_term(keyword) for keyword in keywords) if term
+    ))
+
+
+_LOWERED_BLOB = threading.local()
+
+
+def _lowered_blob(blob: str) -> str:
+    """`blob.lower()` for a string this scan keeps asking about."""
+    slot = getattr(_LOWERED_BLOB, "slot", None)
+    if slot is not None and slot[0] is blob:
+        return slot[1]
+    lowered = blob.lower()
+    _LOWERED_BLOB.slot = (blob, lowered)
+    return lowered
+
+
 def keyword_hits_indexed(blob: str, keywords: Iterable[str], *, cache_namespace: str = "adhoc", limit: int = 10) -> list[str]:
-    terms = [str(keyword or "").strip() for keyword in keywords if str(keyword or "").strip()]
+    terms = _adhoc_terms(tuple(keywords))
     if not terms:
         return []
-    # Perf: skip building/searching the automaton entirely when none of the terms is
-    # even a substring of the blob (the common case for a small ad-hoc keyword set
-    # called many times per file). A match requires the substring, so this is a
-    # correct necessary-condition prefilter.
-    blob_lower = blob.lower()
-    if not any(term.lower() in blob_lower for term in terms):
-        return []
-    groups = [{"framework": cache_namespace, "language": "all", "type": "hit", "terms": terms}]
-    index = compiled_keyword_index(
-        framework=cache_namespace,
-        catalog_version=keyword_groups_signature(groups),
-        language="all",
-        groups=groups,
-    )
-    return index.search(blob, limit_per_type=limit).get("hit", [])[:limit]
+    blob_lower = _lowered_blob(blob)
+    if len(terms) > _ADHOC_TRIE_THRESHOLD:
+        # A match requires the substring, so this is a correct
+        # necessary-condition prefilter for the expensive path.
+        if not any(term in blob_lower for term in terms):
+            return []
+        groups = [{"framework": cache_namespace, "language": "all", "type": "hit", "terms": list(terms)}]
+        index = compiled_keyword_index(
+            framework=cache_namespace,
+            catalog_version=keyword_groups_signature(groups),
+            language="all",
+            groups=groups,
+        )
+        return index.search(blob, limit_per_type=limit).get("hit", [])[:limit]
+
+    # Ordered by where each term first matches, which is the order the walk
+    # above reported them in.
+    found: list[tuple[int, str]] = []
+    for normalized in terms:
+        position = blob_lower.find(normalized)
+        while position >= 0:
+            end = position + len(normalized)
+            if _word_boundary(blob_lower, position, end, normalized):
+                found.append((end, normalized))
+                break
+            position = blob_lower.find(normalized, position + 1)
+    found.sort(key=lambda item: item[0])
+    return [term for _, term in found[:limit]]
 
 
 def _compile_index(framework: str, catalog_version: str, language: str, groups: list[dict]) -> KeywordIndex:
@@ -150,7 +200,10 @@ def _compile_index(framework: str, catalog_version: str, language: str, groups: 
     )
 
 
+@functools.lru_cache(maxsize=16384)
 def _normalize_term(value: str) -> str:
+    """Catalog terms are a fixed set reused on every file, so normalizing one
+    is worth remembering. 8,333 of these for a single PCI pass."""
     return " ".join(str(value or "").strip().split()).lower()
 
 
