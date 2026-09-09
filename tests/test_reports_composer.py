@@ -195,83 +195,76 @@ class ReportCompositionTests(unittest.TestCase):
 
 
 class ReportLayoutTests(unittest.TestCase):
-    """One instrument over one document, and the instrument does not leave."""
+    """A rail beside a document, holding every control at once."""
 
-    def test_the_panel_scrolls_at_document_level_so_the_band_can_stick(self) -> None:
+    def test_the_page_sizes_to_the_window_and_only_two_things_scroll(self) -> None:
         panel = SHEET[SHEET.index("#tab-reports.tab-panel.active {"):]
         panel = panel[:panel.index("\n}")]
-        # The dashboard/queue model - height:100dvh + overflow:hidden - makes the
-        # panel a scroll container that can never scroll, and a sticky inside one
-        # renders but never sticks. This page uses the scan pages' model instead.
-        self.assertIn("min-height: 100dvh", panel)
-        self.assertNotIn("overflow: hidden", panel)
+        self.assertIn("height: 100dvh", panel)
+        self.assertIn("overflow: hidden", panel)
+        # The rail itself must not scroll - it is meant to hold everything.
+        rail = SHEET[SHEET.index(".report-composer {"):]
+        self.assertIn("overflow: hidden", rail[:rail.index("\n}")])
+        # The section list and the document do.
+        for selector in (".report-section-list {", ".report-preview {"):
+            block = SHEET[SHEET.index(selector):]
+            self.assertIn("overflow-y: auto", block[:block.index("\n}")])
+        # And a short window gives up on all of it rather than clipping.
+        self.assertIn("@media (max-height: 620px)", SHEET)
 
-    def test_the_instrument_is_sticky_and_condenses_once_docked(self) -> None:
-        band = SHEET[SHEET.index(".report-composer {"):]
-        band = band[:band.index("\n}")]
-        self.assertIn("position: sticky", band)
-        self.assertIn("top: 0", band)
-        # Docked, it keeps only what you steer by.
-        self.assertIn(".report-composer.is-docked", SHEET)
-        self.assertIn(".report-composer.is-docked .composer-options", SHEET)
+    def test_only_the_section_list_gives_up_height(self) -> None:
+        # Letting every group shrink compressed each below its content and the
+        # rows drew on top of each other.
+        group = SHEET[SHEET.index(".composer-group {"):]
+        self.assertIn("flex: 0 0 auto", group[:group.index("\n}")])
+        grow = SHEET[SHEET.index(".composer-group-grow {"):]
+        self.assertIn("flex: 1 1 auto", grow[:grow.index("\n}")])
 
-    def test_docking_does_not_depend_on_the_frame_lifecycle(self) -> None:
+    def test_the_rows_absorb_the_remainder_instead_of_leaving_a_gap(self) -> None:
+        row = SHEET[SHEET.index(".report-section-row {"):]
+        row = row[:row.index("\n}")]
+        self.assertIn("flex: 1 1 auto", row)
+        self.assertIn("min-height:", row)
+        self.assertIn("max-height:", row)
+
+    def test_the_legacy_button_floor_is_stated_back(self) -> None:
+        # styles.css floors every button at 40px for touch, which cost the rail
+        # 64px across four type rows before this.
+        for selector in (".report-type {", ".report-format-option {"):
+            block = SHEET[SHEET.index(selector):]
+            self.assertIn("min-height: 0", block[:block.index("\n}")])
+
+    def test_one_explainer_answers_for_the_whole_list(self) -> None:
+        # Fifteen hint lines cost 300px of rail and are read once.
+        self.assertIn('id="report-section-explainer"', MARKUP)
         block = reports_block()
-        sync = block[block.index("function syncReportDock()"):]
-        sync = sync[:sync.index("\n}")]
-        self.assertIn("getBoundingClientRect().top <= 0", sync)
-        # An IntersectionObserver never delivers where frames are throttled, and
-        # a pending requestAnimationFrame id never clears - either way the band
-        # sticks in whichever state it was last in. A scroll read has no such
-        # state to get stuck in.
-        self.assertNotIn("new IntersectionObserver", block)
-        self.assertNotIn("requestAnimationFrame(", block)
-        self.assertIn('addEventListener("scroll", syncReportDock', block)
+        self.assertIn("function reportSectionExplain(", block)
+        self.assertIn("function reportSectionDefaultHint(", block)
+        # Reserved height, so moving the pointer never shifts the list under it.
+        legend = SHEET[SHEET.index(".composer-legend-live {"):]
+        self.assertIn("min-height:", legend[:legend.index("\n}")])
 
-    def test_the_band_measures_itself_for_the_jump_offset(self) -> None:
-        # It has two heights, so a fixed offset lands one of them behind it.
-        self.assertIn("--report-band-h", SHEET)
-        self.assertIn("scroll-margin-top: calc(var(--report-band-h", SHEET)
-        self.assertIn("function measureReportBand()", reports_block())
-
-    def test_a_document_table_header_does_not_peel_off(self) -> None:
-        # styles.css makes every `thead th` sticky for the tables that live in a
-        # .table-wrap. This document has none, so the nearest scrollport is the
-        # window - every header in the report would stack under the band.
-        header = SHEET[SHEET.index(".report-table th {"):]
-        self.assertIn("position: static", header[:header.index("\n}")])
-
-    def test_a_section_this_scan_cannot_build_says_so_before_it_is_ticked(self) -> None:
+    def test_pointing_at_a_row_lights_the_section_it_makes(self) -> None:
         block = reports_block()
-        self.assertIn("REPORT_SECTION_AVAILABILITY", block)
-        self.assertIn("Not part of this scan.", block)
-        # And it never reaches the document.
-        self.assertIn("reportSectionIsAvailable(id)", block)
-        # The PDF-inert pass must not clear the flag the unavailable pass set.
-        self.assertIn("fixed || !reportSectionIsAvailable(", block)
-
-    def test_the_band_and_the_document_share_one_column(self) -> None:
-        # The load-bearing half of the connection between them: same width, same
-        # edges, and nothing else on the page shares that measure.
-        self.assertIn("--report-measure", SHEET)
-        shared = SHEET[SHEET.index(".report-composer,\n.report-preview"):]
-        self.assertIn("var(--report-measure)", shared[:shared.index("\n}")])
+        self.assertIn("function reportLinkSection(", block)
+        self.assertIn(".report-section-block.is-linked", SHEET)
+        self.assertIn('addEventListener("pointerover"', block)
+        self.assertIn('addEventListener("focusin"', block)
 
     def test_the_carrier_prints_what_the_document_prints(self) -> None:
-        # A connection made of content: the strip and the document's own cover
-        # are the same two strings, so they move in the same frame.
         self.assertIn('id="report-carrier-title"', MARKUP)
         self.assertIn('id="report-carrier-scope"', MARKUP)
         block = reports_block()
         carrier = block[block.index("function renderReportCarrier()"):]
         carrier = carrier[:carrier.index("\n}")]
         self.assertIn("reportType().label", carrier)
-        self.assertIn("reportScopeLabel()", carrier)
+        self.assertIn("reportCarrierScopeLabel()", carrier)
 
     def test_the_document_is_on_the_page_not_in_a_pane(self) -> None:
         document = SHEET[SHEET.index(".report-document {"):]
         document = document[:document.index("\n}")]
-        # Any border is an edge and an edge is a box.
+        # Any border is an edge and an edge is a box, and a max-width would put
+        # the dead white back either side of it.
         self.assertNotIn("border:", document)
         self.assertNotIn("box-shadow", document)
         self.assertNotIn("max-width", document)
@@ -283,26 +276,73 @@ class ReportLayoutTests(unittest.TestCase):
         self.assertIn("table-layout: fixed", table)
         self.assertIn("min-width: 0", table)
 
+    def test_a_document_table_header_does_not_peel_off(self) -> None:
+        # styles.css makes every `thead th` sticky for the tables that live in a
+        # .table-wrap. This document has none, so its headers would stack at the
+        # top of the preview as you read.
+        header = SHEET[SHEET.index(".report-table th {"):]
+        self.assertIn("position: static", header[:header.index("\n}")])
+
     def test_every_token_the_sheet_names_exists(self) -> None:
         # --radius-md, --radius-sm and --elev-1 were all invented, and a var()
         # that resolves to nothing silently drops the whole declaration - which
         # is how the document had square corners nobody had asked for.
         tokens = Path("frontend/styles/tokens.css").read_text(encoding="utf-8")
-        # Variables this page owns: declared in the sheet, or written onto the
-        # stage from app.js. Everything else has to come from the contract.
         local = set(re.findall(r"^\s*(--[a-z0-9-]+):", SHEET, re.MULTILINE))
         local |= set(re.findall(r"--report-[a-z-]+", SHEET))
         for name in sorted(set(re.findall(r"var\((--[a-z0-9-]+)", SHEET)) - local):
             self.assertIn(f"{name}:", tokens, f"{name} is not defined in tokens.css")
 
+    def test_a_section_this_scan_cannot_build_says_so_before_it_is_ticked(self) -> None:
+        block = reports_block()
+        self.assertIn("REPORT_SECTION_AVAILABILITY", block)
+        self.assertIn("Not part of this scan.", block)
+        self.assertIn("reportSectionIsAvailable(id)", block)
+        # The PDF-inert pass must not clear the flag the unavailable pass set.
+        self.assertIn("fixed || !reportSectionIsAvailable(", block)
+
     def test_the_composer_reads_in_the_order_it_is_answered(self) -> None:
         panel = MARKUP[MARKUP.index('id="report-composer"'):MARKUP.index('id="report-preview"')]
         order = [panel.index(marker) for marker in (
             'id="report-type-list"', 'id="report-coverage"', 'id="report-depth"',
-            'id="report-sections"', 'id="report-format"', 'id="report-generate"',
-            'id="report-carrier-title"', 'id="report-build-line"',
+            'id="report-sections"', 'id="report-format"',
+            'id="report-carrier-title"', 'id="report-build-line"', 'id="report-generate"',
         )]
         self.assertEqual(order, sorted(order))
+
+
+class ReportMotionTests(unittest.TestCase):
+    """The answer arrives; it does not teleport."""
+
+    def test_the_document_announces_itself_when_it_changes(self) -> None:
+        self.assertIn("@keyframes report-document-in", SHEET)
+        animation = SHEET[SHEET.index(".report-document { animation:"):]
+        animation = animation[:animation.index("}")]
+        self.assertIn("var(--motion-base)", animation)
+
+    def test_no_content_is_held_hostage_by_an_animation(self) -> None:
+        # `both` would hold the document at the keyframe's opacity: 0 until the
+        # animation plays, and where frames are throttled it never does - which
+        # hides the whole report behind a decoration.
+        animation = SHEET[SHEET.index(".report-document { animation:"):]
+        animation = animation[:animation.index("}")]
+        self.assertNotIn("both", animation)
+        self.assertNotIn("forwards", animation)
+        self.assertNotIn("backwards", animation)
+
+    def test_the_page_being_replaced_steps_back_while_it_is_counted(self) -> None:
+        self.assertIn(".report-preview.is-loading", SHEET)
+        block = reports_block()
+        self.assertIn('reportPreview.classList.add("is-loading")', block)
+        # And it must come off on the failure path too, or the page stays dim.
+        self.assertEqual(block.count('reportPreview.classList.remove("is-loading")'), 2)
+
+    def test_every_duration_comes_from_the_motion_contract(self) -> None:
+        # The contract collapses these under prefers-reduced-motion; a hardcoded
+        # duration would not collapse with them.
+        for value in re.findall(r"transition:[^;]+;|animation:[^;]+;", SHEET):
+            self.assertNotIn("ms", value.replace("var(--motion-fast)", "").replace("var(--motion-base)", ""),
+                             f"hardcoded duration in: {value.strip()}")
 
 
 class ReportDetailTests(unittest.TestCase):

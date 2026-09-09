@@ -991,6 +991,46 @@ tables those functions read were rebuilt on every call — 22 µs a row, on ever
 scan as well as every report page — and are now module constants: 112 ms → 22 ms
 per 5,000 findings.
 
+### The Reports page is a rail beside a document
+
+The composer briefly moved to a sticky band across the top of the page and has
+moved back beside the document, which is where the operator asked for it. The
+constraint that made the band attractive - a 336px rail could not hold four
+documents, six scope fields, fifteen sections, a format and a build line
+without a scroller - is answered by compaction rather than by width:
+
+- a document is one line until you choose it, and then it explains itself;
+- the six scope fields are a two-column grid, not six stacked rows;
+- the section list carries ONE explainer, on the group's own label, that
+  answers for whichever row the pointer is on. Fifteen hint lines cost 300px
+  of rail and are read once; one line costs 34px and is read every time it
+  changes;
+- what is left over goes into the section rows, which flex between a floor and
+  a ceiling, so the remainder never collects at the bottom as a gap.
+
+That took the rail from overflowing by 150px to fitting with 2px to spare, with
+the section list the only thing in it that scrolls.
+
+The single biggest cost was `button { min-height: 40px }` in styles.css, which
+floors every button for touch: it was adding 14px to each of the four report
+rows and to each format button, 84px in total, in a rail that had none to give.
+Stating `min-height: 0` back is now a contract test.
+
+### Motion, and what must not depend on it
+
+Every control on the rail changes what the document says, and the document was
+being replaced between two frames - which reads as a glitch rather than as a
+result. The preview now dims while the rows are counted and the new document
+plays a short entry.
+
+One rule came out of it: `animation-fill-mode: both` on an entry animation
+holds the element at the keyframe's `opacity: 0` until the animation plays, and
+where frames are throttled - a background tab, a hidden pane - it never does.
+That hides the whole report behind a decoration. The animation carries no fill
+mode, so the element's own state is the visible one and the motion is pure
+addition. Durations all come from `--motion-fast` / `--motion-base`, which the
+token contract already collapses under `prefers-reduced-motion`.
+
 ### The Reports page is one instrument over one document
 
 The composer was a 336px rail beside a 760px document in a bordered workspace,

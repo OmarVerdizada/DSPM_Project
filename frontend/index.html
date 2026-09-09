@@ -16,7 +16,7 @@
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=19" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
-    <link rel="stylesheet" href="/static/styles/reports.css?v=3" />
+    <link rel="stylesheet" href="/static/styles/reports.css?v=4" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -958,107 +958,108 @@
           </div>
 
           <!-- A report is a sentence: prepare THIS report, for THIS scope, at
-               THIS depth, as THIS format. The instrument asks it across the top
-               of the page and the document answers it below, so the page is one
-               thing rather than a control pane beside a result pane. The
-               instrument is sticky: the answer scrolls, the question does not. -->
+               THIS depth, as THIS format. The rail asks it in that order and
+               the document answers it, so every control is in one column and
+               every result is in the other.
+
+               Each control costs one row. The four documents are one line each
+               until you pick one; the six scope fields are a two-column grid;
+               and the section list carries ONE explainer that follows the
+               pointer rather than fifteen repeated ones. That is what pays for
+               a rail that holds everything at once. -->
           <div class="report-stage" id="report-stage">
             <form id="report-composer" class="report-composer" aria-label="Compose a report">
-              <div class="report-type-list" id="report-type-list" role="radiogroup" aria-label="Report"></div>
+              <div class="composer-group">
+                <p class="composer-legend" id="report-type-label">Report</p>
+                <div class="report-type-list" id="report-type-list" role="radiogroup" aria-labelledby="report-type-label"></div>
+              </div>
 
-              <div class="composer-options" id="composer-options">
-                <div class="composer-row">
-                  <p class="composer-legend" id="report-scope-label">Scope</p>
-                  <div class="composer-fields" role="group" aria-labelledby="report-scope-label">
-                    <label>
-                      <span class="composer-field-name">Coverage</span>
-                      <select id="report-coverage">
-                        <option value="current">This scan</option>
-                        <option value="all">This scan and history</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span class="composer-field-name">Severity</span>
-                      <select id="report-severity">
-                        <option value="ALL">All severities</option>
-                        <option value="CRITICAL">Critical only</option>
-                        <option value="CRITICAL,HIGH">Critical and high</option>
-                        <option value="CRITICAL,HIGH,MEDIUM">Critical, high and medium</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span class="composer-field-name">Status</span>
-                      <select id="report-status">
-                        <option value="all">Every status</option>
-                        <option value="active">Open work only</option>
-                        <option value="resolved">Resolved only</option>
-                        <option value="exceptions">Accepted, suppressed and false positives</option>
-                      </select>
-                    </label>
-                  </div>
-                </div>
-
-                <div class="composer-row">
-                  <p class="composer-legend" id="report-depth-label">Depth</p>
-                  <div class="composer-fields" role="group" aria-labelledby="report-depth-label">
-                    <label>
-                      <span class="composer-field-name">Length</span>
-                      <select id="report-depth">
-                        <option value="brief">Brief &mdash; headline tables only</option>
-                        <option value="standard" selected>Standard &mdash; the usual report</option>
-                        <option value="full">Full &mdash; every section, every row</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span class="composer-field-name">Findings written out in full</span>
-                      <select id="report-detail-count">
-                        <option value="0">None</option>
-                        <option value="5">The top 5</option>
-                        <option value="10" selected>The top 10</option>
-                        <option value="20">The top 20</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span class="composer-field-name">Order findings by</span>
-                      <select id="report-order">
-                        <option value="risk_score">Risk score</option>
-                        <option value="severity">Severity</option>
-                        <option value="sla_due">SLA date</option>
-                        <option value="asset">Affected asset</option>
-                        <option value="finding_name">Finding name</option>
-                      </select>
-                    </label>
-                  </div>
-                </div>
-
-                <div class="composer-row composer-row-sections">
-                  <p class="composer-legend" id="report-sections-label">Sections</p>
-                  <div class="report-section-list" id="report-sections" role="group" aria-labelledby="report-sections-label"></div>
+              <div class="composer-group">
+                <p class="composer-legend" id="report-scope-label">Scope</p>
+                <div class="composer-fields" role="group" aria-labelledby="report-scope-label">
+                  <label>
+                    <span class="composer-field-name">Coverage</span>
+                    <select id="report-coverage">
+                      <option value="current">This scan</option>
+                      <option value="all">With history</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Severity</span>
+                    <select id="report-severity">
+                      <option value="ALL">All severities</option>
+                      <option value="CRITICAL">Critical only</option>
+                      <option value="CRITICAL,HIGH">Critical and high</option>
+                      <option value="CRITICAL,HIGH,MEDIUM">Critical to medium</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Status</span>
+                    <select id="report-status">
+                      <option value="all">Every status</option>
+                      <option value="active">Open work only</option>
+                      <option value="resolved">Resolved only</option>
+                      <option value="exceptions">Accepted and suppressed</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Length</span>
+                    <select id="report-depth">
+                      <option value="brief">Brief</option>
+                      <option value="standard" selected>Standard</option>
+                      <option value="full">Full</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Written out</span>
+                    <select id="report-detail-count">
+                      <option value="0">No findings</option>
+                      <option value="5">Top 5 findings</option>
+                      <option value="10" selected>Top 10 findings</option>
+                      <option value="20">Top 20 findings</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Ordered by</span>
+                    <select id="report-order">
+                      <option value="risk_score">Risk score</option>
+                      <option value="severity">Severity</option>
+                      <option value="sla_due">SLA date</option>
+                      <option value="asset">Affected asset</option>
+                      <option value="finding_name">Finding name</option>
+                    </select>
+                  </label>
                 </div>
               </div>
 
-              <div class="composer-footer">
-                <p class="report-format-note" id="report-format-note"></p>
-                <div class="composer-footer-act">
-                  <button type="button" class="report-options-toggle plain-btn" id="report-options-toggle"
-                          aria-controls="composer-options" aria-expanded="true">
-                    <svg class="f-ico" aria-hidden="true"><use href="#li-sliders"/></svg><span id="report-options-toggle-label">Hide options</span>
-                  </button>
-                  <div class="report-format" id="report-format" role="radiogroup" aria-label="Format"></div>
-                  <button type="submit" class="facet-apply" id="report-generate"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg><span id="report-generate-label">Generate report</span></button>
-                </div>
+              <div class="composer-group composer-group-grow">
+                <p class="composer-legend composer-legend-live" id="report-sections-label">Sections<span
+                    class="report-section-explainer" id="report-section-explainer" role="status" aria-live="polite"></span></p>
+                <div class="report-section-list" id="report-sections" role="group" aria-labelledby="report-sections-label"></div>
               </div>
 
-              <div class="report-carrier">
-                <svg class="f-ico" aria-hidden="true"><use href="#li-file-text"/></svg>
-                <p class="report-carrier-name">
-                  <span id="report-carrier-title"></span>
-                  <span class="report-carrier-scope" id="report-carrier-scope"></span>
-                </p>
-                <p class="report-build-line" id="report-build-line" role="status" aria-live="polite"></p>
+              <div class="composer-foot">
+                <div class="composer-group">
+                  <p class="composer-legend" id="report-format-label">Format</p>
+                  <div class="report-format" id="report-format" role="radiogroup" aria-labelledby="report-format-label"></div>
+                  <p class="report-format-note" id="report-format-note"></p>
+                </div>
+
+                <!-- The rail and the document are one system, so the last thing
+                     before the button says what the button makes - in the same
+                     words the document's own cover prints. -->
+                <div class="report-carrier">
+                  <p class="report-carrier-name">
+                    <svg class="f-ico" aria-hidden="true"><use href="#li-file-text"/></svg>
+                    <span id="report-carrier-title"></span>
+                  </p>
+                  <p class="report-carrier-scope" id="report-carrier-scope"></p>
+                  <p class="report-build-line" id="report-build-line" role="status" aria-live="polite"></p>
+                </div>
+
+                <button type="submit" class="facet-apply" id="report-generate"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg><span id="report-generate-label">Generate report</span></button>
               </div>
             </form>
-
 
             <div class="report-preview" id="report-preview" aria-label="Report preview"></div>
           </div>
@@ -1698,7 +1699,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=226"></script>
+    <script src="/static/app.js?v=227"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

@@ -61,9 +61,8 @@ const reportStatusSelect = document.querySelector("#report-status");
 const reportDepthSelect = document.querySelector("#report-depth");
 const reportDetailCountSelect = document.querySelector("#report-detail-count");
 const reportOrderSelect = document.querySelector("#report-order");
-const reportOptionsToggle = document.querySelector("#report-options-toggle");
+const reportSectionExplainer = document.querySelector("#report-section-explainer");
 const reportSeamChip = document.querySelector("#report-seam-chip");
-const reportStage = document.querySelector("#report-stage");
 const logoutBtn = document.querySelector("#logout-btn");
 const profileToggle = document.querySelector("#profile-toggle");
 const profileName = document.querySelector("#profile-name");
@@ -5901,6 +5900,16 @@ function reportScopeLabel() {
   ].join(" · ");
 }
 
+// The document's cover prints the full sentence; the carrier sits under the six
+// controls that set it, so it only names the two that are easy to forget.
+function reportCarrierScopeLabel() {
+  const severities = reportSeverities();
+  return [
+    fieldLabel(reportCoverageSelect, "This scan"),
+    severities ? [...severities].map(severityLabel).join(" and ") : "all severities",
+  ].join(" · ");
+}
+
 function severityLabel(level) {
   const value = String(level || "").toUpperCase();
   return value.charAt(0) + value.slice(1).toLowerCase();
@@ -6133,6 +6142,60 @@ reportTypeList?.addEventListener("click", (event) => {
   renderReportPreview();
 });
 
+// Fifteen hint lines cost 300px of rail and are read once. One line that
+// answers for whichever row you are on costs 32px and is read every time it
+// changes - and it doubles as the thing that teaches the list.
+function reportSectionExplain(id) {
+  if (!reportSectionExplainer) return;
+  const section = id && REPORT_SECTIONS[id];
+  if (!section) {
+    reportSectionExplainer.textContent = reportSectionDefaultHint();
+    return;
+  }
+  reportSectionExplainer.textContent = reportSectionIsAvailable(id)
+    ? section.hint
+    : `${section.label} is not part of this scan.`;
+}
+
+function reportSectionDefaultHint() {
+  const listed = reportType().sections;
+  const chosen = [...reportSections()].filter((id) => listed.includes(id)).length;
+  return `${chosen} of ${listed.length} sections. Point at one to see what it holds.`;
+}
+
+// Pointing at a row lights the section it makes. The mapping between the list
+// and the document is what a first-time reader has to learn, so the page shows
+// it rather than describing it.
+function reportLinkSection(id) {
+  reportPreview?.querySelectorAll(".report-section-block.is-linked")
+    .forEach((block) => block.classList.remove("is-linked"));
+  if (!id) return;
+  document.querySelector(`#report-section-${id}`)?.classList.add("is-linked");
+}
+
+function reportRowFrom(event) {
+  return event.target.closest?.("[data-report-row]") || null;
+}
+
+reportSectionList?.addEventListener("pointerover", (event) => {
+  const row = reportRowFrom(event);
+  if (!row) return;
+  reportSectionExplain(row.dataset.reportRow);
+  reportLinkSection(row.dataset.reportRow);
+});
+
+reportSectionList?.addEventListener("focusin", (event) => {
+  const row = reportRowFrom(event);
+  if (!row) return;
+  reportSectionExplain(row.dataset.reportRow);
+  reportLinkSection(row.dataset.reportRow);
+});
+
+reportSectionList?.addEventListener("pointerleave", () => {
+  reportSectionExplain(null);
+  reportLinkSection(null);
+});
+
 // Ticking a box and then watching that section appear where the list said it
 // would is the half of the connection you can use.
 reportSectionList?.addEventListener("click", (event) => {
@@ -6175,53 +6238,6 @@ reportDepthSelect?.addEventListener("change", () => {
 reportDetailCountSelect?.addEventListener("change", () => renderReportPreview());
 reportComposer?.addEventListener("submit", generateReport);
 
-// The band is docked exactly when it has reached the top of the window.
-//
-// An IntersectionObserver on a sentinel is the tidier way to ask this, and it
-// is what this first shipped with. It is not used, and neither is a
-// requestAnimationFrame coalescer, because both put the behaviour behind the
-// frame lifecycle: where frames are throttled the observer never delivers, and
-// a pending rAF id never clears, which leaves the band stuck in whichever
-// state it was last in. A read on the scroll event has no such state to get
-// stuck in. It costs one rect read - the browser has already laid out by then
-// - and writes nothing at all unless the answer changed.
-function syncReportDock() {
-  if (!reportComposer || !reportStage) return;
-  const docked = reportStage.getBoundingClientRect().top <= 0;
-  if (docked === reportComposer.classList.contains("is-docked")) return;
-  reportComposer.classList.toggle("is-docked", docked);
-  renderReportOptionsToggle();
-  measureReportBand();
-}
-
-window.addEventListener("scroll", syncReportDock, { passive: true });
-window.addEventListener("resize", syncReportDock, { passive: true });
-
-reportOptionsToggle?.addEventListener("click", () => {
-  // Undocking to show the options would move the page under the pointer, so
-  // the collapse is its own state and the docked state only adds to it.
-  const showing = reportOptionsAreOpen();
-  reportComposer?.classList.toggle("is-collapsed", showing);
-  if (!showing && reportComposer?.classList.contains("is-docked")) {
-    reportComposer.classList.remove("is-docked");
-    document.querySelector("#tab-reports")?.scrollIntoView({ block: "start" });
-  }
-  renderReportOptionsToggle();
-});
-
-function reportOptionsAreOpen() {
-  if (!reportComposer) return false;
-  return !reportComposer.classList.contains("is-collapsed")
-    && !reportComposer.classList.contains("is-docked");
-}
-
-function renderReportOptionsToggle() {
-  const label = document.querySelector("#report-options-toggle-label");
-  const open = reportOptionsAreOpen();
-  if (label) label.textContent = open ? "Hide options" : "Show options";
-  reportOptionsToggle?.setAttribute("aria-expanded", open ? "true" : "false");
-}
-
 function renderReportComposer() {
   if (!reportTypeList) return;
   const type = reportType();
@@ -6232,7 +6248,7 @@ function renderReportComposer() {
         <span class="report-type-name">${escapeHtml(item.label)}</span>
         <span class="report-type-audience">${escapeHtml(item.audience)}</span>
       </span>
-      <span class="report-type-blurb">${escapeHtml(item.blurb)}</span>
+      <span class="report-type-blurb"><span>${escapeHtml(item.blurb)}</span></span>
     </button>`).join("");
 
   const chosen = reportSections();
@@ -6241,18 +6257,14 @@ function renderReportComposer() {
     if (!section) return "";
     const available = reportSectionIsAvailable(id);
     return `
-      <div class="report-section-row" ${available ? "" : 'data-unavailable="true"'}>
-        <label class="report-section-tick">
-          <input type="checkbox" data-report-section="${id}" ${chosen.has(id) && available ? "checked" : ""}
-                 ${available ? "" : "disabled"} />
-          <span class="report-section-copy">
-            <span class="report-section-name">${escapeHtml(section.label)}</span>
-            <span class="report-section-hint">${escapeHtml(available ? section.hint : "Not part of this scan.")}</span>
-          </span>
-        </label>
+      <label class="report-section-row" data-report-row="${id}" ${available ? "" : 'data-unavailable="true"'}
+             title="${escapeHtml(available ? section.hint : "Not part of this scan.")}">
+        <input type="checkbox" data-report-section="${id}" ${chosen.has(id) && available ? "checked" : ""}
+               ${available ? "" : "disabled"} />
+        <span class="report-section-name">${escapeHtml(section.label)}</span>
         ${chosen.has(id) && available ? `<button type="button" class="report-section-jump plain-btn" data-report-jump="${id}"
-                aria-label="Go to ${escapeHtml(section.label)} in the document">&rarr;</button>` : ""}
-      </div>`;
+                aria-label="Go to ${escapeHtml(section.label)} in the document">&rarr;</button>` : "<span></span>"}
+      </label>`;
   }).join("");
 
   reportFormatList.innerHTML = REPORT_FORMATS.map((item) => `
@@ -6276,10 +6288,8 @@ function renderReportComposer() {
   });
 
   renderReportBuildLine();
-  renderReportOptionsToggle();
   renderReportCarrier();
-  measureReportBand();
-  syncReportDock();
+  reportSectionExplain(null);
 }
 
 // The joint between the instrument and the page it makes. It carries the same
@@ -6289,16 +6299,11 @@ function renderReportComposer() {
 // cover has scrolled away, this is the only thing still saying which report
 // and which scope you are reading.
 // The jump target has to land below the band, and the band has two heights.
-function measureReportBand() {
-  if (!reportStage || !reportComposer) return;
-  reportStage.style.setProperty("--report-band-h", `${Math.round(reportComposer.getBoundingClientRect().height)}px`);
-}
-
 function renderReportCarrier() {
   const title = document.querySelector("#report-carrier-title");
   const scope = document.querySelector("#report-carrier-scope");
   if (title) title.textContent = reportType().label;
-  if (scope) scope.textContent = reportScopeLabel();
+  if (scope) scope.textContent = reportCarrierScopeLabel();
 }
 
 function reportBuildStats() {
@@ -6761,9 +6766,16 @@ async function renderReportPreview() {
       </div>`;
     return;
   }
+  // Changing the scope means asking the server again, which takes long enough
+  // to see. Without this the document that is about to be wrong sits there
+  // looking current, and is then replaced between two frames - which reads as
+  // a glitch rather than as an answer. It steps back while the count is being
+  // taken, and the new one arrives.
+  reportPreview.classList.add("is-loading");
   try {
     await loadReportRows();
   } catch (_) {
+    reportPreview.classList.remove("is-loading");
     reportPreview.innerHTML = `
       <div class="report-empty">
         <h4>The findings could not be read</h4>
@@ -6771,6 +6783,7 @@ async function renderReportPreview() {
       </div>`;
     return;
   }
+  reportPreview.classList.remove("is-loading");
   renderReportBuildLine();
   const type = reportType();
   const blocks = reportSectionBlocks();
