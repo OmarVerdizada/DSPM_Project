@@ -16,8 +16,15 @@ from backend.security import Principal, require_artifact_principal, require_role
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 
 
+SEVERITY_LEVELS = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+
+
 class ReportArtifactRequest(BaseModel):
     scan_id: str | None = Field(default=None, max_length=160)
+    # The Reports page lets an operator narrow a report to the severities that
+    # matter. create_report_artifact has always been able to build a scoped
+    # artifact; the route simply never offered it.
+    severities: list[str] | None = Field(default=None, max_length=4)
 
 
 @router.post("")
@@ -25,9 +32,11 @@ async def create_report(
     payload: ReportArtifactRequest,
     principal: Principal = Depends(require_role("viewer")),
 ) -> dict:
-    """Create the shared full-scan PDF used by the dashboard composer."""
+    """Create the filed assessment PDF, for the whole scan or a severity slice."""
+    wanted = [level for level in (payload.severities or []) if str(level).upper() in SEVERITY_LEVELS]
+    scope = {"kind": "severity", "severities": [str(level).upper() for level in wanted]} if wanted else {"kind": "full"}
     try:
-        return create_report_artifact(principal, {}, scan_id=payload.scan_id, scope={"kind": "full"})
+        return create_report_artifact(principal, {}, scan_id=payload.scan_id, scope=scope)
     except ArtifactError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

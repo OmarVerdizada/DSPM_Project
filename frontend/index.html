@@ -12,10 +12,11 @@
     />
     <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=9" />
-    <link rel="stylesheet" href="/static/styles.css?v=250" />
+    <link rel="stylesheet" href="/static/styles.css?v=251" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=19" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
+    <link rel="stylesheet" href="/static/styles/reports.css?v=2" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -949,18 +950,73 @@
               <symbol id="li-files" viewBox="0 0 24 24"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l5 5v9a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></symbol>
             </defs>
           </svg>
-          <div class="report-header">
+          <div class="section-header">
             <div>
               <h2 class="page-title">Reports</h2>
             </div>
-            <div class="report-actions">
-              <button type="button" id="export-csv-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-spreadsheet"/></svg>Export Excel Workbook</button>
-              <button type="button" id="export-word-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-text"/></svg>Export Word Pack</button>
-              <button type="button" id="export-pdf-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-text"/></svg>Open PDF Composer</button>
-            </div>
           </div>
 
-          <div id="report-preview" class="report-preview"></div>
+          <!-- A report is a sentence: prepare THIS report, for THIS scope, as
+               THIS format. The rail asks it in that order and the preview
+               answers it, so every control is in one column and every result
+               is in the other. -->
+          <section class="workspace" id="reports-workspace">
+            <form id="report-composer" class="report-composer" aria-label="Compose a report">
+              <div class="composer-group">
+                <p class="composer-legend" id="report-type-label">Report</p>
+                <div class="report-type-list" id="report-type-list" role="radiogroup" aria-labelledby="report-type-label"></div>
+              </div>
+
+              <div class="composer-group">
+                <p class="composer-legend">Scope</p>
+                <div class="composer-fields">
+                  <label>
+                    <span class="composer-field-name">Coverage</span>
+                    <select id="report-coverage">
+                      <option value="current">This scan</option>
+                      <option value="all">This scan and history</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Severity</span>
+                    <select id="report-severity">
+                      <option value="ALL">All severities</option>
+                      <option value="CRITICAL">Critical only</option>
+                      <option value="CRITICAL,HIGH">Critical and high</option>
+                      <option value="CRITICAL,HIGH,MEDIUM">Critical, high and medium</option>
+                    </select>
+                  </label>
+                  <label class="composer-field-wide">
+                    <span class="composer-field-name">Status</span>
+                    <select id="report-status">
+                      <option value="all">Every status</option>
+                      <option value="active">Open work only</option>
+                      <option value="resolved">Resolved only</option>
+                      <option value="exceptions">Accepted, suppressed and false positives</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              <div class="composer-group composer-group-grow">
+                <p class="composer-legend" id="report-sections-label">Sections</p>
+                <div class="report-section-list" id="report-sections" role="group" aria-labelledby="report-sections-label"></div>
+              </div>
+
+              <div class="composer-group">
+                <p class="composer-legend" id="report-format-label">Format</p>
+                <div class="report-format" id="report-format" role="radiogroup" aria-labelledby="report-format-label"></div>
+                <p class="report-format-note" id="report-format-note"></p>
+              </div>
+
+              <div class="composer-footer">
+                <p class="report-build-line" id="report-build-line" role="status" aria-live="polite"></p>
+                <button type="submit" class="facet-apply" id="report-generate"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg><span id="report-generate-label">Generate report</span></button>
+              </div>
+            </form>
+
+            <div class="report-preview" id="report-preview" aria-label="Report preview"></div>
+          </section>
         </section>
 
         <section id="tab-history" class="tab-panel">
@@ -1597,7 +1653,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=224"></script>
+    <script src="/static/app.js?v=225"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

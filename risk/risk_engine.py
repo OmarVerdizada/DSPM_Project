@@ -780,72 +780,167 @@ def _build_remediation(level: str, score: int, file_obj: dict, findings: list[di
     }
 
 
+# The register prints one reason and one action per finding. Both already
+# exist - the risk engine writes them at scan time - but only inside a file's
+# detail blob, which a report covering thousands of findings cannot afford to
+# open. These expose the same functions to a caller holding just the finding.
+def finding_reason(finding: dict) -> str:
+    """Why this finding is a risk, in one sentence."""
+    return _finding_reason(finding)
+
+
+def finding_recommendation(finding: dict, level: str = "MEDIUM") -> str:
+    """The first recommended action for this finding, or an empty string."""
+    actions = _finding_recommendations(finding, str(level or "MEDIUM").upper())
+    return actions[0] if actions else ""
+
+
+# Static lookup tables, hoisted out of the functions that read them: a scan
+# calls those once per finding, and rebuilding a hundred-entry dict each time
+# cost more than the lookup it served.
+_ENTERPRISE_REASONS = {
+    "private_key": "Cryptographic private key material can authenticate systems, decrypt traffic, or enable lateral movement if copied from this location.",
+    "aws_access_key": "AWS access key identifier indicates potential cloud credential exposure and should be validated against active IAM principals.",
+    "aws_secret_key": "AWS secret access key assignment can allow direct cloud API access if the paired access key is present or recoverable.",
+    "jwt": "JSON Web Token may carry reusable session, service, or authorization claims and should be treated as active credential material until expiry and scope are verified.",
+    "azure_storage_key": "Azure storage key or connection secret may grant direct access to storage accounts and customer data containers.",
+    "azure_sas_token": "Azure SAS token can grant scoped but direct access to storage resources until expiry or revocation.",
+    "google_api_key": "Google API key can expose cloud or application services depending on project restrictions and allowed APIs.",
+    "gcp_service_account": "Google Cloud service-account credential block can authenticate workloads and access cloud resources.",
+    "github_token": "GitHub token can expose source code, actions workflows, packages, or deployment secrets.",
+    "gitlab_token": "GitLab token can expose repositories, CI/CD variables, runners, or package artifacts.",
+    "npm_token": "NPM registry token can publish, pull, or tamper with packages depending on assigned scope.",
+    "slack_token": "Slack token may expose collaboration data, internal channels, files, or automation capabilities.",
+    "stripe_key": "Stripe secret or restricted key can expose payment operations and must be treated as PCI-adjacent credential material.",
+    "sendgrid_key": "SendGrid key can enable unauthorized email sending and customer communication abuse.",
+    "twilio_key": "Twilio key or account identifier can expose messaging, voice, or OTP workflows.",
+    "datadog_key": "Datadog key can expose telemetry and operational metadata that may include secrets or incident context.",
+    "sentry_dsn": "Sentry DSN can expose application telemetry paths and error-reporting project identifiers.",
+    "pagerduty_key": "PagerDuty routing or integration key can manipulate alerting workflows and incident response routing.",
+    "splunk_token": "Splunk token can expose logging ingestion paths or security telemetry integrations.",
+    "newrelic_key": "New Relic key can expose observability integrations and production telemetry metadata.",
+    "okta_token": "Okta token or identity-provider token context can expose administrative identity workflows.",
+    "auth0_secret": "Auth0 client secret can compromise application authentication or token exchange flows.",
+    "oauth_client_secret": "OAuth client secret can be used to impersonate an application in authorization flows.",
+    "bearer_token": "Bearer token can provide direct account or API access without proof-of-possession controls.",
+    "password": "Password-like assignment indicates reusable credential material stored outside an approved vault.",
+    "api_key": "API key or generic token assignment indicates credential material that should be vaulted and rotated if confirmed.",
+    "connection_string": "Connection string combines endpoint and authentication context that can be reused to access databases or services.",
+    "database_uri": "Database URI includes embedded credentials and infrastructure location in a portable format.",
+    "jdbc_connection": "JDBC configuration may expose database endpoint, schema, username, or password material.",
+    "basic_auth_url": "URL contains embedded credentials that can leak through logs, screenshots, tickets, and browser history.",
+    "docker_auth_config": "Docker auth config can expose registry credentials and software supply-chain access.",
+    "kubeconfig_secret": "Kubernetes config contains cluster access material that can expose workloads and secrets.",
+    "terraform_state_secret": "Terraform state or variables may contain provider secrets, generated passwords, or infrastructure topology.",
+    "saml_private_key": "SAML or IdP signing key context can undermine federation trust if exposed.",
+    "mfa_recovery_context": "MFA recovery or backup-code context can bypass strong authentication controls.",
+    "credit_card": "Payment card pattern indicates potential PCI data requiring strict storage and sharing controls.",
+    "iban": "IBAN pattern indicates regulated banking data and potential customer/vendor financial exposure.",
+    "swift_bic": "SWIFT/BIC context indicates banking or treasury data that should be limited to finance owners.",
+    "routing_account": "Bank routing or account number context indicates financial account data requiring owner validation.",
+    "passport_number": "Passport identifier context indicates identity-document data requiring strict privacy controls.",
+    "national_id": "Government identifier context indicates regulated identity data and potential privacy exposure.",
+    "ssn": "Social Security Number context indicates high-sensitivity identity data.",
+    "azerbaijan_fin": "Azerbaijan FIN-like identifier may indicate local identity data and should be reviewed with country context.",
+    "email": "Email address match contributes personal-data context, especially when repeated or paired with exports.",
+    "phone_number": "Phone number match contributes personal-data context and may indicate customer or employee records.",
+    "employee_id": "Employee identifier context indicates HR or workforce data.",
+    "phi_context": "Healthcare or PHI context indicates regulated health data or medical operational records.",
+    "payroll_context": "Payroll or compensation context indicates HR restricted data even without explicit national identifiers.",
+    "customer_context": "Customer, vendor, CRM, or invoice context indicates commercial records and possible personal data.",
+    "board_context": "Executive, strategy, forecast, or M&A context indicates confidential business material.",
+    "legal_contract_context": "Legal, contract, NDA, or legal-hold context indicates privileged or need-to-know business records.",
+    "security_ops_context": "Security operations or vulnerability context exposes defensive posture, incidents, or control gaps.",
+    "repo_archive_context": "Repository export or source archive context may expose code, secrets, and software supply-chain metadata.",
+    "build_log_context": "Build or CI/CD context may expose pipeline traces, artifact locations, deployment tokens, or production topology.",
+    "special_category_context": "Special-category privacy context indicates biometric, location, background-check, or other high-sensitivity personal data.",
+    "retention_policy_context": "Governance or retention context indicates audit evidence, legal-hold, or compliance workpapers.",
+    "confidential_keyword": "Confidentiality keyword indicates business-sensitive content that needs owner and access review.",
+    "source_code_secret_context": "Source-code secret assignment indicates credential material embedded in code or configuration.",
+}
+
+
+_RECOMMENDATIONS_BY_TYPE = {
+    "private_key": ["Quarantine the exposed key file, rotate the key pair, and verify no dependent service still trusts the leaked material.", "Move approved key material into a managed vault or HSM-backed storage path."],
+    "aws_access_key": ["Validate the AWS key owner, rotate the credential, and review CloudTrail activity for use after exposure.", "Create a DLP block rule for AWS key prefixes outside approved vault exports."],
+    "aws_secret_key": ["Rotate the AWS secret immediately and review IAM policy scope for the associated principal.", "Open a cloud-security incident if the credential belongs to production or privileged accounts."],
+    "jwt": ["Invalidate or let-expire the token, review issuer/audience/scope, and check access logs for replay.", "Block JWT movement in shared files unless it is documented test data with expired claims."],
+    "azure_storage_key": ["Rotate the affected storage account key and review blob/container access logs.", "Replace shared keys with managed identity or scoped SAS where business use is required."],
+    "azure_sas_token": ["Revoke or expire the SAS token and validate whether it grants write, delete, or list permissions.", "Block SAS-token movement outside approved engineering and platform repositories."],
+    "google_api_key": ["Restrict the API key by project, API, referrer, and IP, then rotate if exposure is confirmed.", "Alert the cloud owner and review GCP audit logs for suspicious use."],
+    "gcp_service_account": ["Disable or rotate the service-account key and move workload authentication to managed identity where possible.", "Review service-account IAM roles for privilege reduction."],
+    "github_token": ["Revoke the GitHub token, rotate dependent automation secrets, and review repository/audit activity.", "Block developer-token patterns in shared drives and report exports."],
+    "gitlab_token": ["Revoke the GitLab token and review project, group, runner, and CI variable access.", "Restrict personal access tokens to approved vault-backed workflows."],
+    "npm_token": ["Revoke the NPM token and review package publish/download activity for the associated account.", "Require registry tokens to be stored in CI secret stores only."],
+    "slack_token": ["Revoke the Slack token and review bot/user scopes and workspace audit logs.", "Block Slack token movement through file shares and email attachments."],
+    "stripe_key": ["Rotate the Stripe key and notify the payment owner for PCI-impact review.", "Block payment-secret movement and require a PCI exception for any retained export."],
+    "sendgrid_key": ["Rotate the SendGrid key and review outbound email activity for abuse.", "Move email-service credentials to an approved application secret store."],
+    "twilio_key": ["Rotate the Twilio credential and review messaging, voice, and OTP activity.", "Limit telecom API keys to owned automation repositories or vaults."],
+    "datadog_key": ["Rotate the Datadog key and confirm whether telemetry ingestion or query scopes were exposed.", "Treat observability tokens as production secrets in DLP policy."],
+    "sentry_dsn": ["Validate Sentry project exposure and rotate DSN or client keys if project policy requires it.", "Review whether error payloads contain personal data or secrets."],
+    "pagerduty_key": ["Rotate the PagerDuty integration key and review incident routing changes.", "Restrict incident tooling tokens to platform-owned secret stores."],
+    "splunk_token": ["Rotate the Splunk token and review HEC ingestion paths or API access.", "Classify SIEM credentials as security-restricted material."],
+    "newrelic_key": ["Rotate the New Relic key and validate application telemetry scope.", "Move APM credentials out of shared files and into deployment secrets."],
+    "okta_token": ["Revoke the Okta token and review admin/audit events for suspicious identity changes.", "Restrict IdP API tokens to identity-admin vault paths."],
+    "auth0_secret": ["Rotate the Auth0 client secret and review application redirect URI and grant configuration.", "Block identity-provider secrets in shared folders and reports."],
+    "oauth_client_secret": ["Rotate the OAuth client secret and validate application ownership and grant type.", "Create an identity-secret DLP rule for OAuth/SAML configuration exports."],
+    "bearer_token": ["Invalidate the bearer token and review logs for replay or unusual access.", "Block bearer-token movement outside approved troubleshooting windows."],
+    "password": ["Rotate the password if active and remove it from the file or replace it with a vault reference.", "Block password-like assignments in exports, scripts, and runbooks."],
+    "api_key": ["Validate the API key owner, rotate if active, and move it into a managed secret store.", "Tune DLP detection by assignment context and entropy to reduce false positives."],
+    "connection_string": ["Rotate embedded credentials and move connection secrets to a vault-backed configuration mechanism.", "Create a DLP rule for connection strings in documents, spreadsheets, and scripts."],
+    "database_uri": ["Rotate database credentials and review database access logs for use after exposure.", "Block URI credentials in shared exports and code attachments."],
+    "jdbc_connection": ["Move JDBC credentials to a secure configuration store and rotate embedded passwords.", "Require owner review for database configuration files on broad shares."],
+    "basic_auth_url": ["Remove embedded credentials from URLs and rotate the exposed password or token.", "Block basic-auth URLs in documents, logs, and tickets."],
+    "docker_auth_config": ["Rotate registry credentials and validate image/package access after exposure.", "Store Docker auth in approved CI/CD secret stores only."],
+    "kubeconfig_secret": ["Rotate kubeconfig tokens or certificates and review cluster audit logs.", "Restrict kubeconfig files to platform administrators and approved encrypted storage."],
+    "terraform_state_secret": ["Move Terraform state to encrypted remote backend and rotate any exposed provider secrets.", "Block Terraform state sharing through file shares and email."],
+    "saml_private_key": ["Rotate SAML signing material and validate IdP/SP trust configuration.", "Restrict federation metadata and signing keys to identity administrators."],
+    "mfa_recovery_context": ["Invalidate recovery codes and force regeneration for the affected account or app.", "Block MFA recovery artifacts outside identity-admin vaults."],
+    "credit_card": ["Apply PCI label, block external transfer, and notify the payment data owner.", "Validate whether storage is approved under PCI scope and retention policy."],
+    "pci_chd_pan": ["Apply PCI label, block external transfer, and notify the payment data owner.", "Validate approved storage need, retention, PAN unreadability, and PCI DSS scope impact."],
+    "pci_chd_cardholder_name": ["Treat name-on-card as CHD when linked to PAN and route review to the payment data owner.", "Separate cardholder identity metadata from PAN-bearing records where possible and remove name + PAN combinations from logs, exports, tickets, and analytics events."],
+    "pci_chd_expiration_date": ["Treat card expiry as CHD when linked to PAN and route review to the payment data owner.", "Remove expiry from logs, analytics payloads, support exports, and unnecessary PAN-bearing records; use tokenized payment references where possible."],
+    "pci_chd_service_code": ["Treat service code as CHD when linked to PAN and route review to the payment data owner.", "Validate that service-code fields do not retain full track data and remove service code from debug or processor logs unless business need is documented."],
+    "pci_sad_track_data": ["Treat full track data as prohibited SAD retention by default and notify the PCI/payment owner immediately.", "Stop persisting raw track payloads and securely delete retained copies across primary storage, logs, queues, backups, and exports."],
+    "pci_sad_cvv": ["Treat retained CVV/CVC/CID as prohibited SAD storage and notify the PCI/payment owner immediately.", "Purge CVV from databases, logs, backups, CRM/support tools, analytics, messages, and recordings; add pre-storage and pre-log field filters."],
+    "pci_sad_pin": ["Treat retained payment-card PIN as prohibited SAD storage and notify the PCI/payment owner immediately.", "Remove PIN persistence from applications, logs, queues, diagnostics, support artifacts, and recordings; use approved PIN-entry and HSM workflows."],
+    "pci_sad_pin_block": ["Treat retained PIN block as Critical SAD requiring PCI PIN specialist review.", "Validate approved issuing/PIN-processing lifecycle, remove unauthorized retention, and rotate affected keys if co-located key material is possible."],
+    "pci_chd_masked_pan": ["Validate that this is display-only masked PAN and not reconstructable from nearby fragments.", "Confirm that full PAN is not present elsewhere in the same export, log, or backup set."],
+    "pci_chd_truncated_pan": ["Validate truncation is applied at rest and cannot be unmasked by the same system or user.", "Confirm that combined fragments do not reconstruct more PAN digits than policy allows."],
+    "pci_tokenized_pan": ["Validate tokenization design, reversibility, vault access, and whether the scanned location remains in PCI scope.", "Separate token vault credentials and detokenization access from broad file access."],
+    "pci_hashed_pan": ["Validate keyed cryptographic hashing evidence, especially for PAN unreadability controls.", "Confirm raw PAN, keys, salts, or detokenization material are not co-located with the hash export."],
+    "pci_encrypted_pan": ["Validate encryption strength, key management, and key separation for the scanned location.", "Restrict access to ciphertext and ensure decryption material is not available in the same trust boundary."],
+    "iban": ["Apply regulated financial-data label and restrict sharing to finance owners.", "Review business justification and retention for bank-account exports."],
+    "swift_bic": ["Route to treasury or finance owner for access review.", "Restrict bank identifier files to approved finance groups."],
+    "routing_account": ["Apply financial-data controls and validate whether account data should remain on this share.", "Require finance owner attestation for continued storage."],
+    "passport_number": ["Apply identity-data label and restrict access to approved HR, legal, or compliance owners.", "Validate lawful basis and retention requirement for identity documents."],
+    "national_id": ["Apply regulated identity-data label and remove broad access.", "Route to privacy owner for lawful-basis and retention review."],
+    "ssn": ["Block external sharing and route to privacy/compliance owner.", "Validate approved storage location and delete unnecessary copies."],
+    "azerbaijan_fin": ["Review with local privacy owner to confirm whether this is a true FIN identifier.", "Apply country-specific identity-data controls when confirmed."],
+    "email": ["Apply personal-data monitoring when email addresses appear in bulk or export files.", "Alert on external transfer of contact lists outside approved systems."],
+    "phone_number": ["Treat as personal data when paired with names, customer records, or employee files.", "Apply privacy label and monitor bulk movement."],
+    "employee_id": ["Route to HR data owner and restrict access to workforce-data groups.", "Monitor bulk export of employee identifiers."],
+    "phi_context": ["Apply PHI label, block external sharing, and route to privacy/compliance owner.", "Validate storage location, access scope, and retention requirements."],
+    "payroll_context": ["Apply HR restricted label and limit access to HR/payroll owners.", "Monitor payroll and compensation exports for external movement."],
+    "customer_context": ["Route to customer-data owner and validate access for sales/support/procurement groups.", "Apply business-confidential label and monitor bulk exports."],
+    "board_context": ["Apply executive-confidential label and restrict to approved leadership or deal-team groups.", "Alert on external movement of board, strategy, pricing, or M&A material."],
+    "legal_contract_context": ["Route to legal operations and apply legal/confidential label.", "Restrict access to contract owners and legal reviewers."],
+    "security_ops_context": ["Apply security-restricted label and limit to security operations and system owners.", "Avoid exporting vulnerability or incident evidence outside approved repositories."],
+    "repo_archive_context": ["Scan repository artifacts for embedded secrets and restrict source archives to engineering owners.", "Remove broad access to repo backup folders."],
+    "build_log_context": ["Review build logs for secrets and production topology before sharing.", "Restrict CI/CD traces and artifacts to engineering/platform owners."],
+    "special_category_context": ["Route to privacy/legal for special-category data review.", "Apply strict sharing controls and validate lawful basis before retention."],
+    "retention_policy_context": ["Keep governance evidence in approved repositories and block ad-hoc external transfer.", "Route access review or legal-hold evidence to compliance owners."],
+    "confidential_keyword": ["Apply classification label and route owner review before broad sharing.", "Use confidentiality keyword context as a booster with path and access signals."],
+    "source_code_secret_context": ["Remove the hardcoded secret and replace it with a vault reference.", "Create a secure-code remediation task for the owning engineering team."],
+}
+
+
 def _finding_reason(finding: dict) -> str:
     finding_type = str(finding.get("type") or "sensitive_data")
     count = int(finding.get("count") or 1)
     description = str(finding.get("description") or finding_type.replace("_", " "))
     suffix = f"{count} match" if count == 1 else f"{count} matches"
-    enterprise_reasons = {
-        "private_key": "Cryptographic private key material can authenticate systems, decrypt traffic, or enable lateral movement if copied from this location.",
-        "aws_access_key": "AWS access key identifier indicates potential cloud credential exposure and should be validated against active IAM principals.",
-        "aws_secret_key": "AWS secret access key assignment can allow direct cloud API access if the paired access key is present or recoverable.",
-        "jwt": "JSON Web Token may carry reusable session, service, or authorization claims and should be treated as active credential material until expiry and scope are verified.",
-        "azure_storage_key": "Azure storage key or connection secret may grant direct access to storage accounts and customer data containers.",
-        "azure_sas_token": "Azure SAS token can grant scoped but direct access to storage resources until expiry or revocation.",
-        "google_api_key": "Google API key can expose cloud or application services depending on project restrictions and allowed APIs.",
-        "gcp_service_account": "Google Cloud service-account credential block can authenticate workloads and access cloud resources.",
-        "github_token": "GitHub token can expose source code, actions workflows, packages, or deployment secrets.",
-        "gitlab_token": "GitLab token can expose repositories, CI/CD variables, runners, or package artifacts.",
-        "npm_token": "NPM registry token can publish, pull, or tamper with packages depending on assigned scope.",
-        "slack_token": "Slack token may expose collaboration data, internal channels, files, or automation capabilities.",
-        "stripe_key": "Stripe secret or restricted key can expose payment operations and must be treated as PCI-adjacent credential material.",
-        "sendgrid_key": "SendGrid key can enable unauthorized email sending and customer communication abuse.",
-        "twilio_key": "Twilio key or account identifier can expose messaging, voice, or OTP workflows.",
-        "datadog_key": "Datadog key can expose telemetry and operational metadata that may include secrets or incident context.",
-        "sentry_dsn": "Sentry DSN can expose application telemetry paths and error-reporting project identifiers.",
-        "pagerduty_key": "PagerDuty routing or integration key can manipulate alerting workflows and incident response routing.",
-        "splunk_token": "Splunk token can expose logging ingestion paths or security telemetry integrations.",
-        "newrelic_key": "New Relic key can expose observability integrations and production telemetry metadata.",
-        "okta_token": "Okta token or identity-provider token context can expose administrative identity workflows.",
-        "auth0_secret": "Auth0 client secret can compromise application authentication or token exchange flows.",
-        "oauth_client_secret": "OAuth client secret can be used to impersonate an application in authorization flows.",
-        "bearer_token": "Bearer token can provide direct account or API access without proof-of-possession controls.",
-        "password": "Password-like assignment indicates reusable credential material stored outside an approved vault.",
-        "api_key": "API key or generic token assignment indicates credential material that should be vaulted and rotated if confirmed.",
-        "connection_string": "Connection string combines endpoint and authentication context that can be reused to access databases or services.",
-        "database_uri": "Database URI includes embedded credentials and infrastructure location in a portable format.",
-        "jdbc_connection": "JDBC configuration may expose database endpoint, schema, username, or password material.",
-        "basic_auth_url": "URL contains embedded credentials that can leak through logs, screenshots, tickets, and browser history.",
-        "docker_auth_config": "Docker auth config can expose registry credentials and software supply-chain access.",
-        "kubeconfig_secret": "Kubernetes config contains cluster access material that can expose workloads and secrets.",
-        "terraform_state_secret": "Terraform state or variables may contain provider secrets, generated passwords, or infrastructure topology.",
-        "saml_private_key": "SAML or IdP signing key context can undermine federation trust if exposed.",
-        "mfa_recovery_context": "MFA recovery or backup-code context can bypass strong authentication controls.",
-        "credit_card": "Payment card pattern indicates potential PCI data requiring strict storage and sharing controls.",
-        "iban": "IBAN pattern indicates regulated banking data and potential customer/vendor financial exposure.",
-        "swift_bic": "SWIFT/BIC context indicates banking or treasury data that should be limited to finance owners.",
-        "routing_account": "Bank routing or account number context indicates financial account data requiring owner validation.",
-        "passport_number": "Passport identifier context indicates identity-document data requiring strict privacy controls.",
-        "national_id": "Government identifier context indicates regulated identity data and potential privacy exposure.",
-        "ssn": "Social Security Number context indicates high-sensitivity identity data.",
-        "azerbaijan_fin": "Azerbaijan FIN-like identifier may indicate local identity data and should be reviewed with country context.",
-        "email": "Email address match contributes personal-data context, especially when repeated or paired with exports.",
-        "phone_number": "Phone number match contributes personal-data context and may indicate customer or employee records.",
-        "employee_id": "Employee identifier context indicates HR or workforce data.",
-        "phi_context": "Healthcare or PHI context indicates regulated health data or medical operational records.",
-        "payroll_context": "Payroll or compensation context indicates HR restricted data even without explicit national identifiers.",
-        "customer_context": "Customer, vendor, CRM, or invoice context indicates commercial records and possible personal data.",
-        "board_context": "Executive, strategy, forecast, or M&A context indicates confidential business material.",
-        "legal_contract_context": "Legal, contract, NDA, or legal-hold context indicates privileged or need-to-know business records.",
-        "security_ops_context": "Security operations or vulnerability context exposes defensive posture, incidents, or control gaps.",
-        "repo_archive_context": "Repository export or source archive context may expose code, secrets, and software supply-chain metadata.",
-        "build_log_context": "Build or CI/CD context may expose pipeline traces, artifact locations, deployment tokens, or production topology.",
-        "special_category_context": "Special-category privacy context indicates biometric, location, background-check, or other high-sensitivity personal data.",
-        "retention_policy_context": "Governance or retention context indicates audit evidence, legal-hold, or compliance workpapers.",
-        "confidential_keyword": "Confidentiality keyword indicates business-sensitive content that needs owner and access review.",
-        "source_code_secret_context": "Source-code secret assignment indicates credential material embedded in code or configuration.",
-    }
-    reason = enterprise_reasons.get(finding_type)
+    reason = _ENTERPRISE_REASONS.get(finding_type)
     if not reason:
         reason = _dynamic_finding_reason(finding, description)
     return f"{reason} ({suffix})"
@@ -875,6 +970,18 @@ def _dynamic_finding_reason(finding: dict, fallback: str) -> str:
         "hr": f"{label} indicates workforce or HR data that should be restricted to HR/payroll owners.",
         "hr_documents": f"{label} indicates workforce or HR data that should be restricted to HR/payroll owners.",
         "custom": f"{label} matched a custom GDPR keyword group and should be reviewed according to the configured category and risk.",
+        # PCI and the framework categories reached this function without a
+        # reason of their own and fell back to printing the rule name, which
+        # tells a reader nothing about why the finding is a risk.
+        "pci_cardholder_data": f"{label} indicates cardholder data, which places this file in PCI DSS scope and requires storage, access, and retention controls.",
+        "pci_sensitive_authentication_data": f"{label} indicates sensitive authentication data, which PCI DSS forbids retaining after authorization.",
+        "pci_payment_secret": f"{label} indicates payment credential material that can act on the payment environment and must be vaulted and rotated.",
+        "pci_scope_context": f"{label} indicates payment-environment context that can pull this location into PCI DSS scope.",
+        "financial_records": f"{label} indicates financial data that should be restricted to approved finance or compliance owners.",
+        "biometric_data": f"{label} indicates biometric data, a special category under GDPR requiring explicit lawful basis and strict access control.",
+        "online_identifiers": f"{label} indicates online identifiers that count as personal data under GDPR when they can be linked to a person.",
+        "audit_and_compliance": f"{label} indicates audit or compliance evidence that should stay in a governed repository with retention applied.",
+        "sensitive_data": f"{label} indicates sensitive content that should be reviewed for ownership, access scope, and whether this location is approved.",
     }
     return f"{category_reasons.get(category, fallback)}{keyword_hint}"
 
@@ -884,79 +991,6 @@ def _finding_recommendations(finding: dict | str, finding_level: str) -> list[st
         finding_type = str(finding.get("type") or "sensitive_data")
     else:
         finding_type = str(finding or "sensitive_data")
-    recommendations_by_type = {
-        "private_key": ["Quarantine the exposed key file, rotate the key pair, and verify no dependent service still trusts the leaked material.", "Move approved key material into a managed vault or HSM-backed storage path."],
-        "aws_access_key": ["Validate the AWS key owner, rotate the credential, and review CloudTrail activity for use after exposure.", "Create a DLP block rule for AWS key prefixes outside approved vault exports."],
-        "aws_secret_key": ["Rotate the AWS secret immediately and review IAM policy scope for the associated principal.", "Open a cloud-security incident if the credential belongs to production or privileged accounts."],
-        "jwt": ["Invalidate or let-expire the token, review issuer/audience/scope, and check access logs for replay.", "Block JWT movement in shared files unless it is documented test data with expired claims."],
-        "azure_storage_key": ["Rotate the affected storage account key and review blob/container access logs.", "Replace shared keys with managed identity or scoped SAS where business use is required."],
-        "azure_sas_token": ["Revoke or expire the SAS token and validate whether it grants write, delete, or list permissions.", "Block SAS-token movement outside approved engineering and platform repositories."],
-        "google_api_key": ["Restrict the API key by project, API, referrer, and IP, then rotate if exposure is confirmed.", "Alert the cloud owner and review GCP audit logs for suspicious use."],
-        "gcp_service_account": ["Disable or rotate the service-account key and move workload authentication to managed identity where possible.", "Review service-account IAM roles for privilege reduction."],
-        "github_token": ["Revoke the GitHub token, rotate dependent automation secrets, and review repository/audit activity.", "Block developer-token patterns in shared drives and report exports."],
-        "gitlab_token": ["Revoke the GitLab token and review project, group, runner, and CI variable access.", "Restrict personal access tokens to approved vault-backed workflows."],
-        "npm_token": ["Revoke the NPM token and review package publish/download activity for the associated account.", "Require registry tokens to be stored in CI secret stores only."],
-        "slack_token": ["Revoke the Slack token and review bot/user scopes and workspace audit logs.", "Block Slack token movement through file shares and email attachments."],
-        "stripe_key": ["Rotate the Stripe key and notify the payment owner for PCI-impact review.", "Block payment-secret movement and require a PCI exception for any retained export."],
-        "sendgrid_key": ["Rotate the SendGrid key and review outbound email activity for abuse.", "Move email-service credentials to an approved application secret store."],
-        "twilio_key": ["Rotate the Twilio credential and review messaging, voice, and OTP activity.", "Limit telecom API keys to owned automation repositories or vaults."],
-        "datadog_key": ["Rotate the Datadog key and confirm whether telemetry ingestion or query scopes were exposed.", "Treat observability tokens as production secrets in DLP policy."],
-        "sentry_dsn": ["Validate Sentry project exposure and rotate DSN or client keys if project policy requires it.", "Review whether error payloads contain personal data or secrets."],
-        "pagerduty_key": ["Rotate the PagerDuty integration key and review incident routing changes.", "Restrict incident tooling tokens to platform-owned secret stores."],
-        "splunk_token": ["Rotate the Splunk token and review HEC ingestion paths or API access.", "Classify SIEM credentials as security-restricted material."],
-        "newrelic_key": ["Rotate the New Relic key and validate application telemetry scope.", "Move APM credentials out of shared files and into deployment secrets."],
-        "okta_token": ["Revoke the Okta token and review admin/audit events for suspicious identity changes.", "Restrict IdP API tokens to identity-admin vault paths."],
-        "auth0_secret": ["Rotate the Auth0 client secret and review application redirect URI and grant configuration.", "Block identity-provider secrets in shared folders and reports."],
-        "oauth_client_secret": ["Rotate the OAuth client secret and validate application ownership and grant type.", "Create an identity-secret DLP rule for OAuth/SAML configuration exports."],
-        "bearer_token": ["Invalidate the bearer token and review logs for replay or unusual access.", "Block bearer-token movement outside approved troubleshooting windows."],
-        "password": ["Rotate the password if active and remove it from the file or replace it with a vault reference.", "Block password-like assignments in exports, scripts, and runbooks."],
-        "api_key": ["Validate the API key owner, rotate if active, and move it into a managed secret store.", "Tune DLP detection by assignment context and entropy to reduce false positives."],
-        "connection_string": ["Rotate embedded credentials and move connection secrets to a vault-backed configuration mechanism.", "Create a DLP rule for connection strings in documents, spreadsheets, and scripts."],
-        "database_uri": ["Rotate database credentials and review database access logs for use after exposure.", "Block URI credentials in shared exports and code attachments."],
-        "jdbc_connection": ["Move JDBC credentials to a secure configuration store and rotate embedded passwords.", "Require owner review for database configuration files on broad shares."],
-        "basic_auth_url": ["Remove embedded credentials from URLs and rotate the exposed password or token.", "Block basic-auth URLs in documents, logs, and tickets."],
-        "docker_auth_config": ["Rotate registry credentials and validate image/package access after exposure.", "Store Docker auth in approved CI/CD secret stores only."],
-        "kubeconfig_secret": ["Rotate kubeconfig tokens or certificates and review cluster audit logs.", "Restrict kubeconfig files to platform administrators and approved encrypted storage."],
-        "terraform_state_secret": ["Move Terraform state to encrypted remote backend and rotate any exposed provider secrets.", "Block Terraform state sharing through file shares and email."],
-        "saml_private_key": ["Rotate SAML signing material and validate IdP/SP trust configuration.", "Restrict federation metadata and signing keys to identity administrators."],
-        "mfa_recovery_context": ["Invalidate recovery codes and force regeneration for the affected account or app.", "Block MFA recovery artifacts outside identity-admin vaults."],
-        "credit_card": ["Apply PCI label, block external transfer, and notify the payment data owner.", "Validate whether storage is approved under PCI scope and retention policy."],
-        "pci_chd_pan": ["Apply PCI label, block external transfer, and notify the payment data owner.", "Validate approved storage need, retention, PAN unreadability, and PCI DSS scope impact."],
-        "pci_chd_cardholder_name": ["Treat name-on-card as CHD when linked to PAN and route review to the payment data owner.", "Separate cardholder identity metadata from PAN-bearing records where possible and remove name + PAN combinations from logs, exports, tickets, and analytics events."],
-        "pci_chd_expiration_date": ["Treat card expiry as CHD when linked to PAN and route review to the payment data owner.", "Remove expiry from logs, analytics payloads, support exports, and unnecessary PAN-bearing records; use tokenized payment references where possible."],
-        "pci_chd_service_code": ["Treat service code as CHD when linked to PAN and route review to the payment data owner.", "Validate that service-code fields do not retain full track data and remove service code from debug or processor logs unless business need is documented."],
-        "pci_sad_track_data": ["Treat full track data as prohibited SAD retention by default and notify the PCI/payment owner immediately.", "Stop persisting raw track payloads and securely delete retained copies across primary storage, logs, queues, backups, and exports."],
-        "pci_sad_cvv": ["Treat retained CVV/CVC/CID as prohibited SAD storage and notify the PCI/payment owner immediately.", "Purge CVV from databases, logs, backups, CRM/support tools, analytics, messages, and recordings; add pre-storage and pre-log field filters."],
-        "pci_sad_pin": ["Treat retained payment-card PIN as prohibited SAD storage and notify the PCI/payment owner immediately.", "Remove PIN persistence from applications, logs, queues, diagnostics, support artifacts, and recordings; use approved PIN-entry and HSM workflows."],
-        "pci_sad_pin_block": ["Treat retained PIN block as Critical SAD requiring PCI PIN specialist review.", "Validate approved issuing/PIN-processing lifecycle, remove unauthorized retention, and rotate affected keys if co-located key material is possible."],
-        "pci_chd_masked_pan": ["Validate that this is display-only masked PAN and not reconstructable from nearby fragments.", "Confirm that full PAN is not present elsewhere in the same export, log, or backup set."],
-        "pci_chd_truncated_pan": ["Validate truncation is applied at rest and cannot be unmasked by the same system or user.", "Confirm that combined fragments do not reconstruct more PAN digits than policy allows."],
-        "pci_tokenized_pan": ["Validate tokenization design, reversibility, vault access, and whether the scanned location remains in PCI scope.", "Separate token vault credentials and detokenization access from broad file access."],
-        "pci_hashed_pan": ["Validate keyed cryptographic hashing evidence, especially for PAN unreadability controls.", "Confirm raw PAN, keys, salts, or detokenization material are not co-located with the hash export."],
-        "pci_encrypted_pan": ["Validate encryption strength, key management, and key separation for the scanned location.", "Restrict access to ciphertext and ensure decryption material is not available in the same trust boundary."],
-        "iban": ["Apply regulated financial-data label and restrict sharing to finance owners.", "Review business justification and retention for bank-account exports."],
-        "swift_bic": ["Route to treasury or finance owner for access review.", "Restrict bank identifier files to approved finance groups."],
-        "routing_account": ["Apply financial-data controls and validate whether account data should remain on this share.", "Require finance owner attestation for continued storage."],
-        "passport_number": ["Apply identity-data label and restrict access to approved HR, legal, or compliance owners.", "Validate lawful basis and retention requirement for identity documents."],
-        "national_id": ["Apply regulated identity-data label and remove broad access.", "Route to privacy owner for lawful-basis and retention review."],
-        "ssn": ["Block external sharing and route to privacy/compliance owner.", "Validate approved storage location and delete unnecessary copies."],
-        "azerbaijan_fin": ["Review with local privacy owner to confirm whether this is a true FIN identifier.", "Apply country-specific identity-data controls when confirmed."],
-        "email": ["Apply personal-data monitoring when email addresses appear in bulk or export files.", "Alert on external transfer of contact lists outside approved systems."],
-        "phone_number": ["Treat as personal data when paired with names, customer records, or employee files.", "Apply privacy label and monitor bulk movement."],
-        "employee_id": ["Route to HR data owner and restrict access to workforce-data groups.", "Monitor bulk export of employee identifiers."],
-        "phi_context": ["Apply PHI label, block external sharing, and route to privacy/compliance owner.", "Validate storage location, access scope, and retention requirements."],
-        "payroll_context": ["Apply HR restricted label and limit access to HR/payroll owners.", "Monitor payroll and compensation exports for external movement."],
-        "customer_context": ["Route to customer-data owner and validate access for sales/support/procurement groups.", "Apply business-confidential label and monitor bulk exports."],
-        "board_context": ["Apply executive-confidential label and restrict to approved leadership or deal-team groups.", "Alert on external movement of board, strategy, pricing, or M&A material."],
-        "legal_contract_context": ["Route to legal operations and apply legal/confidential label.", "Restrict access to contract owners and legal reviewers."],
-        "security_ops_context": ["Apply security-restricted label and limit to security operations and system owners.", "Avoid exporting vulnerability or incident evidence outside approved repositories."],
-        "repo_archive_context": ["Scan repository artifacts for embedded secrets and restrict source archives to engineering owners.", "Remove broad access to repo backup folders."],
-        "build_log_context": ["Review build logs for secrets and production topology before sharing.", "Restrict CI/CD traces and artifacts to engineering/platform owners."],
-        "special_category_context": ["Route to privacy/legal for special-category data review.", "Apply strict sharing controls and validate lawful basis before retention."],
-        "retention_policy_context": ["Keep governance evidence in approved repositories and block ad-hoc external transfer.", "Route access review or legal-hold evidence to compliance owners."],
-        "confidential_keyword": ["Apply classification label and route owner review before broad sharing.", "Use confidentiality keyword context as a booster with path and access signals."],
-        "source_code_secret_context": ["Remove the hardcoded secret and replace it with a vault reference.", "Create a secure-code remediation task for the owning engineering team."],
-    }
     if isinstance(finding, dict):
         dynamic = _dynamic_finding_recommendations(finding, finding_level)
         if dynamic:
@@ -967,7 +1001,7 @@ def _finding_recommendations(finding: dict | str, finding_level: str) -> list[st
         generic.append("Block external movement until the owner confirms business need and remediation status.")
     else:
         generic.append("Monitor movement and validate whether the file belongs in an approved repository.")
-    return recommendations_by_type.get(finding_type, generic)
+    return _RECOMMENDATIONS_BY_TYPE.get(finding_type, generic)
 
 
 def _dynamic_finding_recommendations(finding: dict, finding_level: str) -> list[str]:

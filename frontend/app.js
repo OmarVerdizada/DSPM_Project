@@ -49,9 +49,15 @@ const assetReason = document.querySelector("#asset-reason");
 const assetRuleList = document.querySelector("#asset-rule-list");
 const assetSaveStatus = document.querySelector("#asset-save-status");
 const reportPreview = document.querySelector("#report-preview");
-const exportCsvBtn = document.querySelector("#export-csv-btn");
-const exportWordBtn = document.querySelector("#export-word-btn");
-const exportPdfBtn = document.querySelector("#export-pdf-btn");
+const reportComposer = document.querySelector("#report-composer");
+const reportTypeList = document.querySelector("#report-type-list");
+const reportSectionList = document.querySelector("#report-sections");
+const reportFormatList = document.querySelector("#report-format");
+const reportFormatNote = document.querySelector("#report-format-note");
+const reportBuildLine = document.querySelector("#report-build-line");
+const reportCoverageSelect = document.querySelector("#report-coverage");
+const reportSeveritySelect = document.querySelector("#report-severity");
+const reportStatusSelect = document.querySelector("#report-status");
 const logoutBtn = document.querySelector("#logout-btn");
 const profileToggle = document.querySelector("#profile-toggle");
 const profileName = document.querySelector("#profile-name");
@@ -5692,108 +5698,687 @@ function safeSessionSet(key, value) {
   return true;
 }
 
-function renderReportPreview() {
-  if (deferWhileHidden("tab-reports", "preview", renderReportPreview)) return;
+// ---- Reports -------------------------------------------------------------
+// A report is a sentence: prepare THIS report, for THIS scope, as THIS format.
+// The rail asks it in that order, the preview answers it, and the build line
+// above the button says exactly what will come out - so nobody exports and
+// hopes.
+//
+// Four documents, because four different people ask for one: a board wants the
+// posture, a security team wants the register, a data owner wants to know what
+// is held and where, an auditor wants the framework mapping.
+const REPORT_TYPES = [
+  {
+    id: "executive",
+    label: "Executive summary",
+    audience: "Board",
+    blurb: "Posture, the risks that matter, what moved.",
+    sections: ["posture", "top_risks", "coverage", "trend"],
+  },
+  {
+    id: "register",
+    label: "Risk register",
+    audience: "Security team",
+    blurb: "Every finding, its status and its fix.",
+    sections: ["severity_split", "register", "remediation", "owners", "appendix"],
+  },
+  {
+    id: "inventory",
+    label: "Data inventory",
+    audience: "Data owners",
+    blurb: "What data the estate holds, and where.",
+    sections: ["data_classes", "locations", "assets", "appendix"],
+  },
+  {
+    id: "compliance",
+    label: "Compliance pack",
+    audience: "Auditor",
+    blurb: "Framework coverage and mapped evidence.",
+    sections: ["frameworks", "framework_findings", "pci_scope", "remediation", "appendix"],
+  },
+];
+
+// `pages` is what this section adds to the page count: a number for a fixed
+// summary, or a function of the rows it will print.
+const REPORT_SECTIONS = {
+  posture: { label: "Posture summary", hint: "Score, files and severity split", pages: () => 1 },
+  top_risks: { label: "Top risks", hint: "The highest-scoring findings", pages: () => 1 },
+  coverage: { label: "Assessment coverage", hint: "Classified, clear and unreadable", pages: () => 1 },
+  trend: { label: "Change since last scan", hint: "What moved since the last scan", pages: () => 1 },
+  severity_split: { label: "Severity breakdown", hint: "Counts and share per severity", pages: () => 1 },
+  register: { label: "Finding register", hint: "Status, reason and fix per finding", pages: (rows) => Math.max(1, Math.ceil(rows / 24)) },
+  remediation: { label: "Remediation guidance", hint: "Actions, by how often they apply", pages: () => 1 },
+  owners: { label: "Owners", hint: "Who holds the affected assets", pages: () => 1 },
+  data_classes: { label: "Data classes", hint: "Every class found, with counts", pages: () => 2 },
+  locations: { label: "Locations", hint: "Folders holding sensitive data", pages: () => 1 },
+  assets: { label: "Affected assets", hint: "One row per affected file", pages: (rows) => Math.max(1, Math.ceil(rows / 34)) },
+  frameworks: { label: "Framework coverage", hint: "GDPR, PCI DSS and NIST coverage", pages: () => 1 },
+  framework_findings: { label: "Mapped findings", hint: "Findings by the framework they touch", pages: (rows) => Math.max(1, Math.ceil(rows / 28)) },
+  pci_scope: { label: "PCI scope", hint: "Cardholder data and scope candidates", pages: () => 1 },
+  appendix: { label: "Evidence appendix", hint: "Full register with paths and evidence", pages: (rows) => Math.max(1, Math.ceil(rows / 40)), off: true },
+};
+
+const REPORT_FORMATS = [
+  { id: "pdf", label: "PDF", note: "Filed on the server as evidence, on the standard template. Scope applies; sections are fixed." },
+  { id: "word", label: "Word", note: "An editable document of the sections ticked above." },
+  { id: "excel", label: "Excel", note: "Every section as a table, ready to filter and pivot." },
+];
+
+let reportState = { type: "executive", format: "pdf", sections: null };
+
+// A report is evidence, so it covers the estate the server holds - not the 200
+// rows the Findings workspace happens to have loaded. Every row comes from
+// /api/findings, which filters, sorts and counts server-side; `total` is the
+// real number of findings in scope even when only a page of them is in memory.
+const REPORT_SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
+const REPORT_PREVIEW_ROWS = 200;
+const REPORT_PAGE_SIZE = 200;
+// A filed document is not a database dump. Past this, the report says so and
+// prints the highest-scoring findings rather than growing without a bound.
+const REPORT_ROW_CEILING = 5000;
+let reportRows = { key: "", rows: [], total: 0, complete: false, summary: null, facets: null };
+let reportRowsInFlight = null;
+
+function reportType() {
+  return REPORT_TYPES.find((item) => item.id === reportState.type) || REPORT_TYPES[0];
+}
+
+function reportDefaultSections(type) {
+  return new Set(type.sections.filter((id) => !REPORT_SECTIONS[id]?.off));
+}
+
+function reportSections() {
+  if (!reportState.sections) reportState.sections = reportDefaultSections(reportType());
+  return reportState.sections;
+}
+
+function reportSeverities() {
+  const raw = reportSeveritySelect?.value || "ALL";
+  return raw === "ALL" ? null : new Set(raw.split(","));
+}
+
+function reportScopeParams() {
+  const params = new URLSearchParams();
+  params.set("scope", reportCoverageSelect?.value || "current");
+  params.set("status", reportStatusSelect?.value || "active");
+  const severities = reportSeverities();
+  if (severities) params.set("severity", [...severities].join(","));
+  params.set("sort", "risk_score");
+  params.set("direction", "desc");
+  return params;
+}
+
+function reportScopeKey() {
+  return reportScopeParams().toString();
+}
+
+function fieldLabel(select, fallback) {
+  return select?.selectedOptions?.[0]?.textContent?.trim() || fallback;
+}
+
+function reportScopeLabel() {
+  return [
+    fieldLabel(reportCoverageSelect, "This scan"),
+    fieldLabel(reportSeveritySelect, "All severities"),
+    fieldLabel(reportStatusSelect, "Open work only"),
+  ].join(" · ");
+}
+
+function severityLabel(level) {
+  const value = String(level || "").toUpperCase();
+  return value.charAt(0) + value.slice(1).toLowerCase();
+}
+
+// ---- The rows every section is drawn from --------------------------------
+// One page for the preview, every page for the file. The cache is keyed on the
+// scope, so changing a control invalidates it and nothing stale is printed.
+async function loadReportRows({ complete = false } = {}) {
+  const key = reportScopeKey();
+  if (reportRows.key === key && (reportRows.complete || !complete) && reportRows.rows.length) return reportRows;
+  if (reportRowsInFlight) await reportRowsInFlight.catch(() => {});
+  if (reportRows.key === key && (reportRows.complete || !complete) && reportRows.rows.length) return reportRows;
+  reportRowsInFlight = loadReportRowsNow(key, complete).finally(() => { reportRowsInFlight = null; });
+  return reportRowsInFlight;
+}
+
+async function loadReportRowsNow(key, complete) {
+  const ceiling = complete ? REPORT_ROW_CEILING : REPORT_PREVIEW_ROWS;
+  const rows = [];
+  let cursor = "";
+  let total = 0;
+  let summary = null;
+  let facets = null;
+  do {
+    const params = new URLSearchParams(key);
+    params.set("limit", String(Math.min(REPORT_PAGE_SIZE, ceiling - rows.length)));
+    if (cursor) params.set("after", cursor);
+    const page = await api(`/api/findings?${params.toString()}`, null, "GET");
+    if (reportScopeKey() !== key) return reportRows;
+    rows.push(...(page.items || []));
+    total = Number(page.total || rows.length);
+    summary = page.summary || summary;
+    facets = page.facets || facets;
+    cursor = page.has_more ? String(page.next_cursor || "") : "";
+  } while (cursor && rows.length < ceiling);
+  reportRows = {
+    key, rows, total, summary, facets,
+    complete: complete && (rows.length >= total || rows.length >= REPORT_ROW_CEILING),
+  };
+  return reportRows;
+}
+
+// The server counts the whole scan; a page of rows counts only itself. So an
+// aggregate uses the server's own tally when nothing narrows the scope, and
+// falls back to the carried rows - saying so - when something does.
+function reportScopeIsWhole() {
+  return !reportSeverities() && reportStatusIsWhole();
+}
+
+function reportFacetCounts(name) {
+  if (!reportScopeIsWhole()) return null;
+  const facet = reportRows.facets?.[name];
+  if (!facet?.length) return null;
+  return facet
+    .map((item) => [String(item.value || ""), Number(item.count || 0)])
+    .filter(([value]) => value)
+    .sort((a, b) => b[1] - a[1]);
+}
+
+// Printed under an aggregate the report could only build from what it carries.
+function reportSampleNote() {
+  return reportRows.total > reportRows.rows.length
+    ? `<p class="report-note">Counted across the ${reportRows.rows.length.toLocaleString()} highest-scoring of ${reportRows.total.toLocaleString()} findings in scope.</p>`
+    : "";
+}
+
+function reportRegisterRows() {
+  return reportRows.rows.map((item) => {
+    const file = item.file || {};
+    return {
+      severity: String(item.severity || "LOW").toUpperCase(),
+      score: Number(item.risk_score || 0),
+      finding: String(item.display_name || item.type || "Sensitive content"),
+      dataClass: String(item.data_type || item.finding_category || "Unclassified"),
+      frameworks: item.frameworks || [],
+      asset: String(item.affected_asset || file.source || ""),
+      path: String(file.path || file.name || ""),
+      name: String(file.name || ""),
+      owner: String(item.owner || ""),
+      status: remediationStatusLabel(item.status),
+      due: String(item.sla_due || ""),
+      reason: String(item.reason || ""),
+      recommendation: String(item.recommendation || ""),
+    };
+  });
+}
+
+// ---- Generating ----------------------------------------------------------
+function reportFileStem() {
+  const type = reportType().id;
+  const stamp = new Date().toISOString().slice(0, 10);
+  return `sentro_${type}_${stamp}`;
+}
+
+function reportDocumentTitle() {
+  return `${reportType().label} — ${reportScopeLabel()}`;
+}
+
+// A filed document says what it covers. When the scope is larger than one
+// document should carry, it says that too, rather than looking complete.
+function reportCoverageLine() {
+  const total = reportRows.total;
+  const carried = Math.min(total, REPORT_ROW_CEILING);
+  const counted = `${total.toLocaleString()} findings in scope`;
+  return carried < total
+    ? `${counted} · this document carries the ${carried.toLocaleString()} highest-scoring of them`
+    : counted;
+}
+
+function buildReportDocumentHtml() {
+  const blocks = reportSectionBlocks();
+  const body = blocks.map((block, index) => `
+    <h2>${index + 1}. ${escapeHtml(block.label)}</h2>
+    ${block.table ? `<table border="1" cellspacing="0" cellpadding="6">
+      <thead><tr>${block.table.headers.map((head) => `<th align="left">${escapeHtml(head)}</th>`).join("")}</tr></thead>
+      <tbody>${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table>${block.note || ""}` : (block.html || "")}`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(reportDocumentTitle())}</title>
+    <style>
+      body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #111827; }
+      h1 { font-size: 20pt; margin: 0 0 4pt; }
+      h2 { font-size: 13pt; margin: 18pt 0 6pt; border-bottom: 1px solid #d1d5db; padding-bottom: 3pt; }
+      p.scope { color: #4b5563; margin: 0 0 18pt; }
+      table { border-collapse: collapse; width: 100%; font-size: 10pt; }
+      th { background: #eef2ff; }
+    </style></head><body>
+    <h1>${escapeHtml(reportType().label)}</h1>
+    <p class="scope">${escapeHtml(reportScopeLabel())} &middot; tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}<br/>${escapeHtml(reportCoverageLine())}</p>
+    ${body}
+  </body></html>`;
+}
+
+function buildReportWorkbookHtml() {
+  const blocks = reportSectionBlocks();
+  const tables = blocks.map((block) => {
+    if (!block.table) return "";
+    return `<table border="1" cellspacing="0" cellpadding="4">
+      <tr><td colspan="${block.table.headers.length}"><b>${escapeHtml(block.label)}</b></td></tr>
+      <tr>${block.table.headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr>
+      ${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}
+    </table><br/>`;
+  }).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body>
+    <table><tr><td><b>${escapeHtml(reportDocumentTitle())}</b></td></tr>
+    <tr><td>tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}</td></tr>
+    <tr><td>${escapeHtml(reportCoverageLine())}</td></tr></table><br/>
+    ${tables}</body></html>`;
+}
+
+async function generateReport(event) {
+  event?.preventDefault?.();
   if (!activeReportFileCount()) {
-    reportPreview.innerHTML = `
-      <div class="report-empty product-report-empty">
-        <span class="report-empty-icon">&nearr;</span>
-        <h4>No report data yet</h4>
-        <p>Run a scan first. The report center will prepare a board-ready summary, evidence register, and export package.</p>
-      </div>
-    `;
+    showToast("Nothing to report on", "Run a scan first.", "warning");
     return;
   }
+  const button = document.querySelector("#report-generate");
+  const format = reportState.format;
+  if (format !== "pdf" && !reportSections().size) {
+    showToast("No sections selected", "Tick at least one section to build a report.", "warning");
+    return;
+  }
+  if (button) button.disabled = true;
+  const label = document.querySelector("#report-generate-label");
+  const buttonLabel = label?.textContent;
+  try {
+    if (format !== "pdf") {
+      // The preview holds one page of findings. The file holds every one in
+      // scope, so it is fetched now rather than exported short.
+      if (label) label.textContent = "Collecting findings…";
+      await loadReportRows({ complete: true });
+    }
+    if (format === "word") {
+      downloadFile(`${reportFileStem()}.doc`, buildReportDocumentHtml(), "application/msword;charset=utf-8");
+      showToast("Report generated", `${reportType().label} saved as Word.`, "success");
+    } else if (format === "excel") {
+      downloadFile(`${reportFileStem()}.xls`, buildReportWorkbookHtml(), "application/vnd.ms-excel;charset=utf-8");
+      showToast("Report generated", `${reportType().label} saved as Excel.`, "success");
+    } else {
+      await exportPdf();
+    }
+  } catch (error) {
+    showToast("Report failed", error.message || "The report could not be generated.", "danger");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      if (label && buttonLabel) label.textContent = buttonLabel;
+    }
+  }
+}
 
-  const report = buildReportModel();
-  const hiddenCount = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
-  const protectedCount = latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length;
-  const topFiles = report.priorityFiles.slice(0, 10);
-  const executiveTone = report.summary.critical || report.summary.high
-    ? "Immediate remediation focus: critical/high files, sensitive signals, and broad access paths."
-    : "Current scan is stable, but continue ownership validation and retention cleanup.";
+reportTypeList?.addEventListener("click", (event) => {
+  const choice = event.target.closest("[data-report-type]");
+  if (!choice) return;
+  reportState.type = choice.dataset.reportType;
+  // Each report has its own sections, so switching document starts from that
+  // document's defaults rather than carrying the last one's ticks across.
+  reportState.sections = reportDefaultSections(reportType());
+  renderReportPreview();
+});
 
+reportSectionList?.addEventListener("change", (event) => {
+  const box = event.target.closest("[data-report-section]");
+  if (!box) return;
+  const chosen = reportSections();
+  if (box.checked) chosen.add(box.dataset.reportSection);
+  else chosen.delete(box.dataset.reportSection);
+  renderReportPreview();
+});
+
+reportFormatList?.addEventListener("click", (event) => {
+  const choice = event.target.closest("[data-report-format]");
+  if (!choice) return;
+  reportState.format = choice.dataset.reportFormat;
+  renderReportPreview();
+});
+
+// Changing scope invalidates the rows, so the preview refetches rather than
+// re-rendering a document built from the previous answer.
+[reportCoverageSelect, reportSeveritySelect, reportStatusSelect].forEach((select) => {
+  select?.addEventListener("change", () => renderReportPreview());
+});
+reportComposer?.addEventListener("submit", generateReport);
+
+function renderReportComposer() {
+  if (!reportTypeList) return;
+  const type = reportType();
+  reportTypeList.innerHTML = REPORT_TYPES.map((item) => `
+    <button type="button" class="report-type plain-btn" role="radio" data-report-type="${item.id}"
+            aria-checked="${item.id === type.id ? "true" : "false"}">
+      <span class="report-type-head">
+        <span class="report-type-name">${escapeHtml(item.label)}</span>
+        <span class="report-type-audience">${escapeHtml(item.audience)}</span>
+      </span>
+      ${item.id === type.id ? `<span class="report-type-blurb">${escapeHtml(item.blurb)}</span>` : ""}
+    </button>`).join("");
+
+  const chosen = reportSections();
+  reportSectionList.innerHTML = type.sections.map((id) => {
+    const section = REPORT_SECTIONS[id];
+    if (!section) return "";
+    return `
+      <label class="report-section-row">
+        <input type="checkbox" data-report-section="${id}" ${chosen.has(id) ? "checked" : ""} />
+        <span class="report-section-copy">
+          <span class="report-section-name">${escapeHtml(section.label)}</span>
+          <span class="report-section-hint">${escapeHtml(section.hint)}</span>
+        </span>
+      </label>`;
+  }).join("");
+
+  reportFormatList.innerHTML = REPORT_FORMATS.map((item) => `
+    <button type="button" class="report-format-option plain-btn" role="radio" data-report-format="${item.id}"
+            aria-checked="${item.id === reportState.format ? "true" : "false"}">${escapeHtml(item.label)}</button>`).join("");
+  const format = REPORT_FORMATS.find((item) => item.id === reportState.format) || REPORT_FORMATS[0];
+  reportFormatNote.textContent = format.note;
+  // The filed PDF is one fixed template on purpose - an auditor wants the same
+  // shape every time - so the section list says so rather than being ignored.
+  reportSectionList.classList.toggle("is-inert", reportState.format === "pdf");
+  reportSectionList.querySelectorAll("input").forEach((input) => {
+    input.disabled = reportState.format === "pdf";
+  });
+
+  renderReportBuildLine();
+}
+
+function reportBuildStats() {
+  const rows = Math.min(reportRows.total, REPORT_ROW_CEILING);
+  const chosen = [...reportSections()];
+  const pages = chosen.reduce((total, id) => total + (REPORT_SECTIONS[id]?.pages(rows) || 1), 1);
+  return {
+    pages,
+    sections: chosen.length,
+    rows,
+    findings: reportRows.total,
+    files: Number(reportRows.summary?.affected_files || estateFacets?.sensitive || 0),
+  };
+}
+
+function renderReportBuildLine() {
+  if (!reportBuildLine) return;
+  if (!activeReportFileCount()) {
+    reportBuildLine.textContent = "Run a scan to build a report.";
+    return;
+  }
+  if (!reportRows.rows.length && reportRows.key !== reportScopeKey()) {
+    reportBuildLine.textContent = "Counting the findings in scope…";
+    return;
+  }
+  const stats = reportBuildStats();
+  const format = (REPORT_FORMATS.find((item) => item.id === reportState.format) || REPORT_FORMATS[0]).label;
+  const carried = Math.min(stats.findings, REPORT_ROW_CEILING);
+  const findings = carried < stats.findings
+    ? `${carried.toLocaleString()} of ${stats.findings.toLocaleString()} findings`
+    : `${stats.findings.toLocaleString()} findings`;
+  const parts = reportState.format === "pdf"
+    ? [`${stats.files.toLocaleString()} files`, `${stats.findings.toLocaleString()} findings`]
+    : [`~${stats.pages} pages`, `${stats.sections} sections`, findings];
+  reportBuildLine.textContent = `${parts.join(" · ")} · ${format}`;
+}
+
+// ---- The document --------------------------------------------------------
+// One builder, three destinations. What the preview shows is what Word and
+// Excel contain, which is the only way the build line above the button can be
+// trusted.
+function reportSectionBlocks() {
+  const model = buildReportModel();
+  const rows = reportRegisterRows();
+  return [...reportSections()]
+    .filter((id) => reportType().sections.includes(id))
+    .sort((a, b) => reportType().sections.indexOf(a) - reportType().sections.indexOf(b))
+    .map((id) => ({ id, label: REPORT_SECTIONS[id].label, ...reportSectionContent(id, model, rows) }))
+    .filter((block) => block.html || block.table);
+}
+
+function reportTable(headers, bodyRows) {
+  return { headers, rows: bodyRows };
+}
+
+function reportTally(rows, pick) {
+  const counts = new Map();
+  rows.forEach((row) => {
+    const key = pick(row);
+    if (!key) return;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+// Severities come from the facet the same query produced, so they always
+// describe the scope the report is actually built from.
+function reportStatusIsWhole() {
+  return (reportStatusSelect?.value || "all") === "all";
+}
+
+function reportSeverityCountsAreWhole() {
+  return reportStatusIsWhole() && Boolean(reportRows.facets?.severities?.length);
+}
+
+function reportSeverityCounts() {
+  const wanted = reportSeverities();
+  if (reportSeverityCountsAreWhole()) {
+    // Narrowing to Critical does not change how many Critical findings there
+    // are, so the scan-wide facet still answers exactly. A narrowed status
+    // does change it, which is why that case falls through.
+    const counts = {};
+    reportRows.facets.severities.forEach((item) => {
+      const level = String(item.value || "").toUpperCase();
+      if (wanted && !wanted.has(level)) return;
+      counts[level] = Number(item.count || 0);
+    });
+    return counts;
+  }
+  const counts = {};
+  reportRows.rows.forEach((item) => {
+    const level = String(item.severity || "").toUpperCase();
+    counts[level] = (counts[level] || 0) + 1;
+  });
+  return counts;
+}
+
+function reportWorstSeverity(rows) {
+  return rows.reduce((worst, row) => worstSeverity(worst, row.severity), "LOW");
+}
+
+function reportFolder(path) {
+  const parts = String(path || "").split(/[\\/]+/).filter(Boolean);
+  return parts.length > 1 ? parts.slice(0, -1).join("/") : "(root)";
+}
+
+function reportSectionContent(id, model, rows) {
+  const summary = reportRows.summary || {};
+  const estateTotal = Number(estateFacets?.total || model.summary?.total_files || 0);
+  switch (id) {
+    case "posture": {
+      const bySeverity = reportSeverityCounts();
+      return { table: reportTable(["Measure", "Value"], [
+        ["Posture score", `${model.score} / 100`],
+        ["Files analysed", estateTotal.toLocaleString()],
+        ["Files with findings", Number(summary.affected_files || estateFacets?.sensitive || 0).toLocaleString()],
+        ["Findings in scope", Number(reportRows.total || 0).toLocaleString()],
+        ...REPORT_SEVERITY_ORDER.map((level) => [severityLabel(level), Number(bySeverity[level] || 0).toLocaleString()]),
+        ["Past its SLA", Number(summary.overdue || 0).toLocaleString()],
+      ]), note: reportSeverityCountsAreWhole() ? "" : reportSampleNote() };
+    }
+    case "severity_split": {
+      const bySeverity = reportSeverityCounts();
+      const total = REPORT_SEVERITY_ORDER.reduce((sum, level) => sum + Number(bySeverity[level] || 0), 0) || 1;
+      return { table: reportTable(["Severity", "Findings", "Share"], REPORT_SEVERITY_ORDER
+        .filter((level) => bySeverity[level])
+        .map((level) => [severityLabel(level), Number(bySeverity[level]).toLocaleString(),
+          `${Math.round((Number(bySeverity[level]) / total) * 100)}%`])),
+        note: reportSeverityCountsAreWhole() ? "" : reportSampleNote() };
+    }
+    case "top_risks":
+      return { table: reportTable(["Finding", "File", "Severity", "Why it is a risk"], rows.slice(0, 12)
+        .map((row) => [row.finding, row.name || row.path, severityLabel(row.severity), row.reason || "—"])) };
+    case "coverage": {
+      const classified = Number(estateFacets?.sensitive || summary.affected_files || 0);
+      const locked = Number(estateFacets?.protected || 0);
+      return { table: reportTable(["State", "Files"], [
+        ["Classified", classified.toLocaleString()],
+        ["Clear", Math.max(0, estateTotal - classified - locked).toLocaleString()],
+        ["Unreadable", locked.toLocaleString()],
+      ]) };
+    }
+    case "trend": {
+      const comparison = model.comparison || [];
+      if (!comparison.length) return { html: '<p class="report-note">No earlier scan covers comparable ground, so there is nothing to compare against.</p>' };
+      return { table: reportTable(["Measure", "Previous", "Now", "Change"], comparison
+        .map((item) => [item.label, String(item.previous ?? "—"), String(item.current ?? "—"), String(item.delta ?? "—")])) };
+    }
+    case "register":
+      return { table: reportTable(["Severity", "Finding", "File", "Status", "Why it is a risk", "Recommended action"], rows
+        .map((row) => [severityLabel(row.severity), row.finding, row.name || row.path, row.status || "—",
+          row.reason || "—", row.recommendation || "—"])) };
+    case "remediation": {
+      const tally = reportTally(rows, (row) => row.recommendation);
+      if (!tally.length) return { html: '<p class="report-note">No recommended actions were produced for this scope.</p>' };
+      return {
+        table: reportTable(["Recommended action", "Findings"], tally
+          .map(([action, count]) => [action, count.toLocaleString()])),
+        note: reportSampleNote(),
+      };
+    }
+    case "owners": {
+      const tally = reportFacetCounts("owners") || reportTally(rows, (row) => row.owner || "Unassigned");
+      return {
+        table: reportTable(["Owner", "Findings"], tally.slice(0, 25)
+          .map(([owner, count]) => [owner || "Unassigned", count.toLocaleString()])),
+        note: reportFacetCounts("owners") ? "" : reportSampleNote(),
+      };
+    }
+    case "data_classes": {
+      const counted = reportFacetCounts("data_types");
+      const tally = counted || reportTally(rows, (row) => row.dataClass);
+      if (!tally.length) return { html: '<p class="report-note">No data classes were found in this scope.</p>' };
+      return {
+        table: reportTable(["Data class", "Findings"], tally
+          .map(([name, count]) => [keywordCategoryLabel(name), count.toLocaleString()])),
+        note: counted ? "" : reportSampleNote(),
+      };
+    }
+    case "locations": {
+      const tally = reportTally(rows, (row) => reportFolder(row.path));
+      if (!tally.length) return { html: '<p class="report-note">No folder grouping is available for this scope.</p>' };
+      return {
+        table: reportTable(["Location", "Findings", "Highest severity"], tally.slice(0, 25)
+          .map(([place, count]) => [place, count.toLocaleString(),
+            severityLabel(reportWorstSeverity(rows.filter((row) => reportFolder(row.path) === place)))])),
+        note: reportSampleNote(),
+      };
+    }
+    case "assets": {
+      const byFile = new Map();
+      rows.forEach((row) => {
+        const key = row.path || row.name;
+        const held = byFile.get(key);
+        if (!held) {
+          byFile.set(key, { name: row.name || key, place: reportFolder(row.path), severity: row.severity, count: 1 });
+          return;
+        }
+        held.count += 1;
+        held.severity = worstSeverity(held.severity, row.severity);
+      });
+      return {
+        table: reportTable(["File", "Location", "Severity", "Findings"], [...byFile.values()]
+          .map((file) => [file.name, file.place, severityLabel(file.severity), String(file.count)])),
+        note: reportSampleNote(),
+      };
+    }
+    case "frameworks": {
+      const counted = reportFacetCounts("frameworks");
+      const tally = counted || reportTally(rows, (row) => (row.frameworks[0] || "standard_scan"));
+      if (!tally.length) return { html: '<p class="report-note">Compliance mapping was not enabled for this scan.</p>' };
+      return {
+        table: reportTable(["Framework", "Findings"], tally
+          .map(([key, count]) => [frameworkLabel(key), count.toLocaleString()])),
+        note: counted ? "" : reportSampleNote(),
+      };
+    }
+    case "framework_findings":
+      return { table: reportTable(["Framework", "Finding", "File", "Severity", "Status"], rows
+        .flatMap((row) => (row.frameworks.length ? row.frameworks : ["standard_scan"])
+          .map((framework) => [frameworkLabel(framework), row.finding, row.name || row.path,
+            severityLabel(row.severity), row.status || "—"]))) };
+    case "pci_scope": {
+      const scope = latestReport?.pci_scope_summary || {};
+      if (!scope.enabled) return { html: '<p class="report-note">PCI DSS was not part of this scan.</p>' };
+      const categories = scope.category_finding_group_counts || scope.category_counts || {};
+      return { table: reportTable(["Measure", "Count"], [
+        ["Cardholder data (CHD)", String(categories.CHD || 0)],
+        ["Sensitive authentication data (SAD)", String(categories.SAD || 0)],
+        ["Scope candidates", String(scope.cde_candidate_count || 0)],
+      ]) };
+    }
+    case "appendix":
+      return { table: reportTable(["Finding", "Path", "Severity", "Data class", "Owner", "Status", "Recommended action"], rows
+        .map((row) => [row.finding, row.path, severityLabel(row.severity), row.dataClass,
+          row.owner || "—", row.status || "—", row.recommendation || "—"])) };
+    default:
+      return {};
+  }
+}
+
+function reportTableMarkup(table, limit = 12) {
+  const shown = table.rows.slice(0, limit);
+  if (!shown.length) return '<p class="report-note">Nothing to show for this scope.</p>';
+  return `
+    <table class="report-table">
+      <thead><tr>${table.headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr></thead>
+      <tbody>${shown.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}</tbody>
+    </table>
+    ${table.rows.length > shown.length ? `<p class="report-note">Preview shows ${shown.length} of ${table.rows.length.toLocaleString()} rows.</p>` : ""}`;
+}
+
+async function renderReportPreview() {
+  if (deferWhileHidden("tab-reports", "preview", renderReportPreview)) return;
+  if (!reportPreview) return;
+  renderReportComposer();
+  if (!activeReportFileCount()) {
+    reportPreview.innerHTML = `
+      <div class="report-empty">
+        <h4>No scan to report on yet</h4>
+        <p>Run a scan from the Scan page. Every report here is built from the findings that scan produced.</p>
+      </div>`;
+    return;
+  }
+  try {
+    await loadReportRows();
+  } catch (_) {
+    reportPreview.innerHTML = `
+      <div class="report-empty">
+        <h4>The findings could not be read</h4>
+        <p>Reload the page, or narrow the scope, and the preview will rebuild.</p>
+      </div>`;
+    return;
+  }
+  renderReportBuildLine();
+  const type = reportType();
+  const blocks = reportSectionBlocks();
   reportPreview.innerHTML = `
-    <div class="report-document premium-report-preview product-report-preview">
-      <div class="report-cover-strip product-report-cover">
-        <div>
-          <span>DSPM executive evidence package</span>
-          <h4>${escapeHtml(report.title)}</h4>
-          <p>${escapeHtml(report.generatedAt)} &middot; tenant ${escapeHtml(currentTenant)} &middot; ${report.summary.total_files} files analyzed</p>
-        </div>
-        <strong>${report.score}</strong>
-      </div>
-
-      <div class="report-narrative-card">
-        <p class="eyebrow">Board summary</p>
-        <h5>${escapeHtml(executiveTone)}</h5>
-        <p>Exports keep the executive story focused while preserving the full evidence register in generated report packs.</p>
-      </div>
-
-      <div class="report-kpis product-report-kpis">
-        <div class="critical"><span>Critical</span><strong>${report.summary.critical}</strong></div>
-        <div class="high"><span>High</span><strong>${report.summary.high}</strong></div>
-        <div class="medium"><span>Medium</span><strong>${report.summary.medium}</strong></div>
-        <div class="low"><span>Low</span><strong>${report.summary.low}</strong></div>
-        <div class="report-hidden"><span>Hidden</span><strong>${hiddenCount}</strong></div>
-        <div class="report-protected"><span>Protected</span><strong>${protectedCount}</strong></div>
-      </div>
-
-      <div class="report-visual-grid report-distribution-grid">
-        <div class="chart-panel report-card-scroll report-risk-card product-panel">
-          <h5>Risk distribution</h5>
-          ${buildDistributionBars(report.distribution)}
-        </div>
-        <div class="chart-panel report-card-scroll report-signal-card product-panel">
-          <h5>Detection signals</h5>
-          ${renderFindingBars(report.findingStats.slice(0, 10), "product-signal-bars")}
-        </div>
-      </div>
-
-      <div class="report-visual-grid">
-        ${renderComplianceSummaryPanel(report.compliance)}
-        <div class="chart-panel report-card-scroll product-panel">
-          <h5>Framework mapping</h5>
-          ${renderComplianceMappingList(report.compliance)}
-        </div>
-      </div>
-
-      <div class="report-visual-grid">
-        ${renderPciScopeSummaryPanel(report.pciScope)}
-        ${renderGdprReportPanel(report.gdprReport)}
-      </div>
-
-      <div class="report-visual-grid">
-        <div class="chart-panel report-card-scroll report-priority-card product-panel">
-          <h5>Priority queue</h5>
-          ${renderReportFileList(topFiles)}
-        </div>
-        <div class="chart-panel report-card-scroll report-folder-card product-panel">
-          <h5>Top risky folders</h5>
-          ${renderReportFolderList(report.folders.slice(0, 10))}
-        </div>
-      </div>
-
-      <details class="report-data-drawer">
-        <summary>
-          <span>
-            <strong>Show full evidence register</strong>
-            <small>All scanned files are available here; no hidden "additional files" placeholder.</small>
-          </span>
-          <b>${report.priorityFiles.length} rows</b>
-        </summary>
-        <div class="report-register-wrap">
-          <table class="report-register-table">
-            <thead>
-              <tr><th>File</th><th>Source</th><th>Risk</th><th>Findings</th><th>Action</th></tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
-    </div>
-  `;
-  reportPreview.querySelector(".report-data-drawer")?.remove();
+    <article class="report-document">
+      <header class="report-cover">
+        <p class="eyebrow">Sentro DSPM</p>
+        <h3>${escapeHtml(type.label)}</h3>
+        <p class="report-cover-scope">${escapeHtml(reportScopeLabel())} · tenant ${escapeHtml(currentTenant)} · ${new Date().toLocaleDateString()}</p>
+        <p class="report-cover-scope">${escapeHtml(reportCoverageLine())}</p>
+      </header>
+      ${blocks.length ? blocks.map((block, index) => `
+        <section class="report-section-block">
+          <h4><span class="report-section-index">${index + 1}</span>${escapeHtml(block.label)}</h4>
+          ${block.table ? reportTableMarkup(block.table) + (block.note || "") : block.html}
+        </section>`).join("") : '<p class="report-note">Tick at least one section to build a report.</p>'}
+    </article>`;
 }
 
 
@@ -5815,175 +6400,6 @@ function buildReportModel() {
     pciScope: latestReport?.pci_scope_summary || { enabled: false },
     gdprReport: latestReport?.gdpr_report || { enabled: false },
   };
-}
-
-function renderComplianceSummaryPanel(compliance = latestReport?.compliance_summary || {}) {
-  if (!compliance.enabled) {
-    return `
-      <div class="chart-panel report-card-scroll product-panel compliance-report-panel">
-        <h5>Compliance mapping</h5>
-        <p class="subtext">Compliance mapping was not enabled for this scan.</p>
-      </div>
-    `;
-  }
-  const frameworks = compliance.selected_framework_names || compliance.selected_frameworks || [];
-  const topFiles = compliance.top_risky_files || [];
-  const categories = compliance.top_violated_categories || [];
-  return `
-    <div class="chart-panel report-card-scroll product-panel compliance-report-panel">
-      <h5>Compliance mapping</h5>
-      <div class="compliance-score-row">
-        <div><span>Assets</span><strong>${escapeHtml(compliance.affected_asset_count || 0)}</strong></div>
-        <div><span>Files</span><strong>${escapeHtml(compliance.affected_file_count || compliance.files_with_compliance_matches || 0)}</strong></div>
-        <div><span>Finding groups</span><strong>${escapeHtml(compliance.finding_group_count || compliance.total_compliance_findings || 0)}</strong></div>
-        <div><span>Occurrences</span><strong>${escapeHtml(compliance.occurrence_count || 0)}</strong></div>
-        <div><span>Unique values</span><strong>${escapeHtml(compliance.unique_sensitive_value_count || 0)}</strong></div>
-        <div class="critical"><span>Critical findings</span><strong>${escapeHtml(compliance.critical || 0)}</strong></div>
-        <div class="high"><span>High findings</span><strong>${escapeHtml(compliance.high || 0)}</strong></div>
-      </div>
-      <div class="compliance-badge-row">${frameworks.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>
-      <h6>Top categories</h6>
-      ${categories.length ? categories.slice(0, 5).map((item) => `<div class="report-row"><div><strong>${escapeHtml(keywordCategoryLabel(item.category))}</strong><span>${escapeHtml(item.count)} finding groups</span></div></div>`).join("") : '<p class="subtext">No category mapping.</p>'}
-      <h6>Top compliance files</h6>
-      ${topFiles.length ? topFiles.slice(0, 5).map((item) => `<div class="report-row"><div><strong>${escapeHtml(item.file)}</strong><span>${escapeHtml((item.frameworks || []).join(", "))}</span></div><span class="badge ${escapeHtml(item.severity)}">${escapeHtml(item.severity)} ${escapeHtml(item.score)}</span></div>`).join("") : '<p class="subtext">No compliance findings.</p>'}
-    </div>
-  `;
-}
-
-function renderPciScopeSummaryPanel(summary = latestReport?.pci_scope_summary || {}) {
-  if (!summary.enabled) return "";
-  const categoryCounts = summary.category_finding_group_counts || summary.category_counts || {};
-  const protectionCounts = summary.protection_state_finding_group_counts || summary.protection_state_counts || {};
-  const candidateRows = summary.scope_candidates || [];
-  const sections = [
-    ["CHD", categoryCounts.CHD || 0],
-    ["SAD", categoryCounts.SAD || 0],
-    ["Unprotected PAN", protectionCounts.READABLE_FULL || protectionCounts.readable_full || 0],
-    ["Prohibited Storage", summary.sad_retention_candidate_count || 0],
-    ["Scope Candidates", summary.cde_candidate_count || 0],
-    ["Protection States", Object.keys(protectionCounts).length],
-    ["Exposure", Object.keys(summary.environment_finding_group_counts || summary.environment_counts || {}).length],
-    ["Retention", (summary.authorization_state_finding_group_counts || summary.authorization_state_counts || {}).POST_AUTH_CONFIRMED || 0],
-  ];
-  return `
-    <div class="chart-panel report-card-scroll product-panel compliance-report-panel">
-      <h5>PCI DSS</h5>
-      <div class="compliance-score-row">
-        <div><span>Overview</span><strong>${escapeHtml(summary.cde_candidate_count || 0)}</strong></div>
-        ${sections.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}
-      </div>
-      <h6>Scope candidates</h6>
-      ${candidateRows.slice(0, 5).map((item) => `<div class="report-row"><div><strong>${escapeHtml(item.file)}</strong><span>${escapeHtml(item.reason || "")}</span></div><span class="badge ${escapeHtml(item.severity || "LOW")}">${escapeHtml(item.severity || "LOW")}</span></div>`).join("") || '<p class="subtext">No PCI scope candidates.</p>'}
-    </div>
-  `;
-}
-
-function renderGdprReportPanel(report = latestReport?.gdpr_report || {}) {
-  if (!report.enabled) return "";
-  const categories = report.personal_data_by_category || [];
-  const special = report.special_category_data || [];
-  const owners = report.departments_business_owners || [];
-  const queueCount = (report.lawful_basis_review_queue || []).length;
-  const dpiaCount = (report.dpia_candidates || []).length;
-  const minimizationCount = (report.data_minimization_candidates || []).length;
-  return `
-    <div class="chart-panel report-card-scroll product-panel compliance-report-panel">
-      <h5>GDPR report</h5>
-      <div class="compliance-score-row">
-        <div><span>Personal data</span><strong>${escapeHtml(categories.reduce((sum, item) => sum + Number(item.count || 0), 0))}</strong></div>
-        <div><span>Special category</span><strong>${escapeHtml(special.reduce((sum, item) => sum + Number(item.count || 0), 0))}</strong></div>
-        <div><span>Owners</span><strong>${escapeHtml(owners.length)}</strong></div>
-        <div><span>Retention</span><strong>${escapeHtml((report.retention_violations || []).length)}</strong></div>
-        <div><span>Public exposure</span><strong>${escapeHtml((report.public_exposure || []).length)}</strong></div>
-        <div><span>Cross-border</span><strong>${escapeHtml((report.cross_border_locations || []).length)}</strong></div>
-        <div><span>Non-production</span><strong>${escapeHtml((report.non_production_copies || []).length)}</strong></div>
-        <div><span>Lawful basis</span><strong>${escapeHtml(queueCount)}</strong></div>
-        <div><span>DPIA</span><strong>${escapeHtml(dpiaCount)}</strong></div>
-        <div><span>Minimization</span><strong>${escapeHtml(minimizationCount)}</strong></div>
-        <div><span>DSR search</span><strong>${escapeHtml((report.data_subject_request_search || []).length)}</strong></div>
-      </div>
-      <h6>Personal data by category</h6>
-      ${categories.slice(0, 5).map((item) => `<div class="report-row"><div><strong>${escapeHtml(keywordCategoryLabel(item.category))}</strong><span>${escapeHtml(item.count)} occurrences</span></div></div>`).join("") || '<p class="subtext">No GDPR personal data categories.</p>'}
-    </div>
-  `;
-}
-
-function renderComplianceMappingList(compliance = latestReport?.compliance_summary || {}) {
-  if (!compliance.enabled) return '<p class="subtext">Run a scan with Compliance enabled to populate framework mappings.</p>';
-  const priorities = compliance.remediation_priorities || [];
-  const topFiles = compliance.top_risky_files || [];
-  const items = priorities.length
-    ? priorities.map((item) => ({ label: item.control, detail: `${item.count} files` }))
-    : topFiles.map((item) => ({ label: (item.frameworks || []).join(", "), detail: item.remediation || item.path }));
-  return items.slice(0, 8).map((item) => `
-    <div class="report-row">
-      <div>
-        <strong>${escapeHtml(item.label || "Compliance mapping")}</strong>
-        <span>${escapeHtml(item.detail || "Review mapped control and remediation priority.")}</span>
-      </div>
-    </div>
-  `).join("") || '<p class="subtext">No compliance mappings found.</p>';
-}
-
-function reportComplianceText(file) {
-  const compliance = file.compliance || {};
-  if (!compliance.matched_frameworks?.length) return "No compliance mapping";
-  return `${(compliance.matched_framework_names || compliance.matched_frameworks).join(", ")}; ${compliance.compliance_severity} ${compliance.compliance_score}; ${(compliance.data_categories || []).map(keywordCategoryLabel).join(", ")}`;
-}
-
-function buildComplianceRows(report) {
-  const summary = report.compliance || {};
-  const topFiles = summary.top_risky_files || [];
-  return topFiles.map((item, index) => `
-    <tr>
-      <td>${index + 1}</td>
-      <td>${escapeHtml(item.file || "")}</td>
-      <td>${escapeHtml(item.path || "")}</td>
-      <td class="${escapeHtml(item.severity || "LOW")}">${escapeHtml(item.severity || "LOW")}</td>
-      <td>${escapeHtml(item.score || 0)}</td>
-      <td>${escapeHtml((item.frameworks || []).join("; "))}</td>
-      <td>${escapeHtml((item.categories || []).map(keywordCategoryLabel).join("; "))}</td>
-      <td>${escapeHtml(item.remediation || "")}</td>
-    </tr>
-  `).join("");
-}
-
-function renderReportFileList(files) {
-  if (!files.length) {
-    return '<p class="subtext">No priority files.</p>';
-  }
-  return files
-    .map((file) => {
-      const risk = getEffectiveRisk(file);
-      return `
-        <div class="report-row">
-          <div>
-            <strong>${escapeHtml(file.name || file.path || "")}</strong>
-            <span>${escapeHtml(file.path || "")}</span>
-          </div>
-          <span class="badge ${risk.level}">${risk.level} ${risk.score}</span>
-        </div>
-      `;
-    })
-    .join("");
-}
-
-function renderReportFolderList(folders) {
-  if (!folders.length) {
-    return '<p class="subtext">No folder risk concentration yet.</p>';
-  }
-  return folders
-    .map(
-      (folder) => `
-        <div class="report-row">
-          <div>
-            <strong>${escapeHtml(folder.folder)}</strong>
-            <span>${folder.files} files &middot; ${folder.critical} critical &middot; avg ${Math.round(folder.score / Math.max(folder.files, 1))}</span>
-          </div>
-        </div>
-      `
-    )
-    .join("");
 }
 
 function buildReportComparisonRows() {
@@ -8199,28 +8615,6 @@ function buildRiskTopology(summary) {
   `;
 }
 
-function renderFindingBars(items, extraClass = "") {
-  if (!items.length) {
-    return '<p class="subtext">No sensitive detection signals were found.</p>';
-  }
-
-  const max = Math.max(...items.map((item) => item.count), 1);
-  return `
-    <div class="signal-bars ${extraClass}">
-      ${items
-        .map(
-          (item) => `
-            <div class="signal-bar">
-              <div><span>${escapeHtml(item.type)}</span><strong>${item.count}</strong></div>
-              <progress max="${max}" value="${item.count}"></progress>
-            </div>
-          `
-        )
-        .join("")}
-    </div>
-  `;
-}
-
 function buildCurrentSummary() {
   if (latestReport?.files_omitted) {
     return {
@@ -8248,23 +8642,6 @@ function buildCurrentSummary() {
   };
 }
 
-function reportTimestampSlug() {
-  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-}
-
-function reportSourceSlug(value = "dspm") {
-  return String(value || "dspm")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 44) || "dspm";
-}
-
-function reportFileName(extension) {
-  const source = reportSourceSlug(buildReportModel().title || "assessment");
-  return `dspm-${source}-${reportTimestampSlug()}.${extension}`;
-}
-
 function reportText(value, fallback = "-") {
   if (Array.isArray(value)) {
     const joined = value.filter(Boolean).join("; ");
@@ -8274,106 +8651,11 @@ function reportText(value, fallback = "-") {
   return text || fallback;
 }
 
-function reportFindingsText(file) {
-  const findings = file.findings || [];
-  if (!findings.length) return "No sensitive finding labels";
-  return findings
-    .slice(0, 8)
-    .map((finding) => `${finding.type || finding.label || finding.pattern || "Finding"}${finding.count ? `: ${finding.count}` : ""}`)
-    .join("; ");
-}
-
-function reportReasonsText(file) {
-  return reportText(file.risk?.reasons || file.risk?.explanations || file.reasons, "Risk generated from score, sensitivity, extension, hidden/protected status, and findings.");
-}
-
-function reportActionsText(file) {
-  return reportText(
-    file.risk?.remediation?.actions || file.risk?.dlp_recommendations || file.risk?.recommendations,
-    "Validate owner, reduce broad access, apply retention policy, and monitor recurring exposure."
-  );
-}
-
-function reportDlpText(file) {
-  return reportText(file.risk?.dlp_recommendations || file.risk?.remediation?.controls, "Classify, restrict sharing, and add DLP monitoring rule.");
-}
-
-function reportOwnerText(file) {
-  return reportText(file.owner || file.owner_name || file.file_owner || file.acl?.owner || file.security_owner || file.metadata?.owner, "-");
-}
-
-function reportPathText(file) {
-  return reportText(file.path || file.full_path || file.name, "Unknown path");
-}
-
-function reportSourceText(file) {
-  return reportText(file.source || file.share || file.host || file.server, "workspace");
-}
-
-function buildReportRegisterRows(files, options = {}) {
-  const compact = options.compact !== false;
-  const limit = options.limit || files.length;
-  return files.slice(0, limit).map((file) => {
-    const risk = getEffectiveRisk(file);
-    const name = reportText(file.name || file.filename || file.path, "Unknown file");
-    const path = reportPathText(file);
-    const source = reportSourceText(file);
-    const hidden = file.is_hidden ? "Hidden" : "Visible";
-    const protectedLabel = isProtectedFile(file) ? getProtectionLabel(file) : "Readable";
-    const riskCell = `<span class="risk ${risk.level}">${escapeHtml(risk.level)} ${escapeHtml(risk.score)}</span>`;
-    if (compact) {
-      return `
-        <tr>
-          <td><strong>${escapeHtml(name)}</strong><br><span>${escapeHtml(path)}</span></td>
-          <td>${escapeHtml(source)}<br><span>${escapeHtml(hidden)} &middot; ${escapeHtml(protectedLabel)}</span></td>
-          <td>${riskCell}</td>
-          <td>${escapeHtml(reportFindingsText(file))}</td>
-          <td>${escapeHtml(reportActionsText(file))}</td>
-        </tr>
-      `;
-    }
-    return `
-      <tr>
-        <td><strong>${escapeHtml(name)}</strong><br><span>${escapeHtml(path)}</span></td>
-        <td>${escapeHtml(source)}</td>
-        <td>${escapeHtml(reportOwnerText(file))}</td>
-        <td>${file.is_hidden ? "Yes" : "No"}</td>
-        <td>${isProtectedFile(file) ? escapeHtml(getProtectionLabel(file)) : "No"}</td>
-        <td>${riskCell}</td>
-        <td>${escapeHtml(reportFindingsText(file))}</td>
-        <td>${escapeHtml(reportReasonsText(file))}</td>
-        <td>${escapeHtml(reportDlpText(file))}</td>
-        <td>${escapeHtml(reportActionsText(file))}</td>
-      </tr>
-    `;
-  }).join("");
-}
-
-function exportCsv() {
-  if (!latestFiles.length) {
-    setStatus("Run a scan before exporting Excel workbook.");
-    return;
-  }
-
-  downloadFile(reportFileName("xls"), buildPolishedExcelWorkbookHtml(), "application/vnd.ms-excel;charset=utf-8");
-  setStatus("Excel workbook exported with full evidence register and remediation sheets.");
-}
-
-function exportWord() {
-  if (!latestFiles.length) {
-    setStatus("Run a scan before exporting Word report.");
-    return;
-  }
-
-  downloadFile(reportFileName("doc"), buildWordReportHtml(), "application/msword;charset=utf-8");
-  setStatus("Word board pack exported with executive summary and full appendix.");
-}
-
 const UNIFIED_PDF_TEMPLATE_ID = "sentro-dspm-unified-v1";
 
 async function exportPdf() {
-  if (!latestFiles.length) {
-    setStatus("Run a scan before opening the PDF composer.");
+  if (!activeReportFileCount()) {
+    setStatus("Run a scan before filing a PDF report.");
     return;
   }
 
@@ -8404,7 +8686,10 @@ async function exportPdf() {
     const response = await fetch("/api/v1/reports", {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({ scan_id: latestReport?.scan_id || null }),
+      body: JSON.stringify({
+        scan_id: latestReport?.scan_id || null,
+        severities: [...(reportSeverities() || [])],
+      }),
     });
     if (!response.ok) {
       throw new Error(await readErrorMessage(response));
@@ -8414,7 +8699,7 @@ async function exportPdf() {
       throw new Error("The report service returned an unsupported template.");
     }
     reportWindow.location.replace(artifact.preview_url);
-    setStatus("PDF composer opened with the unified SENTRO report. Use the PDF viewer to print or save it.");
+    showToast("Report filed", `${reportType().label} is open as a PDF artifact.`, "success");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to create the PDF report.";
     const status = reportWindow.document.getElementById("composer-status");
@@ -8427,864 +8712,6 @@ async function exportPdf() {
 
 
 
-
-function reportColor(level) {
-  return {
-    CRITICAL: "#9f1239",
-    HIGH: "#c2410c",
-    MEDIUM: "#b7791f",
-    LOW: "#2f855a",
-  }[level] || "#0f766e";
-}
-
-function buildReportDonutSvg(distribution, total) {
-  const radius = 54;
-  const circumference = 2 * Math.PI * radius;
-  let offset = 0;
-  const rings = distribution
-    .map((item) => {
-      const length = total ? (item.count / total) * circumference : 0;
-      const circle = `<circle cx="80" cy="80" r="${radius}" fill="none" stroke="${reportColor(item.level)}" stroke-width="18" stroke-dasharray="${length} ${circumference - length}" stroke-dashoffset="${-offset}" />`;
-      offset += length;
-      return circle;
-    })
-    .join("");
-  return `
-    <svg class="report-svg" viewBox="0 0 160 160" role="img" aria-label="Risk distribution donut">
-      <circle cx="80" cy="80" r="${radius}" fill="none" stroke="#e5e7eb" stroke-width="18" />
-      ${rings}
-      <circle cx="80" cy="80" r="38" fill="#fff" />
-      <text x="80" y="76" text-anchor="middle" class="svg-number">${total}</text>
-      <text x="80" y="96" text-anchor="middle" class="svg-label">files</text>
-    </svg>
-  `;
-}
-
-function buildReportRiskBarsSvg(distribution, total) {
-  const rows = distribution
-    .map((item, index) => {
-      const y = 28 + index * 34;
-      const width = Math.max(6, total ? (item.count / total) * 250 : 0);
-      return `
-        <text x="0" y="${y + 9}" class="svg-axis">${escapeSvg(item.label)}</text>
-        <rect x="76" y="${y}" width="250" height="14" rx="7" fill="#e5e7eb"></rect>
-        <rect x="76" y="${y}" width="${width}" height="14" rx="7" fill="${reportColor(item.level)}"></rect>
-        <text x="340" y="${y + 11}" class="svg-value">${item.count}</text>
-      `;
-    })
-    .join("");
-  return `<svg class="report-svg wide" viewBox="0 0 390 170" role="img" aria-label="Risk bar chart">${rows}</svg>`;
-}
-
-function buildReportSignalSvg(stats) {
-  if (!stats.length) {
-    return '<p class="muted">No detection signals.</p>';
-  }
-  const max = Math.max(...stats.map((item) => item.count), 1);
-  const rows = stats.slice(0, 7)
-    .map((item, index) => {
-      const y = 24 + index * 28;
-      const label = item.type.length > 22 ? `${item.type.slice(0, 21)}...` : item.type;
-      const width = Math.max(8, (item.count / max) * 220);
-      return `
-        <text x="0" y="${y + 9}" class="svg-axis">${escapeSvg(label)}</text>
-        <rect x="142" y="${y}" width="220" height="12" rx="6" fill="#e5e7eb"></rect>
-        <rect x="142" y="${y}" width="${width}" height="12" rx="6" fill="#0f766e"></rect>
-        <text x="374" y="${y + 10}" class="svg-value">${item.count}</text>
-      `;
-    })
-    .join("");
-  return `<svg class="report-svg wide" viewBox="0 0 420 232" role="img" aria-label="Detection signal chart">${rows}</svg>`;
-}
-
-function buildReportTrendSvg() {
-  const trend = (latestDashboard?.trend || []).slice(-8);
-  if (trend.length < 2) {
-    return '<p class="muted">Save at least two scans to draw a trend line.</p>';
-  }
-  const points = trend.map((item, index) => {
-    const score = calculatePostureScore(item.summary || {});
-    const x = 24 + index * (300 / Math.max(trend.length - 1, 1));
-    const y = 138 - score * 1.08;
-    return { x, y, score, label: (item.timestamp || "").slice(5, 10) || `scan ${index + 1}` };
-  });
-  const polyline = points.map((item) => `${item.x},${item.y}`).join(" ");
-  const dots = points.map((item) => `<circle cx="${item.x}" cy="${item.y}" r="4" fill="#0f766e"></circle><text x="${item.x}" y="158" text-anchor="middle" class="svg-tick">${escapeSvg(item.label)}</text>`).join("");
-  return `
-    <svg class="report-svg wide" viewBox="0 0 360 170" role="img" aria-label="Risk trend">
-      <line x1="24" y1="138" x2="340" y2="138" stroke="#cbd5e1"></line>
-      <line x1="24" y1="30" x2="24" y2="138" stroke="#cbd5e1"></line>
-      <polyline points="${polyline}" fill="none" stroke="#0f766e" stroke-width="3"></polyline>
-      ${dots}
-      <text x="28" y="24" class="svg-label">Posture score</text>
-    </svg>
-  `;
-}
-
-function buildReportFolderHeatmapSvg(folders) {
-  if (!folders.length) {
-    return '<p class="muted">No folder concentration data.</p>';
-  }
-  const max = Math.max(...folders.map((item) => item.score), 1);
-  return `
-    <svg class="report-svg wide" viewBox="0 0 420 190" role="img" aria-label="Top folder heatmap">
-      ${folders.slice(0, 8).map((item, index) => {
-        const col = index % 4;
-        const row = Math.floor(index / 4);
-        const x = 8 + col * 102;
-        const y = 16 + row * 82;
-        const alpha = Math.max(0.16, item.score / max);
-        const label = item.folder.length > 15 ? `${item.folder.slice(0, 14)}...` : item.folder;
-        return `
-          <rect x="${x}" y="${y}" width="94" height="70" rx="8" fill="#0f766e" opacity="${alpha}"></rect>
-          <text x="${x + 9}" y="${y + 24}" class="svg-heat-title">${escapeSvg(label)}</text>
-          <text x="${x + 9}" y="${y + 44}" class="svg-heat-meta">${item.files} files</text>
-          <text x="${x + 9}" y="${y + 60}" class="svg-heat-meta">${item.critical} critical</text>
-        `;
-      }).join("")}
-    </svg>
-  `;
-}
-
-function buildPolishedReportHtml(mode = "word") {
-  const report = buildReportModel();
-  const maxSignal = Math.max(...report.findingStats.map((item) => item.count), 1);
-  const sourceLabel = escapeHtml(report.title);
-  const registerRows = report.priorityFiles
-    .map((file) => {
-      const risk = getEffectiveRisk(file);
-      return `
-        <tr>
-          <td><strong>${escapeHtml(file.name || "")}</strong><br><span>${escapeHtml(file.path || "")}</span></td>
-          <td>${escapeHtml(file.source || "")}</td>
-          <td>${file.is_hidden ? "Yes" : "No"}</td>
-          <td><span class="risk ${risk.level}">${escapeHtml(risk.level)} ${escapeHtml(risk.score)}</span></td>
-          <td>${escapeHtml((file.findings || []).map((finding) => `${finding.type}: ${finding.count}`).join("; ") || "None")}</td>
-          <td>${escapeHtml((file.risk?.remediation?.actions || []).slice(0, 3).join("; ") || "Review ownership and access")}</td>
-        </tr>
-      `;
-    })
-    .join("");
-  const comparisonRows = report.comparison.length
-    ? report.comparison.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.current}</td><td>${item.prior}</td><td class="${item.delta > 0 ? "worse" : item.delta < 0 ? "better" : ""}">${item.delta > 0 ? "+" : ""}${item.delta}</td></tr>`).join("")
-    : '<tr><td colspan="4">Run and save at least two scans to populate comparison.</td></tr>';
-
-  return `
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>DSPM Assessment Report</title>
-        <style>
-          @page { size: A4; margin: 14mm; }
-          * { box-sizing: border-box; }
-          body { margin: 0; background: ${mode === "pdf" ? "#fff" : "#eef2f7"}; color: #17202a; font-family: Arial, Helvetica, sans-serif; line-height: 1.35; }
-          .page { max-width: 1120px; margin: ${mode === "pdf" ? "0" : "28px auto"}; background: #fff; border: 1px solid #d8dee8; }
-          .cover { padding: 34px; color: #fff; background: #0f766e; }
-          .cover-top { display: table; width: 100%; }
-          .cover-copy { display: table-cell; vertical-align: top; }
-          .logo { display: table-cell; vertical-align: middle; text-align: right; }
-          .logo span { display: inline-block; width: 64px; height: 64px; border-radius: 12px; background: #fff; color: #0f766e; line-height: 64px; text-align: center; font-size: 28px; font-weight: 900; }
-          h1, h2, h3, p { margin-top: 0; }
-          h1 { font-size: 34px; margin-bottom: 8px; }
-          h2 { font-size: 19px; margin: 28px 0 12px; }
-          h3 { font-size: 14px; margin-bottom: 8px; }
-          .muted, td span { color: #667085; }
-          .content { padding: 28px; }
-          .summary { display: table; width: 100%; margin-bottom: 18px; }
-          .score { display: table-cell; width: 170px; vertical-align: middle; }
-          .score-ring { width: 138px; height: 138px; border-radius: 999px; background: conic-gradient(#0f766e ${report.score}%, #e5e7eb 0); display: table; }
-          .score-ring span { display: table-cell; vertical-align: middle; text-align: center; font-size: 34px; font-weight: 900; color: #0f766e; }
-          .summary-text { display: table-cell; vertical-align: middle; }
-          .kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin: 18px 0 24px; }
-          .kpi { border: 1px solid #d8dee8; border-radius: 8px; padding: 12px; background: #f8fafc; }
-          .kpi span { display: block; color: #667085; font-size: 11px; font-weight: 700; text-transform: uppercase; }
-          .kpi strong { display: block; margin-top: 7px; font-size: 25px; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-          .panel { border: 1px solid #d8dee8; border-radius: 8px; padding: 14px; background: #fff; }
-          .bar { margin-bottom: 10px; }
-          .bar-label { display: table; width: 100%; font-size: 12px; margin-bottom: 4px; }
-          .bar-label span { display: table-cell; }
-          .bar-label strong { display: table-cell; text-align: right; }
-          .track { display: block; height: 9px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
-          .track b { display: block; height: 100%; background: #0f766e; }
-          .track b.CRITICAL { background: #9f1239; } .track b.HIGH { background: #c2410c; } .track b.MEDIUM { background: #b7791f; } .track b.LOW { background: #2f855a; }
-          .list-card { border: 1px solid #d8dee8; border-radius: 8px; padding: 10px; margin-bottom: 8px; background: #f8fafc; }
-          .list-card strong { display: block; word-break: break-word; }
-          .list-card span { font-size: 12px; }
-          table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
-          th, td { border: 1px solid #d8dee8; padding: 8px; text-align: left; vertical-align: top; }
-          th { background: #f1f5f9; color: #334155; }
-          .risk { display: inline-block; border-radius: 999px; padding: 4px 8px; color: #fff; font-weight: 700; white-space: nowrap; }
-          .CRITICAL { background: #9f1239; } .HIGH { background: #c2410c; } .MEDIUM { background: #b7791f; } .LOW { background: #2f855a; }
-          .better { color: #15803d; font-weight: 700; }
-          .worse { color: #9f1239; font-weight: 700; }
-          @media print { body { background: #fff; } .page { border: 0; margin: 0; } .cover { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
-        </style>
-      </head>
-      <body>
-        <div class="page">
-          <section class="cover">
-            <div class="cover-top">
-              <div class="cover-copy">
-                <h1>DSPM Assessment Report</h1>
-                <p>${sourceLabel}</p>
-                <p>Generated ${escapeHtml(report.generatedAt)} &middot; tenant ${escapeHtml(currentTenant)}</p>
-              </div>
-              <div class="logo"><span>D</span></div>
-            </div>
-          </section>
-          <main class="content">
-            <section class="summary">
-              <div class="score"><div class="score-ring"><span>${report.score}</span></div></div>
-              <div class="summary-text">
-                <h2>Executive summary</h2>
-                <p class="muted">${report.summary.critical || report.summary.high ? "Critical or high exposure exists. Prioritize credential rotation, ownership validation, and access reduction." : "No urgent high-risk exposure is present in the current scan."}</p>
-              </div>
-            </section>
-            <section class="kpis">
-              <div class="kpi"><span>Critical</span><strong>${report.summary.critical}</strong></div>
-              <div class="kpi"><span>High</span><strong>${report.summary.high}</strong></div>
-              <div class="kpi"><span>Medium</span><strong>${report.summary.medium}</strong></div>
-              <div class="kpi"><span>Low</span><strong>${report.summary.low}</strong></div>
-              <div class="kpi"><span>Hidden</span><strong>${latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length}</strong></div>
-              <div class="kpi"><span>Total</span><strong>${report.summary.total_files}</strong></div>
-            </section>
-            <section class="grid">
-              <div class="panel">
-                <h2>Risk distribution</h2>
-                ${report.distribution.map((item) => `<div class="bar"><div class="bar-label"><span>${item.label}</span><strong>${item.count}</strong></div><span class="track"><b class="${item.level}" style="width:${(item.count / Math.max(report.summary.total_files, 1)) * 100}%"></b></span></div>`).join("")}
-              </div>
-              <div class="panel">
-                <h2>Detection signals</h2>
-                ${report.findingStats.length ? report.findingStats.map((item) => `<div class="bar"><div class="bar-label"><span>${escapeHtml(item.type)}</span><strong>${item.count}</strong></div><span class="track"><b style="width:${Math.max(8, (item.count / maxSignal) * 100)}%"></b></span></div>`).join("") : '<p class="muted">No detection signals.</p>'}
-              </div>
-            </section>
-            <section class="grid">
-              <div class="panel">
-                <h2>Department risk</h2>
-                ${report.departments.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.department)}</strong><span>${item.files} files &middot; ${item.critical} critical &middot; ${item.high} high</span></div>`).join("") || '<p class="muted">No department data.</p>'}
-              </div>
-              <div class="panel">
-                <h2>Top risky folders</h2>
-                ${report.folders.slice(0, 7).map((item) => `<div class="list-card"><strong>${escapeHtml(item.folder)}</strong><span>${item.files} files &middot; ${item.critical} critical &middot; avg ${Math.round(item.score / Math.max(item.files, 1))}</span></div>`).join("") || '<p class="muted">No folder data.</p>'}
-              </div>
-            </section>
-            <h2>Scan comparison</h2>
-            <table><thead><tr><th>Metric</th><th>Latest</th><th>Previous</th><th>Delta</th></tr></thead><tbody>${comparisonRows}</tbody></table>
-            <h2>Priority file queue</h2>
-            <table>
-              <thead><tr><th>File</th><th>Source</th><th>Hidden</th><th>Risk</th><th>Findings</th><th>Recommended action</th></tr></thead>
-              <tbody>${registerRows}</tbody>
-            </table>
-          </main>
-        </div>
-      </body>
-    </html>
-  `;
-}
-
-function buildWordReportHtml() {
-  const report = buildReportModel();
-  const hiddenCount = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
-  const protectedCount = latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length;
-  const criticalHighCount = (report.summary.critical || 0) + (report.summary.high || 0);
-  const statusText = criticalHighCount ? "Action required" : "Controlled";
-  const statusTone = criticalHighCount ? "Critical and high exposure exists. Prioritize owner review, access reduction, and DLP controls." : "No critical/high concentration is visible in the latest assessment.";
-  const maxSignal = Math.max(...report.findingStats.map((item) => item.count), 1);
-  const fullRows = buildReportRegisterRows(report.priorityFiles, { compact: false });
-  const priorityRows = buildReportRegisterRows(report.priorityFiles, { compact: true, limit: 12 });
-  const comparisonRows = report.comparison.length
-    ? report.comparison.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.current}</td><td>${item.prior}</td><td class="${item.delta > 0 ? "worse" : item.delta < 0 ? "better" : ""}">${item.delta > 0 ? "+" : ""}${item.delta}</td></tr>`).join("")
-    : '<tr><td colspan="4">Run and save at least two scans to populate comparison.</td></tr>';
-  const compliance = report.compliance || {};
-  const complianceRows = buildComplianceRows(report);
-  const complianceFrameworks = compliance.selected_framework_names || compliance.selected_frameworks || [];
-  const actionCards = report.priorityFiles.slice(0, 4).map((file, index) => {
-    const risk = getEffectiveRisk(file);
-    return `
-      <div class="action-card ${risk.level}">
-        <span>${String(index + 1).padStart(2, "0")}</span>
-        <strong>${escapeHtml(file.name || file.path || "Unknown file")}</strong>
-        <p>${escapeHtml(reportActionsText(file))}</p>
-      </div>
-    `;
-  }).join("") || '<p class="muted">No priority action required from the current scan.</p>';
-  return `
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>DSPM Assessment Report</title>
-        <style>
-          @page { size: A4 landscape; margin: 9mm; }
-          * { box-sizing: border-box; }
-          body { margin: 0; background: #eef2f7; color: #17202a; font-family: "Segoe UI", Arial, Helvetica, sans-serif; font-size: 10.8px; line-height: 1.42; }
-          .page { width: 100%; max-width: 1180px; margin: 24px auto; background: #fff; border: 1px solid #d8dee8; box-shadow: 0 24px 70px rgba(15, 23, 42, .12); }
-          .report-composer-toolbar { position: fixed; z-index: 50; left: 18px; right: 18px; top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 16px; background: rgba(255,255,255,.95); box-shadow: 0 16px 42px rgba(15, 23, 42, .16); backdrop-filter: blur(12px); }
-          .report-composer-toolbar div { display: grid; gap: 2px; }
-          .report-composer-toolbar strong { font-size: 13px; }
-          .report-composer-toolbar span { color: #64748b; }
-          .report-composer-toolbar button { border: 1px solid #cbd5e1; border-radius: 999px; background: #fff; color: #0f172a; padding: 9px 13px; font-weight: 800; cursor: pointer; }
-          .report-composer-toolbar button.primary { background: #0f766e; border-color: #0f766e; color: #fff; }
-          .cover { padding: 24px 28px; color: #fff; background: linear-gradient(135deg, #0f766e, #115e59 48%, #0f172a); }
-          .cover-top { display: table; width: 100%; table-layout: fixed; }
-          .cover-copy { display: table-cell; vertical-align: top; }
-          .logo { display: table-cell; vertical-align: middle; text-align: right; }
-          .logo span { display: inline-block; width: 58px; height: 58px; border-radius: 16px; background: #ecfeff; color: #0f766e; line-height: 58px; text-align: center; font-size: 26px; font-weight: 900; box-shadow: inset 0 0 0 1px rgba(15,118,110,.18); }
-          h1, h2, h3, p { margin-top: 0; }
-          h1 { font-size: 28px; margin-bottom: 6px; letter-spacing: -.03em; }
-          h2 { font-size: 15px; margin: 18px 0 8px; color: #0f172a; }
-          h3 { font-size: 12px; margin: 0 0 6px; color: #0f172a; }
-          .muted, td span { color: #64748b; }
-          .cover p { color: #ccfbf1; margin: 4px 0 0; }
-          .content { padding: 20px 22px 24px; }
-          .meta-strip { display: grid; grid-template-columns: 1.2fr .8fr .8fr; gap: 10px; align-items: stretch; margin-bottom: 12px; }
-          .executive-box, .status-box, .metric-box, .panel, .action-card { border: 1px solid #d8dee8; border-radius: 14px; padding: 12px; background: #fff; break-inside: avoid; page-break-inside: avoid; }
-          .executive-box { background: #f8fafc; }
-          .status-box { background: #ecfdf5; border-color: #99f6e4; color: #134e4a; }
-          .status-box.warning { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
-          .status-box strong { display: block; font-size: 30px; margin: 2px 0; letter-spacing: -.05em; }
-          .metric-box span, .status-box span, .kpi span { display: block; color: #64748b; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; }
-          .metric-box strong { display: block; font-size: 22px; margin-top: 6px; }
-          .kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 12px 0 14px; }
-          .kpi { border: 1px solid #d8dee8; border-radius: 12px; padding: 9px 10px; background: #fff; }
-          .kpi strong { display: block; margin-top: 4px; font-size: 22px; }
-          .kpi.critical { background: #fff1f2; border-color: #fecdd3; } .kpi.high { background: #fff7ed; border-color: #fed7aa; } .kpi.medium { background: #fefce8; border-color: #fde68a; } .kpi.low { background: #f0fdf4; border-color: #bbf7d0; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
-          .tri-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
-          .panel.visual-panel { min-height: 172px; }
-          .report-svg { width: 100%; height: auto; display: block; }
-          .report-svg.wide { min-height: 136px; }
-          .svg-number { font-size: 25px; font-weight: 900; fill: #17202a; }
-          .svg-label, .svg-axis, .svg-value, .svg-tick { font-size: 9px; fill: #64748b; }
-          .svg-value { font-weight: 900; fill: #0f172a; }
-          .svg-heat-title { font-size: 8px; font-weight: 900; fill: #fff; }
-          .svg-heat-meta { font-size: 7px; fill: #ecfeff; }
-          .signal-list .bar { margin-bottom: 8px; }
-          .bar-label { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 3px; font-size: 10px; }
-          .track { display: block; height: 8px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
-          .track b { display: block; height: 100%; background: #0f766e; }
-          .action-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-          .action-card span { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: #f1f5f9; font-weight: 900; color: #334155; margin-bottom: 8px; }
-          .action-card strong { display: block; word-break: break-word; }
-          .action-card p { margin: 5px 0 0; color: #64748b; font-size: 9.6px; }
-          .register-intro { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border-radius: 14px; background: #f8fafc; border: 1px dashed #cbd5e1; margin: 14px 0 8px; }
-          .register-intro strong { display: block; }
-          .register-intro span { color: #64748b; }
-          .register-intro .fake-button { border-radius: 999px; padding: 8px 12px; background: #0f766e; color: #fff; font-weight: 900; white-space: nowrap; }
-          table { width: 100%; border-collapse: collapse; font-size: 9.2px; margin-top: 8px; table-layout: fixed; }
-          th, td { border: 1px solid #d8dee8; padding: 5px 6px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
-          th { background: #f1f5f9; color: #334155; font-size: 8.5px; text-transform: uppercase; letter-spacing: .04em; }
-          .priority-table th:nth-child(1) { width: 30%; } .priority-table th:nth-child(2) { width: 18%; } .priority-table th:nth-child(3) { width: 10%; } .priority-table th:nth-child(4) { width: 20%; } .priority-table th:nth-child(5) { width: 22%; }
-          .full-register-table th:nth-child(1) { width: 21%; } .full-register-table th:nth-child(2) { width: 10%; } .full-register-table th:nth-child(3) { width: 9%; } .full-register-table th:nth-child(4) { width: 6%; } .full-register-table th:nth-child(5) { width: 8%; } .full-register-table th:nth-child(6) { width: 8%; } .full-register-table th:nth-child(7) { width: 13%; } .full-register-table th:nth-child(8) { width: 13%; } .full-register-table th:nth-child(9) { width: 12%; }
-          .risk { display: inline-block; border-radius: 999px; padding: 3px 7px; color: #fff; font-weight: 900; white-space: nowrap; font-size: 8.6px; }
-          .CRITICAL { background: #9f1239; } .HIGH { background: #c2410c; } .MEDIUM { background: #b7791f; } .LOW { background: #15803d; }
-          .better { color: #15803d; font-weight: 900; } .worse { color: #9f1239; font-weight: 900; }
-          .page-break { break-before: page; page-break-before: always; }
-          .full-register-section { display: block; }
-          body.include-register .full-register-section { display: block; }
-          body.include-register #toggle-register-btn::before { content: "Hide"; }
-          body.include-register #toggle-register-btn { font-size: 0; }
-          body.include-register #toggle-register-btn::before { font-size: 13px; }
-          @media print { body { background: #fff; } .no-print { display: none !important; } .page { border: 0; box-shadow: none; margin: 0; max-width: none; } body:not(.include-register) .full-register-section { display: none !important; } .cover, .status-box, .kpi, .panel, .metric-box, .action-card, .register-intro { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
-        </style>
-        <script>
-          function toggleRegister() {
-            document.body.classList.toggle("include-register");
-          }
-        </script>
-      </head>
-      <body class="include-register">
-        <div class="page">
-          <section class="cover">
-            <div class="cover-top">
-              <div class="cover-copy">
-                <h1>DSPM Assessment Report</h1>
-                <p>${escapeHtml(report.title)}</p>
-                <p>Generated ${escapeHtml(report.generatedAt)} &middot; tenant ${escapeHtml(currentTenant)} &middot; ${report.summary.total_files} files analyzed</p>
-              </div>
-              <div class="logo"><span>D</span></div>
-            </div>
-          </section>
-          <main class="content">
-            <section class="meta-strip">
-              <div class="executive-box">
-                <h2>Executive summary</h2>
-                <p class="muted">${escapeHtml(statusTone)} This pack is structured for customer, audit, and remediation review: first the decision summary, then the evidence appendix only when requested.</p>
-              </div>
-              <div class="status-box ${criticalHighCount ? "warning" : ""}">
-                <span>Risk posture</span>
-                <strong>${report.score}</strong>
-                <span>${escapeHtml(statusText)}</span>
-              </div>
-              <div class="metric-box">
-                <span>Priority exposure</span>
-                <strong>${criticalHighCount}</strong>
-                <p class="muted">Critical + high files requiring owner validation.</p>
-              </div>
-            </section>
-
-            <section class="kpis">
-              <div class="kpi critical"><span>Critical</span><strong>${report.summary.critical}</strong></div>
-              <div class="kpi high"><span>High</span><strong>${report.summary.high}</strong></div>
-              <div class="kpi medium"><span>Medium</span><strong>${report.summary.medium}</strong></div>
-              <div class="kpi low"><span>Low</span><strong>${report.summary.low}</strong></div>
-              <div class="kpi"><span>Hidden</span><strong>${hiddenCount}</strong></div>
-              <div class="kpi"><span>Protected</span><strong>${protectedCount}</strong></div>
-            </section>
-
-            <section class="grid">
-              <div class="panel visual-panel">
-                <h2>Risk distribution</h2>
-                ${buildReportDonutSvg(report.distribution, report.summary.total_files)}
-              </div>
-              <div class="panel visual-panel">
-                <h2>Risk bars</h2>
-                ${buildReportRiskBarsSvg(report.distribution, report.summary.total_files)}
-              </div>
-            </section>
-
-            <section class="grid">
-              <div class="panel visual-panel signal-list">
-                <h2>Detection signals</h2>
-                ${report.findingStats.length ? report.findingStats.slice(0, 8).map((item) => `<div class="bar"><div class="bar-label"><span>${escapeHtml(item.type)}</span><strong>${item.count}</strong></div><span class="track"><b style="width:${Math.max(8, (item.count / maxSignal) * 100)}%"></b></span></div>`).join("") : '<p class="muted">No detection signals.</p>'}
-              </div>
-              <div class="panel visual-panel">
-                <h2>Posture trend</h2>
-                ${buildReportTrendSvg()}
-              </div>
-            </section>
-
-            <section class="grid">
-              <div class="panel">
-                <h2>Compliance executive summary</h2>
-                <table>
-                  <thead><tr><th>Enabled</th><th>Frameworks</th><th>Files</th><th>Finding groups</th><th>Occurrences</th><th>Unique values</th><th>Critical findings</th><th>High findings</th><th>Medium findings</th><th>Low findings</th></tr></thead>
-                  <tbody><tr><td>${compliance.enabled ? "Yes" : "No"}</td><td>${escapeHtml(complianceFrameworks.join("; "))}</td><td>${escapeHtml(compliance.affected_file_count || 0)}</td><td>${escapeHtml(compliance.finding_group_count || compliance.total_compliance_findings || 0)}</td><td>${escapeHtml(compliance.occurrence_count || 0)}</td><td>${escapeHtml(compliance.unique_sensitive_value_count || 0)}</td><td>${escapeHtml(compliance.critical || 0)}</td><td>${escapeHtml(compliance.high || 0)}</td><td>${escapeHtml(compliance.medium || 0)}</td><td>${escapeHtml(compliance.low || 0)}</td></tr></tbody>
-                </table>
-              </div>
-              <div class="panel">
-                <h2>Framework mapping</h2>
-                ${renderComplianceMappingList(compliance)}
-              </div>
-            </section>
-
-            <section class="grid">
-              <div class="panel">
-                <h2>Department risk</h2>
-                ${report.departments.slice(0, 7).map((item) => `<div class="bar"><div class="bar-label"><span>${escapeHtml(item.department)}</span><strong>${item.files}</strong></div><span class="track"><b style="width:${Math.min(100, (item.score / Math.max(...report.departments.map((dep) => dep.score), 1)) * 100)}%"></b></span></div>`).join("") || '<p class="muted">No department data.</p>'}
-              </div>
-              <div class="panel visual-panel">
-                <h2>Top risky folders</h2>
-                ${buildReportFolderHeatmapSvg(report.folders)}
-              </div>
-            </section>
-
-            <section class="panel">
-              <h2>Recommended remediation plan</h2>
-              <div class="action-grid">${actionCards}</div>
-            </section>
-
-            <section class="grid">
-              <div class="panel">
-                <h2>Scan comparison</h2>
-                <table><thead><tr><th>Metric</th><th>Latest</th><th>Previous</th><th>Delta</th></tr></thead><tbody>${comparisonRows}</tbody></table>
-              </div>
-              <div class="panel">
-                <h2>Priority file queue</h2>
-                <table class="priority-table">
-                  <thead><tr><th>File</th><th>Source</th><th>Risk</th><th>Findings</th><th>Action</th></tr></thead>
-                  <tbody>${priorityRows || '<tr><td colspan="5">No priority files.</td></tr>'}</tbody>
-                </table>
-              </div>
-            </section>
-
-            <section class="register-intro">
-              <div>
-                <strong>Full evidence register is separated from the executive story.</strong>
-                <span>Word export includes the full appendix below, so auditors can review every row without changing the executive summary layout.</span>
-              </div>
-              <div class="fake-button">${report.priorityFiles.length} rows included</div>
-            </section>
-
-            <section class="full-register-section page-break">
-              <h2>Appendix A - Full evidence register</h2>
-              <p class="muted">All scanned files sorted by effective risk score. This replaces the old "additional files" placeholder and keeps every row available when requested.</p>
-              <table class="full-register-table">
-                <thead><tr><th>File</th><th>Source</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Findings</th><th>Reasons</th><th>DLP / action</th></tr></thead>
-                <tbody>${fullRows || '<tr><td colspan="10">No file evidence rows available.</td></tr>'}</tbody>
-              </table>
-            </section>
-            <section class="full-register-section page-break">
-              <h2>Appendix B - Compliance findings</h2>
-              <p class="muted">Evidence-based compliance exposure mapping. This is not a legal compliance certification.</p>
-              <table>
-                <thead><tr><th>#</th><th>File</th><th>Path</th><th>Severity</th><th>Score</th><th>Frameworks</th><th>Categories</th><th>Remediation</th></tr></thead>
-                <tbody>${complianceRows || '<tr><td colspan="8">No compliance findings.</td></tr>'}</tbody>
-              </table>
-            </section>
-          </main>
-        </div>
-      </body>
-    </html>
-  `;
-}
-
-
-function buildReportHtml(mode = "word") {
-  const summary = buildCurrentSummary();
-  const distribution = buildRiskDistribution(summary);
-  const findingStats = buildFindingStats();
-  const score = getCurrentPostureScore(summary);
-  const topFiles = [...latestFiles]
-    .sort((a, b) => getEffectiveRisk(b).score - getEffectiveRisk(a).score)
-    .slice(0, 8);
-  const rows = latestFiles
-    .map((file) => {
-      const risk = getEffectiveRisk(file);
-      return `
-        <tr>
-          <td>${escapeHtml(file.name || "")}</td>
-          <td>${escapeHtml(file.path || "")}</td>
-          <td>${escapeHtml(file.source || "")}</td>
-          <td>${escapeHtml(risk.level)} ${escapeHtml(risk.score)}</td>
-          <td>${escapeHtml((file.findings || []).map((finding) => `${finding.type}: ${finding.count}`).join(", ") || "None")}</td>
-          <td>${escapeHtml((file.risk?.reasons || []).join("; "))}</td>
-          <td>${escapeHtml((file.risk?.dlp_recommendations || []).join("; "))}</td>
-        </tr>
-      `;
-    })
-    .join("");
-  const topRows = topFiles
-    .map((file) => {
-      const risk = getEffectiveRisk(file);
-      return `
-        <tr>
-          <td>${escapeHtml(file.name || file.path || "")}</td>
-          <td>${escapeHtml(file.path || "")}</td>
-          <td><span class="pill ${risk.level}">${escapeHtml(risk.level)} ${escapeHtml(risk.score)}</span></td>
-        </tr>
-      `;
-    })
-    .join("");
-
-  const distributionRows = distribution
-    .map((item) => {
-      const total = Math.max(summary.total_files, 1);
-      return `<div class="bar"><div><span>${item.label}</span><strong>${item.count}</strong></div><span class="track"><b class="${item.level}" style="width:${(item.count / total) * 100}%"></b></span></div>`;
-    })
-    .join("");
-
-  return `
-    <!doctype html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>DSPM Assessment Report</title>
-        <style>
-          @page { margin: 18mm; }
-          body { font-family: Arial, sans-serif; color: #17202a; margin: 0; background: ${mode === "pdf" ? "#fff" : "#eef2f7"}; }
-          .page { margin: ${mode === "pdf" ? "0" : "28px"}; background: #fff; border: 1px solid #d9dee7; }
-          .cover { background: #0f766e; color: #fff; padding: 34px; }
-          .cover p { color: #ccfbf1; margin: 8px 0 0; }
-          .brandline { display: flex; justify-content: space-between; gap: 18px; align-items: center; }
-          .logo { width: 54px; height: 54px; border-radius: 12px; background: #fff; color: #0f766e; display: grid; place-items: center; font-weight: 900; font-size: 24px; }
-          .content { padding: 26px; }
-          h1 { margin: 0; font-size: 34px; }
-          h2 { margin: 28px 0 12px; }
-          .muted { color: #687382; }
-          .kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 22px 0; }
-          .kpis div, .panel { border: 1px solid #d9dee7; padding: 14px; border-radius: 8px; background: #f9fafb; }
-          .kpis span { display: block; color: #687382; font-size: 12px; text-transform: uppercase; }
-          .kpis strong { display: block; margin-top: 8px; font-size: 28px; }
-          .score { display: grid; grid-template-columns: 150px 1fr; gap: 18px; align-items: center; margin-top: 22px; }
-          .score-ring { width: 138px; height: 138px; border-radius: 999px; background: conic-gradient(#0f766e ${score}%, #d9dee7 0); display: grid; place-items: center; }
-          .score-ring span { width: 92px; height: 92px; border-radius: 999px; background: #fff; display: grid; place-items: center; font-size: 30px; font-weight: 900; color: #0f766e; }
-          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-          .bar { margin-bottom: 10px; }
-          .bar div { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
-          .bar span.track { display: block; height: 9px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
-          .bar b { display: block; height: 100%; background: #0f766e; }
-          .bar b.CRITICAL { background: #9f1239; } .bar b.HIGH { background: #c2410c; } .bar b.MEDIUM { background: #b7791f; } .bar b.LOW { background: #2f855a; }
-          table { width: 100%; border-collapse: collapse; font-size: 12px; }
-          th, td { border: 1px solid #d9dee7; padding: 9px; text-align: left; vertical-align: top; }
-          th { background: #f1f5f9; }
-          .pill { display: inline-block; padding: 4px 8px; border-radius: 999px; color: #fff; font-weight: 700; }
-          .CRITICAL { background: #9f1239; } .HIGH { background: #c2410c; } .MEDIUM { background: #b7791f; } .LOW { background: #2f855a; }
-          .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-          .top-card { border: 1px solid #d9dee7; border-radius: 8px; padding: 12px; margin-bottom: 8px; }
-          @media print { .page { border: 0; } .cover { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
-        </style>
-      </head>
-      <body>
-        <div class="page">
-          <div class="cover">
-            <div class="brandline">
-              <div>
-                <h1>DSPM Assessment Report</h1>
-                <p>Generated ${escapeHtml(new Date().toLocaleString())} for ${escapeHtml(readPayload().server || "Local sample scan")}</p>
-              </div>
-              <div class="logo">D</div>
-            </div>
-          </div>
-          <div class="content">
-            <div class="score">
-              <div class="score-ring"><span>${score}</span></div>
-              <div>
-                <h2>Executive Summary</h2>
-                <p class="muted">${summary.critical || summary.high ? "Sensitive data exposure requires prioritized remediation." : "Current exposure remains within a manageable posture."}</p>
-              </div>
-            </div>
-            <div class="kpis">
-              <div><span>Critical</span><strong>${summary.critical}</strong></div>
-              <div><span>High</span><strong>${summary.high}</strong></div>
-              <div><span>Medium</span><strong>${summary.medium}</strong></div>
-              <div><span>Low</span><strong>${summary.low}</strong></div>
-              <div><span>Total</span><strong>${summary.total_files}</strong></div>
-            </div>
-            <div class="grid">
-              <div class="panel">
-                <h2>Risk Distribution</h2>
-                ${distributionRows}
-              </div>
-              <div class="panel">
-                <h2>Detection Signals</h2>
-                ${findingStats.length ? findingStats.map((item) => `<div class="bar"><div><span>${escapeHtml(item.type)}</span><strong>${item.count}</strong></div><span class="track"><b style="width:${Math.max(8, (item.count / Math.max(...findingStats.map((stat) => stat.count))) * 100)}%"></b></span></div>`).join("") : '<p class="muted">No sensitive detection signals were found.</p>'}
-              </div>
-            </div>
-            <h2>Top Risky Files</h2>
-            <div class="two-col">${topFiles
-              .map((file) => {
-                const risk = getEffectiveRisk(file);
-                return `<div class="top-card"><span class="pill ${risk.level}">${risk.level} ${risk.score}</span><strong> ${escapeHtml(file.name || file.path || "")}</strong><p class="muted">${escapeHtml(file.path || "")}</p></div>`;
-              })
-              .join("")}</div>
-            <h2>File Risk Register</h2>
-            <table>
-              <thead><tr><th>File</th><th>Path</th><th>Source</th><th>Risk</th><th>Findings</th><th>Reasons</th><th>Recommendations</th></tr></thead>
-              <tbody>${rows}</tbody>
-            </table>
-          </div>
-        </div>
-      </body>
-    </html>
-  `;
-}
-
-function buildPolishedExcelWorkbookHtml() {
-  const report = buildReportModel();
-  const hiddenCount = latestReport?.summary?.hidden_files || latestFiles.filter((file) => file.is_hidden).length;
-  const protectedCount = latestReport?.summary?.protected_files ?? latestFiles.filter(isProtectedFile).length;
-  const criticalHighCount = (report.summary.critical || 0) + (report.summary.high || 0);
-  const riskRows = report.priorityFiles
-    .map((file, index) => {
-      const risk = getEffectiveRisk(file);
-      return `
-        <tr>
-          <td>${index + 1}</td>
-          <td>${escapeHtml(file.name || file.filename || file.path || "")}</td>
-          <td>${escapeHtml(reportPathText(file))}</td>
-          <td>${escapeHtml(reportSourceText(file))}</td>
-          <td>${escapeHtml(file.share || "")}</td>
-          <td>${escapeHtml(reportOwnerText(file))}</td>
-          <td>${file.is_hidden ? "Yes" : "No"}</td>
-          <td>${isProtectedFile(file) ? escapeHtml(getProtectionLabel(file)) : "No"}</td>
-          <td class="${risk.level}">${escapeHtml(risk.level)}</td>
-          <td>${escapeHtml(risk.score)}</td>
-          <td>${escapeHtml(reportFindingsText(file))}</td>
-          <td>${escapeHtml(reportComplianceText(file))}</td>
-          <td>${escapeHtml(reportReasonsText(file))}</td>
-          <td>${escapeHtml(reportDlpText(file))}</td>
-          <td>${escapeHtml(reportActionsText(file))}</td>
-        </tr>
-      `;
-    })
-    .join("");
-  const departmentRows = report.departments
-    .map((item) => `<tr><td>${escapeHtml(item.department)}</td><td>${item.files}</td><td>${item.critical}</td><td>${item.high}</td><td>${item.score}</td><td>${Math.round(item.score / Math.max(item.files, 1))}</td></tr>`)
-    .join("");
-  const folderRows = report.folders
-    .map((item) => `<tr><td>${escapeHtml(item.folder)}</td><td>${item.files}</td><td>${item.critical}</td><td>${item.score}</td><td>${Math.round(item.score / Math.max(item.files, 1))}</td></tr>`)
-    .join("");
-  const signalRows = report.findingStats
-    .map((item) => `<tr><td>${escapeHtml(item.type)}</td><td>${item.count}</td><td>${Math.round((item.count / Math.max(report.summary.total_files, 1)) * 100)}%</td></tr>`)
-    .join("");
-  const comparisonRows = report.comparison.length
-    ? report.comparison.map((item) => `<tr><td>${escapeHtml(item.label)}</td><td>${item.current}</td><td>${item.prior}</td><td class="${item.delta > 0 ? "worse" : item.delta < 0 ? "better" : ""}">${item.delta}</td></tr>`).join("")
-    : '<tr><td colspan="4">No previous saved scan</td></tr>';
-  const remediationRows = report.priorityFiles.slice(0, 50)
-    .map((file, index) => {
-      const risk = getEffectiveRisk(file);
-      const sla = risk.level === "CRITICAL" ? "24 hours" : risk.level === "HIGH" ? "3 days" : risk.level === "MEDIUM" ? "14 days" : "30 days";
-      return `<tr><td>${index + 1}</td><td>${escapeHtml(file.name || file.path || "")}</td><td class="${risk.level}">${risk.level}</td><td>${risk.score}</td><td>${escapeHtml(reportOwnerText(file))}</td><td>${sla}</td><td>${escapeHtml(reportActionsText(file))}</td></tr>`;
-    })
-    .join("");
-  const complianceRows = buildComplianceRows(report);
-  const compliance = report.compliance || {};
-  const frameworkRows = compliance.enabled
-    ? (compliance.selected_framework_names || compliance.selected_frameworks || []).map((item) => `<tr><td>${escapeHtml(item)}</td><td>${escapeHtml(compliance.affected_file_count || 0)}</td><td>${escapeHtml(compliance.finding_group_count || compliance.total_compliance_findings || 0)}</td><td>${escapeHtml(compliance.occurrence_count || 0)}</td><td>${escapeHtml(compliance.critical || 0)}</td><td>${escapeHtml(compliance.high || 0)}</td></tr>`).join("")
-    : '<tr><td colspan="6">Compliance mapping was not enabled for this scan.</td></tr>';
-  const complianceRemediationRows = compliance.enabled
-    ? (compliance.remediation_priorities || []).map((item) => `<tr><td>${escapeHtml(item.control)}</td><td>${escapeHtml(item.count)}</td><td>Review owner, reduce broad access, encrypt sensitive data, and validate retention.</td></tr>`).join("")
-    : '<tr><td colspan="3">No compliance remediation priorities.</td></tr>';
-
-  return `
-    <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
-      <head>
-        <meta charset="utf-8" />
-        <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets>
-          <x:ExcelWorksheet><x:Name>Executive Summary</x:Name><x:WorksheetOptions><x:DisplayGridlines/><x:FreezePanes/><x:FrozenNoSplit/><x:SplitHorizontal>1</x:SplitHorizontal><x:TopRowBottomPane>1</x:TopRowBottomPane></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Compliance Summary</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Risk Register</x:Name><x:WorksheetOptions><x:DisplayGridlines/><x:FreezePanes/></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Framework Mapping</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Remediation Plan</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Departments</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Folders</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Signals</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
-          <x:ExcelWorksheet><x:Name>Comparison</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet>
-        </x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
-        <style>
-          body { font-family: "Segoe UI", Arial, sans-serif; color: #17202a; }
-          h1 { color: #0f766e; font-size: 24px; margin-bottom: 6px; }
-          h2 { color: #0f172a; font-size: 18px; margin-top: 24px; border-bottom: 2px solid #0f766e; padding-bottom: 6px; }
-          .muted { color: #64748b; }
-          table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
-          th { background: #0f766e; color: #fff; font-weight: bold; text-align: left; }
-          th, td { border: 1px solid #cbd5e1; padding: 8px; vertical-align: top; mso-number-format:"\\@"; }
-          .meta th { background: #f1f5f9; color: #334155; width: 18%; }
-          .score-card td { border: 0; padding: 12px; }
-          .score { background: #0f766e; color: #fff; font-size: 30px; font-weight: bold; text-align: center; }
-          .summary-copy { background: #f8fafc; color: #334155; }
-          .kpi th { background: #1f2937; color: #fff; }
-          .kpi td { font-size: 18px; font-weight: bold; text-align: center; }
-          .CRITICAL { background: #ffe4e6; color: #9f1239; font-weight: bold; }
-          .HIGH { background: #ffedd5; color: #c2410c; font-weight: bold; }
-          .MEDIUM { background: #fef9c3; color: #a16207; font-weight: bold; }
-          .LOW { background: #dcfce7; color: #15803d; font-weight: bold; }
-          .better { background: #dcfce7; color: #15803d; font-weight: bold; }
-          .worse { background: #ffe4e6; color: #9f1239; font-weight: bold; }
-          .section-break { page-break-before: always; }
-        </style>
-      </head>
-      <body>
-        <h1>DSPM Assessment Workbook</h1>
-        <p class="muted">Executive summary, full risk register, remediation plan, department/folder concentration, detection signals, and scan comparison.</p>
-        <table class="meta">
-          <tr><th>Generated</th><td>${escapeHtml(report.generatedAt)}</td><th>Tenant</th><td>${escapeHtml(currentTenant)}</td></tr>
-          <tr><th>Source</th><td>${escapeHtml(report.title)}</td><th>Posture score</th><td>${report.score}</td></tr>
-          <tr><th>Total files</th><td>${report.summary.total_files}</td><th>Priority exposure</th><td>${criticalHighCount}</td></tr>
-        </table>
-        <table class="score-card">
-          <tr><td class="score">${report.score}</td><td class="summary-copy">${criticalHighCount ? "Critical or high exposure exists. Prioritize owners, broad-access reduction, credential rotation, and DLP controls." : "Current exposure profile is controlled. Continue periodic scans and retention cleanup."}</td></tr>
-        </table>
-        <table class="kpi">
-          <tr><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Hidden</th><th>Protected</th><th>Total files</th></tr>
-          <tr><td class="CRITICAL">${report.summary.critical}</td><td class="HIGH">${report.summary.high}</td><td class="MEDIUM">${report.summary.medium}</td><td class="LOW">${report.summary.low}</td><td>${hiddenCount}</td><td>${protectedCount}</td><td>${report.summary.total_files}</td></tr>
-        </table>
-
-        <h2 class="section-break">Compliance Summary</h2>
-        <table class="kpi">
-          <tr><th>Enabled</th><th>Frameworks</th><th>Files</th><th>Finding groups</th><th>Occurrences</th><th>Unique values</th><th>Critical findings</th><th>High findings</th><th>Medium findings</th><th>Low findings</th></tr>
-          <tr><td>${compliance.enabled ? "Yes" : "No"}</td><td>${escapeHtml((compliance.selected_framework_names || compliance.selected_frameworks || []).join("; "))}</td><td>${escapeHtml(compliance.affected_file_count || 0)}</td><td>${escapeHtml(compliance.finding_group_count || compliance.total_compliance_findings || 0)}</td><td>${escapeHtml(compliance.occurrence_count || 0)}</td><td>${escapeHtml(compliance.unique_sensitive_value_count || 0)}</td><td class="CRITICAL">${escapeHtml(compliance.critical || 0)}</td><td class="HIGH">${escapeHtml(compliance.high || 0)}</td><td class="MEDIUM">${escapeHtml(compliance.medium || 0)}</td><td class="LOW">${escapeHtml(compliance.low || 0)}</td></tr>
-        </table>
-        <table><tr><th>#</th><th>File</th><th>Path</th><th>Severity</th><th>Score</th><th>Frameworks</th><th>Categories</th><th>Remediation</th></tr>${complianceRows || '<tr><td colspan="8">No compliance findings</td></tr>'}</table>
-
-        <h2>Risk Distribution</h2>
-        <table><tr><th>Level</th><th>Files</th><th>Percent of scan</th></tr>${report.distribution.map((item) => `<tr><td class="${item.level}">${item.label}</td><td>${item.count}</td><td>${Math.round((item.count / Math.max(report.summary.total_files, 1)) * 100)}%</td></tr>`).join("")}</table>
-
-        <h2 class="section-break">Risk Register - All Files</h2>
-        <table>
-          <tr><th>#</th><th>File</th><th>Path</th><th>Source</th><th>Share</th><th>Owner</th><th>Hidden</th><th>Protected</th><th>Risk</th><th>Score</th><th>Findings</th><th>Compliance</th><th>Reasons</th><th>DLP Recommendation</th><th>Remediation Action</th></tr>
-          ${riskRows || '<tr><td colspan="15">No risk rows available</td></tr>'}
-        </table>
-
-        <h2 class="section-break">Framework Mapping</h2>
-        <table><tr><th>Framework</th><th>Files</th><th>Finding groups</th><th>Occurrences</th><th>Critical findings</th><th>High findings</th></tr>${frameworkRows}</table>
-
-        <h2 class="section-break">Remediation Plan</h2>
-        <table><tr><th>#</th><th>File</th><th>Risk</th><th>Score</th><th>Owner</th><th>SLA</th><th>Action</th></tr>${remediationRows || '<tr><td colspan="7">No remediation actions required</td></tr>'}</table>
-
-        <h2>Compliance Remediation</h2>
-        <table><tr><th>Mapped control/category</th><th>Files</th><th>Priority action</th></tr>${complianceRemediationRows}</table>
-
-        <h2 class="section-break">Departments</h2>
-        <table><tr><th>Department</th><th>Files</th><th>Critical</th><th>High</th><th>Total risk score</th><th>Average risk</th></tr>${departmentRows || '<tr><td colspan="6">No department data</td></tr>'}</table>
-
-        <h2>Folders</h2>
-        <table><tr><th>Folder</th><th>Files</th><th>Critical</th><th>Total risk score</th><th>Average risk</th></tr>${folderRows || '<tr><td colspan="5">No folder data</td></tr>'}</table>
-
-        <h2>Detection Signals</h2>
-        <table><tr><th>Signal</th><th>Count</th><th>Percent of files</th></tr>${signalRows || '<tr><td colspan="3">No sensitive detection signals</td></tr>'}</table>
-
-        <h2>Scan Comparison</h2>
-        <table><tr><th>Metric</th><th>Latest</th><th>Previous</th><th>Delta</th></tr>${comparisonRows}</table>
-      </body>
-    </html>
-  `;
-}
-
-
-function buildExcelWorkbookHtml() {
-  const summary = buildCurrentSummary();
-  const distribution = buildRiskDistribution(summary);
-  const findingStats = buildFindingStats();
-  const rows = latestFiles
-    .map((file) => {
-      const risk = getEffectiveRisk(file);
-      return `
-        <tr>
-          <td>${escapeHtml(file.name || "")}</td>
-          <td>${escapeHtml(file.path || "")}</td>
-          <td>${escapeHtml(file.source || "")}</td>
-          <td>${escapeHtml(file.share || "")}</td>
-          <td class="${risk.level}">${escapeHtml(risk.level)}</td>
-          <td>${escapeHtml(risk.score)}</td>
-          <td>${escapeHtml((file.findings || []).map((finding) => `${finding.type}:${finding.count}`).join("; "))}</td>
-          <td>${escapeHtml((file.risk?.reasons || []).join("; "))}</td>
-          <td>${escapeHtml((file.risk?.dlp_recommendations || []).join("; "))}</td>
-        </tr>
-      `;
-    })
-    .join("");
-
-  return `
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <style>
-          body { font-family: Arial, sans-serif; color: #17202a; }
-          h1 { color: #0f766e; }
-          table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
-          th { background: #0f766e; color: white; }
-          th, td { border: 1px solid #d9dee7; padding: 8px; vertical-align: top; }
-          .kpi th { background: #f1f5f9; color: #17202a; }
-          .CRITICAL { background: #fce7f3; color: #9f1239; font-weight: bold; }
-          .HIGH { background: #ffedd5; color: #c2410c; font-weight: bold; }
-          .MEDIUM { background: #fef9c3; color: #b7791f; font-weight: bold; }
-          .LOW { background: #dcfce7; color: #2f855a; font-weight: bold; }
-        </style>
-      </head>
-      <body>
-        <h1>DSPM Assessment Workbook</h1>
-        <p>Generated ${escapeHtml(new Date().toLocaleString())} for tenant ${escapeHtml(currentTenant)}</p>
-        <table class="kpi">
-          <tr><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Total files</th><th>Posture score</th></tr>
-          <tr><td class="CRITICAL">${summary.critical}</td><td class="HIGH">${summary.high}</td><td class="MEDIUM">${summary.medium}</td><td class="LOW">${summary.low}</td><td>${summary.total_files}</td><td>${getCurrentPostureScore(summary)}</td></tr>
-        </table>
-        <h2>Risk Distribution</h2>
-        <table><tr><th>Level</th><th>Files</th></tr>${distribution.map((item) => `<tr><td class="${item.level}">${item.label}</td><td>${item.count}</td></tr>`).join("")}</table>
-        <h2>Detection Signals</h2>
-        <table><tr><th>Signal</th><th>Count</th></tr>${findingStats.map((item) => `<tr><td>${escapeHtml(item.type)}</td><td>${item.count}</td></tr>`).join("") || '<tr><td colspan="2">No sensitive detection signals</td></tr>'}</table>
-        <h2>Risk Register</h2>
-        <table>
-          <tr><th>File</th><th>Path</th><th>Source</th><th>Share</th><th>Risk</th><th>Score</th><th>Findings</th><th>Reasons</th><th>Recommendations</th></tr>
-          ${rows}
-        </table>
-      </body>
-    </html>
-  `;
-}
 
 function csvCell(value) {
   return `"${String(value).replaceAll('"', '""')}"`;
@@ -10838,9 +10265,6 @@ resultsBody.addEventListener("change", (event) => {
   }
 });
 
-exportCsvBtn.addEventListener("click", exportCsv);
-exportWordBtn.addEventListener("click", exportWord);
-exportPdfBtn.addEventListener("click", exportPdf);
 inventoryExportCsvBtn?.addEventListener("click", () => {
   streamInventoryExport("csv").catch((error) => {
     if (error?.name !== "AbortError") showToast("Inventory export failed", error.message, "danger");

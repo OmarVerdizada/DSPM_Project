@@ -967,6 +967,30 @@ under uvicorn started five workers and ran 198 of 362 files in them.
 default leaves one core for the parent, which is still collecting, extracting
 and writing while the workers classify, and disables itself below three cores.
 
+### Reports read the scan, not the workspace
+
+The Reports page used to build every document from `latestFiles` — the 200-row
+top-risk slice `hydrateWorkspaceSlice()` fetches for the Findings table. On this
+data that meant a "full" report covering 200 of 463 files and 3,310 of 6,831
+findings, with no indication that anything was missing.
+
+It now composes from `/api/findings`, which filters, sorts and counts
+server-side:
+
+- the build line reports the server's own `total`, not the page length;
+- aggregate sections use the response's `facets` when nothing narrows the scope,
+  and say what they were counted from when something does;
+- generating a Word or Excel file pages through the cursor up to a 5,000-row
+  ceiling, and the document states the count it could not carry.
+
+`/api/findings` rows now carry `reason` and `recommendation`, computed by
+`risk.risk_engine` from the finding itself (`finding_reason`,
+`finding_recommendation`). Reading them from a file's `detail_json` costs one
+request per finding, which a report of thousands cannot pay. The two lookup
+tables those functions read were rebuilt on every call — 22 µs a row, on every
+scan as well as every report page — and are now module constants: 112 ms → 22 ms
+per 5,000 findings.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

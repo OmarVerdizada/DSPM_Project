@@ -86,8 +86,10 @@ class InventoryWindowFrontendTests(unittest.TestCase):
         self.assertIn("inventoryApplyFiltersBtn?.addEventListener", self.script)
 
     def test_manual_risk_change_rerenders_without_a_database_round_trip(self) -> None:
+        # The end of the handler, not whatever listener happens to follow it -
+        # the Reports toolbar this used to anchor on no longer exists.
         start = self.script.index('resultsBody.addEventListener("change"')
-        body = self.script[start:self.script.index("exportCsvBtn.addEventListener", start)]
+        body = self.script[start:self.script.index(chr(10) + "});" + chr(10), start)]
         self.assertIn("renderRows(currentPage.items", body)
         self.assertNotIn("refreshInventoryPageWindow()", body)
 

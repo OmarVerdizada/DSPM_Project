@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend import db
+from risk.risk_engine import finding_recommendation, finding_reason
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
@@ -3130,7 +3131,20 @@ def _decode_remediation_cursor(cursor: str, sort: str, direction: str, is_text: 
 
 def _remediation_row(row) -> dict:
     frameworks = _decode_string_list(row["frameworks_json"])
+    severity = str(row["severity"] or "LOW")
+    # A finding row carries its own risk story, so a report does not have to
+    # open one detail blob per finding to print why it matters and what to do.
+    signal = {
+        "type": str(row["rule"] or ""),
+        "label": str(row["display_name"] or row["rule"] or ""),
+        "description": str(row["display_name"] or row["rule"] or ""),
+        "category": str(row["category"] or ""),
+        "framework": frameworks[0] if frameworks else str(row["framework"] or ""),
+        "count": int(row["occurrence_count"] or 1),
+    }
     return {
+        "reason": finding_reason(signal),
+        "recommendation": finding_recommendation(signal, severity),
         "finding_id": str(row["id"] or ""),
         "asset_id": str(row["asset_id"] or ""),
         "severity": str(row["severity"] or "LOW"),
