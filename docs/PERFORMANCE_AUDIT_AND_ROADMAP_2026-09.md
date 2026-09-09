@@ -991,6 +991,46 @@ tables those functions read were rebuilt on every call — 22 µs a row, on ever
 scan as well as every report page — and are now module constants: 112 ms → 22 ms
 per 5,000 findings.
 
+### The Reports page is one instrument over one document
+
+The composer was a 336px rail beside a 760px document in a bordered workspace,
+inside a panel pinned to `height: 100dvh; overflow: hidden`. That model makes
+the panel a scroll container that can never scroll, so nothing on the page
+could stick to anything.
+
+The page now uses the model the two scan pages already use - `min-height:
+100dvh`, no overflow, scrolling at document level - and the composer is
+`position: sticky; top: 0` against the window. Going wide paid for itself
+twice: the section list keeps its per-section explanations and costs three
+rows instead of a scroller showing two and a half, and the document gets the
+full column instead of 760px with 240px of dead white either side.
+
+Three mechanisms were tried for the docked state and only the third is in the
+tree. An `IntersectionObserver` on a sentinel and a `requestAnimationFrame`
+coalescer both put the behaviour behind the frame lifecycle: where frames are
+throttled the observer delivers nothing and a pending rAF id never clears,
+leaving the band stuck in whichever state it was last in. A read on the scroll
+event has no such state - one `getBoundingClientRect()` the browser has already
+laid out for, writing nothing unless the answer changed.
+
+Two cascade defects this uncovered, both invisible until measured:
+
+- `styles.css` makes every `thead th` in the product `position: sticky; top: 0`
+  for the tables that live in a `.table-wrap`. The report document has no wrap,
+  so the nearest scrollport is the window and every table header in the report
+  peeled off and stacked under the band. `.report-table th` is `static`.
+- `styles/reports.css` named `--radius-md`, `--radius-sm` and `--elev-1`, none
+  of which exist. A `var()` that resolves to nothing drops the whole
+  declaration, which is why the document had square corners nobody chose.
+  A contract test now checks every token the sheet names against `tokens.css`.
+
+Report content grew with the width: nine more sections, all backed by fields
+already on the wire (`summary.total_occurrences`, `findings_by_status`,
+`sla_due`, `inventory_facets.locations` with its per-severity file counts,
+`risk_counts`, `avg_risk_score`, `scans`/`sources`, `scan_diagnostics`).
+`exposure` and `confidence` were rejected: the first is one repeated value on
+an SMB estate, the second is 0 for every non-PCI finding.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

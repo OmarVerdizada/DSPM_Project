@@ -191,8 +191,11 @@ class CoverageStateTests(unittest.TestCase):
         data classes would always start with it."""
         self.assertIn("const COVERAGE_FACET_VALUES = new Set([", APP_JS)
         self.assertIn("function isDataClass(value) {", APP_JS)
-        self.assertEqual(APP_JS.count("filter((item) => isDataClass(item.value))"), 2,
-                         "the card and the View all modal read the same list")
+        # Three consumers now: the dashboard card, its View all modal, and the
+        # Reports page's data-class sections. Every one of them reaches the
+        # finding_types facet through the same predicate, which is the point.
+        self.assertEqual(APP_JS.count("filter((item) => isDataClass(item.value))"), 3,
+                         "a data-class list read the facet without the coverage filter")
 
 
 class DashboardRoutingTests(unittest.TestCase):

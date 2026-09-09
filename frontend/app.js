@@ -58,6 +58,12 @@ const reportBuildLine = document.querySelector("#report-build-line");
 const reportCoverageSelect = document.querySelector("#report-coverage");
 const reportSeveritySelect = document.querySelector("#report-severity");
 const reportStatusSelect = document.querySelector("#report-status");
+const reportDepthSelect = document.querySelector("#report-depth");
+const reportDetailCountSelect = document.querySelector("#report-detail-count");
+const reportOrderSelect = document.querySelector("#report-order");
+const reportOptionsToggle = document.querySelector("#report-options-toggle");
+const reportSeamChip = document.querySelector("#report-seam-chip");
+const reportStage = document.querySelector("#report-stage");
 const logoutBtn = document.querySelector("#logout-btn");
 const profileToggle = document.querySelector("#profile-toggle");
 const profileName = document.querySelector("#profile-name");
@@ -4962,13 +4968,28 @@ function keywordCategoryLabel(category) {
     nist_source_code: "NIST source code",
     nist_tax: "NIST tax and treasury",
     pii: "Personal data",
+    personal_data: "Personal data",
     government_ids: "Government IDs",
+    official_identifier: "Official identifier",
+    credentials_secrets: "Credentials and secrets",
+    financial_records: "Financial records",
+    hr_documents: "HR and workforce records",
+    biometric_data: "Biometric data",
+    online_identifiers: "Online identifiers",
+    legal_contracts: "Legal and contractual records",
+    intellectual_property: "Intellectual property",
     financial: "Financial",
     credentials: "Credentials",
     health: "Health",
     hr: "HR",
   };
-  return labels[category] || String(category || "").replaceAll("_", " ");
+  // A report is a printed document: "hr documents" and "credentials secrets"
+  // read as raw column values, not as the names of things. Sentence-case the
+  // fallback so an unmapped category still prints like a label.
+  const known = labels[category];
+  if (known) return known;
+  const words = String(category || "").replaceAll("_", " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "";
 }
 
 function frameworkExportName(framework = "") {
@@ -5713,28 +5734,28 @@ const REPORT_TYPES = [
     label: "Executive summary",
     audience: "Board",
     blurb: "Posture, the risks that matter, what moved.",
-    sections: ["posture", "top_risks", "coverage", "trend"],
+    sections: ["posture", "scale", "top_risks", "detailed_findings", "coverage", "funnel", "estate", "trend", "assurance"],
   },
   {
     id: "register",
     label: "Risk register",
     audience: "Security team",
     blurb: "Every finding, its status and its fix.",
-    sections: ["severity_split", "register", "remediation", "owners", "appendix"],
+    sections: ["severity_split", "funnel", "lifecycle", "sla", "register", "detailed_findings", "remediation", "owners", "appendix"],
   },
   {
     id: "inventory",
     label: "Data inventory",
     audience: "Data owners",
     blurb: "What data the estate holds, and where.",
-    sections: ["data_classes", "locations", "assets", "appendix"],
+    sections: ["estate", "classes_by_file", "data_classes", "places", "locations", "assets", "provenance", "detailed_findings", "appendix"],
   },
   {
     id: "compliance",
     label: "Compliance pack",
     audience: "Auditor",
     blurb: "Framework coverage and mapped evidence.",
-    sections: ["frameworks", "framework_findings", "pci_scope", "remediation", "appendix"],
+    sections: ["frameworks", "framework_findings", "pci_scope", "detailed_findings", "remediation", "provenance", "assurance", "appendix"],
   },
 ];
 
@@ -5756,7 +5777,45 @@ const REPORT_SECTIONS = {
   framework_findings: { label: "Mapped findings", hint: "Findings by the framework they touch", pages: (rows) => Math.max(1, Math.ceil(rows / 28)) },
   pci_scope: { label: "PCI scope", hint: "Cardholder data and scope candidates", pages: () => 1 },
   appendix: { label: "Evidence appendix", hint: "Full register with paths and evidence", pages: (rows) => Math.max(1, Math.ceil(rows / 40)), off: true },
+
+  // Added once the page went wide enough to offer them. Every one is backed by
+  // a field the scan already returns; nothing here needs new backend work, and
+  // nothing degenerate got in - `exposure` is one repeated value on an SMB
+  // estate and `confidence` is 0 for every non-PCI finding, so neither is here.
+  detailed_findings: { label: "Findings in full", hint: "Each one written out with its reason and fix", pages: (rows, count) => Math.max(1, Math.ceil((count || 10) / 3)) },
+  scale: { label: "Scale of exposure", hint: "Findings, values and files in one line", pages: () => 1 },
+  funnel: { label: "Remediation funnel", hint: "Open through resolved, with exceptions", pages: () => 1 },
+  lifecycle: { label: "Status detail", hint: "Every lifecycle status, not the five groups", pages: () => 1 },
+  sla: { label: "SLA position", hint: "Overdue, due soon, and the earliest dates", pages: () => 1 },
+  estate: { label: "Estate profile", hint: "Every file by risk, not only the flagged", pages: () => 1 },
+  places: { label: "Where the risk lives", hint: "Shares and folders, severity-weighted", pages: () => 1 },
+  classes_by_file: { label: "Data classes by file", hint: "Unique files per class, with severity", pages: () => 2 },
+  provenance: { label: "Scan provenance", hint: "What was scanned, by what, and when", pages: () => 1 },
+  assurance: { label: "Scan assurance", hint: "Coverage, access denials and truncation", pages: () => 1, off: true },
 };
+
+// `has` answers "can this scan build the section at all". A section without one
+// is always buildable.
+const REPORT_SECTION_AVAILABILITY = {
+  trend: () => (buildReportComparisonRows() || []).length > 0,
+  pci_scope: () => Boolean(latestReport?.pci_scope_summary?.enabled),
+  assurance: () => Object.keys(latestReport?.scan_diagnostics || {}).length > 0,
+  frameworks: () => Boolean(reportRows.facets?.frameworks?.length),
+  places: () => Boolean(estateFacets?.locations?.length),
+  estate: () => Boolean(estateFacets?.risk_counts),
+  classes_by_file: () => Boolean(estateFacets?.finding_types?.length),
+  provenance: () => Boolean(estateFacets?.scans?.length || latestReport?.source),
+};
+
+function reportSectionIsAvailable(id) {
+  const test = REPORT_SECTION_AVAILABILITY[id];
+  if (!test) return true;
+  try {
+    return Boolean(test());
+  } catch (_) {
+    return false;
+  }
+}
 
 const REPORT_FORMATS = [
   { id: "pdf", label: "PDF", note: "Filed on the server as evidence, on the standard template. Scope applies; sections are fixed." },
@@ -5764,7 +5823,7 @@ const REPORT_FORMATS = [
   { id: "excel", label: "Excel", note: "Every section as a table, ready to filter and pivot." },
 ];
 
-let reportState = { type: "executive", format: "pdf", sections: null };
+let reportState = { type: "executive", format: "word", sections: null };
 
 // A report is evidence, so it covers the estate the server holds - not the 200
 // rows the Findings workspace happens to have loaded. Every row comes from
@@ -5783,8 +5842,8 @@ function reportType() {
   return REPORT_TYPES.find((item) => item.id === reportState.type) || REPORT_TYPES[0];
 }
 
-function reportDefaultSections(type) {
-  return new Set(type.sections.filter((id) => !REPORT_SECTIONS[id]?.off));
+function reportDefaultSections(type, depth = reportDepth()) {
+  return new Set(type.sections.filter((id) => depth.optional || !REPORT_SECTIONS[id]?.off));
 }
 
 function reportSections() {
@@ -5797,14 +5856,31 @@ function reportSeverities() {
   return raw === "ALL" ? null : new Set(raw.split(","));
 }
 
+// Depth is the one control that changes the SHAPE of the document rather than
+// its scope: how many rows a table prints, and whether the sections a reader
+// only sometimes wants come on by default.
+const REPORT_DEPTHS = {
+  brief: { label: "Brief", tableRows: 10, previewRows: 6, optional: false },
+  standard: { label: "Standard", tableRows: 60, previewRows: 12, optional: false },
+  full: { label: "Full", tableRows: Number.POSITIVE_INFINITY, previewRows: 20, optional: true },
+};
+
+function reportDepth() {
+  return REPORT_DEPTHS[reportDepthSelect?.value || "standard"] || REPORT_DEPTHS.standard;
+}
+
+function reportDetailCount() {
+  return Math.min(20, Math.max(0, Number(reportDetailCountSelect?.value) || 0));
+}
+
 function reportScopeParams() {
   const params = new URLSearchParams();
   params.set("scope", reportCoverageSelect?.value || "current");
   params.set("status", reportStatusSelect?.value || "active");
   const severities = reportSeverities();
   if (severities) params.set("severity", [...severities].join(","));
-  params.set("sort", "risk_score");
-  params.set("direction", "desc");
+  params.set("sort", reportOrderSelect?.value || "risk_score");
+  params.set("direction", (reportOrderSelect?.value || "risk_score") === "finding_name" ? "asc" : "desc");
   return params;
 }
 
@@ -5820,7 +5896,8 @@ function reportScopeLabel() {
   return [
     fieldLabel(reportCoverageSelect, "This scan"),
     fieldLabel(reportSeveritySelect, "All severities"),
-    fieldLabel(reportStatusSelect, "Open work only"),
+    fieldLabel(reportStatusSelect, "Every status"),
+    `${reportDepth().label} detail`,
   ].join(" · ");
 }
 
@@ -5906,6 +5983,10 @@ function reportRegisterRows() {
       owner: String(item.owner || ""),
       status: remediationStatusLabel(item.status),
       due: String(item.sla_due || ""),
+      lastSeen: String(item.last_seen || ""),
+      occurrences: Number(item.occurrence_count || 0),
+      confidence: Number(item.confidence || 0),
+      exposure: String(item.exposure || ""),
       reason: String(item.reason || ""),
       recommendation: String(item.recommendation || ""),
     };
@@ -5938,10 +6019,10 @@ function buildReportDocumentHtml() {
   const blocks = reportSectionBlocks();
   const body = blocks.map((block, index) => `
     <h2>${index + 1}. ${escapeHtml(block.label)}</h2>
-    ${block.table ? `<table border="1" cellspacing="0" cellpadding="6">
+    ${block.detail ? reportDetailWordHtml(block.detail) : block.table ? `<table border="1" cellspacing="0" cellpadding="6">
       <thead><tr>${block.table.headers.map((head) => `<th align="left">${escapeHtml(head)}</th>`).join("")}</tr></thead>
       <tbody>${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}</tbody>
-    </table>${block.note || ""}` : (block.html || "")}`).join("");
+    </table>${reportDroppedNote(block.table)}${block.note || ""}` : (block.html || "")}`).join("");
   return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(reportDocumentTitle())}</title>
     <style>
       body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #111827; }
@@ -5960,11 +6041,15 @@ function buildReportDocumentHtml() {
 function buildReportWorkbookHtml() {
   const blocks = reportSectionBlocks();
   const tables = blocks.map((block) => {
+    // A spreadsheet holds long text happily, so the detail blocks travel as a
+    // wide sheet rather than as prose.
+    if (block.detail) return reportDetailWorkbookHtml(block);
     if (!block.table) return "";
     return `<table border="1" cellspacing="0" cellpadding="4">
       <tr><td colspan="${block.table.headers.length}"><b>${escapeHtml(block.label)}</b></td></tr>
       <tr>${block.table.headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr>
       ${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}
+      ${reportDroppedText(block.table) ? `<tr><td colspan="${block.table.headers.length}">${escapeHtml(reportDroppedText(block.table))}</td></tr>` : ""}
     </table><br/>`;
   }).join("");
   return `<!doctype html><html><head><meta charset="utf-8"></head><body>
@@ -5972,6 +6057,29 @@ function buildReportWorkbookHtml() {
     <tr><td>tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}</td></tr>
     <tr><td>${escapeHtml(reportCoverageLine())}</td></tr></table><br/>
     ${tables}</body></html>`;
+}
+
+function reportDetailWordHtml(entries) {
+  return entries.map((entry, index) => `
+    <h3>${index + 1}. ${escapeHtml(entry.finding)} &mdash; ${escapeHtml(severityLabel(entry.severity))}</h3>
+    <p><i>${escapeHtml(entry.path || entry.name)}</i></p>
+    <p>${reportDetailFacts(entry).map(([term, value]) =>
+      `<b>${escapeHtml(term)}:</b> ${escapeHtml(value)}`).join(" &nbsp;&middot;&nbsp; ")}</p>
+    ${entry.reason ? `<p><b>Why it is a risk.</b> ${escapeHtml(entry.reason)}</p>` : ""}
+    ${entry.recommendation ? `<p><b>Recommended action.</b> ${escapeHtml(entry.recommendation)}</p>` : ""}`).join("");
+}
+
+function reportDetailWorkbookHtml(block) {
+  const headers = ["#", "Finding", "Severity", "Status", "File", "Data class", "Owner", "Why it is a risk", "Recommended action"];
+  return `<table border="1" cellspacing="0" cellpadding="4">
+    <tr><td colspan="${headers.length}"><b>${escapeHtml(block.label)}</b></td></tr>
+    <tr>${headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr>
+    ${block.detail.map((entry, index) => `<tr>${[
+      String(index + 1), entry.finding, severityLabel(entry.severity), entry.status,
+      entry.path || entry.name, keywordCategoryLabel(entry.dataClass), entry.owner,
+      entry.reason, entry.recommendation,
+    ].map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}
+  </table><br/>`;
 }
 
 async function generateReport(event) {
@@ -6025,6 +6133,15 @@ reportTypeList?.addEventListener("click", (event) => {
   renderReportPreview();
 });
 
+// Ticking a box and then watching that section appear where the list said it
+// would is the half of the connection you can use.
+reportSectionList?.addEventListener("click", (event) => {
+  const jump = event.target.closest("[data-report-jump]");
+  if (!jump) return;
+  document.querySelector(`#report-section-${jump.dataset.reportJump}`)
+    ?.scrollIntoView({ block: "start", behavior: "smooth" });
+});
+
 reportSectionList?.addEventListener("change", (event) => {
   const box = event.target.closest("[data-report-section]");
   if (!box) return;
@@ -6043,10 +6160,67 @@ reportFormatList?.addEventListener("click", (event) => {
 
 // Changing scope invalidates the rows, so the preview refetches rather than
 // re-rendering a document built from the previous answer.
-[reportCoverageSelect, reportSeveritySelect, reportStatusSelect].forEach((select) => {
+[reportCoverageSelect, reportSeveritySelect, reportStatusSelect, reportOrderSelect].forEach((select) => {
   select?.addEventListener("change", () => renderReportPreview());
 });
+
+// Depth changes which sections a document offers, so it restarts from that
+// document's defaults at the new depth rather than keeping a tick that the
+// previous depth put there.
+reportDepthSelect?.addEventListener("change", () => {
+  reportState.sections = reportDefaultSections(reportType());
+  renderReportPreview();
+});
+
+reportDetailCountSelect?.addEventListener("change", () => renderReportPreview());
 reportComposer?.addEventListener("submit", generateReport);
+
+// The band is docked exactly when it has reached the top of the window.
+//
+// An IntersectionObserver on a sentinel is the tidier way to ask this, and it
+// is what this first shipped with. It is not used, and neither is a
+// requestAnimationFrame coalescer, because both put the behaviour behind the
+// frame lifecycle: where frames are throttled the observer never delivers, and
+// a pending rAF id never clears, which leaves the band stuck in whichever
+// state it was last in. A read on the scroll event has no such state to get
+// stuck in. It costs one rect read - the browser has already laid out by then
+// - and writes nothing at all unless the answer changed.
+function syncReportDock() {
+  if (!reportComposer || !reportStage) return;
+  const docked = reportStage.getBoundingClientRect().top <= 0;
+  if (docked === reportComposer.classList.contains("is-docked")) return;
+  reportComposer.classList.toggle("is-docked", docked);
+  renderReportOptionsToggle();
+  measureReportBand();
+}
+
+window.addEventListener("scroll", syncReportDock, { passive: true });
+window.addEventListener("resize", syncReportDock, { passive: true });
+
+reportOptionsToggle?.addEventListener("click", () => {
+  // Undocking to show the options would move the page under the pointer, so
+  // the collapse is its own state and the docked state only adds to it.
+  const showing = reportOptionsAreOpen();
+  reportComposer?.classList.toggle("is-collapsed", showing);
+  if (!showing && reportComposer?.classList.contains("is-docked")) {
+    reportComposer.classList.remove("is-docked");
+    document.querySelector("#tab-reports")?.scrollIntoView({ block: "start" });
+  }
+  renderReportOptionsToggle();
+});
+
+function reportOptionsAreOpen() {
+  if (!reportComposer) return false;
+  return !reportComposer.classList.contains("is-collapsed")
+    && !reportComposer.classList.contains("is-docked");
+}
+
+function renderReportOptionsToggle() {
+  const label = document.querySelector("#report-options-toggle-label");
+  const open = reportOptionsAreOpen();
+  if (label) label.textContent = open ? "Hide options" : "Show options";
+  reportOptionsToggle?.setAttribute("aria-expanded", open ? "true" : "false");
+}
 
 function renderReportComposer() {
   if (!reportTypeList) return;
@@ -6058,21 +6232,27 @@ function renderReportComposer() {
         <span class="report-type-name">${escapeHtml(item.label)}</span>
         <span class="report-type-audience">${escapeHtml(item.audience)}</span>
       </span>
-      ${item.id === type.id ? `<span class="report-type-blurb">${escapeHtml(item.blurb)}</span>` : ""}
+      <span class="report-type-blurb">${escapeHtml(item.blurb)}</span>
     </button>`).join("");
 
   const chosen = reportSections();
   reportSectionList.innerHTML = type.sections.map((id) => {
     const section = REPORT_SECTIONS[id];
     if (!section) return "";
+    const available = reportSectionIsAvailable(id);
     return `
-      <label class="report-section-row">
-        <input type="checkbox" data-report-section="${id}" ${chosen.has(id) ? "checked" : ""} />
-        <span class="report-section-copy">
-          <span class="report-section-name">${escapeHtml(section.label)}</span>
-          <span class="report-section-hint">${escapeHtml(section.hint)}</span>
-        </span>
-      </label>`;
+      <div class="report-section-row" ${available ? "" : 'data-unavailable="true"'}>
+        <label class="report-section-tick">
+          <input type="checkbox" data-report-section="${id}" ${chosen.has(id) && available ? "checked" : ""}
+                 ${available ? "" : "disabled"} />
+          <span class="report-section-copy">
+            <span class="report-section-name">${escapeHtml(section.label)}</span>
+            <span class="report-section-hint">${escapeHtml(available ? section.hint : "Not part of this scan.")}</span>
+          </span>
+        </label>
+        ${chosen.has(id) && available ? `<button type="button" class="report-section-jump plain-btn" data-report-jump="${id}"
+                aria-label="Go to ${escapeHtml(section.label)} in the document">&rarr;</button>` : ""}
+      </div>`;
   }).join("");
 
   reportFormatList.innerHTML = REPORT_FORMATS.map((item) => `
@@ -6082,12 +6262,43 @@ function renderReportComposer() {
   reportFormatNote.textContent = format.note;
   // The filed PDF is one fixed template on purpose - an auditor wants the same
   // shape every time - so the section list says so rather than being ignored.
-  reportSectionList.classList.toggle("is-inert", reportState.format === "pdf");
+  const fixed = reportState.format === "pdf";
+  reportSectionList.classList.toggle("is-inert", fixed);
+  // Two reasons a tick is refused: the filed PDF ignores the list, or this
+  // scan cannot build that section. Clearing the flag for the first reason
+  // used to re-enable the second.
   reportSectionList.querySelectorAll("input").forEach((input) => {
-    input.disabled = reportState.format === "pdf";
+    input.disabled = fixed || !reportSectionIsAvailable(input.dataset.reportSection);
+  });
+  document.querySelector("#composer-options")?.classList.toggle("is-template", fixed);
+  [reportDepthSelect, reportDetailCountSelect, reportOrderSelect].forEach((select) => {
+    if (select) select.disabled = fixed;
   });
 
   renderReportBuildLine();
+  renderReportOptionsToggle();
+  renderReportCarrier();
+  measureReportBand();
+  syncReportDock();
+}
+
+// The joint between the instrument and the page it makes. It carries the same
+// sentence the document's own cover prints, so the connection is made of
+// content rather than of pixels - change any control and the strip and the
+// cover move in the same frame. Once the band is docked and the document's
+// cover has scrolled away, this is the only thing still saying which report
+// and which scope you are reading.
+// The jump target has to land below the band, and the band has two heights.
+function measureReportBand() {
+  if (!reportStage || !reportComposer) return;
+  reportStage.style.setProperty("--report-band-h", `${Math.round(reportComposer.getBoundingClientRect().height)}px`);
+}
+
+function renderReportCarrier() {
+  const title = document.querySelector("#report-carrier-title");
+  const scope = document.querySelector("#report-carrier-scope");
+  if (title) title.textContent = reportType().label;
+  if (scope) scope.textContent = reportScopeLabel();
 }
 
 function reportBuildStats() {
@@ -6132,15 +6343,41 @@ function renderReportBuildLine() {
 function reportSectionBlocks() {
   const model = buildReportModel();
   const rows = reportRegisterRows();
+  const cap = reportDepth().tableRows;
   return [...reportSections()]
-    .filter((id) => reportType().sections.includes(id))
+    .filter((id) => reportType().sections.includes(id) && reportSectionIsAvailable(id))
     .sort((a, b) => reportType().sections.indexOf(a) - reportType().sections.indexOf(b))
     .map((id) => ({ id, label: REPORT_SECTIONS[id].label, ...reportSectionContent(id, model, rows) }))
-    .filter((block) => block.html || block.table);
+    .map((block) => (block.table && Number.isFinite(cap) && block.table.rows.length > cap
+      ? { ...block, table: { ...block.table, rows: block.table.rows.slice(0, cap) }, capped: true }
+      : block))
+    .filter((block) => block.html || block.table || block.detail?.length);
 }
 
+// "none" and "unknown" are ANSWERS in a security report - "Owner: unknown"
+// is a finding, not a gap - so a column of them is a column that said
+// something. Only a genuine blank counts.
+const REPORT_EMPTY_CELLS = new Set(["", "-", "—", "–", "n/a"]);
+
+function reportCellIsEmpty(cell) {
+  return REPORT_EMPTY_CELLS.has(String(cell ?? "").trim().toLowerCase());
+}
+
+// A column every row left blank is noise in a printed document: it costs width
+// the columns that DID answer needed, and it reads as missing data rather than
+// as a question this scan could not answer. Drop it, keeping at least one.
 function reportTable(headers, bodyRows) {
-  return { headers, rows: bodyRows };
+  const keep = headers.map((_, index) =>
+    !bodyRows.length || bodyRows.some((row) => !reportCellIsEmpty(row[index])));
+  // The first column is the row's identity - Finding, File, Framework,
+  // Measure - and a table that lost it cannot be read at all.
+  keep[0] = true;
+  if (keep.every(Boolean)) return { headers, rows: bodyRows };
+  return {
+    headers: headers.filter((_, index) => keep[index]),
+    rows: bodyRows.map((row) => row.filter((_, index) => keep[index])),
+    dropped: headers.filter((_, index) => !keep[index]),
+  };
 }
 
 function reportTally(rows, pick) {
@@ -6320,6 +6557,114 @@ function reportSectionContent(id, model, rows) {
         ["Scope candidates", String(scope.cde_candidate_count || 0)],
       ]) };
     }
+    case "detailed_findings": {
+      const count = reportDetailCount();
+      if (!count) return { html: '<p class="report-note">Set &ldquo;Findings written out in full&rdquo; above to include this section.</p>' };
+      return { detail: rows.slice(0, count) };
+    }
+    case "scale": {
+      const findings = Number(summary.total_findings || reportRows.total || 0);
+      const values = Number(summary.total_occurrences || 0);
+      const files = Number(summary.affected_files || 0);
+      return { table: reportTable(["Measure", "Count"], [
+        ["Findings", findings.toLocaleString()],
+        ["Matched values behind them", values.toLocaleString()],
+        ["Files carrying them", files.toLocaleString()],
+        ["Values per affected file", files ? (values / files).toFixed(1) : "—"],
+      ]) };
+    }
+    case "funnel": {
+      const stages = [
+        ["Open", summary.open], ["In progress", summary.in_progress],
+        ["Awaiting validation", summary.pending_validation], ["Resolved", summary.resolved],
+        ["Risk accepted", summary.risk_accepted], ["Suppressed", summary.suppressed],
+        ["False positive", summary.false_positive],
+      ].filter(([, value]) => Number(value || 0) > 0);
+      if (!stages.length) return { html: '<p class="report-note">No lifecycle activity has been recorded for this scope.</p>' };
+      return { table: reportTable(["Stage", "Findings"], stages
+        .map(([label, value]) => [label, Number(value || 0).toLocaleString()])) };
+    }
+    case "lifecycle": {
+      const byStatus = Object.entries(summary.findings_by_status || {});
+      if (!byStatus.length) return { html: '<p class="report-note">No statuses were recorded for this scope.</p>' };
+      return { table: reportTable(["Status", "Findings"], byStatus
+        .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+        .map(([status, count]) => [remediationStatusLabel(status), Number(count || 0).toLocaleString()])) };
+    }
+    case "sla": {
+      const overdue = Number(summary.overdue || 0);
+      const dated = rows.filter((row) => row.due).sort((a, b) => a.due.localeCompare(b.due));
+      if (!overdue && !dated.length) return { html: '<p class="report-note">No SLA dates are set on the findings in this scope.</p>' };
+      return {
+        table: reportTable(["Finding", "File", "Severity", "Due"], dated.slice(0, 25)
+          .map((row) => [row.finding, row.name || row.path, severityLabel(row.severity), formatReportDate(row.due)])),
+        note: `<p class="report-note">${overdue.toLocaleString()} of ${Number(summary.total_findings || reportRows.total || 0).toLocaleString()} findings in this scope are past their SLA.</p>`,
+      };
+    }
+    case "estate": {
+      const counts = estateFacets?.risk_counts || {};
+      const rowsOut = REPORT_SEVERITY_ORDER
+        .filter((level) => Number(counts[level] || 0))
+        .map((level) => [severityLabel(level), Number(counts[level]).toLocaleString()]);
+      if (!rowsOut.length) return { html: '<p class="report-note">The estate summary is not available for this scan.</p>' };
+      const average = Number(estateFacets?.avg_risk_score || 0);
+      return { table: reportTable(["Measure", "Files"], [
+        ["Files in the estate", estateTotal.toLocaleString()],
+        ...rowsOut,
+        ["Unreadable", Number(estateFacets?.protected || 0).toLocaleString()],
+        ["Average risk score", average ? average.toFixed(1) : ""],
+      ]) };
+    }
+    case "places": {
+      const places = estateFacets?.locations || [];
+      if (!places.length) return { html: '<p class="report-note">No location breakdown is available for this scan.</p>' };
+      return { table: reportTable(["Location", "Files", "Critical", "High"], places
+        .slice(0, 25)
+        .map((place) => [
+          `${"\u00a0\u00a0".repeat(Number(place.depth || 0))}${place.label || place.value}`,
+          Number(place.file_count ?? place.count ?? 0).toLocaleString(),
+          Number(place.severity_file_counts?.CRITICAL || 0).toLocaleString(),
+          Number(place.severity_file_counts?.HIGH || 0).toLocaleString(),
+        ])) };
+    }
+    case "classes_by_file": {
+      const classes = (estateFacets?.finding_types || []).filter((item) => isDataClass(item.value));
+      if (!classes.length) return { html: '<p class="report-note">No data classes were found in this scan.</p>' };
+      return { table: reportTable(["Data class", "Files", "Critical", "High"], classes
+        .slice(0, 40)
+        .map((item) => [
+          keywordCategoryLabel(item.value),
+          Number(item.file_count ?? item.count ?? 0).toLocaleString(),
+          Number(item.severity_file_counts?.CRITICAL || 0).toLocaleString(),
+          Number(item.severity_file_counts?.HIGH || 0).toLocaleString(),
+        ])) };
+    }
+    case "provenance": {
+      const scans = (estateFacets?.scans || []).map((item) => String(item.value)).filter(Boolean);
+      const sources = (estateFacets?.sources || []).map((item) => String(item.value)).filter(Boolean);
+      return { table: reportTable(["Measure", "Value"], [
+        ["Scan", scans.join(", ")],
+        ["Collector", sources.join(", ")],
+        ["Server", String(latestReport?.source || readPayload().server || "")],
+        ["Run at", latestReport?.timestamp ? formatReportDate(latestReport.timestamp) : ""],
+        ["Files in the estate", estateTotal.toLocaleString()],
+      ]) };
+    }
+    case "assurance": {
+      const diagnostics = latestReport?.scan_diagnostics || {};
+      const shares = Number(diagnostics.shares_scanned || 0);
+      const facts = [
+        ["Files discovered", diagnostics.files_discovered],
+        ["Shares scanned", shares],
+        ["Shares access denied", diagnostics.shares_access_denied],
+        ["Shares skipped", diagnostics.shares_skipped],
+        ["Directories that could not be listed", (diagnostics.list_errors || []).length || 0],
+        ["Result truncated", diagnostics.scan_truncated ? "Yes" : ""],
+      ].filter(([, value]) => value !== undefined && value !== null && Number(value) !== 0 || typeof value === "string" && value);
+      if (!facts.length) return { html: '<p class="report-note">This scan recorded no coverage exceptions.</p>' };
+      return { table: reportTable(["Measure", "Value"], facts
+        .map(([label, value]) => [label, typeof value === "number" ? value.toLocaleString() : String(value)])) };
+    }
     case "appendix":
       return { table: reportTable(["Finding", "Path", "Severity", "Data class", "Owner", "Status", "Recommended action"], rows
         .map((row) => [row.finding, row.path, severityLabel(row.severity), row.dataClass,
@@ -6329,7 +6674,64 @@ function reportSectionContent(id, model, rows) {
   }
 }
 
-function reportTableMarkup(table, limit = 12) {
+// A reason runs to 162 characters and an action to 101. In a six-column table
+// on a 760px page that is four wrapped lines of 90px column, which is why the
+// two fields the brief cares most about were the two nobody could read. These
+// findings get a block each instead, with the sentences at full width.
+function reportDetailMarkup(entries) {
+  if (!entries.length) return '<p class="report-note">No finding in this scope carries a written reason yet.</p>';
+  return `<ol class="report-detail-list">${entries.map((entry) => `
+    <li class="report-detail" data-severity="${escapeHtml(entry.severity)}">
+      <div class="report-detail-head">
+        <span class="report-detail-name">${escapeHtml(entry.finding)}</span>
+        <span class="report-sev" data-severity="${escapeHtml(entry.severity)}">${escapeHtml(severityLabel(entry.severity))}</span>
+      </div>
+      <p class="report-detail-path">${escapeHtml(entry.path || entry.name)}</p>
+      <dl class="report-detail-facts">
+        ${reportDetailFacts(entry).map(([term, value]) => `
+          <div><dt>${escapeHtml(term)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}
+      </dl>
+      ${entry.reason ? `<div class="report-detail-prose">
+        <p class="report-detail-term">Why it is a risk</p>
+        <p>${escapeHtml(entry.reason)}</p></div>` : ""}
+      ${entry.recommendation ? `<div class="report-detail-prose">
+        <p class="report-detail-term">Recommended action</p>
+        <p>${escapeHtml(entry.recommendation)}</p></div>` : ""}
+    </li>`).join("")}</ol>`;
+}
+
+// Only the facts this finding actually carries - the same rule the tables now
+// follow, applied one row at a time.
+function reportDetailFacts(entry) {
+  return [
+    ["Status", entry.status],
+    ["Data class", keywordCategoryLabel(entry.dataClass)],
+    ["Framework", (entry.frameworks || []).map(frameworkLabel).join(", ")],
+    ["Owner", entry.owner],
+    ["Score", entry.score ? String(entry.score) : ""],
+    ["Occurrences", entry.occurrences > 1 ? String(entry.occurrences) : ""],
+    ["Due", entry.due ? formatReportDate(entry.due) : ""],
+  ].filter(([, value]) => !reportCellIsEmpty(value));
+}
+
+function formatReportDate(value) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleDateString();
+}
+
+function reportDroppedText(table) {
+  if (!table?.dropped?.length) return "";
+  const names = table.dropped.join(", ");
+  const column = table.dropped.length === 1 ? "that column is" : "those columns are";
+  return `No row in this scope carried ${names}, so ${column} not printed.`;
+}
+
+function reportDroppedNote(table) {
+  const text = reportDroppedText(table);
+  return text ? `<p class="report-note">${escapeHtml(text)}</p>` : "";
+}
+
+function reportTableMarkup(table, limit = reportDepth().previewRows) {
   const shown = table.rows.slice(0, limit);
   if (!shown.length) return '<p class="report-note">Nothing to show for this scope.</p>';
   return `
@@ -6337,7 +6739,14 @@ function reportTableMarkup(table, limit = 12) {
       <thead><tr>${table.headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr></thead>
       <tbody>${shown.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}</tbody>
     </table>
+    ${reportDroppedNote(table)}
     ${table.rows.length > shown.length ? `<p class="report-note">Preview shows ${shown.length} of ${table.rows.length.toLocaleString()} rows.</p>` : ""}`;
+}
+
+function reportBlockMarkup(block) {
+  if (block.detail) return reportDetailMarkup(block.detail) + (block.note || "");
+  if (block.table) return reportTableMarkup(block.table) + (block.note || "");
+  return block.html || "";
 }
 
 async function renderReportPreview() {
@@ -6374,9 +6783,9 @@ async function renderReportPreview() {
         <p class="report-cover-scope">${escapeHtml(reportCoverageLine())}</p>
       </header>
       ${blocks.length ? blocks.map((block, index) => `
-        <section class="report-section-block">
+        <section class="report-section-block" id="report-section-${escapeHtml(block.id)}">
           <h4><span class="report-section-index">${index + 1}</span>${escapeHtml(block.label)}</h4>
-          ${block.table ? reportTableMarkup(block.table) + (block.note || "") : block.html}
+          ${reportBlockMarkup(block)}
         </section>`).join("") : '<p class="report-note">Tick at least one section to build a report.</p>'}
     </article>`;
 }
