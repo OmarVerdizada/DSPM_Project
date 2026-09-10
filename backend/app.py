@@ -1798,7 +1798,10 @@ def endpoint_check_access(payload: EndpointScanRequest, principal: Principal = D
         "endpoint.access.check",
         {"host": _safe_target_label(payload.host), "target_username": payload.target_username},
     )
-    return scanner.check_access()
+    try:
+        return scanner.check_access()
+    except Exception as exc:
+        raise _safe_operation_error("Endpoint access check failed", exc) from exc
 
 
 @app.post("/api/endpoint/activate-local-winrm")
@@ -2505,6 +2508,17 @@ def _safe_operation_error(message: str, exc: Exception) -> HTTPException:
     lowered = raw.lower()
     code = "operation_failed"
     hint = "Check the target, credentials, and scan scope, then retry."
+    if "dspm_winrm_kerberos" in lowered:
+        # Asking for Kerberos on an install that cannot speak it is the
+        # operator's own configuration, and the exception already says which
+        # package is missing and what the alternative setting is. Flattening it
+        # into "install requirements.txt" would send them to a file that has
+        # never contained requests-kerberos.
+        return HTTPException(status_code=400, detail={
+            "message": "Kerberos was required but is not available on this host",
+            "code": "kerberos_unavailable",
+            "hint": raw,
+        })
     if isinstance(exc, FileNotFoundError) or "no such file or directory" in lowered or "cannot find the path" in lowered:
         code = "scan_path_not_found"
         message = "Scan path was not found"
@@ -3545,8 +3559,32 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
 # Registered LAST so every real route and the /static mount win first: an
 # unknown page URL redirects to the dashboard instead of leaking a raw JSON
 # 404, while unknown API/static paths keep failing loudly for clients.
-@app.get("/{unmatched_path:path}", include_in_schema=False)
-def unknown_page_redirect(unmatched_path: str):
-    if unmatched_path.startswith(("api/", "static/")) or "." in unmatched_path.rsplit("/", 1)[-1]:
+@app.api_route(
+    "/{unmatched_path:path}",
+    include_in_schema=False,
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+def unknown_page_redirect(unmatched_path: str, request: Request):
+    """Every verb, so an unknown API path 404s instead of reporting 405.
+
+    Registered for GET alone, this route still MATCHED a POST by path - and
+    Starlette answers a path match with no method match as 405 Method Not
+    Allowed, without ever calling the handler. So a POST to an endpoint the
+    running server does not have came back as "Method Not Allowed", which reads
+    as a bug in the request rather than as a missing route, and is exactly what
+    a server left running across an upgrade looks like.
+    """
+
+    is_api = unmatched_path.startswith(("api/", "static/"))
+    if is_api:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Unknown endpoint: /{unmatched_path}. If this worked before an upgrade, "
+                "the running server predates it - restart it and retry."
+            ),
+        )
+    # A redirect is only meaningful for a page navigation, which is a GET.
+    if request.method != "GET" or "." in unmatched_path.rsplit("/", 1)[-1]:
         raise HTTPException(status_code=404, detail="Not Found")
     return RedirectResponse("/dashboard", status_code=302)

@@ -200,7 +200,10 @@
   --z-raised: 10;
   --z-sticky: 100;
   --z-overlay: 1000;
-  --z-toast: 1100;
+  /* Above the legacy profile panel (10000), which is still one of the
+     ad-hoc values this ladder has yet to replace. Below the avatar crop
+     modal (20000): that is a focused task with its own controls. */
+  --z-toast: 10001;
 
   /* ── Motion — one vocabulary ──────────────────────────────
      The console currently runs three page-transition systems at once and

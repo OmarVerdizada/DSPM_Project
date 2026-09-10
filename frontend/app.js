@@ -18,7 +18,7 @@ const customExtensionInput = document.querySelector("#custom-extension-input");
 const addCustomExtensionBtn = document.querySelector("#add-custom-extension-btn");
 const endpointCustomExtensionInput = document.querySelector("#endpoint-custom-extension-input");
 const endpointAddCustomExtensionBtn = document.querySelector("#endpoint-add-custom-extension-btn");
-const toastHost = document.querySelector("#toast-host");
+const noticeHost = document.querySelector("#notice-host");
 const sidebarToggle = document.querySelector("#sidebar-toggle");
 const protectedCount = document.querySelector("#protected-count");
 const health = document.querySelector("#health");
@@ -1487,18 +1487,76 @@ function summarizeFileServerDiagnostics(report = {}) {
   return facts;
 }
 
-function showToast(title, message = "", tone = "info") {
-  const toast = document.createElement("div");
-  toast.className = `toast ${tone}`;
-  toast.innerHTML = `<button type="button" class="toast-close" aria-label="Dismiss notification"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button><strong>${escapeHtml(title)}</strong>${message ? `<span>${escapeHtml(message)}</span>` : ""}`;
-  toast.querySelector(".toast-close").addEventListener("click", () => {
-    toast.classList.add("leaving");
-    window.setTimeout(() => toast.remove(), 260);
-  });
-  toastHost.appendChild(toast);
-  window.setTimeout(() => toast.classList.add("leaving"), 4200);
-  window.setTimeout(() => toast.remove(), 4800);
+/* How long a notice stays up, by tone. A confirmation has been read by the
+   time it finishes appearing; a failure carries the sentence that says what
+   went wrong, and taking that away after four seconds is how an operator ends
+   up re-running a scan to find out why the first one failed. */
+const NOTICE_LIFETIMES = { info: 5000, success: 5000, warning: 8000, danger: 12000 };
+const NOTICE_LIMIT = 4;
+const NOTICE_EXIT_MS = 200;
+
+function dismissNotice(notice) {
+  if (!notice || notice.dataset.leaving === "1") return;
+  notice.dataset.leaving = "1";
+  window.clearTimeout(Number(notice.dataset.timer || 0));
+  notice.classList.add("leaving");
+  window.setTimeout(() => notice.remove(), NOTICE_EXIT_MS);
 }
+
+function armNoticeTimer(notice) {
+  window.clearTimeout(Number(notice.dataset.timer || 0));
+  const life = Number(notice.dataset.life || 0);
+  if (!life || notice.dataset.paused === "1") return;
+  notice.dataset.timer = String(window.setTimeout(() => dismissNotice(notice), life));
+}
+
+/* Pause while the pointer or the keyboard is inside it. Without this a notice
+   can expire between reading its first line and reaching for its close
+   button, which reads as the notice refusing to be dismissed. */
+function holdNotice(notice, paused) {
+  notice.dataset.paused = paused ? "1" : "0";
+  if (paused) {
+    window.clearTimeout(Number(notice.dataset.timer || 0));
+    return;
+  }
+  armNoticeTimer(notice);
+}
+
+function showToast(title, message = "", tone = "info") {
+  if (!noticeHost) return null;
+
+  const notice = document.createElement("div");
+  notice.className = `notice ${tone}`;
+  // Failures interrupt a screen reader; confirmations wait their turn.
+  notice.setAttribute("role", tone === "danger" ? "alert" : "status");
+  const life = NOTICE_LIFETIMES[tone] ?? NOTICE_LIFETIMES.info;
+  notice.dataset.life = String(life);
+  notice.style.setProperty("--notice-life", `${life}ms`);
+  notice.innerHTML = `<button type="button" class="notice-close plain-btn" aria-label="Dismiss notification"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button><strong class="notice-title">${escapeHtml(title)}</strong>${message ? `<span class="notice-body">${escapeHtml(message)}</span>` : ""}<span class="notice-life" aria-hidden="true"></span>`;
+
+  notice.querySelector(".notice-close").addEventListener("click", () => dismissNotice(notice));
+  notice.addEventListener("mouseenter", () => holdNotice(notice, true));
+  notice.addEventListener("mouseleave", () => holdNotice(notice, false));
+  notice.addEventListener("focusin", () => holdNotice(notice, true));
+  notice.addEventListener("focusout", () => holdNotice(notice, false));
+
+  noticeHost.appendChild(notice);
+  armNoticeTimer(notice);
+
+  // A burst of notices - a scan finishing on several hosts - must not grow
+  // into a column that covers the page it is reporting on.
+  const live = Array.from(noticeHost.children).filter((item) => item.dataset.leaving !== "1");
+  live.slice(0, Math.max(0, live.length - NOTICE_LIMIT)).forEach(dismissNotice);
+  return notice;
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !noticeHost) return;
+  const live = Array.from(noticeHost.children).filter((item) => item.dataset.leaving !== "1");
+  // Newest first: Escape walks the stack back the way it was built. It does
+  // not preventDefault - a modal or a menu still gets the same keypress.
+  if (live.length) dismissNotice(live[live.length - 1]);
+});
 
 function updateEndpointCustomPathState(isBusy = false) {
   if (!endpointPathScope || !endpointCustomPaths) {

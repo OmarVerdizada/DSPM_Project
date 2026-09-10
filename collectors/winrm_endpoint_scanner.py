@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import functools
 import gzip
 import io
 import ipaddress
@@ -582,6 +583,26 @@ def _format_windows_username(username: str, domain: str) -> str:
     return username
 
 
+class WinRMKerberosUnavailable(RuntimeError):
+    """Kerberos was required and this install cannot provide it."""
+
+
+@functools.lru_cache(maxsize=1)
+def _kerberos_transport_available() -> bool:
+    """Whether pywinrm can actually negotiate Kerberos here.
+
+    pywinrm imports requests_kerberos lazily inside build_session, so an absent
+    dependency surfaces as a failed connection attempt rather than as anything
+    that names the cause.
+    """
+
+    try:
+        import requests_kerberos  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
 @dataclass(slots=True)
 class WinRMEndpointConfig:
     host: str
@@ -834,8 +855,18 @@ class WinRMEndpointScanner:
                 } | ConvertTo-Json -Compress -Depth 4
                 """
             )
-        except Exception:
-            return {"ok": False, "host": self.config.host, "message": "WinRM access check failed"}
+        except WinRMKerberosUnavailable:
+            # Not a target problem and not something a retry fixes: the install
+            # was told to require Kerberos and cannot. Reporting that as a
+            # generic access failure is the exact silence this preflight exists
+            # to remove, so it travels up to the API and gets its own hint.
+            raise
+        except Exception as exc:
+            return {
+                "ok": False,
+                "host": self.config.host,
+                "message": _clean_error(str(exc)) or "WinRM access check failed",
+            }
 
         if result.status_code != 0:
             return {
@@ -1060,14 +1091,41 @@ class WinRMEndpointScanner:
         return f"http{'s' if self.config.use_ssl else ''}://{host_for_url}:{port}/wsman"
 
     def _winrm_transports(self) -> list[str]:
-        # M11 (0.3): prefer Kerberos (mutual auth, not NTLM-relayable) for domain
-        # targets when enabled, always with an NTLM fallback. Kerberos needs
-        # requests-kerberos + a usable ticket; if unavailable the attempt fails
-        # and the loop falls through to NTLM. Read-only scan scripts are
-        # idempotent, so a re-run after a failed transport is safe.
-        if os.getenv("DSPM_WINRM_KERBEROS", "0") == "1":
-            return ["kerberos", "ntlm"]
-        return ["ntlm"]
+        """Which authentication to offer, and in what order.
+
+        Kerberos is preferred where it is asked for because it authenticates the
+        SERVER as well as the client and cannot be relayed the way NTLM can.
+
+        The subtlety is what to do when it was asked for and cannot be had. The
+        old answer was to list it first and let the attempt fail into the NTLM
+        entry behind it - which meant that with requests-kerberos absent (it is
+        an optional pywinrm extra, and is not installed here) the flag did
+        nothing at all, quietly, while the operator believed they had turned
+        NTLM off. A security control that silently does not apply is worse than
+        one that was never offered, so an unavailable Kerberos is now a
+        configuration error and says how to fix itself.
+
+        `DSPM_WINRM_KERBEROS=prefer` keeps the old behaviour for anyone who
+        wants Kerberos where possible and NTLM where not - but it has to be
+        chosen, and the transport actually used is reported either way in
+        `connection_transport`.
+        """
+
+        mode = os.getenv("DSPM_WINRM_KERBEROS", "0").strip().lower()
+        if mode in {"", "0", "false", "no", "off"}:
+            return ["ntlm"]
+        if not _kerberos_transport_available():
+            if mode == "prefer":
+                return ["ntlm"]
+            raise WinRMKerberosUnavailable(
+                "DSPM_WINRM_KERBEROS is set, but this install cannot speak Kerberos: "
+                "pywinrm's kerberos transport needs requests-kerberos, which is not "
+                "installed. Install it with `pip install pywinrm[kerberos]`, or set "
+                "DSPM_WINRM_KERBEROS=prefer to allow NTLM where Kerberos is unavailable. "
+                "Leaving it set without the dependency does not fall back safely - it "
+                "would use NTLM while reporting nothing."
+            )
+        return ["kerberos"] if mode in {"1", "true", "yes", "on", "require", "strict"} else ["kerberos", "ntlm"]
 
     def _winrm_cert_validation(self) -> str:
         # Default 'validate' - no cert-validation bypass. 'ignore' is an explicit,

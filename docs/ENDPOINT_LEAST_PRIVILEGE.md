@@ -125,6 +125,37 @@ activation provision an HTTPS listener.
 self-signed certificate an HTTPS activation creates. It still encrypts, but it
 drops MITM protection — prefer a trusted or pinned certificate in production.
 
+### Kerberos instead of NTLM
+
+By default the collector authenticates with NTLM. Kerberos is the stronger
+choice where the target is domain-joined and the DSPM host has a ticket: it
+authenticates the *server* as well as the client, so it cannot be relayed the
+way NTLM can.
+
+It is off by default because it needs a dependency that is not in
+`requirements.txt`:
+
+```bash
+pip install "pywinrm[kerberos]"
+```
+
+Then set `DSPM_WINRM_KERBEROS=1` to require it.
+
+**Setting it without the dependency is now an error, not a fallback.** The flag
+used to list Kerberos first and NTLM behind it, which meant that on an install
+without `requests-kerberos` — the normal case — the Kerberos attempt failed
+instantly and every scan ran on NTLM while the operator believed otherwise. A
+control that silently does not apply is worse than one that was never offered,
+so the scan now refuses and names the missing package.
+
+If you want the old behaviour deliberately — Kerberos where it is available,
+NTLM where it is not — set `DSPM_WINRM_KERBEROS=prefer`. Either way, the
+transport actually negotiated is reported as `connection_transport` on the scan
+result, so what was used is a fact you can read rather than an assumption.
+
+Kerberos also requires the target to be addressed by a name the KDC can issue a
+ticket for. An IP address will not do; use the FQDN.
+
 ---
 
 ## A note on the file-server collector

@@ -37,12 +37,16 @@ class RootRouteTests(unittest.TestCase):
         # Copilot was removed: no launcher, popup, or bundle may return.
         self.assertNotIn("copilot", response.text.lower())
 
-    def test_toasts_clear_the_bottom_right_action_stack(self):
+    def test_notifications_are_served_from_their_own_sheet(self):
+        """The `bottom: 96px` this used to lock held the stack clear of an
+        action stack that no longer exists, and left it floating in open space.
+        Placement now belongs to styles/toast.css; tests/test_notice_layer.py
+        owns what it has to say."""
         styles = (FRONTEND_DIR / "styles.css").read_text(encoding="utf-8")
+        markup = (FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
 
-        toast_rule = styles[styles.index(".toast-host {"):styles.index(".toast {", styles.index(".toast-host {"))]
-        self.assertIn("bottom: 96px", toast_rule)
-        self.assertIn("z-index: 10001", toast_rule)
+        self.assertNotIn(".toast-host", styles)
+        self.assertIn("/static/styles/toast.css", markup)
 
     @patch("backend.app.generate_enterprise_test_data")
     @patch("backend.app.Path.exists", return_value=False)
