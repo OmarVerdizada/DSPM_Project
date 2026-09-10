@@ -1769,6 +1769,38 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
     return scanner.test_connection()
 
 
+@app.post("/api/endpoint/check-access")
+def endpoint_check_access(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    """What the supplied credential can actually reach on the target.
+
+    An endpoint scan needs no administrator - it reads, and stages one file in
+    the connecting user's own temp - but two Windows defaults make a privileged
+    account the path of least resistance: only local Administrators may open a
+    WinRM session, and one account cannot read another's profile folder. Both
+    are grantable, and this is how an operator confirms a least-privilege
+    account is sufficient without discovering it half way through a scan.
+    """
+
+    if _is_local_endpoint_host(payload.host):
+        return {
+            "ok": platform.system().lower() == "windows",
+            "host": payload.host,
+            "user": os.getenv("USERNAME") or "",
+            "computer": socket.gethostname(),
+            "verdict": "A local scan runs as the account the DSPM backend runs as; there is no WinRM credential to check.",
+            "profiles": [],
+        }
+    _validate_scan_target(payload.host)
+    scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "endpoint.access.check",
+        {"host": _safe_target_label(payload.host), "target_username": payload.target_username},
+    )
+    return scanner.check_access()
+
+
 @app.post("/api/endpoint/activate-local-winrm")
 def endpoint_activate_local_winrm(payload: LocalWinRMActivationRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     try:
@@ -2485,7 +2517,19 @@ def _safe_operation_error(message: str, exc: Exception) -> HTTPException:
         hint = "Install requirements.txt on the DSPM backend host before running WinRM endpoint scans."
     elif "access denied" in lowered or "unauthorized" in lowered:
         code = "access_denied"
-        hint = "Use a credential that is local admin on the target and can read the selected paths."
+        # Two different refusals used to share one hint that told the operator
+        # to reach for a local administrator. A scan needs no administrator; it
+        # needs to be let in, and to be allowed to read what it was pointed at.
+        # Saying "use an admin" for a single NTFS denial is what makes a domain
+        # admin the account of least resistance.
+        if "winrm" in lowered or "wsman" in lowered or "5985" in lowered or "5986" in lowered:
+            hint = ("The target refused the WinRM session. Windows allows only local administrators to "
+                    "connect until the account is added to the Remote Management Users group on that "
+                    "machine - that grant alone is enough, and does not make the account an administrator.")
+        else:
+            hint = ("The credential connected but was refused a path. Grant it read access to the folders "
+                    "you are scanning, or narrow the scope to what it can already read. Run the endpoint "
+                    "access check to see which profiles it can reach.")
     elif "winrm" in lowered:
         code = "endpoint_unreachable"
         hint = "Verify WinRM service, firewall, DNS/IP reachability, and the credential."

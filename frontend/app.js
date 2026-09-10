@@ -143,6 +143,7 @@ const localWinrmActivateBtn = document.querySelector("#local-winrm-activate-btn"
 const localWinrmStatus = document.querySelector("#local-winrm-status");
 const endpointActivateBtn = document.querySelector("#endpoint-activate-btn");
 const endpointTestBtn = document.querySelector("#endpoint-test-btn");
+const endpointAccessBtn = document.querySelector("#endpoint-access-btn");
 const endpointScanBtn = document.querySelector("#endpoint-scan-btn");
 const endpointCancelBtn = document.querySelector("#endpoint-cancel-btn");
 const endpointViewOverviewBtn = document.querySelector("#endpoint-view-overview-btn");
@@ -9936,6 +9937,7 @@ const AUDIT_ACTIONS = {
   "connection.test": "Tested a file server connection",
   "credential.stored": "Stored a credential",
   "endpoint.connection.test": "Tested an endpoint connection",
+  "endpoint.access.check": "Checked what an endpoint credential can reach",
   "endpoint.scan.queued": "Queued an endpoint scan",
   "endpoint.scan.completed": "Finished an endpoint scan",
   "scan.queued": "Queued a scan",
@@ -10478,6 +10480,40 @@ if (endpointTestBtn) endpointTestBtn.addEventListener("click", async () => {
   } catch (error) {
     endpointStatus.textContent = `Endpoint test failed: ${error.message}`;
     showToast("Endpoint test failed", error.message, "danger");
+  } finally {
+    setBusy(false);
+  }
+});
+
+// Scanning an endpoint needs no administrator, but two Windows defaults make a
+// privileged account the easy path: only local Administrators may open a WinRM
+// session, and one account cannot read another's profile folder. Both are
+// grantable - and this is how an operator confirms a least-privilege account is
+// enough without finding out half way through a scan.
+if (endpointAccessBtn) endpointAccessBtn.addEventListener("click", async () => {
+  setBusy(true);
+  endpointStatus.textContent = "Checking what this credential can reach...";
+  try {
+    requireAuth();
+    const payload = await ensureEndpointCredential(readEndpointConnectionPayload());
+    const result = await api("/api/endpoint/check-access", payload);
+    if (!result.ok) {
+      endpointStatus.textContent = `Access check failed: ${result.message || "the target did not answer"}`;
+      showToast("Access check failed", result.message || result.host, "danger");
+      return;
+    }
+    const reach = result.profiles_total
+      ? `${result.profiles_readable} of ${result.profiles_total} profiles readable`
+      : "no user profiles found";
+    endpointStatus.textContent = `${result.user || "This account"} on ${result.computer || result.host}: ${reach}. ${result.verdict || ""}`.trim();
+    showToast(
+      result.profiles_readable || !result.profiles_total ? "Access checked" : "Nothing readable yet",
+      result.verdict || reach,
+      result.profiles_readable || !result.profiles_total ? "success" : "warning",
+    );
+  } catch (error) {
+    endpointStatus.textContent = `Access check failed: ${error.message}`;
+    showToast("Access check failed", error.message, "danger");
   } finally {
     setBusy(false);
   }

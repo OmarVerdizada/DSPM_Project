@@ -1260,12 +1260,17 @@
                       Domain
                       <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-globe"/></svg><input id="endpoint-domain" value="WORKGROUP" /></span>
                     </label>
+                    <!-- Not "Admin". A scan reads; nothing on the scan path
+                         tests for administrator. An account in the target's
+                         Remote Management Users group with read access to the
+                         folders being scanned is enough, and the access check
+                         on the last step proves it before a scan is run. -->
                     <label>
-                      Admin username
-                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><input id="endpoint-username" autocomplete="username" placeholder="Administrator" /></span>
+                      Scan username
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><input id="endpoint-username" autocomplete="username" placeholder="svc_dspm_scan" /></span>
                     </label>
                     <label>
-                      Admin password
+                      Scan password
                       <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="endpoint-password" type="password" autocomplete="current-password" /></span>
                     </label>
                     <label>
@@ -1419,8 +1424,9 @@
                   <div class="actions endpoint-actions">
                     <button type="button" id="endpoint-activate-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-plug-zap"/></svg>Prepare &amp; Test target WinRM</button>
                     <button type="button" id="endpoint-test-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-activity"/></svg>Test endpoint</button>
+                    <button type="button" id="endpoint-access-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>Check access</button>
                   </div>
-                  <p id="winrm-activate-status" class="save-status">One-time per machine: enables WinRM on the target using the admin credential, then verifies the connection.</p>
+                  <p id="winrm-activate-status" class="save-status">Preparing WinRM is one-time per machine and needs an administrator on the target. Scanning does not: check access to see what this credential can already read.</p>
                   <div id="endpoint-wizard-status" class="wizard-status-mirror muted">Ready</div>
                 </section>
 <details class="scan-advanced">

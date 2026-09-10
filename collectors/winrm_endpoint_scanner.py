@@ -763,6 +763,116 @@ class WinRMEndpointScanner:
         except Exception as exc:
             return {"connected": False, "host": self.config.host, "message": "WinRM connection test failed"}
 
+    def check_access(self) -> dict:
+        """What this credential can actually reach on this target.
+
+        Scanning an endpoint does NOT require administrator: nothing in the scan
+        path tests for it, the scripts only read, and the one thing they write
+        is a base64 staging file under the connecting user's own $env:TEMP. Two
+        Windows defaults are what make a domain admin the path of least
+        resistance, and both are grantable without one:
+
+          * only local Administrators may open a WinRM session, until the
+            account is put in Remote Management Users. That group - not a
+            PowerShell session configuration - is the grant that matters here,
+            because pywinrm opens the WinRS `cmd` shell resource rather than
+            Microsoft.PowerShell, so the WinRM service RootSDDL governs and
+            Set-PSSessionConfiguration would not help;
+          * another account's folder under the Users directory denies everyone
+            but that account, SYSTEM and Administrators, so a non-admin reads
+            its OWN profile and no more.
+
+        Which means the answer to "will a low-privilege account do?" depends
+        entirely on the scope, and an operator cannot see that until a scan has
+        already half-failed. This asks the target instead, before anything is
+        committed: who am I, am I an admin, which profiles can I list, and can I
+        stage a file. It reads nothing but directory entries.
+        """
+
+        try:
+            result = self._run_ps(
+                r"""
+                $ErrorActionPreference = "Stop"
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+                $isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
+                  [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+                $temp = $env:TEMP
+                $tempWritable = $false
+                try {
+                  $probe = Join-Path $temp ("dspm-preflight-" + [guid]::NewGuid().ToString("N") + ".tmp")
+                  [IO.File]::WriteAllBytes($probe, [byte[]]@())
+                  Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+                  $tempWritable = $true
+                } catch { $tempWritable = $false }
+
+                $profiles = @()
+                try {
+                  foreach ($dir in (Get-ChildItem -LiteralPath "C:\Users" -Directory -Force -ErrorAction SilentlyContinue)) {
+                    $readable = $false
+                    $denied = ""
+                    try {
+                      Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction Stop | Out-Null
+                      $readable = $true
+                    } catch { $denied = $_.Exception.GetType().Name }
+                    $profiles += [PSCustomObject]@{
+                      name = $dir.Name
+                      path = $dir.FullName
+                      readable = $readable
+                      denied = $denied
+                    }
+                  }
+                } catch { }
+
+                [PSCustomObject]@{
+                  computer = $env:COMPUTERNAME
+                  user = $identity.Name
+                  isAdmin = $isAdmin
+                  tempWritable = $tempWritable
+                  temp = $temp
+                  profiles = $profiles
+                } | ConvertTo-Json -Compress -Depth 4
+                """
+            )
+        except Exception:
+            return {"ok": False, "host": self.config.host, "message": "WinRM access check failed"}
+
+        if result.status_code != 0:
+            return {
+                "ok": False,
+                "host": self.config.host,
+                "message": _clean_error(result.std_err) or "WinRM access check failed",
+            }
+
+        info = _read_json(result.std_out) or {}
+        raw_profiles = info.get("profiles") or []
+        if isinstance(raw_profiles, dict):
+            raw_profiles = [raw_profiles]
+        profiles = [
+            {
+                "name": str(item.get("name", "")),
+                "path": str(item.get("path", "")),
+                "readable": bool(item.get("readable")),
+            }
+            for item in raw_profiles
+        ]
+        readable = [item for item in profiles if item["readable"]]
+        is_admin = bool(info.get("isAdmin"))
+        return {
+            "ok": True,
+            "host": self.config.host,
+            "computer": str(info.get("computer", "")),
+            "user": str(info.get("user", "")),
+            "is_admin": is_admin,
+            "temp_writable": bool(info.get("tempWritable")),
+            "channel_encrypted": True,
+            "profiles": profiles,
+            "profiles_readable": len(readable),
+            "profiles_total": len(profiles),
+            "verdict": _access_verdict(is_admin, len(readable), len(profiles), bool(info.get("tempWritable"))),
+            **self._session_diagnostics(),
+        }
+
     def _winrm_worker_count(self) -> int:
         """Runspace-pool worker count for the remote per-file work (content +
         SHA256 + ACL). ON by default; ``DSPM_WINRM_PARALLEL=0`` forces the serial
@@ -969,9 +1079,35 @@ class WinRMEndpointScanner:
             return "ignore"
         return "validate"
 
+    def _winrm_message_encryption(self) -> str:
+        """Never carry a scan over an unencrypted channel.
+
+        pywinrm's default is 'auto', which wraps the payload in NTLM/Kerberos
+        message encryption only when the auth object happens to expose a
+        session key - for NTLM that is `hasattr(session.auth,
+        "session_security")` in winrm/transport.py. When it does not, 'auto'
+        does not fail: it sends the request PLAINTEXT over http://...:5985 and
+        says nothing. On this collector that payload is the customer's file
+        content, which is the one thing a DSPM must never put on the wire in
+        the clear.
+
+        It happens to encrypt today because requests-ntlm 1.3.0 exposes that
+        attribute - which is a property of the lockfile, not of the design. On
+        HTTP the requirement is stated instead, so a transport that cannot
+        encrypt raises WinRMError rather than quietly succeeding. Over HTTPS
+        the channel is already encrypted and 'auto' leaves it to TLS rather
+        than paying for a second wrapping.
+        """
+
+        return "auto" if self.config.use_ssl else "always"
+
     def _winrm_session(self, connection_host: str, transport: str):
         import winrm
-        kwargs = {"auth": (self._username(), self.config.password), "transport": transport}
+        kwargs = {
+            "auth": (self._username(), self.config.password),
+            "transport": transport,
+            "message_encryption": self._winrm_message_encryption(),
+        }
         if self.config.use_ssl:
             kwargs["server_cert_validation"] = self._winrm_cert_validation()
         return winrm.Session(self._endpoint_url(connection_host), **kwargs)
@@ -992,6 +1128,7 @@ class WinRMEndpointScanner:
             bool(self.config.use_ssl),
             self.config.port or (5986 if self.config.use_ssl else 5985),
             self._winrm_cert_validation(),
+            self._winrm_message_encryption(),
             tuple(self._winrm_transports()),
         )
 
@@ -2473,6 +2610,23 @@ def _decode_scan_response(output: bytes | str) -> tuple[bytes, dict]:
         "response_compressed_bytes": len(compressed),
         "response_compression_ratio": round(len(decoded) / max(wire_bytes, 1), 3),
     }
+
+
+def _access_verdict(is_admin: bool, readable: int, total: int, temp_writable: bool) -> str:
+    if not temp_writable:
+        return ("This account cannot write to its own temp directory on the target, which the "
+                "scan needs to stage file content. Check the profile is not mandatory or roaming-blocked.")
+    if is_admin:
+        return (f"This account is a local administrator, so it can read all {total} profiles. "
+                "A scan does not need administrator: an account in Remote Management Users with "
+                "read access to the folders you scan is enough.")
+    if total and readable == total:
+        return f"This account is not an administrator and can already read all {total} profiles."
+    if readable:
+        return (f"This account is not an administrator and can read {readable} of {total} profiles. "
+                "That is enough to scan those; the rest need a read grant on their folders.")
+    return ("This account is not an administrator and cannot read any user profile. It can still scan "
+            "paths you grant it read access to.")
 
 
 def _read_json(output: bytes | str) -> object | None:
