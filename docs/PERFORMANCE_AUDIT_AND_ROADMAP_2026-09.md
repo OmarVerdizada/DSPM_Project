@@ -1139,6 +1139,29 @@ Also fixed: the New Scan menu advertised Reports as "CSV, Word, PDF evidence".
 CSV was removed from this page two rounds ago and the formats are PDF, Word and
 Excel.
 
+### Reports: a figure is stated once
+
+The Executive summary printed the same three numbers between two and four times
+each - 6,831 as "Findings in scope", "Findings" and "Open"; 448 as "Files with
+findings", "Files carrying them" and "Classified"; 463 as "Files analysed" and
+"Files in the estate". Sections overlap because each looks at the same estate
+from its own angle.
+
+De-duplicating on the VALUE would have been wrong: the Data inventory legibly
+prints two data classes that happen to share a count, and dropping one would
+delete a true statement. A fact can now name what it MEASURES, and the first
+section to state a measure keeps it. Section order therefore became editorial -
+coverage precedes scale so "448 files" belongs to the section whose subject it
+is - and the posture summary was cut back to the headline it should be.
+
+Two related fixes: a funnel with one stage is not printed, because it restates
+the total under another name; and Estate profile's severity rows are labelled
+"Critical files" and so on, since posture counts findings and the same word
+over two different numbers reads as a contradiction rather than as two
+measures.
+
+The rail went to 344px and the document to 921px.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

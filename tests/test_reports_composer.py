@@ -319,6 +319,67 @@ class ReportLayoutTests(unittest.TestCase):
         self.assertEqual(order, sorted(order))
 
 
+class ReportRepetitionTests(unittest.TestCase):
+    """A figure is stated once, by the section whose subject it is."""
+
+    def test_a_fact_can_name_what_it_measures(self) -> None:
+        # "Files analysed" and "Files in the estate" are two names for one
+        # number; "Expiration Date" and "PCI Account Data" are two data classes
+        # that happen to share a count. Only a key tells those apart.
+        block = reports_block()
+        self.assertIn("function reportFacts(", block)
+        self.assertIn("function dropRepeatedFacts(", block)
+
+    def test_de_duplication_reads_the_key_and_never_the_value(self) -> None:
+        block = reports_block()
+        body = block[block.index("function dropRepeatedFacts("):]
+        body = body[:body.index(chr(10) + "}" + chr(10))]
+        self.assertIn("block.table?.keys", body)
+        self.assertIn("stated.has(key)", body)
+        # A table with no keys is left entirely alone.
+        self.assertIn("if (!block.table?.keys) return block;", body)
+
+    def test_the_overlapping_sections_declare_their_measures(self) -> None:
+        block = reports_block()
+        for key in ("files.total", "files.sensitive", "files.locked", "findings.total"):
+            self.assertIn(f'"{key}"', block)
+
+    def test_the_headline_section_stops_doing_the_others_work(self) -> None:
+        # Posture printed the estate size, the file count and the finding total
+        # as well, which is every other section's subject.
+        block = reports_block()
+        posture = block[block.index('case "posture": {'):]
+        posture = posture[:posture.index('case "severity_split"')]
+        self.assertIn("Posture score", posture)
+        self.assertNotIn("Files analysed", posture)
+        self.assertNotIn("Findings in scope", posture)
+
+    def test_the_executive_order_puts_each_measure_with_its_owner(self) -> None:
+        # First to state a measure keeps it, so coverage must precede scale for
+        # "448 files" to be owned by the section whose subject it is.
+        block = reports_block()
+        listed = re.search(r'id: "executive".*?sections: \[([^\]]+)\]', block, re.S).group(1)
+        names = [name.strip().strip('"') for name in listed.split(",") if name.strip()]
+        self.assertLess(names.index("coverage"), names.index("scale"))
+        self.assertLess(names.index("posture"), names.index("coverage"))
+
+    def test_a_one_stage_funnel_is_not_printed(self) -> None:
+        # It restates the total under another name, which is how "Open" came to
+        # print the finding count for the third time.
+        block = reports_block()
+        funnel = block[block.index('case "funnel": {'):]
+        funnel = funnel[:funnel.index('case "lifecycle"')]
+        self.assertIn("stages.length < 2", funnel)
+
+    def test_two_measures_that_share_a_label_are_renamed(self) -> None:
+        # Estate profile counts FILES by severity; posture counts findings. The
+        # same word over two different numbers reads as a contradiction.
+        block = reports_block()
+        estate = block[block.index('case "estate": {'):]
+        estate = estate[:estate.index('case "places"')]
+        self.assertIn("} files`", estate)
+
+
 class ReportMotionTests(unittest.TestCase):
     """The answer arrives; it does not teleport."""
 

@@ -5738,7 +5738,10 @@ const REPORT_TYPES = [
     label: "Executive summary",
     audience: "Board",
     blurb: "Posture, the risks that matter, what moved.",
-    sections: ["posture", "scale", "top_risks", "detailed_findings", "coverage", "funnel", "estate", "trend", "assurance"],
+    // What the posture is, what was looked at, how much was found, then the
+    // findings themselves. The first section to state a measure keeps it, so
+    // this order decides who owns "448 files" - and coverage should.
+    sections: ["posture", "coverage", "scale", "top_risks", "detailed_findings", "estate", "funnel", "trend", "assurance"],
   },
   {
     id: "register",
@@ -6382,11 +6385,38 @@ function renderReportBuildLine() {
 // One builder, three destinations. What the preview shows is what Word and
 // Excel contain, which is the only way the build line above the button can be
 // trusted.
+// The Executive summary printed the same three figures between two and four
+// times each: 6,831 as "Findings in scope", "Findings" and "Open"; 448 as
+// "Files with findings", "Files carrying them" and "Classified". Sections
+// overlap because each looks at the estate from its own angle, so the first
+// section to state a measure keeps it and the rest go quiet - which is also
+// why the section order below is the order a reader should meet them in.
+function dropRepeatedFacts(blocks) {
+  const stated = new Set();
+  return blocks.map((block) => {
+    if (!block.table?.keys) return block;
+    const keep = block.table.keys.map((key) => {
+      if (!key) return true;
+      if (stated.has(key)) return false;
+      stated.add(key);
+      return true;
+    });
+    return {
+      ...block,
+      table: {
+        ...block.table,
+        rows: block.table.rows.filter((_, index) => keep[index]),
+        keys: block.table.keys.filter((_, index) => keep[index]),
+      },
+    };
+  }).filter((block) => block.html || block.detail?.length || block.table?.rows.length);
+}
+
 function reportSectionBlocks() {
   const model = buildReportModel();
   const rows = reportRegisterRows();
   const cap = reportDepth().tableRows;
-  return [...reportSections()]
+  const blocks = [...reportSections()]
     .filter((id) => reportType().sections.includes(id) && reportSectionIsAvailable(id))
     .sort((a, b) => reportType().sections.indexOf(a) - reportType().sections.indexOf(b))
     .map((id) => ({ id, label: REPORT_SECTIONS[id].label, ...reportSectionContent(id, model, rows) }))
@@ -6394,6 +6424,7 @@ function reportSectionBlocks() {
       ? { ...block, table: { ...block.table, rows: block.table.rows.slice(0, cap) }, capped: true }
       : block))
     .filter((block) => block.html || block.table || block.detail?.length);
+  return dropRepeatedFacts(blocks);
 }
 
 // "none" and "unknown" are ANSWERS in a security report - "Owner: unknown"
@@ -6408,6 +6439,15 @@ function reportCellIsEmpty(cell) {
 // A column every row left blank is noise in a printed document: it costs width
 // the columns that DID answer needed, and it reads as missing data rather than
 // as a question this scan could not answer. Drop it, keeping at least one.
+// A fact may name what it MEASURES, not just what it is called. "Files
+// analysed" and "Files in the estate" are two names for one number; "Expiration
+// Date" and "PCI Account Data" are two data classes that happen to share a
+// count. Only a key can tell those apart, so de-duplication reads the key and
+// never the value.
+function reportFacts(rows, keys) {
+  return { ...reportTable(["Measure", "Value"], rows), keys };
+}
+
 function reportTable(headers, bodyRows) {
   const keep = headers.map((_, index) =>
     !bodyRows.length || bodyRows.some((row) => !reportCellIsEmpty(row[index])));
@@ -6478,15 +6518,17 @@ function reportSectionContent(id, model, rows) {
   const estateTotal = Number(estateFacets?.total || model.summary?.total_files || 0);
   switch (id) {
     case "posture": {
+      // The headline only. It used to print the file counts, the finding total
+      // and the estate size as well, which is every other section's subject.
       const bySeverity = reportSeverityCounts();
-      return { table: reportTable(["Measure", "Value"], [
-        ["Posture score", `${model.score} / 100`],
-        ["Files analysed", estateTotal.toLocaleString()],
-        ["Files with findings", Number(summary.affected_files || estateFacets?.sensitive || 0).toLocaleString()],
-        ["Findings in scope", Number(reportRows.total || 0).toLocaleString()],
-        ...REPORT_SEVERITY_ORDER.map((level) => [severityLabel(level), Number(bySeverity[level] || 0).toLocaleString()]),
-        ["Past its SLA", Number(summary.overdue || 0).toLocaleString()],
-      ]), note: reportSeverityCountsAreWhole() ? "" : reportSampleNote() };
+      return {
+        table: reportFacts([
+          ["Posture score", `${model.score} / 100`],
+          ...REPORT_SEVERITY_ORDER.map((level) => [severityLabel(level), Number(bySeverity[level] || 0).toLocaleString()]),
+          ["Past its SLA", Number(summary.overdue || 0).toLocaleString()],
+        ], ["posture.score", ...REPORT_SEVERITY_ORDER.map((level) => `findings.${level.toLowerCase()}`), "findings.overdue"]),
+        note: reportSeverityCountsAreWhole() ? "" : reportSampleNote(),
+      };
     }
     case "severity_split": {
       const bySeverity = reportSeverityCounts();
@@ -6503,11 +6545,11 @@ function reportSectionContent(id, model, rows) {
     case "coverage": {
       const classified = Number(estateFacets?.sensitive || summary.affected_files || 0);
       const locked = Number(estateFacets?.protected || 0);
-      return { table: reportTable(["State", "Files"], [
+      return { table: reportFacts([
         ["Classified", classified.toLocaleString()],
         ["Clear", Math.max(0, estateTotal - classified - locked).toLocaleString()],
         ["Unreadable", locked.toLocaleString()],
-      ]) };
+      ], ["files.sensitive", "files.clear", "files.locked"]) };
     }
     case "trend": {
       const comparison = model.comparison || [];
@@ -6608,12 +6650,12 @@ function reportSectionContent(id, model, rows) {
       const findings = Number(summary.total_findings || reportRows.total || 0);
       const values = Number(summary.total_occurrences || 0);
       const files = Number(summary.affected_files || 0);
-      return { table: reportTable(["Measure", "Count"], [
+      return { table: reportFacts([
         ["Findings", findings.toLocaleString()],
         ["Matched values behind them", values.toLocaleString()],
         ["Files carrying them", files.toLocaleString()],
         ["Values per affected file", files ? (values / files).toFixed(1) : "—"],
-      ]) };
+      ], ["findings.total", "values.total", "files.sensitive", "values.perFile"]) };
     }
     case "funnel": {
       const stages = [
@@ -6622,9 +6664,12 @@ function reportSectionContent(id, model, rows) {
         ["Risk accepted", summary.risk_accepted], ["Suppressed", summary.suppressed],
         ["False positive", summary.false_positive],
       ].filter(([, value]) => Number(value || 0) > 0);
-      if (!stages.length) return { html: '<p class="report-note">No lifecycle activity has been recorded for this scope.</p>' };
-      return { table: reportTable(["Stage", "Findings"], stages
-        .map(([label, value]) => [label, Number(value || 0).toLocaleString()])) };
+      // One stage is not a funnel: it restates the total under another name,
+      // which is how "Open" came to print 6,831 for the third time.
+      if (stages.length < 2) return {};
+      return { table: reportFacts(stages
+        .map(([label, value]) => [label, Number(value || 0).toLocaleString()]),
+        stages.map(([label]) => `status.${label.toLowerCase().replace(/ /g, "_")}`)) };
     }
     case "lifecycle": {
       const byStatus = Object.entries(summary.findings_by_status || {});
@@ -6645,17 +6690,23 @@ function reportSectionContent(id, model, rows) {
     }
     case "estate": {
       const counts = estateFacets?.risk_counts || {};
+      // Named for what they count. Bare "Critical" already appears in the
+      // posture summary against a finding count, and the same word twice over
+      // two different numbers reads as a contradiction rather than as two
+      // measures.
       const rowsOut = REPORT_SEVERITY_ORDER
         .filter((level) => Number(counts[level] || 0))
-        .map((level) => [severityLabel(level), Number(counts[level]).toLocaleString()]);
+        .map((level) => [`${severityLabel(level)} files`, Number(counts[level]).toLocaleString()]);
       if (!rowsOut.length) return { html: '<p class="report-note">The estate summary is not available for this scan.</p>' };
       const average = Number(estateFacets?.avg_risk_score || 0);
-      return { table: reportTable(["Measure", "Files"], [
+      // These severities count FILES; the posture summary's count findings, so
+      // they are different measures and both are stated.
+      return { table: reportFacts([
         ["Files in the estate", estateTotal.toLocaleString()],
         ...rowsOut,
         ["Unreadable", Number(estateFacets?.protected || 0).toLocaleString()],
         ["Average risk score", average ? average.toFixed(1) : ""],
-      ]) };
+      ], ["files.total", ...REPORT_SEVERITY_ORDER.filter((level) => Number(counts[level] || 0)).map((level) => `files.${level.toLowerCase()}`), "files.locked", "risk.average"]) };
     }
     case "places": {
       const places = estateFacets?.locations || [];
@@ -6684,13 +6735,15 @@ function reportSectionContent(id, model, rows) {
     case "provenance": {
       const scans = (estateFacets?.scans || []).map((item) => String(item.value)).filter(Boolean);
       const sources = (estateFacets?.sources || []).map((item) => String(item.value)).filter(Boolean);
-      return { table: reportTable(["Measure", "Value"], [
+      // The file count is keyed, so where a report also carries Estate profile
+      // this row goes quiet rather than printing "Files in the estate" twice.
+      return { table: reportFacts([
         ["Scan", scans.join(", ")],
         ["Collector", sources.join(", ")],
         ["Server", String(latestReport?.source || readPayload().server || "")],
         ["Run at", latestReport?.timestamp ? formatReportDate(latestReport.timestamp) : ""],
         ["Files in the estate", estateTotal.toLocaleString()],
-      ]) };
+      ], ["scan.label", "scan.collector", "scan.server", "scan.at", "files.total"]) };
     }
     case "assurance": {
       const diagnostics = latestReport?.scan_diagnostics || {};
