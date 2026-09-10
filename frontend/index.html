@@ -16,7 +16,7 @@
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=19" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
-    <link rel="stylesheet" href="/static/styles/reports.css?v=4" />
+    <link rel="stylesheet" href="/static/styles/reports.css?v=5" />
     <link rel="stylesheet" href="/static/styles/history.css?v=1" />
   </head>
   <body class="auth-locked">
@@ -163,7 +163,7 @@
                   <b>Start endpoint scan</b><small><abbr title="Windows Remote Management">WinRM</abbr> workstation</small>
                 </button>
                 <button type="button" role="menuitem" data-tab-jump="reports">
-                  <b>Open reports</b><small>CSV, Word, PDF evidence</small>
+                  <b>Open reports</b><small>PDF, Word or Excel evidence</small>
                 </button>
               </div>
             </div>
@@ -948,6 +948,7 @@
               <symbol id="li-file-spreadsheet" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/></symbol>
               <symbol id="li-file-text" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
               <symbol id="li-file-type-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 13v-1h6v1"/><path d="M5 12v6"/><path d="M4 18h2"/></symbol>
+              <symbol id="li-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
               <symbol id="li-sliders" viewBox="0 0 24 24"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></symbol>
               <symbol id="li-files" viewBox="0 0 24 24"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l5 5v9a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></symbol>
             </defs>
@@ -975,9 +976,14 @@
                 <div class="report-type-list" id="report-type-list" role="radiogroup" aria-labelledby="report-type-label"></div>
               </div>
 
-              <div class="composer-group">
-                <p class="composer-legend" id="report-scope-label">Scope</p>
-                <div class="composer-fields" role="group" aria-labelledby="report-scope-label">
+              <div class="composer-group composer-drawer">
+                <button type="button" class="composer-summary plain-btn" id="report-scope-toggle"
+                        aria-expanded="false" aria-controls="report-scope-fields">
+                  <span class="composer-summary-name" id="report-scope-label">Scope</span>
+                  <span class="composer-summary-value" id="report-scope-summary"></span>
+                  <svg class="f-ico composer-caret" aria-hidden="true"><use href="#li-chevron-down"/></svg>
+                </button>
+                <div class="composer-fields" id="report-scope-fields" role="group" aria-labelledby="report-scope-label" hidden>
                   <label>
                     <span class="composer-field-name">Coverage</span>
                     <select id="report-coverage">
@@ -1033,10 +1039,17 @@
                 </div>
               </div>
 
-              <div class="composer-group composer-group-grow">
-                <p class="composer-legend composer-legend-live" id="report-sections-label">Sections<span
-                    class="report-section-explainer" id="report-section-explainer" role="status" aria-live="polite"></span></p>
-                <div class="report-section-list" id="report-sections" role="group" aria-labelledby="report-sections-label"></div>
+              <div class="composer-group composer-group-grow composer-drawer">
+                <button type="button" class="composer-summary plain-btn" id="report-sections-toggle"
+                        aria-expanded="false" aria-controls="report-sections-body">
+                  <span class="composer-summary-name" id="report-sections-label">Sections</span>
+                  <span class="composer-summary-value" id="report-sections-summary"></span>
+                  <svg class="f-ico composer-caret" aria-hidden="true"><use href="#li-chevron-down"/></svg>
+                </button>
+                <div class="composer-drawer-body" id="report-sections-body" hidden>
+                  <div class="report-section-list" id="report-sections" role="group" aria-labelledby="report-sections-label"></div>
+                  <p class="report-section-explainer" id="report-section-explainer" role="status" aria-live="polite"></p>
+                </div>
               </div>
 
               <div class="composer-foot">
@@ -1049,14 +1062,12 @@
                 <!-- The rail and the document are one system, so the last thing
                      before the button says what the button makes - in the same
                      words the document's own cover prints. -->
-                <div class="report-carrier">
-                  <p class="report-carrier-name">
-                    <svg class="f-ico" aria-hidden="true"><use href="#li-file-text"/></svg>
-                    <span id="report-carrier-title"></span>
-                  </p>
-                  <p class="report-carrier-scope" id="report-carrier-scope"></p>
-                  <p class="report-build-line" id="report-build-line" role="status" aria-live="polite"></p>
-                </div>
+                <!-- The title and the scope used to be printed here too. With
+                     the rail this short they sat a finger's width from the card
+                     that names the report and the row that states the scope, so
+                     all three said the same thing. What is left is the only line
+                     nothing else says: what the button is about to produce. -->
+                <p class="report-carrier report-build-line" id="report-build-line" role="status" aria-live="polite"></p>
 
                 <button type="submit" class="facet-apply" id="report-generate"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg><span id="report-generate-label">Generate report</span></button>
               </div>
@@ -1702,7 +1713,7 @@
 
     <!-- SSO handoff from the SENTRO landing page — must load before app.js -->
     <script src="/static/sso-handoff.js?v=1"></script>
-    <script src="/static/app.js?v=228"></script>
+    <script src="/static/app.js?v=229"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

@@ -59,8 +59,11 @@ class ReportScopeTests(unittest.TestCase):
 
     def test_the_document_states_what_it_could_not_carry(self) -> None:
         block = reports_block()
-        self.assertIn("function reportCoverageLine()", block)
+        self.assertIn("function reportCoverageLine(", block)
         self.assertIn("highest-scoring of them", block)
+        # Depth caps every table, so the cover states the rows it prints rather
+        # than the findings it could have reached.
+        self.assertIn("prints ${printed.toLocaleString()} rows", block)
 
     def test_scope_controls_map_onto_the_query_the_server_understands(self) -> None:
         for element in ("report-coverage", "report-severity", "report-status"):
@@ -179,12 +182,16 @@ class ReportCompositionTests(unittest.TestCase):
         self.assertIn("application/msword", block)
         self.assertIn("application/vnd.ms-excel", block)
 
-    def test_the_build_line_promises_the_file_not_the_scope(self) -> None:
+    def test_the_build_line_counts_the_rows_it_is_about_to_print(self) -> None:
+        """It counted the findings in SCOPE, so at Standard depth - where every
+        table is capped at 60 rows - it promised "5,000 of 6,831 findings" over
+        a file that held 106."""
         block = reports_block()
-        line = block[block.index("function renderReportBuildLine()"):]
-        line = line[:line.index("\n}\n")]
-        self.assertIn("REPORT_ROW_CEILING", line)
-        self.assertIn("of ${stats.findings.toLocaleString()} findings", line)
+        self.assertIn("function reportPrintedRows(", block)
+        stats = block[block.index("function reportBuildStats()"):]
+        stats = stats[:stats.index(chr(10) + "}" + chr(10))]
+        self.assertIn("reportSectionBlocks()", stats)
+        self.assertNotIn("REPORT_ROW_CEILING", stats)
 
     def test_the_preview_and_the_file_are_built_by_one_function(self) -> None:
         block = reports_block()
@@ -195,98 +202,100 @@ class ReportCompositionTests(unittest.TestCase):
 
 
 class ReportLayoutTests(unittest.TestCase):
-    """A rail beside a document, holding every control at once."""
+    """A rail with a first move, and a document with no dead space in it."""
 
-    def test_the_page_sizes_to_the_window_and_only_two_things_scroll(self) -> None:
+    def test_the_page_sizes_to_the_window(self) -> None:
         panel = SHEET[SHEET.index("#tab-reports.tab-panel.active {"):]
         panel = panel[:panel.index("\n}")]
         self.assertIn("height: 100dvh", panel)
         self.assertIn("overflow: hidden", panel)
-        # The rail itself must not scroll - it is meant to hold everything.
-        rail = SHEET[SHEET.index(".report-composer {"):]
-        self.assertIn("overflow: hidden", rail[:rail.index("\n}")])
-        # The section list and the document do.
-        for selector in (".report-section-list {", ".report-preview {"):
-            block = SHEET[SHEET.index(selector):]
-            self.assertIn("overflow-y: auto", block[:block.index("\n}")])
-        # And a short window gives up on all of it rather than clipping.
         self.assertIn("@media (max-height: 620px)", SHEET)
 
-    def test_only_the_section_list_gives_up_height(self) -> None:
-        # Letting every group shrink compressed each below its content and the
-        # rows drew on top of each other.
-        group = SHEET[SHEET.index(".composer-group {"):]
-        self.assertIn("flex: 0 0 auto", group[:group.index("\n}")])
-        grow = SHEET[SHEET.index(".composer-group-grow {"):]
-        self.assertIn("flex: 1 1 auto", grow[:grow.index("\n}")])
+    def test_the_rail_ends_where_its_content_ends(self) -> None:
+        """Stretched to the column it left 300px of nothing under the button.
 
-    def test_the_rows_absorb_the_remainder_instead_of_leaving_a_gap(self) -> None:
-        row = SHEET[SHEET.index(".report-section-row {"):]
-        row = row[:row.index("\n}")]
-        self.assertIn("flex: 1 1 auto", row)
-        self.assertIn("min-height:", row)
-        self.assertIn("max-height:", row)
+        With both drawers shut the rail needs about 550px of an 800px column,
+        so it is a card that stops, and scrolls only if opening a drawer takes
+        it past the window.
+        """
+        rail = SHEET[SHEET.index(".report-composer {"):]
+        rail = rail[:rail.index("\n}")]
+        self.assertIn("align-self: start", rail)
+        self.assertIn("max-height: 100%", rail)
+        self.assertIn("overflow-y: auto", rail)
 
-    def test_the_legacy_button_floor_is_stated_back(self) -> None:
-        # styles.css floors every button at 40px for touch, which cost the rail
-        # 64px across four type rows before this.
-        for selector in (".report-type {", ".report-format-option {"):
-            block = SHEET[SHEET.index(selector):]
-            self.assertIn("min-height: 0", block[:block.index("\n}")])
-
-    def test_one_explainer_answers_for_the_whole_list(self) -> None:
-        # Fifteen hint lines cost 300px of rail and are read once.
-        self.assertIn('id="report-section-explainer"', MARKUP)
+    def test_the_two_quiet_groups_are_drawers_that_state_their_answer(self) -> None:
+        """Six selects and nine checkboxes shown at once gave the rail no first
+        move: every group looked equally like the place to start."""
+        for element in ("report-scope-toggle", "report-sections-toggle",
+                        "report-scope-summary", "report-sections-summary"):
+            self.assertIn(f'id="{element}"', MARKUP)
         block = reports_block()
-        self.assertIn("function reportSectionExplain(", block)
-        self.assertIn("function reportSectionDefaultHint(", block)
-        # Reserved height, so moving the pointer never shifts the list under it.
-        legend = SHEET[SHEET.index(".composer-legend-live {"):]
-        self.assertIn("min-height:", legend[:legend.index("\n}")])
+        self.assertIn("function renderComposerSummaries()", block)
+        self.assertIn("function toggleComposerDrawer(", block)
+        # Shut, they are one row each - and the row says what it is set to.
+        self.assertIn("reportCarrierScopeLabel()", block)
 
-    def test_pointing_at_a_row_lights_the_section_it_makes(self) -> None:
-        block = reports_block()
-        self.assertIn("function reportLinkSection(", block)
-        self.assertIn(".report-section-block.is-linked", SHEET)
-        self.assertIn('addEventListener("pointerover"', block)
-        self.assertIn('addEventListener("focusin"', block)
+    def test_a_shut_drawer_is_actually_shut(self) -> None:
+        # `[hidden]` is a UA rule at specificity zero and both bodies carry a
+        # class rule that sets `display`, so it has to be stated back.
+        self.assertIn(".composer-fields[hidden]", SHEET)
+        self.assertIn(".composer-drawer-body[hidden]", SHEET)
 
-    def test_the_carrier_prints_what_the_document_prints(self) -> None:
-        self.assertIn('id="report-carrier-title"', MARKUP)
-        self.assertIn('id="report-carrier-scope"', MARKUP)
+    def test_a_report_row_looks_like_something_you_press(self) -> None:
+        # Four rows of plain text gave no sign they were choices, which is half
+        # of "nothing to click on arrival".
+        self.assertIn("report-type-mark", reports_block())
+        self.assertIn('.report-type[aria-checked="true"] .report-type-mark', SHEET)
+
+    def test_the_rail_says_each_thing_once(self) -> None:
+        # The carrier used to print the report's name and its scope a finger's
+        # width from the card that names it and the row that states it.
         block = reports_block()
-        carrier = block[block.index("function renderReportCarrier()"):]
-        carrier = carrier[:carrier.index("\n}")]
-        self.assertIn("reportType().label", carrier)
-        self.assertIn("reportCarrierScopeLabel()", carrier)
+        self.assertNotIn("renderReportCarrier", block)
+        self.assertNotIn('id="report-carrier-title"', MARKUP)
+        self.assertNotIn('id="report-carrier-scope"', MARKUP)
+        # What is left is the one line nothing else says.
+        self.assertIn('id="report-build-line"', MARKUP)
 
     def test_the_document_is_on_the_page_not_in_a_pane(self) -> None:
         document = SHEET[SHEET.index(".report-document {"):]
         document = document[:document.index("\n}")]
-        # Any border is an edge and an edge is a box, and a max-width would put
-        # the dead white back either side of it.
         self.assertNotIn("border:", document)
         self.assertNotIn("box-shadow", document)
         self.assertNotIn("max-width", document)
 
+    def test_a_column_is_as_wide_as_what_it_holds(self) -> None:
+        """`table-layout: fixed` divides the width equally, which gave an
+        eight-character Severity column the same 259px as a 144-character
+        sentence - the sentence wrapped to eight lines and the row stood 127px
+        tall, a quarter of it blank."""
+        block = reports_block()
+        self.assertIn("REPORT_COLUMN_KINDS", block)
+        self.assertIn("function reportColumnKind(", block)
+        self.assertIn("<colgroup>", block)
+        for kind in ("sev", "num", "name", "path"):
+            self.assertIn(f".report-table col.col-{kind}", SHEET)
+
+    def test_a_pair_of_facts_is_not_a_full_width_grid(self) -> None:
+        # As a table this ran the page's whole width to print "9 / 100" beside
+        # "Posture score" - 518px of column for seven characters.
+        block = reports_block()
+        self.assertIn("function reportTableIsFacts(", block)
+        self.assertIn("function reportFactsMarkup(", block)
+        self.assertIn(".report-facts {", SHEET)
+
     def test_the_document_wraps_rather_than_scrolling_sideways(self) -> None:
         table = SHEET[SHEET.index(".report-table {"):]
         table = table[:table.index("\n}")]
-        # styles.css floors every table at 1180px for the inventory grid.
         self.assertIn("table-layout: fixed", table)
         self.assertIn("min-width: 0", table)
 
     def test_a_document_table_header_does_not_peel_off(self) -> None:
-        # styles.css makes every `thead th` sticky for the tables that live in a
-        # .table-wrap. This document has none, so its headers would stack at the
-        # top of the preview as you read.
         header = SHEET[SHEET.index(".report-table th {"):]
         self.assertIn("position: static", header[:header.index("\n}")])
 
     def test_every_token_the_sheet_names_exists(self) -> None:
-        # --radius-md, --radius-sm and --elev-1 were all invented, and a var()
-        # that resolves to nothing silently drops the whole declaration - which
-        # is how the document had square corners nobody had asked for.
         tokens = Path("frontend/styles/tokens.css").read_text(encoding="utf-8")
         local = set(re.findall(r"^\s*(--[a-z0-9-]+):", SHEET, re.MULTILINE))
         local |= set(re.findall(r"--report-[a-z-]+", SHEET))
@@ -298,15 +307,14 @@ class ReportLayoutTests(unittest.TestCase):
         self.assertIn("REPORT_SECTION_AVAILABILITY", block)
         self.assertIn("Not part of this scan.", block)
         self.assertIn("reportSectionIsAvailable(id)", block)
-        # The PDF-inert pass must not clear the flag the unavailable pass set.
         self.assertIn("fixed || !reportSectionIsAvailable(", block)
 
     def test_the_composer_reads_in_the_order_it_is_answered(self) -> None:
         panel = MARKUP[MARKUP.index('id="report-composer"'):MARKUP.index('id="report-preview"')]
         order = [panel.index(marker) for marker in (
-            'id="report-type-list"', 'id="report-coverage"', 'id="report-depth"',
-            'id="report-sections"', 'id="report-format"',
-            'id="report-carrier-title"', 'id="report-build-line"', 'id="report-generate"',
+            'id="report-type-list"', 'id="report-scope-toggle"', 'id="report-depth"',
+            'id="report-sections-toggle"', 'id="report-format"',
+            'id="report-build-line"', 'id="report-generate"',
         )]
         self.assertEqual(order, sorted(order))
 

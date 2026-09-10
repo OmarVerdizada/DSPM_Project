@@ -1108,6 +1108,37 @@ that follows a 539-file sweep would otherwise read as "174 critical resolved",
 an improvement that never happened. A scan with no comparable predecessor says
 "Baseline".
 
+### Reports: the dead space was in the columns
+
+The document looked empty because `table-layout: fixed` divides a table's width
+equally between its columns. Measured on the shipped page: an eight-character
+Severity column took the same 259px as a 144-character sentence, so the
+sentence wrapped to eight lines and every row of Top risks stood 127px tall
+with a quarter of it blank. A two-column Measure/Value table ran the full
+1,036px of the page to print "9 / 100".
+
+Columns are sized by what they hold now - the kind is read off the header
+string, which is written in this file - and a two-column table whose second
+column is a number is rendered as a list of facts rather than a grid. The
+document went from 6,280px to 4,779px for the same content, and the reason
+column from 259px to 463px.
+
+The rail had the opposite problem: six selects and nine checkboxes shown at
+once, every group the same weight, so there was no first move. Scope and
+Sections are drawers now - one row each, stating their own answer - and the
+rail is 566px instead of 806px with 300px of nothing under the button, because
+it is sized to its content rather than stretched to the column.
+
+**A gap the density work uncovered.** The build line counted the findings in
+SCOPE, not the rows the document prints. At Standard depth every table is
+capped at 60 rows, so it promised "5,000 of 6,831 findings" over a file holding
+106. It counts the blocks it is about to build; verified against the generated
+file at both depths (Standard 106, Full 10,086).
+
+Also fixed: the New Scan menu advertised Reports as "CSV, Word, PDF evidence".
+CSV was removed from this page two rounds ago and the formats are PDF, Word and
+Excel.
+
 ### Sequencing and risk
 
 - Phase 0 items are independent of each other and of everything else; ship them in one release. 0.4 needs a backfill script (`reason_count`/`dlp_count` from existing `detail_json`; a few seconds on this data) — run it in the migration runner the DB roadmap already has.

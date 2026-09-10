@@ -62,6 +62,8 @@ const reportDepthSelect = document.querySelector("#report-depth");
 const reportDetailCountSelect = document.querySelector("#report-detail-count");
 const reportOrderSelect = document.querySelector("#report-order");
 const reportSectionExplainer = document.querySelector("#report-section-explainer");
+const reportScopeSummary = document.querySelector("#report-scope-summary");
+const reportSectionsSummary = document.querySelector("#report-sections-summary");
 const reportSeamChip = document.querySelector("#report-seam-chip");
 const logoutBtn = document.querySelector("#logout-btn");
 const profileToggle = document.querySelector("#profile-toggle");
@@ -6018,12 +6020,16 @@ function reportDocumentTitle() {
 
 // A filed document says what it covers. When the scope is larger than one
 // document should carry, it says that too, rather than looking complete.
-function reportCoverageLine() {
+function reportCoverageLine(blocks) {
   const total = reportRows.total;
-  const carried = Math.min(total, REPORT_ROW_CEILING);
+  const printed = reportPrintedRows(blocks);
   const counted = `${total.toLocaleString()} findings in scope`;
-  return carried < total
-    ? `${counted} · this document carries the ${carried.toLocaleString()} highest-scoring of them`
+  const depth = reportDepth();
+  if (Number.isFinite(depth.tableRows)) {
+    return `${counted} · ${depth.label.toLowerCase()} detail prints ${printed.toLocaleString()} rows, longest table ${depth.tableRows}`;
+  }
+  return reportRows.rows.length < total
+    ? `${counted} · this document carries the ${reportRows.rows.length.toLocaleString()} highest-scoring of them`
     : counted;
 }
 
@@ -6045,7 +6051,7 @@ function buildReportDocumentHtml() {
       th { background: #eef2ff; }
     </style></head><body>
     <h1>${escapeHtml(reportType().label)}</h1>
-    <p class="scope">${escapeHtml(reportScopeLabel())} &middot; tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}<br/>${escapeHtml(reportCoverageLine())}</p>
+    <p class="scope">${escapeHtml(reportScopeLabel())} &middot; tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}<br/>${escapeHtml(reportCoverageLine(blocks))}</p>
     ${body}
   </body></html>`;
 }
@@ -6067,7 +6073,7 @@ function buildReportWorkbookHtml() {
   return `<!doctype html><html><head><meta charset="utf-8"></head><body>
     <table><tr><td><b>${escapeHtml(reportDocumentTitle())}</b></td></tr>
     <tr><td>tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}</td></tr>
-    <tr><td>${escapeHtml(reportCoverageLine())}</td></tr></table><br/>
+    <tr><td>${escapeHtml(reportCoverageLine(blocks))}</td></tr></table><br/>
     ${tables}</body></html>`;
 }
 
@@ -6247,6 +6253,7 @@ function renderReportComposer() {
   reportTypeList.innerHTML = REPORT_TYPES.map((item) => `
     <button type="button" class="report-type plain-btn" role="radio" data-report-type="${item.id}"
             aria-checked="${item.id === type.id ? "true" : "false"}">
+      <span class="report-type-mark" aria-hidden="true"></span>
       <span class="report-type-head">
         <span class="report-type-name">${escapeHtml(item.label)}</span>
         <span class="report-type-audience">${escapeHtml(item.audience)}</span>
@@ -6291,9 +6298,39 @@ function renderReportComposer() {
   });
 
   renderReportBuildLine();
-  renderReportCarrier();
+  renderComposerSummaries();
   reportSectionExplain(null);
 }
+
+// A drawer that is shut still answers its own question. Six selects and nine
+// checkboxes shown at once gave the rail no first move - every group looked
+// equally like the place to start - so the two that are usually left alone are
+// one line each until somebody wants them.
+function renderComposerSummaries() {
+  if (reportScopeSummary) reportScopeSummary.textContent = reportCarrierScopeLabel();
+  if (reportSectionsSummary) {
+    const listed = reportType().sections;
+    const chosen = [...reportSections()].filter((id) => listed.includes(id)).length;
+    reportSectionsSummary.textContent = reportState.format === "pdf"
+      ? "fixed by the PDF template"
+      : `${chosen} of ${listed.length}`;
+  }
+}
+
+function toggleComposerDrawer(toggle, body) {
+  if (!toggle || !body) return;
+  const open = toggle.getAttribute("aria-expanded") === "true";
+  toggle.setAttribute("aria-expanded", open ? "false" : "true");
+  body.hidden = open;
+}
+
+document.querySelector("#report-scope-toggle")?.addEventListener("click", (event) => {
+  toggleComposerDrawer(event.currentTarget, document.querySelector("#report-scope-fields"));
+});
+
+document.querySelector("#report-sections-toggle")?.addEventListener("click", (event) => {
+  toggleComposerDrawer(event.currentTarget, document.querySelector("#report-sections-body"));
+});
 
 // The joint between the instrument and the page it makes. It carries the same
 // sentence the document's own cover prints, so the connection is made of
@@ -6302,21 +6339,22 @@ function renderReportComposer() {
 // cover has scrolled away, this is the only thing still saying which report
 // and which scope you are reading.
 // The jump target has to land below the band, and the band has two heights.
-function renderReportCarrier() {
-  const title = document.querySelector("#report-carrier-title");
-  const scope = document.querySelector("#report-carrier-scope");
-  if (title) title.textContent = reportType().label;
-  if (scope) scope.textContent = reportCarrierScopeLabel();
+
+
+function reportPrintedRows(blocks = reportSectionBlocks()) {
+  return blocks.reduce((total, block) =>
+    total + (block.table ? block.table.rows.length : block.detail ? block.detail.length : 0), 0);
 }
 
 function reportBuildStats() {
-  const rows = Math.min(reportRows.total, REPORT_ROW_CEILING);
-  const chosen = [...reportSections()];
-  const pages = chosen.reduce((total, id) => total + (REPORT_SECTIONS[id]?.pages(rows) || 1), 1);
+  const blocks = reportSectionBlocks();
+  const rows = reportPrintedRows(blocks);
+  const pages = blocks.reduce((total, block) =>
+    total + (REPORT_SECTIONS[block.id]?.pages(block.table ? block.table.rows.length : 0) || 1), 1);
   return {
     pages,
-    sections: chosen.length,
     rows,
+    sections: blocks.length,
     findings: reportRows.total,
     files: Number(reportRows.summary?.affected_files || estateFacets?.sensitive || 0),
   };
@@ -6334,13 +6372,9 @@ function renderReportBuildLine() {
   }
   const stats = reportBuildStats();
   const format = (REPORT_FORMATS.find((item) => item.id === reportState.format) || REPORT_FORMATS[0]).label;
-  const carried = Math.min(stats.findings, REPORT_ROW_CEILING);
-  const findings = carried < stats.findings
-    ? `${carried.toLocaleString()} of ${stats.findings.toLocaleString()} findings`
-    : `${stats.findings.toLocaleString()} findings`;
   const parts = reportState.format === "pdf"
     ? [`${stats.files.toLocaleString()} files`, `${stats.findings.toLocaleString()} findings`]
-    : [`~${stats.pages} pages`, `${stats.sections} sections`, findings];
+    : [`~${stats.pages} pages`, `${stats.sections} sections`, `${stats.rows.toLocaleString()} rows`];
   reportBuildLine.textContent = `${parts.join(" · ")} · ${format}`;
 }
 
@@ -6739,13 +6773,53 @@ function reportDroppedNote(table) {
   return text ? `<p class="report-note">${escapeHtml(text)}</p>` : "";
 }
 
-function reportTableMarkup(table, limit = reportDepth().previewRows) {
+// `table-layout: fixed` divides the width equally, which gave an eight-
+// character Severity column the same 259px as a 144-character sentence: the
+// sentence wrapped to eight lines and the row stood 127px tall, while a
+// quarter of every row was blank. A column is sized by what it holds instead.
+// The kind is read off the header because every header string is written here.
+const REPORT_COLUMN_KINDS = {
+  sev: ["severity", "highest severity"],
+  num: ["value", "count", "counts", "files", "findings", "occurrences", "share", "score", "pages", "applies to"],
+  prose: ["why it is a risk", "recommended action", "reason"],
+  when: ["due", "last seen", "run at", "change"],
+  path: ["path", "location", "file", "asset", "owner"],
+};
+
+function reportColumnKind(header) {
+  const name = String(header || "").trim().toLowerCase();
+  const found = Object.entries(REPORT_COLUMN_KINDS).find(([, names]) => names.includes(name));
+  return found ? found[0] : "name";
+}
+
+// A two-column table whose second column is a number is a list of facts, not a
+// grid. As a table it ran the full width of the page to print "9 / 100" beside
+// "Posture score" - the widest dead space in the document.
+function reportTableIsFacts(table) {
+  return table.headers.length === 2 && reportColumnKind(table.headers[1]) === "num";
+}
+
+function reportFactsMarkup(table, limit) {
   const shown = table.rows.slice(0, limit);
   if (!shown.length) return '<p class="report-note">Nothing to show for this scope.</p>';
   return `
+    <dl class="report-facts">
+      ${shown.map(([label, value]) => `
+        <div><dt>${escapeHtml(String(label ?? ""))}</dt><dd>${escapeHtml(String(value ?? ""))}</dd></div>`).join("")}
+    </dl>
+    ${reportDroppedNote(table)}
+    ${table.rows.length > shown.length ? `<p class="report-note">Preview shows ${shown.length} of ${table.rows.length.toLocaleString()} rows.</p>` : ""}`;
+}
+
+function reportTableMarkup(table, limit = reportDepth().previewRows) {
+  const shown = table.rows.slice(0, limit);
+  if (!shown.length) return '<p class="report-note">Nothing to show for this scope.</p>';
+  const kinds = table.headers.map(reportColumnKind);
+  return `
     <table class="report-table">
-      <thead><tr>${table.headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr></thead>
-      <tbody>${shown.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}</tbody>
+      <colgroup>${kinds.map((kind) => `<col class="col-${kind}" />`).join("")}</colgroup>
+      <thead><tr>${table.headers.map((head, index) => `<th class="col-${kinds[index]}">${escapeHtml(head)}</th>`).join("")}</tr></thead>
+      <tbody>${shown.map((row) => `<tr>${row.map((cell, index) => `<td class="col-${kinds[index]}">${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}</tbody>
     </table>
     ${reportDroppedNote(table)}
     ${table.rows.length > shown.length ? `<p class="report-note">Preview shows ${shown.length} of ${table.rows.length.toLocaleString()} rows.</p>` : ""}`;
@@ -6753,8 +6827,12 @@ function reportTableMarkup(table, limit = reportDepth().previewRows) {
 
 function reportBlockMarkup(block) {
   if (block.detail) return reportDetailMarkup(block.detail) + (block.note || "");
-  if (block.table) return reportTableMarkup(block.table) + (block.note || "");
-  return block.html || "";
+  if (!block.table) return block.html || "";
+  const limit = reportDepth().previewRows;
+  const markup = reportTableIsFacts(block.table)
+    ? reportFactsMarkup(block.table, Math.max(limit, 12))
+    : reportTableMarkup(block.table, limit);
+  return markup + (block.note || "");
 }
 
 async function renderReportPreview() {
@@ -6796,7 +6874,7 @@ async function renderReportPreview() {
         <p class="eyebrow">Sentro DSPM</p>
         <h3>${escapeHtml(type.label)}</h3>
         <p class="report-cover-scope">${escapeHtml(reportScopeLabel())} · tenant ${escapeHtml(currentTenant)} · ${new Date().toLocaleDateString()}</p>
-        <p class="report-cover-scope">${escapeHtml(reportCoverageLine())}</p>
+        <p class="report-cover-scope">${escapeHtml(reportCoverageLine(blocks))}</p>
       </header>
       ${blocks.length ? blocks.map((block, index) => `
         <section class="report-section-block" id="report-section-${escapeHtml(block.id)}">
