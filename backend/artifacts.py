@@ -50,6 +50,7 @@ import os
 import re
 import shutil
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -165,6 +166,76 @@ def put_bytes(tenant_id: str, payload: bytes) -> ArtifactRef:
     except OSError:  # pragma: no cover - platform dependent
         pass
     return ref
+
+
+def put_stream(tenant_id: str, chunks) -> ArtifactRef:
+    """Store a body that is produced in pieces, without ever holding it whole.
+
+    ``put_bytes`` needs the finished object three times over - as the payload,
+    as its gzip, and as the hash input - which is affordable for a small body
+    and not for a scan report. A million-file report is a gigabyte of JSON, and
+    the only reason it was ever a single string is that it was convenient.
+
+    The two things that stop this being a plain pipe are both real: the object's
+    name is the SHA-256 of its plaintext, so the destination is unknown until
+    the last chunk has been seen, and the stored form is
+    ``MAGIC + encrypt(gzip(plaintext))``, so the compressor has to run before
+    the cipher. Both are solved by compressing into a scratch file while hashing
+    the plaintext on the way past, then encrypting that file into place once the
+    name is known. What stays in memory is one chunk.
+
+    ``chunks`` yields ``str`` (encoded UTF-8) or ``bytes``. The result is
+    byte-identical in meaning to ``put_bytes`` of the concatenation, and reads
+    back through the same ``get_bytes``.
+    """
+
+    import io as _io
+    import tempfile as _tempfile
+
+    root = artifact_root() / _safe_tenant(tenant_id)
+    root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    size = 0
+    scratch = _tempfile.NamedTemporaryFile(
+        dir=str(root), prefix=".streaming-", suffix=".gz", delete=False,
+    )
+    scratch_path = Path(scratch.name)
+    try:
+        with gzip.GzipFile(fileobj=scratch, mode="wb", compresslevel=6) as compressor:
+            for chunk in chunks:
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8")
+                if not chunk:
+                    continue
+                digest.update(chunk)
+                size += len(chunk)
+                compressor.write(chunk)
+        scratch.close()
+
+        content_id = digest.hexdigest()
+        destination = object_path(tenant_id, content_id)
+        ref = ArtifactRef(_safe_tenant(tenant_id), content_id, size)
+        if destination.exists():
+            return ref  # identical content is already stored
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination.with_suffix(f".{os.getpid()}.partial")
+        try:
+            with open(scratch_path, "rb") as compressed, open(staging, "wb") as out:
+                out.write(_MAGIC_GZIP)
+                encrypt_stream(Fernet(artifact_key()), compressed, out)
+            os.replace(staging, destination)
+        finally:
+            staging.unlink(missing_ok=True)
+        try:
+            os.chmod(destination, 0o600)
+        except OSError:  # pragma: no cover - platform dependent
+            pass
+        return ref
+    finally:
+        with suppress(Exception):
+            scratch.close()
+        scratch_path.unlink(missing_ok=True)
 
 
 def put_text(tenant_id: str, text: str) -> ArtifactRef:

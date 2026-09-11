@@ -1540,18 +1540,61 @@ def report_artifacts_enabled() -> bool:
     return os.getenv("DSPM_REPORT_ARTIFACTS", "1") != "0"
 
 
-def _store_report_body(tenant_id: str, body: str) -> tuple[str, int, str]:
+def iter_report_json(report: dict):
+    """The report as JSON, a piece at a time, never as one string.
+
+    ``json.dumps(report)`` on a million-file scan is a gigabyte of text held
+    beside the report it was built from - measured at 4.63 KB per file, and the
+    tallest thing in the save once the projection stopped being built whole.
+
+    The output is byte-for-byte what ``json.dumps(report, ensure_ascii=False)``
+    produces, which is not a nicety: an artifact's name is the SHA-256 of its
+    plaintext, so a different-but-equivalent encoding would give every existing
+    report a new content id and re-store it on the next lifecycle update. A
+    nested value serialises the same whether it is dumped alone or as part of
+    its parent, so only the punctuation between values has to be reproduced
+    here - `json.dumps` default separators, in insertion order.
+
+    ``files`` is emitted record by record and may be any iterable, which is what
+    lets the scanner eventually hand this a stream rather than a list.
+    """
+
+    yield "{"
+    for index, (key, value) in enumerate(report.items()):
+        if index:
+            yield ", "
+        yield json.dumps(key, ensure_ascii=False)
+        yield ": "
+        if key == "files" and isinstance(value, (list, tuple)):
+            yield "["
+            for position, record in enumerate(value):
+                if position:
+                    yield ", "
+                yield json.dumps(record, ensure_ascii=False)
+            yield "]"
+        else:
+            yield json.dumps(value, ensure_ascii=False)
+    yield "}"
+
+
+def _store_report_body(tenant_id: str, report: dict) -> tuple[str, int, str]:
     """Persist a report body; returns (report_ref, report_bytes, inline_body).
 
     The object is durable before the row that references it. The reverse order
     would risk a reference to a body that does not exist; this order risks only
     an unreferenced object, which ``artifacts.prune()`` collects.
+
+    With the artifact tier on - the default - the body is streamed and never
+    exists as a single string. With it off the body is a column value, so it has
+    to be assembled; that is the pre-Phase-5 behaviour and it keeps the
+    pre-Phase-5 memory cost with it.
     """
     if not report_artifacts_enabled():
+        body = "".join(iter_report_json(report))
         return "", len(body.encode("utf-8")), body
     from backend import artifacts
 
-    ref = artifacts.put_text(tenant_id, body)
+    ref = artifacts.put_stream(tenant_id, iter_report_json(report))
     return ref.content_id, ref.size_bytes, ""
 
 
@@ -1605,8 +1648,7 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                 if isinstance(incremental, dict) and incremental.get("enabled"):
                     incremental["baseline_committed"] = False
                     incremental["baseline_commit_reason"] = "normalized_asset_write_unavailable"
-            body = json.dumps(report, ensure_ascii=False)
-            report_ref, report_bytes, inline_body = _store_report_body(tenant_id, body)
+            report_ref, report_bytes, inline_body = _store_report_body(tenant_id, report)
             conn.execute(
                 """
                 INSERT OR REPLACE INTO scan_reports

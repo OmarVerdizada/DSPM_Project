@@ -107,19 +107,29 @@ class AuthoritativeWrites(_TempStore):
         store.save_scan_history(self.tenant, _report("first-scan"))
         before = self._counts()
 
-        real_dumps = store.json.dumps
+        real_body = store.iter_report_json
 
-        def fail_on_the_report_body(value, *args, **kwargs):
-            # The report row serializes the whole body; the projection does not.
-            if isinstance(value, dict) and "files" in value:
-                raise RuntimeError("report body serialization failed")
-            return real_dumps(value, *args, **kwargs)
+        def fail_partway_through_the_body(report):
+            # Fail after some of the body has been produced, which is the shape
+            # of the risk now that it is streamed rather than built as one
+            # string: the projection is already written and part of the object
+            # may already be on disk when the failure arrives.
+            emitted = 0
+            for piece in real_body(report):
+                emitted += 1
+                if emitted > 3:
+                    raise RuntimeError("report body serialization failed")
+                yield piece
 
-        with mock.patch.object(store.json, "dumps", side_effect=fail_on_the_report_body):
+        with mock.patch.object(store, "iter_report_json", fail_partway_through_the_body):
             with self.assertRaises(RuntimeError):
                 store.save_scan_history(self.tenant, _report("second-scan"))
 
         self.assertEqual(self._counts(), before, "a failed save must change neither surface")
+        self.assertIsNone(
+            store.read_scan_report(self.tenant, "second-scan"),
+            "the half-written scan must not be readable",
+        )
 
 
 class BestEffortEscapeHatch(_TempStore):
