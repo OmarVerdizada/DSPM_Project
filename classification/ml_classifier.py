@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import re
+import os
 
 from scripts.logger import get_logger
 
@@ -8,30 +8,55 @@ logger = get_logger(__name__)
 
 SENSITIVE_ENTITY_LABELS = {"PERSON", "ORG", "GPE", "LOC", "NORP", "MONEY", "DATE", "CARDINAL"}
 
-# GAP-2: the spaCy/NER path used to fail silently (return []), so on any install
-# without spacy + en_core_web_sm the ML detection layer was disabled with no
-# signal. Probe availability once, emit a one-time warning, and expose the state
-# so the degradation is observable rather than silent.
+# A3: the heuristic fallback that used to live here is GONE. It was five
+# re.search calls - one occurrence of `tax`, `bank`, `employee`, `patient` or
+# `repository` anywhere in a file produced a MEDIUM or HIGH finding described as
+# a "classifier". Three of the five duplicated rules that already exist in
+# `regex_classifier.RULES` (`phi_context`, `payroll_context`,
+# `customer_context`), so one sentence could produce the same claim twice.
+# Context detection belongs in the GDPR and NIST detectors, which have keyword
+# catalogs, thresholds and confidence tiers; a regex with no threshold is not a
+# classifier and should not have been named like one.
+#
+# What remains is the real spaCy NER path, and it is opt-in twice over: the
+# optional dependency has to be installed AND DSPM_ML_NER_ENABLED has to be set.
+# GAP-2 (why the status probe exists): the NER path used to fail silently, so an
+# install without spacy ran without it and said nothing.
 _ML_STATUS: dict | None = None
+
+
+def _ner_enabled() -> bool:
+    """Whether the operator asked for entity recognition at all.
+
+    Off by default. `SENSITIVE_ENTITY_LABELS` includes DATE and CARDINAL, which
+    every business document contains, so this is a tuning surface an operator
+    opts into deliberately - not something that should arrive with an install.
+    """
+
+    return os.getenv("DSPM_ML_NER_ENABLED", "0").strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def ml_classifier_status() -> dict:
     """Return {'available': bool, 'reason': str} for the ML/NER detector.
 
-    Probed once and cached. Emits a single WARNING when unavailable so operators
-    know classification is running in the heuristic-only fallback mode.
+    Probed once and cached. Emits a single WARNING when the operator asked for
+    NER and it cannot run, so a requested control that does not apply is
+    visible rather than silent. Being switched off is not a warning.
     """
     global _ML_STATUS
     if _ML_STATUS is not None:
+        return _ML_STATUS
+    if not _ner_enabled():
+        _ML_STATUS = {"available": False, "reason": "ml_ner_disabled"}
         return _ML_STATUS
     try:
         import spacy
     except ModuleNotFoundError:
         _ML_STATUS = {"available": False, "reason": "spacy_not_installed"}
         logger.warning(
-            "ML/NER classification is DISABLED (spacy not installed); using "
-            "heuristic context detection only. Install requirements-ml.txt and run "
-            "'python -m spacy download en_core_web_sm' to enable it."
+            "DSPM_ML_NER_ENABLED is set but spacy is not installed, so entity "
+            "recognition is off. Install requirements-ml.txt and run "
+            "'python -m spacy download en_core_web_sm'."
         )
         return _ML_STATUS
     try:
@@ -39,9 +64,9 @@ def ml_classifier_status() -> dict:
     except Exception:
         _ML_STATUS = {"available": False, "reason": "model_not_downloaded"}
         logger.warning(
-            "ML/NER classification is DISABLED ('en_core_web_sm' model missing); "
-            "using heuristic context detection only. Run "
-            "'python -m spacy download en_core_web_sm' to enable it."
+            "DSPM_ML_NER_ENABLED is set but the 'en_core_web_sm' model is missing, "
+            "so entity recognition is off. Run "
+            "'python -m spacy download en_core_web_sm'."
         )
         return _ML_STATUS
     _ML_STATUS = {"available": True, "reason": ""}
@@ -51,11 +76,7 @@ def ml_classifier_status() -> dict:
 def classify_with_ml(content: str) -> list[dict]:
     if not content:
         return []
-
-    spacy_findings = _spacy_ner(content)
-    if spacy_findings:
-        return spacy_findings
-    return _heuristic_findings(content)
+    return _spacy_ner(content)
 
 
 def _spacy_ner(content: str) -> list[dict]:
@@ -74,68 +95,18 @@ def _spacy_ner(content: str) -> list[dict]:
         if entity.label_ in SENSITIVE_ENTITY_LABELS:
             counts[entity.label_] = counts.get(entity.label_, 0) + 1
 
+    # An entity count is a hint about a document, not evidence about a value:
+    # LOW severity and an explicit LOW confidence, so it can neither drive a
+    # severity band nor inflate `_detection_confidence_label`, which otherwise
+    # reads a finding carrying no confidence at all as MEDIUM.
     return [
         {
             "type": f"ml_ner_{label.lower()}",
-            "risk": "MEDIUM",
+            "risk": "LOW",
+            "detection_confidence": "LOW",
             "description": f"ML NER detected {label} entities",
             "count": count,
             "samples": [],
         }
         for label, count in sorted(counts.items())
     ]
-
-
-def _heuristic_findings(content: str) -> list[dict]:
-    findings: list[dict] = []
-    if re.search(r"\b(source code|repository|git clone|commit hash|pull request|deployment key)\b", content, re.IGNORECASE):
-        findings.append(
-            {
-                "type": "ml_source_code_context",
-                "risk": "HIGH",
-                "description": "Source code context classifier detected engineering asset language",
-                "count": 1,
-                "samples": [],
-            }
-        )
-    if re.search(r"\b(patient|diagnosis|treatment|medical record|mrn)\b", content, re.IGNORECASE):
-        findings.append(
-            {
-                "type": "ml_phi_context",
-                "risk": "HIGH",
-                "description": "PHI context classifier detected medical language",
-                "count": 1,
-                "samples": [],
-            }
-        )
-    if re.search(r"\b(invoice|salary|payroll|iban|swift|bank|payment|wire transfer|tax)\b", content, re.IGNORECASE):
-        findings.append(
-            {
-                "type": "ml_finance_context",
-                "risk": "MEDIUM",
-                "description": "Finance context classifier detected regulated business language",
-                "count": 1,
-                "samples": [],
-            }
-        )
-    if re.search(r"\b(employee|termination|performance review|bonus|compensation|hr case)\b", content, re.IGNORECASE):
-        findings.append(
-            {
-                "type": "ml_hr_context",
-                "risk": "MEDIUM",
-                "description": "HR context classifier detected employee-sensitive language",
-                "count": 1,
-                "samples": [],
-            }
-        )
-    if re.search(r"\b(customer list|customer export|account owner|crm|lead list|prospect)\b", content, re.IGNORECASE):
-        findings.append(
-            {
-                "type": "ml_customer_data_context",
-                "risk": "MEDIUM",
-                "description": "Customer data context classifier detected commercial data language",
-                "count": 1,
-                "samples": [],
-            }
-        )
-    return findings

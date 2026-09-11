@@ -241,14 +241,19 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
     manifest_path = directory / f"sentro_{stamp}{MANIFEST_SUFFIX}"
 
     counts = capture_table_counts(dsn)
-    completed = subprocess.run(
-        [_pg_bin("pg_dump"), "--format=custom", "--no-password", f"--dbname={dsn}",
-         "--file", str(plain)],
-        capture_output=True, text=True, timeout=3600,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"pg_dump failed: {completed.stderr.strip()[:400]}")
+    # The try starts BEFORE pg_dump, not after it. The finally below was already
+    # here, but a dump that succeeded and then failed the returncode check - or
+    # timed out after writing part of a file - left an unencrypted copy of the
+    # whole database in the backup directory. One was sitting in data/backups on
+    # this tree next to seven encrypted ones.
     try:
+        completed = subprocess.run(
+            [_pg_bin("pg_dump"), "--format=custom", "--no-password", f"--dbname={dsn}",
+             "--file", str(plain)],
+            capture_output=True, text=True, timeout=3600,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"pg_dump failed: {completed.stderr.strip()[:400]}")
         plain_sha, cipher_sha = encrypt_file(plain, encrypted)
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),

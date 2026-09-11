@@ -63,6 +63,13 @@ class PCIFinding:
     rotation_version: str = "v1"
     card_brand: str = "unknown"
     pan_length_valid_for_brand: bool = False
+    # Why this digit run was accepted as a card, and how strongly.
+    pan_confidence: str = ""
+    pan_issuer: str = ""
+    pan_context_terms: list[str] = field(default_factory=list)
+    pan_density: int = 0
+    pan_validator_version: str = ""
+    confidence_basis: str = ""
     test_card: bool = False
     test_card_label: str = ""
     iin_bin: str = ""
@@ -105,6 +112,14 @@ class PCIFinding:
             "rotation_version": self.rotation_version,
             "card_brand": self.card_brand,
             "pan_length_valid_for_brand": self.pan_length_valid_for_brand,
+            **({
+                "pan_confidence": self.pan_confidence,
+                "pan_issuer": self.pan_issuer,
+                "pan_context_terms": self.pan_context_terms,
+                "pan_density": self.pan_density,
+                "pan_validator_version": self.pan_validator_version,
+                "confidence_basis": self.confidence_basis,
+            } if self.pan_confidence else {}),
             "test_card": self.test_card,
             "test_card_label": self.test_card_label,
             "iin_bin": self.iin_bin,

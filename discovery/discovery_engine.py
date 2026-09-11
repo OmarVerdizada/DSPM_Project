@@ -29,16 +29,16 @@ from discovery.detector_pool import build_pool
 from discovery.detector_stage import run_detector_stage, timed_detector
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
 from permissions.acl_analyzer import analyze_acl
-from risk.risk_engine import RiskAssessment, calculate_risk
+from risk.risk_engine import RiskAssessment, _is_protected_content, calculate_risk
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
-GENERIC_DETECTOR_VERSION = "generic-regex-ml-v1"
-PCI_DETECTOR_VERSION = "pci-detector-v2"
+GENERIC_DETECTOR_VERSION = "generic-regex-v3"  # A3 removed the ML heuristic; A6 changed what a sample says
+PCI_DETECTOR_VERSION = "pci-detector-v3"  # A2: one PAN validator, issuer-gated
 # Bumped v2 -> v3 for SC-1: previews and the classification cache are now
 # produced by the universal evidence sanitizer, so every pre-existing findings
 # cache entry and preview sidecar must be regenerated rather than reused.
-PARSER_VERSION = "content-parser-v3"
+PARSER_VERSION = "content-parser-v4"  # A1: credential material (.pem/.key/...) is read as text
 
 
 @dataclass(slots=True)
@@ -71,7 +71,11 @@ class ScanConfig:
     pipeline_enabled: bool = True
     detector_timeout_seconds: float = 8.0
     persistent_cache_enabled: bool = True
-    cache_dir: str = "data/scan_cache"
+    # Overridable so a test run - or an operator with a separate cache disk -
+    # does not read and write the live install's findings cache. The suite
+    # sets it to a temp directory; without that, a test's result depended on
+    # what an earlier real scan happened to leave behind.
+    cache_dir: str = field(default_factory=lambda: os.getenv("DSPM_SCAN_CACHE_DIR", "data/scan_cache"))
     incremental_enabled: bool = True
     incremental_scope: str = ""
     baseline_probe: Callable[[str, int, str, str], dict | None] | None = None
@@ -87,6 +91,11 @@ class ScanSummary:
     sensitive_files: int
     hidden_files: int = 0
     protected_files: int = 0
+    # Files carrying no signal at all, so that
+    # total_files == critical + high + medium + low + clear. Without it the
+    # difference between "what we looked at" and "what we found" is an
+    # unexplained gap, which is how an operator concludes the scan is broken.
+    clear: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +104,7 @@ class ScanSummary:
             "high": self.high,
             "medium": self.medium,
             "low": self.low,
+            "clear": self.clear,
             "sensitive_files": self.sensitive_files,
             "hidden_files": self.hidden_files,
             "protected_files": self.protected_files,
@@ -483,6 +493,7 @@ class DSPMDiscoveryEngine:
             rule_catalog_version,
             tuple(sorted(framework_ids)),
             (
+                os.getenv("DSPM_ML_NER_ENABLED", "0"),
                 os.getenv("DSPM_OCR_ENABLED", "0"),
                 os.getenv("DSPM_OCR_MAX_FILE_BYTES", ""),
                 os.getenv("DSPM_OCR_MAX_PIXELS", ""),
@@ -819,7 +830,10 @@ class DSPMDiscoveryEngine:
             }
             acl_assessment = analyze_acl(record.get("acl") or {}, record)
             public_record["permissions"] = acl_assessment
-            public_record["risk"] = calculate_risk(record, [], acl_assessment).to_dict()
+            # public_record, not record: the sanitized copy is the one carrying
+            # `scan_error`, and that is what tells the risk engine this file was
+            # never actually inspected.
+            public_record["risk"] = calculate_risk(public_record, [], acl_assessment).to_dict()
             return public_record
 
     def _collect_records(self, record_callback: Callable[[dict], None] | None = None) -> list[dict]:
@@ -1301,26 +1315,24 @@ class DSPMDiscoveryEngine:
 
     @staticmethod
     def _build_summary(files: list[dict]) -> ScanSummary:
-        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
         sensitive_files = 0
         hidden_files = 0
         protected_files = 0
 
         for item in files:
-            level = item.get("risk", {}).get("level", "LOW")
+            # A record with no risk block was never scored, and "never scored"
+            # is NONE, not LOW. Defaulting to LOW is how an unscored file became
+            # a finding.
+            level = item.get("risk", {}).get("level") or "NONE"
             counts[level] = counts.get(level, 0) + 1
             if item.get("findings"):
                 sensitive_files += 1
             if item.get("is_hidden"):
                 hidden_files += 1
-            protection_blob = " ".join(
-                str(item.get(key, "")).lower()
-                for key in ("content_status", "scan_error", "protection_type")
-            )
-            if item.get("protected") or any(
-                marker in protection_blob
-                for marker in ("protected", "password", "encrypted", "locked", "unreadable", "unsupported_archive", "bad_archive")
-            ):
+            # One definition of "protected", shared with the risk engine, so the
+            # count and the score can never disagree about what the word means.
+            if _is_protected_content(item):
                 protected_files += 1
 
         return ScanSummary(
@@ -1329,6 +1341,7 @@ class DSPMDiscoveryEngine:
             high=counts["HIGH"],
             medium=counts["MEDIUM"],
             low=counts["LOW"],
+            clear=counts["NONE"],
             sensitive_files=sensitive_files,
             hidden_files=hidden_files,
             protected_files=protected_files,
@@ -1440,13 +1453,16 @@ def sanitize_evidence_text(content: str) -> str:
     classes (private keys, tokens, credentials, connection strings, PII) are
     replaced with a non-reversible ``[redacted:<class>]`` marker. This is the
     single choke point that generalises the previous PCI-only preview redaction
-    to every sensitive class. Raw, unmasked passthrough is opt-in via
-    ``DSPM_RAW_EVIDENCE_PREVIEW=1`` and is OFF by default.
+    to every sensitive class. There is no way to turn it off.
     """
     if not content:
         return content
-    if os.getenv("DSPM_RAW_EVIDENCE_PREVIEW", "0") == "1":
-        return content
+    # DSPM_RAW_EVIDENCE_PREVIEW is gone. It was a single environment variable
+    # that turned masking off for every preview in the product, and previews are
+    # PERSISTED - into the report body and into the cache sidecars. A global
+    # "store the customer's PII in clear" switch is not a setting a data
+    # -security product should ship, and the reason it existed - that a masked
+    # sample told an analyst nothing - is what A6 fixed instead.
     return _sanitize_evidence_cached(content)
 
 

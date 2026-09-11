@@ -71,6 +71,11 @@ from classification.compliance.keywords import (
     VULNERABILITY_PENTEST_KEYWORDS,
 )
 from classification.compliance.models import GDPRRule
+from classification.pan_validator import (
+    context_window as local_pan_context,
+    pan_hits,
+    validate_pan,
+)
 from classification.compliance.validators import (
     AZ_PLATE_RE,
     ALIEN_NUMBER_RE,
@@ -652,9 +657,16 @@ def detect_criminal_records(content: str, _: dict) -> list[str]:
 
 def detect_payment_card_data(content: str, _: dict) -> list[str]:
     matches: list[str] = []
+    # This detector was already the strictest of the three - it asked for a
+    # payment word within 120 characters, which is why it alone reported nothing
+    # for an IMEI. The keyword requirement STAYS, and the shared validator is an
+    # additional AND, so the set of accepted numbers can only shrink.
+    density = len({hit.verdict.digits for hit in pan_hits(content)})
     for match in PAYMENT_CARD_RE.finditer(content):
         value = match.group(0)
-        if is_luhn_valid(value) and has_keyword_context(content, match.start(), PAYMENT_CARD_KEYWORDS, window=120):
+        if not has_keyword_context(content, match.start(), PAYMENT_CARD_KEYWORDS, window=120):
+            continue
+        if validate_pan(value, context=local_pan_context(content, match.start(), match.end()), density=density):
             matches.append(value)
     for pattern in (MASKED_CARD_RE, CARD_EXPIRY_RE):
         for match in pattern.finditer(content):
@@ -662,8 +674,9 @@ def detect_payment_card_data(content: str, _: dict) -> list[str]:
                 matches.append(match.group(0))
     for value in context_values(content, PAYMENT_CARD_KEYWORDS, max_chars=260):
         candidate = re.split(r"[\r\n;|]", value, maxsplit=1)[0].strip(" :=,-")
-        if PAYMENT_CARD_RE.search(candidate) and is_luhn_valid(candidate):
-            matches.append(PAYMENT_CARD_RE.search(candidate).group(0))
+        card = PAYMENT_CARD_RE.search(candidate)
+        if card and validate_pan(card.group(0), context=candidate, density=density):
+            matches.append(card.group(0))
         elif MASKED_CARD_RE.search(candidate) or CARD_EXPIRY_RE.search(candidate):
             matches.append(candidate[:140])
         elif CARD_CVV_RE.fullmatch(candidate) and len(candidate) in (3, 4):

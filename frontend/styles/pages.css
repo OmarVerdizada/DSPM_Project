@@ -1165,3 +1165,15 @@ button.ledger-cell:hover { background: var(--band-wash); }
    between them - the users table sat on the audit trail. */
 #tab-security > .workspace + .workspace { margin-top: var(--space-4); }
 
+
+
+/* A file with no signal is inventory, not a severity. It needs a badge that
+   reads as "we looked, there was nothing" rather than an unstyled gap - and it
+   must stay visually quieter than every real level, because a clean estate is
+   mostly these. */
+.badge.NONE {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-muted);
+  font-weight: var(--weight-regular);
+}

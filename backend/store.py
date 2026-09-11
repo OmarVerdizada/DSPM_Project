@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import contextvars
 import json
 import math
 import os
@@ -1493,8 +1494,31 @@ def delete_scan_profile(tenant_id: str, profile_id: str) -> bool:
     return bool(result.rowcount)
 
 
+# The request an audit row belongs to. Set once per request by the API layer;
+# `audit()` is called from thirty places and threading a Request through all of
+# them would be a worse change than a context variable.
+_request_origin: contextvars.ContextVar[dict] = contextvars.ContextVar("dspm_request_origin", default={})
+
+
+def set_request_origin(client_ip: str = "", user_agent: str = "") -> None:
+    _request_origin.set({
+        "client_ip": str(client_ip or "")[:64],
+        "user_agent": str(user_agent or "")[:200],
+    })
+
+
 def audit(tenant_id: str, actor: str, action: str, detail: dict | None = None) -> None:
+    """Record one action.
+
+    The row carries the ORIGIN of the request as well as the actor. A trail that
+    says "admin deleted a tenant" without saying from where cannot answer the
+    first question anyone asks of it. Note the address is the peer's: behind a
+    reverse proxy every row reads as the proxy unless the proxy is configured to
+    preserve it, and X-Forwarded-For is deliberately not trusted here.
+    """
+
     timestamp = datetime.now(timezone.utc).isoformat()
+    detail = {**(detail or {}), **{k: v for k, v in _request_origin.get().items() if v}}
     with _lock:
         with _connect() as conn:
             conn.execute(
@@ -1502,7 +1526,7 @@ def audit(tenant_id: str, actor: str, action: str, detail: dict | None = None) -
                 INSERT INTO audit_events (tenant_id, timestamp, actor, action, detail_json)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (tenant_id, timestamp, actor, action, json.dumps(detail or {}, ensure_ascii=False)),
+                (tenant_id, timestamp, actor, action, json.dumps(detail, ensure_ascii=False)),
             )
 
 
@@ -3193,6 +3217,64 @@ def _remediation_framework_metric_rows(conn, tenant_id: str, scope_where: list[s
     ).fetchall()
 
 
+def posture_inputs(tenant_id: str) -> dict:
+    """The four measurements the posture score is made of, from the estate.
+
+    Three aggregates, all index-served. They come from the normalized tables
+    rather than from a scan report because posture is a statement about the
+    ESTATE - a report covers one scan, and a console that scored the last scan
+    could be improved by scanning a smaller folder.
+
+    A severity-less asset (risk_level NONE - inventory, no signal) counts in
+    `analysed_files` and nowhere else: it is what was looked at, and it is the
+    denominator that makes the score comparable across estates of any size.
+    """
+
+    active = ", ".join("?" for _ in REMEDIATION_ACTIVE_STATUSES)
+    now = datetime.now(timezone.utc).isoformat()
+    with _connect() as conn:
+        estate = conn.execute(
+            "SELECT COUNT(*) AS analysed, "
+            "SUM(CASE WHEN finding_count > 0 THEN 1 ELSE 0 END) AS sensitive, "
+            "SUM(CASE WHEN is_protected = 1 THEN 1 ELSE 0 END) AS uninspected "
+            "FROM assets WHERE tenant_id = ?",
+            (tenant_id,),
+        ).fetchone()
+        severity = conn.execute(
+            "SELECT risk_level, COUNT(*) AS n FROM assets "
+            "WHERE tenant_id = ? AND COALESCE(risk_level, '') NOT IN ('', ?) "
+            "GROUP BY risk_level",
+            (tenant_id, SEVERITYLESS_RISK_LEVEL),
+        ).fetchall()
+        # Exposure is a property of the FINDING (the canonical model records the
+        # ACL breadth that applied when it was seen), counted over distinct
+        # files so one file with six findings is one exposed file.
+        work = conn.execute(
+            "SELECT COUNT(DISTINCT CASE WHEN exposure IN ('PUBLIC', 'BROAD_INTERNAL', 'WRITABLE_INTERNAL') "
+            "THEN asset_id END) AS exposed, "
+            f"SUM(CASE WHEN status IN ({active}) THEN 1 ELSE 0 END) AS active_n, "
+            f"SUM(CASE WHEN status IN ({active}) AND COALESCE(sla_due, '') <> '' "
+            "AND sla_due < ? THEN 1 ELSE 0 END) AS overdue_n "
+            "FROM findings WHERE tenant_id = ? AND is_current = 1",
+            (*REMEDIATION_ACTIVE_STATUSES, *REMEDIATION_ACTIVE_STATUSES, now, tenant_id),
+        ).fetchone()
+
+    def _value(row, key) -> int:
+        return int((row[key] if row else 0) or 0)
+
+    return {
+        "analysed_files": _value(estate, "analysed"),
+        "findings_by_severity": {
+            str(row["risk_level"]).lower(): int(row["n"] or 0) for row in severity if row["risk_level"]
+        },
+        "sensitive_files": _value(estate, "sensitive"),
+        "exposed_sensitive_files": min(_value(work, "exposed"), _value(estate, "sensitive")),
+        "active_findings": _value(work, "active_n"),
+        "overdue_findings": _value(work, "overdue_n"),
+        "uninspected_files": _value(estate, "uninspected"),
+    }
+
+
 def remediation_summary(tenant_id: str, scope: str = "current") -> dict:
     normalized_scope = _remediation_scope(scope)
     cache_key = (str(DB_PATH), tenant_id, normalized_scope, "summary")
@@ -4425,6 +4507,11 @@ def _finding_type_facet_items(counts: dict[str, int], severity_counts: dict[str,
     ]
 
 
+# risk_engine.LEVEL_NONE. Spelled out rather than imported so the store keeps
+# no dependency on the scan-time package.
+SEVERITYLESS_RISK_LEVEL = "NONE"
+
+
 def _facets_from_rows(rows: list[dict], source: str) -> dict:
     risk_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
@@ -4444,7 +4531,7 @@ def _facets_from_rows(rows: list[dict], source: str) -> dict:
     for row in rows:
         risk = str(row.get("risk_level") or "").upper()
         asset_source = str(row.get("source") or "workspace")
-        if risk:
+        if risk and risk != SEVERITYLESS_RISK_LEVEL:
             risk_counts[risk] = risk_counts.get(risk, 0) + 1
         scan_label = str(row.get("scan_label") or "").strip()
         if scan_label:
@@ -4713,7 +4800,11 @@ def inventory_facets(tenant_id: str, source: str = "") -> dict:
                 finding_counts["Clear"] = clear_count
             return _cache_inventory_facets(cache_key, {
                 "total": int(total_row["n"] if total_row else 0),
-                "risk_counts": {str(row["risk_level"] or "").upper(): int(row["n"]) for row in risk_rows if row["risk_level"]},
+                "risk_counts": {
+                    str(row["risk_level"] or "").upper(): int(row["n"])
+                    for row in risk_rows
+                    if row["risk_level"] and str(row["risk_level"]).upper() != SEVERITYLESS_RISK_LEVEL
+                },
                 "protected": protected_count,
                 "sources": _facet_items({str(row["source"] or "workspace"): int(row["n"]) for row in source_rows}),
                 "scans": _facet_items({str(row["scan_label"]): int(row["n"]) for row in scan_label_rows}),

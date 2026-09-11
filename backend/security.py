@@ -72,6 +72,22 @@ def _load_secret_key() -> str:
 SECRET_KEY = _load_secret_key()
 DEFAULT_SECRET_IN_USE = "DSPM_SECRET_KEY" not in os.environ
 TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "28800"))
+
+# How long a token may go unused before it stops working. An 8-hour token with
+# no idle timeout means a console left open on an unlocked machine at 09:00 is
+# still signed in at 17:00.
+#
+# Last-seen is held IN THIS PROCESS, deliberately: a per-request database write
+# is exactly what the performance work removed from the authenticated path, and
+# a new table would be a schema revision for a one-day control. The trade is
+# stated rather than hidden - on a restart every session is admitted once more,
+# and with several workers each tracks what IT has seen, so a session idle in
+# one worker and active in another stays alive. The single-instance on-prem
+# deployment this ships into has neither problem, and the CONSEQUENCE is not
+# local: an expired session is revoked in the database, so it dies everywhere.
+# 0 disables the check.
+SESSION_IDLE_SECONDS = int(os.getenv("DSPM_SESSION_IDLE_SECONDS", "3600"))
+_session_last_seen: dict[str, float] = {}
 API_KEYS = {
     item.split(":", 1)[0]: item.split(":", 1)[1]
     for item in os.getenv("DSPM_API_KEYS", "").split(",")
@@ -239,6 +255,8 @@ def verify_token(token: str) -> Principal:
         jti = str(claims.get("jti") or "")
         if is_token_revoked(jti):
             raise ValueError("revoked token")
+        if not _touch_session(jti, exp):
+            raise ValueError("idle session")
         subject = sanitize_username(str(claims.get("sub") or ""))
         user = get_user(subject)
         if not user or not user.get("is_active"):
@@ -250,6 +268,31 @@ def verify_token(token: str) -> Principal:
         return Principal(subject, role, tenant_id)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
+
+
+def _touch_session(jti: str, exp: int) -> bool:
+    """Mark a session used. False when it had already gone idle.
+
+    A session this process has never seen is admitted and recorded - that is
+    what keeps tokens issued before a restart working. Going idle REVOKES the
+    token rather than just refusing it here, so the decision outlives the
+    process that made it.
+    """
+
+    if SESSION_IDLE_SECONDS <= 0 or not jti:
+        return True
+    now = time.time()
+    previous = _session_last_seen.get(jti)
+    if previous is not None and now - previous > SESSION_IDLE_SECONDS:
+        _session_last_seen.pop(jti, None)
+        revoke_token_jti(jti, exp)
+        return False
+    _session_last_seen[jti] = now
+    if len(_session_last_seen) > 4096:
+        cutoff = now - max(SESSION_IDLE_SECONDS, TOKEN_TTL_SECONDS)
+        for stale in [key for key, seen in _session_last_seen.items() if seen < cutoff]:
+            _session_last_seen.pop(stale, None)
+    return True
 
 
 def revoke_token(token: str) -> None:
@@ -367,14 +410,23 @@ def verify_artifact_download_token(token: str, artifact_id: str) -> Principal | 
     return Principal(subject, role, tenant_id, "artifact_dl_token")
 
 
+# A query string is written to every proxy and web-server access log in the
+# path. The header is the real delivery mechanism; the query is accepted only
+# because a POPUP opened by top-level navigation cannot send a header, and an
+# operator whose browser will not take the blob-URL route needs a way back.
+ALLOW_DL_TOKEN_QUERY = os.getenv("DSPM_ALLOW_DL_TOKEN_QUERY", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def require_artifact_principal(
     artifact_id: str,
     dl_token: Annotated[str | None, Query()] = None,
+    x_artifact_token: Annotated[str | None, Header(alias="X-Artifact-Token")] = None,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)] = None,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-ID")] = None,
 ) -> Principal:
-    principal = verify_artifact_download_token(dl_token, artifact_id) if dl_token else None
+    token = x_artifact_token or (dl_token if ALLOW_DL_TOKEN_QUERY else None)
+    principal = verify_artifact_download_token(token, artifact_id) if token else None
     return principal or require_principal(credentials, x_api_key, x_tenant_id)
 
 

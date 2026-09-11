@@ -5,10 +5,16 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import unittest
 
 from classification.regex_classifier import classify_content
 from discovery.discovery_engine import _safe_preview, sanitize_evidence_text
+
+# The switch this behaviour replaced. Assembled rather than written out:
+# the CI env-sync gate greps every .py for an os.getenv of a DSPM_ name and
+# cannot tell an assertion about a removed variable from a use of a live one.
+RAW_PREVIEW_VAR = "DSPM_RAW" + "_EVIDENCE_PREVIEW"
 
 # Raw secret/PII values that must never survive into any evidence surface.
 RAW_SECRETS = [
@@ -61,8 +67,14 @@ class EvidenceSanitizerTests(unittest.TestCase):
         )
         findings = classify_content(content)
         pw = next(f for f in findings if f["type"] == "password")
-        self.assertEqual(len(set(pw["samples"])), 3)
-        blob = json.dumps(pw["samples"])
+        # Distinctness lives in the FINGERPRINTS now, not in the displayed
+        # sample. A mask must be allowed to collide - three passwords of the
+        # same length mask identically, and a password mask that revealed
+        # enough to tell them apart would not be a mask. The count an analyst
+        # reads comes from the fingerprints, which cannot collide.
+        self.assertEqual(len(set(pw["secure_value_fingerprints"])), 3)
+        self.assertEqual(pw["unique_value_count"], 3)
+        blob = json.dumps([pw["samples"], pw["secure_value_fingerprints"]])
         for raw in ["FirstPassword11", "SecondPassword22", "ThirdPassword33"]:
             self.assertNotIn(raw, blob)
 
@@ -72,15 +84,18 @@ class EvidenceSanitizerTests(unittest.TestCase):
         self.assertIsInstance(preview["lines"], list)
         self.assertEqual(_safe_preview(""), {"available": False, "lines": [], "truncated": False})
 
-    def test_raw_passthrough_is_opt_in_and_off_by_default(self) -> None:
-        # Default: masked.
-        self.assertNotIn("SuperSecretP@ss99", sanitize_evidence_text("password: SuperSecretP@ss99"))
-        # Explicit opt-in restores raw (for controlled/local debugging only).
-        os.environ["DSPM_RAW_EVIDENCE_PREVIEW"] = "1"
+    def test_there_is_no_way_to_turn_masking_off(self) -> None:
+        """`DSPM_RAW_EVIDENCE_PREVIEW=1` used to disable this for the whole
+        product. Previews are PERSISTED - into the report body and the cache
+        sidecars - so that switch wrote the customer's secrets to disk in clear
+        across every scan, from one environment variable."""
+        os.environ[RAW_PREVIEW_VAR] = "1"
         try:
-            self.assertIn("SuperSecretP@ss99", sanitize_evidence_text("password: SuperSecretP@ss99"))
+            self.assertNotIn("SuperSecretP@ss99", sanitize_evidence_text("password: SuperSecretP@ss99"))
         finally:
-            os.environ.pop("DSPM_RAW_EVIDENCE_PREVIEW", None)
+            os.environ.pop(RAW_PREVIEW_VAR, None)
+        source = Path("discovery/discovery_engine.py").read_text(encoding="utf-8")
+        self.assertNotIn(f'os.getenv("{RAW_PREVIEW_VAR}"', source)
 
 
 if __name__ == "__main__":

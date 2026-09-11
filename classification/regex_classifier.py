@@ -8,6 +8,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from classification.ml_classifier import classify_with_ml
+from classification import masking
+from classification.masking import data_class_for_rule, mask
+from classification.pan_validator import cap_severity, pan_hits
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,22 +30,22 @@ class DetectionRule:
     # alone (e.g. the BIC after a "SWIFT:" label) so the validator, redaction,
     # and unique-value fingerprint all operate on the value, not the label.
     value_group: int = 0
+    # A rule whose decision needs more than the matched value - the words around
+    # it, or how many times it occurs in the file - supplies a finder instead of
+    # a validator. It returns (value, extra_fields) pairs and OWNS the match
+    # loop; `pattern` stays in place because evidence masking redacts from it.
+    finder: Callable[[str], list[tuple[str, dict]]] | None = None
 
 
-def _luhn_ok(value: str) -> bool:
-    """Payment card: 13-19 digits AND a valid Luhn checksum (rejects arbitrary
-    long digit runs such as phone numbers, order ids, timestamps)."""
-    digits = [int(ch) for ch in value if ch.isdigit()]
-    if not 13 <= len(digits) <= 19:
-        return False
-    checksum = 0
-    for index, digit in enumerate(reversed(digits)):
-        if index % 2 == 1:
-            digit *= 2
-            if digit > 9:
-                digit -= 9
-        checksum += digit
-    return checksum % 10 == 0
+def _card_finder(content: str) -> list[tuple[str, dict]]:
+    """Payment cards, decided by the shared validator.
+
+    This rule used to ask for a Luhn checksum and nothing else. Luhn accepts one
+    in ten random digit strings and is the checksum IMEI numbers use, so
+    `Device IMEI: 490154203237518` was reported as a payment card - measured, on
+    this tree, at HIGH.
+    """
+    return [(hit.raw, hit.verdict.to_fields()) for hit in pan_hits(content)]
 
 
 def _iban_ok(value: str) -> bool:
@@ -320,8 +323,8 @@ RULES = [
         name="credit_card",
         pattern=re.compile(r"\b(?:\d[ -]*?){13,19}\b"),
         risk="HIGH",
-        description="Payment card number detected (Luhn-valid)",
-        validator=_luhn_ok,
+        description="Payment card number detected",
+        finder=_card_finder,
     ),
     DetectionRule(
         name="swift_bic",
@@ -475,12 +478,38 @@ RULES = [
 ]
 
 
-def _redact(value: str) -> str:
-    # SC-3: non-reversible, keyed fingerprint of the matched value. Reveals
-    # neither the value nor its edges (the old first3***last2 form leaked up to
-    # 5 chars), while staying distinct per distinct value so unique-value counts
-    # (canonical_model._unique_value_count, which falls back to len(set(samples))
-    # for generic findings that carry no secure fingerprints) stay accurate.
+def _add_fingerprint(fingerprints: list[str], value: str, redact: bool) -> None:
+    """Context rules match a KEYWORD, not a value, so they have nothing to
+    fingerprint - their sample is the keyword and it is shown as it was."""
+
+    if redact:
+        fingerprints.append(_fingerprint(value))
+
+
+_CONFIDENCE_STRENGTH = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+
+def _merge_rule_extra(current: dict, incoming: dict) -> dict:
+    """One finding covers every match of its rule, so the fields it carries have
+    to describe the STRONGEST match - otherwise a file whose first card is a
+    guess and whose second is confirmed reports the guess."""
+
+    if not current:
+        return dict(incoming)
+    here = _CONFIDENCE_STRENGTH.get(str(current.get("pan_confidence") or "LOW").upper(), 0)
+    there = _CONFIDENCE_STRENGTH.get(str(incoming.get("pan_confidence") or "LOW").upper(), 0)
+    return dict(incoming) if there > here else current
+
+
+def _fingerprint(value: str) -> str:
+    """A keyed, non-reversible fingerprint of a matched value.
+
+    SC-3. This is how distinct values are COUNTED without any being stored, and
+    it is what `canonical_model._unique_value_count` and its two siblings read.
+    It used to be the displayed sample as well, which is why an analyst saw
+    `[redacted:30840604a1b4]` and had to open the file to learn anything.
+    """
+
     from classification.compliance.evidence_keys import evidence_hmac_key
 
     digest = hmac.new(
@@ -489,6 +518,12 @@ def _redact(value: str) -> str:
         hashlib.sha256,
     ).hexdigest()[:12]
     return f"[redacted:{digest}]"
+
+
+def _redact(value: str, data_class: str = masking.GENERIC) -> str:
+    """What a person is shown: a partial value, masked for its class."""
+
+    return mask(value, data_class)
 
 
 # SC/SCAN-003: samples are capped for evidence hygiene, but the occurrence
@@ -589,6 +624,35 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
         total = 0
         examined = 0
         count_capped = False
+        extra_fields: dict = {}
+        data_class = data_class_for_rule(rule.name)
+        fingerprints: list[str] = []
+        if rule.finder is not None:
+            produced = rule.finder(content)
+            for value, extra in produced[:COUNT_CAP]:
+                if len(samples) < SAMPLE_CAP:
+                    samples.append(_redact(value, data_class) if rule.redact else value)
+                    _add_fingerprint(fingerprints, value, rule.redact)
+                total += 1
+                extra_fields = _merge_rule_extra(extra_fields, extra)
+            count_capped = len(produced) > COUNT_CAP
+            if total:
+                findings.append({
+                    "type": rule.name,
+                    "risk": cap_severity(rule.risk, str(extra_fields.get("pan_confidence") or "LOW")),
+                    "description": rule.description,
+                    "count": total,
+                    "occurrence_count": total,
+                    "sample_count": len(samples),
+                    "occurrence_truncated": total > len(samples),
+                    "count_capped": count_capped,
+                    "samples": samples,
+                    "data_class": data_class,
+                    "secure_value_fingerprints": fingerprints,
+                    "unique_value_count": len(set(fingerprints)) or len(set(samples)),
+                    **extra_fields,
+                })
+            continue
         for match in rule.pattern.finditer(content):
             examined += 1
             # value_group isolates the sensitive value from any anchoring label,
@@ -598,7 +662,8 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
                 value = match.group(0)
             if rule.validator is None or rule.validator(value):
                 if len(samples) < SAMPLE_CAP:
-                    samples.append(_redact(value) if rule.redact else value)
+                    samples.append(_redact(value, data_class) if rule.redact else value)
+                    _add_fingerprint(fingerprints, value, rule.redact)
                 total += 1
             if total >= COUNT_CAP or examined >= MATCH_SCAN_CAP:
                 count_capped = True
@@ -618,6 +683,12 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
                 "occurrence_truncated": total > len(samples),
                 "count_capped": count_capped,
                 "samples": samples,
+                "data_class": data_class,
+                # The masked sample is for READING. Distinct-value counting keys
+                # off these instead, so two different cards that mask to the
+                # same first-six/last-four are still two values.
+                "secure_value_fingerprints": fingerprints,
+                "unique_value_count": len(set(fingerprints)) or len(set(samples)),
             }
         )
 

@@ -135,6 +135,8 @@ from discovery.incremental import (
     qualified_object_key,
     reuse_snapshot_from_result,
 )
+from backend.reporting.posture import PostureInputs, compute_posture, posture_from_summary
+from backend.store import posture_inputs, set_request_origin
 from risk.risk_engine import get_risk_rules
 from scripts.generate_enterprise_test_data import generate as generate_enterprise_test_data
 from scripts.report import generate_report
@@ -196,6 +198,12 @@ from backend.artifacts import ArtifactCorrupted, ArtifactMissing
 DATABASE_IDENTITY = _db.enforce_database_authority(IS_PRODUCTION)
 REPORT_DIR = Path(os.getenv("DSPM_REPORT_DIR", BASE_DIR / "data" / "reports")).resolve()
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
+# A saved scan's body lives in the ENCRYPTED artifact tier (gzip + Fernet,
+# content-addressed, covered by the backup set and by tenant erasure). This
+# directory is the pre-artifact-tier copy of the same thing in clear text,
+# previews included - 28 full reports, 319 MB, on this tree. Off by default;
+# set DSPM_PLAINTEXT_REPORT_EXPORT=1 only if an external tool still reads them.
+PLAINTEXT_REPORT_EXPORT = os.getenv("DSPM_PLAINTEXT_REPORT_EXPORT", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 @asynccontextmanager
@@ -291,6 +299,11 @@ app.include_router(reporting_router)
 
 @app.middleware("http")
 async def secure_response_headers(request: Request, call_next):
+    # Before the handler runs, so anything it audits carries the origin.
+    set_request_origin(
+        getattr(request.client, "host", "") or "",
+        request.headers.get("user-agent", ""),
+    )
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
@@ -1012,6 +1025,12 @@ def compliance_keywords_export(
     principal: Principal = Depends(require_role("viewer")),
 ) -> Response:
     filename, media_type, content = export_keyword_groups(principal.tenant_id, framework, language=language, source=source, fmt=format)
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "compliance_keywords.exported",
+        {"framework": framework, "language": language, "source": source, "format": format, "bytes": len(content or "")},
+    )
     return Response(content=content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
@@ -1232,8 +1251,8 @@ def nist_catalog_rollback(principal: Principal = Depends(require_role("admin")))
 
 @app.get("/api/nist/catalog/export")
 def nist_catalog_export(principal: Principal = Depends(require_role("viewer"))) -> Response:
-    _ = principal
     filename, media_type, content = export_nist_catalog()
+    audit(principal.tenant_id, principal.subject, "nist.catalog.exported", {"bytes": len(content or "")})
     return Response(content=content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
@@ -1243,12 +1262,19 @@ def login(payload: LoginRequest, request: Request) -> dict:
     ip_key = _login_ip_rate_key(request)
     # M4: trip on EITHER the per-(IP,username) cap OR the aggregate per-IP cap, so a
     # username-spray from one IP is throttled even though no single username does.
+    # A trail that records only successful sign-ins cannot show an attempt to
+    # break in - which is the thing it is most often asked for. The tenant is
+    # unknown at this point (the credential did not resolve to one), so these
+    # rows land in "default" and name the account that was tried.
+    attempted = sanitize_username(payload.username)
     if _too_many_login_failures(login_key) or _too_many_ip_login_failures(ip_key):
+        audit("default", attempted or "unknown", "auth.login_blocked", {"username": attempted})
         raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
     principal = authenticate_user(payload.username, payload.password)
     if principal is None:
         _record_login_failure(login_key)
         _record_login_failure(ip_key)
+        audit("default", attempted or "unknown", "auth.login_failed", {"username": attempted})
         raise HTTPException(status_code=401, detail="Invalid username or password")
     # Clear this user's counter; the per-IP aggregate is NOT cleared by one success
     # (a sprayer who guesses one valid credential must not reset the IP's history).
@@ -2442,12 +2468,20 @@ def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) 
     history = read_scan_history(principal.tenant_id, limit=200)
     latest = history[-1] if history else {"summary": {}}
     summary = latest.get("summary", {})
-    score = _posture_score(summary)
+    # Posture is a statement about the ESTATE, measured from the normalized
+    # tables - not about the last scan. Scoring the last scan is what let the
+    # number be improved by pointing the scanner at a smaller folder.
+    posture = compute_posture(PostureInputs(**posture_inputs(principal.tenant_id)))
+    trend = [
+        {**entry, "posture_score": posture_from_summary(entry.get("summary") or {}).total_score}
+        for entry in history[-14:]
+    ]
     return {
         "tenant_id": principal.tenant_id,
-        "risk_posture_score": score,
+        "risk_posture_score": posture.total_score,
+        "posture": posture.to_dict(),
         "latest": latest,
-        "trend": history[-14:],
+        "trend": trend,
         "retention": data_retention_summary(principal.tenant_id),
     }
 
@@ -2678,17 +2712,13 @@ def _read_demo_manifest(output: Path) -> dict:
 
 
 def _posture_score(summary: dict) -> int:
-    total = int(summary.get("total_files") or 0)
-    if total <= 0:
-        return 100
+    """One scan's posture. Delegates, so it cannot drift from the estate's.
 
-    exposure = (
-        int(summary.get("critical") or 0) * 95
-        + int(summary.get("high") or 0) * 80
-        + int(summary.get("medium") or 0) * 55
-        + int(summary.get("low") or 0) * 20
-    ) / total
-    return max(0, min(100, round(100 - exposure)))
+    This used to be its own formula - a severity-weighted mean over the file
+    count - and it disagreed with both the dashboard's and the report's.
+    """
+
+    return posture_from_summary(summary).total_score
 
 
 _compact_scan_report = compact_scan_report
@@ -2731,7 +2761,7 @@ def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, princi
     except Exception as exc:
         data["alerts"] = []
         warnings.append({"stage": "alerts", "error": type(exc).__name__})
-    if payload.save_report:
+    if payload.save_report and PLAINTEXT_REPORT_EXPORT:
         try:
             report_id = str(data.get("scan_id") or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"))
             generate_report(data, REPORT_DIR / f"{principal.tenant_id}_{report_id}.json")

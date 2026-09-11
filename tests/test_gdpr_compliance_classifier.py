@@ -667,7 +667,7 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
         self.assertEqual(first["incremental_scan_reason"], "cache_miss_new_or_changed_file")
         self.assertEqual(second["incremental_scan_reason"], "cache_hit_unchanged_file")
         email = next(item for item in second["findings"] if item["type"] == "gdpr_email_address")
-        self.assertEqual(email["detector_version"], "gdpr-detector-v2")
+        self.assertEqual(email["detector_version"], "gdpr-detector-v3")
 
 
 if __name__ == "__main__":

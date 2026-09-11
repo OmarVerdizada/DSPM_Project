@@ -94,7 +94,6 @@ const executiveTopFiles = document.querySelector("#executive-top-files");
 const priorityRiskFiles = document.querySelector("#priority-risk-files");
 const departmentRisk = document.querySelector("#department-risk");
 const topRiskyFolders = document.querySelector("#top-risky-folders");
-const postureTrend = document.querySelector("#posture-trend");
 const remediationWorkflow = document.querySelector("#remediation-workflow");
 const remediationDrawerToggle = document.querySelector("#remediation-drawer-toggle");
 const remediationDrawerBody = document.querySelector("#remediation-drawer-body");
@@ -1875,7 +1874,6 @@ function facetsToEstateSummary(facets = {}) {
     protected_files: Number(facets.protected || 0),
     sensitive_files: Number(facets.sensitive || 0),
     hidden_files: Number(facets.hidden || 0),
-    posture_score: clampScore(100 - Math.round(Number(facets.avg_risk_score || 0))),
   };
 }
 
@@ -3036,7 +3034,7 @@ function renderRows(files, options = {}) {
           <td><div class="finding-chip-wrap"><div class="finding-chip-set">${findingChips}</div>${moreFindings}</div>${frameworkStrip}</td>
           <td>
             <div class="risk-cell${manualLevel ? " is-manual" : ""}">
-              <span class="badge ${level}">${escapeHtml(level)} ${escapeHtml(score)}</span>
+              ${riskBadge(level, score)}
               <span class="risk-override" title="${manualLevel ? "Set manually - change or return to Auto" : "Set the risk manually"}">
                 <svg class="f-ico" aria-hidden="true"><use href="#li-chevron-down"/></svg>
                 <select class="risk-override-select" data-override="${escapeHtml(key)}" aria-label="Manual risk">
@@ -4270,7 +4268,7 @@ function renderFindingDrawerGroups(file) {
   const effectiveRisk = getEffectiveRisk(file);
   return `
     <div class="drawer-summary-strip">
-      <span class="badge ${escapeHtml(effectiveRisk.level)}">${escapeHtml(effectiveRisk.level)} ${escapeHtml(effectiveRisk.score)}</span>
+      ${riskBadge(effectiveRisk.level, effectiveRisk.score)}
       <span>${escapeHtml(groups.length)} finding type${groups.length === 1 ? "" : "s"}</span>
       <i aria-hidden="true"></i>
       <span>${escapeHtml(totalOccurrences)} occurrence${totalOccurrences === 1 ? "" : "s"}</span>
@@ -5979,7 +5977,18 @@ function reportCarrierScopeLabel() {
 
 function severityLabel(level) {
   const value = String(level || "").toUpperCase();
+  // A file with no signal is not a severity. It is inventory, and "None 0"
+  // reads as a broken cell rather than as a clean file.
+  if (value === "NONE" || !value) return "Clear";
   return value.charAt(0) + value.slice(1).toLowerCase();
+}
+
+// The badge every risk cell draws. One place decides how a level is spelled, so
+// the inventory row, the detail drawer and the asset modal cannot disagree.
+function riskBadge(level, score) {
+  const value = String(level || "NONE").toUpperCase();
+  const text = value === "NONE" ? "Clear" : `${escapeHtml(value)} ${escapeHtml(score)}`;
+  return `<span class="badge ${escapeHtml(value)}">${text}</span>`;
 }
 
 // ---- The rows every section is drawn from --------------------------------
@@ -6095,13 +6104,54 @@ function reportCoverageLine(blocks) {
     : counted;
 }
 
+// Excel, LibreOffice and Numbers all EXECUTE a cell that begins with =, +, -
+// or @. Every cell below is built from scanned content - file names, owners,
+// share names - so a file called `=HYPERLINK("http://x","x").txt` on the share
+// being scanned becomes a live formula in the customer's report. The backend
+// CSV export has guarded this since Track S; these three builders did not.
+//
+// A leading apostrophe is the portable "treat this as text" marker. Numbers are
+// exempt: the report prints counts and percentages, and quoting those would
+// turn a spreadsheet of figures into a spreadsheet of strings.
+// The four characters a spreadsheet treats as the start of a formula, plus
+// the two whitespace characters Excel strips before deciding.
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+const NUMERIC_CELL = /^[-+]?\d[\d,. ]*%?$/;
+
+// The artifact bytes, as a URL a window can be pointed at. Falls back to the
+// signed query URL if the fetch cannot be made - an operator whose browser
+// blocks blob navigation still gets their report, and the server still accepts
+// that form unless DSPM_ALLOW_DL_TOKEN_QUERY=0 turns it off.
+async function artifactBlobUrl(artifact) {
+  const path = artifact.artifact_path;
+  const token = artifact.download_token;
+  if (!path || !token) return artifact.preview_url;
+  try {
+    const response = await fetch(`${path}?inline=1`, { headers: { "X-Artifact-Token": token } });
+    if (!response.ok) return artifact.preview_url;
+    return URL.createObjectURL(await response.blob());
+  } catch {
+    return artifact.preview_url;
+  }
+}
+
+function reportCell(value) {
+  const text = String(value ?? "");
+  if (!text || !FORMULA_LEAD.test(text)) return escapeHtml(text);
+  // A figure is not a formula. The report prints counts, percentages and
+  // deltas like "-12", and quoting those turns a sheet of numbers into a
+  // sheet of strings.
+  if (NUMERIC_CELL.test(text)) return escapeHtml(text);
+  return escapeHtml("'" + text);
+}
+
 function buildReportDocumentHtml() {
   const blocks = reportSectionBlocks();
   const body = blocks.map((block, index) => `
     <h2>${index + 1}. ${escapeHtml(block.label)}</h2>
     ${block.detail ? reportDetailWordHtml(block.detail) : block.table ? `<table border="1" cellspacing="0" cellpadding="6">
       <thead><tr>${block.table.headers.map((head) => `<th align="left">${escapeHtml(head)}</th>`).join("")}</tr></thead>
-      <tbody>${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}</tbody>
+      <tbody>${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${reportCell(cell)}</td>`).join("")}</tr>`).join("")}</tbody>
     </table>${reportDroppedNote(block.table)}${block.note || ""}` : (block.html || "")}`).join("");
   return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(reportDocumentTitle())}</title>
     <style>
@@ -6128,7 +6178,7 @@ function buildReportWorkbookHtml() {
     return `<table border="1" cellspacing="0" cellpadding="4">
       <tr><td colspan="${block.table.headers.length}"><b>${escapeHtml(block.label)}</b></td></tr>
       <tr>${block.table.headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr>
-      ${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}
+      ${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${reportCell(cell)}</td>`).join("")}</tr>`).join("")}
       ${reportDroppedText(block.table) ? `<tr><td colspan="${block.table.headers.length}">${escapeHtml(reportDroppedText(block.table))}</td></tr>` : ""}
     </table><br/>`;
   }).join("");
@@ -6158,7 +6208,7 @@ function reportDetailWorkbookHtml(block) {
       String(index + 1), entry.finding, severityLabel(entry.severity), entry.status,
       entry.path || entry.name, keywordCategoryLabel(entry.dataClass), entry.owner,
       entry.reason, entry.recommendation,
-    ].map((cell) => `<td>${escapeHtml(String(cell ?? ""))}</td>`).join("")}</tr>`).join("")}
+    ].map((cell) => `<td>${reportCell(cell)}</td>`).join("")}</tr>`).join("")}
   </table><br/>`;
 }
 
@@ -7004,7 +7054,7 @@ function buildReportModel() {
     title: readPayload().server || "Local sample scan",
     generatedAt: new Date().toLocaleString(),
     summary,
-    score: getCurrentPostureScore(summary),
+    score: getCurrentPostureScore(),
     distribution: buildRiskDistribution(summary),
     findingStats: buildFindingStats(Number.POSITIVE_INFINITY),
     priorityFiles,
@@ -7040,7 +7090,7 @@ function renderExecutiveExperience() {
   const currentSummary = displaySummary(buildCurrentSummary());
   const dashboardSummary = latestDashboard?.latest?.summary || {};
   const summary = currentSummary.total_files ? currentSummary : dashboardSummary.total_files ? dashboardSummary : currentSummary;
-  const score = getCurrentPostureScore(summary);
+  const score = getCurrentPostureScore();
 
   renderPostureCard(summary, score);
   renderDataClassesCard();
@@ -7063,7 +7113,6 @@ function renderExecutiveExperience() {
   renderRemediationWorkspace();
   setPanelHtml(topRiskyFolders, buildTopRiskyFolders());
   setPanelHtml(riskDistribution, () => `<div class="distribution-visual">${buildDonutSvg(buildRiskDistribution(summary))}${buildDistributionBars(buildRiskDistribution(summary))}</div>`);
-  setPanelHtml(postureTrend, buildPostureTrend);
   setPanelHtml(msspPortfolio, buildMsspPortfolio);
   setPanelHtml(priorityRiskFiles, buildPriorityRiskFiles);
   setPanelHtml(departmentRisk, buildDepartmentRisk);
@@ -7108,7 +7157,7 @@ function posturePoints() {
     .slice(-12)
     .map((item) => ({
       label: String(item.timestamp || "").slice(5, 10),
-      score: calculatePostureScore(item.summary || {}),
+      score: Number(item.posture_score ?? 0),
       files: Number((item.summary || {}).total_files || 0),
     }));
 }
@@ -7372,7 +7421,10 @@ function riskCategories(limit = 6) {
 function renderPostureCard(summary, score) {
   const card = document.querySelector("#posture-card");
   if (!card) return;
-  const band = postureBand(score);
+  // The server owns this number. Until it answers there IS no score, and a
+  // placeholder is more honest than a zero that reads as a failing grade.
+  const known = score !== null && score !== undefined;
+  const band = postureBand(known ? score : 100);
   const points = posturePoints();
   const comparable = comparablePosturePoints(points);
   const delta = comparable ? comparable.latest.score - comparable.earlier.score : null;
@@ -7385,7 +7437,7 @@ function renderPostureCard(summary, score) {
   card.innerHTML = `
     <div class="posture-hero" data-band="${band.key}">
       <div class="posture-figure">
-        <strong class="posture-score">${score}</strong>
+        <strong class="posture-score">${known ? escapeHtml(score) : "&mdash;"}</strong>
         <span class="posture-scale">/100</span>
       </div>
       <div class="posture-read">
@@ -7981,36 +8033,23 @@ function renderRemediationLoad() {
   }
 }
 
-function getCurrentPostureScore(summary = buildCurrentSummary()) {
-  // An estate-wide summary carries its own posture, computed from the mean
-  // risk score of every indexed asset across all sources.
-  if (summary?.posture_score !== undefined && summary?.posture_score !== null) {
-    return clampScore(summary.posture_score);
-  }
-  if (latestFiles.length || latestReport?.files_omitted) {
-    return calculatePostureScore(summary, latestFiles);
-  }
-  const dashboardSummary = latestDashboard?.latest?.summary;
-  if (dashboardSummary?.total_files) {
-    return calculatePostureScore(dashboardSummary);
-  }
-  return latestDashboard?.risk_posture_score ?? calculatePostureScore(summary);
+// The server computes posture from the estate, and it is the ONLY thing that
+// computes it. Three formulas used to produce this number - a mean of asset
+// risk scores here, a severity-weighted mean in the executive API, absolute
+// weighted counts in the report - and they disagreed with each other on the
+// same data. The client now reads the answer instead of deriving one.
+function getCurrentPostureScore() {
+  // `measured: false` means nothing has been scanned yet. The score is 100 in
+  // that case because no deduction applies, which is a different claim from
+  // "the estate is clean" - so the card shows a dash rather than an A.
+  if (latestDashboard?.posture && latestDashboard.posture.measured === false) return null;
+  const score = latestDashboard?.risk_posture_score;
+  return score === undefined || score === null ? null : clampScore(score);
 }
 
-function calculatePostureScore(summary, files = []) {
-  if (files.length) {
-    const exposure = files.reduce((sum, file) => sum + (Number(getEffectiveRisk(file).score) || 0), 0) / files.length;
-    return clampScore(100 - Math.round(exposure));
-  }
-
-  const total = Number(summary.total_files || 0);
-  if (!total) {
-    return 100;
-  }
-
-  const exposure =
-    ((summary.critical || 0) * 95 + (summary.high || 0) * 80 + (summary.medium || 0) * 55 + (summary.low || 0) * 20) / total;
-  return clampScore(100 - Math.round(exposure));
+// The four subtractions behind the score, for the card that shows them.
+function posturePressure() {
+  return latestDashboard?.posture?.terms || [];
 }
 
 function clampScore(value) {
@@ -8063,45 +8102,6 @@ function buildFindingStats(limit = 6) {
   shown.total = all.length;
   return shown;
 }
-
-function buildPostureTrend() {
-  const trend = latestDashboard?.trend || [];
-  if (!trend.length) {
-    return '<div class="empty compact">Scan history will draw a posture trend after the first saved assessment.</div>';
-  }
-
-  const points = trend.slice(-8).map((item) => {
-    const summary = item.summary || {};
-    return {
-      label: (item.timestamp || "").slice(5, 10) || "scan",
-      score: calculatePostureScore(summary),
-      critical: summary.critical || 0,
-      high: summary.high || 0,
-    };
-  });
-
-  const maxScore = Math.max(35, ...points.map((item) => item.score));
-  return `
-    <div class="trend-bars">
-      ${points.map((item) => `
-        <div class="trend-bar" title="${escapeHtml(item.label)}: ${item.score}">
-          <span style="height:${Math.max(8, (item.score / maxScore) * 100)}%"></span>
-          <strong>${item.score}</strong>
-          <small>${escapeHtml(item.label)}</small>
-        </div>
-      `).join("")}
-    </div>
-    <div class="trend-caption">${points.at(-1)?.critical || 0} critical and ${points.at(-1)?.high || 0} high files in latest saved scan.</div>
-  `;
-}
-
-
-const REMEDIATION_LIFECYCLE_STATUSES = [
-  "NEW", "OPEN", "UNDER_REVIEW", "CONFIRMED", "ASSIGNED", "IN_PROGRESS",
-  "PENDING_VALIDATION", "RESOLVED", "RISK_ACCEPTED", "FALSE_POSITIVE", "SUPPRESSED", "REOPENED",
-];
-
-const REMEDIATION_TERMINAL_STATUSES = new Set(["RESOLVED", "RISK_ACCEPTED", "FALSE_POSITIVE", "SUPPRESSED"]);
 
 function remediationStatus(finding = {}) {
   const value = String(finding.status || finding.review_status || finding.workflow_status || "OPEN").trim().toUpperCase();
@@ -9313,7 +9313,11 @@ async function exportPdf() {
     if (artifact.template_id !== UNIFIED_PDF_TEMPLATE_ID || !artifact.preview_url) {
       throw new Error("The report service returned an unsupported template.");
     }
-    reportWindow.location.replace(artifact.preview_url);
+    // Fetch with the token in a header, then show the bytes from a same-origin
+    // blob. A top-level navigation cannot carry a header, which is the only
+    // reason the signed token was ever in the query string - and a query string
+    // is written to every access log between here and the server.
+    reportWindow.location.replace(await artifactBlobUrl(artifact));
     showToast("Report filed", `${reportType().label} is open as a PDF artifact.`, "success");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to create the PDF report.";
@@ -9989,7 +9993,11 @@ async function loadAudit() {
 // print them, and a JSON blob beside them.
 const AUDIT_ACTIONS = {
   "auth.login": "Signed in",
+  "auth.login_failed": "Sign-in refused",
+  "auth.login_blocked": "Sign-in blocked after repeated failures",
   "auth.logout": "Signed out",
+  "compliance_keywords.exported": "Exported the keyword library",
+  "nist.catalog.exported": "Exported the NIST catalog",
   "api_key.created": "Created an API key",
   "api_key.revoked": "Revoked an API key",
   "connection.test": "Tested a file server connection",

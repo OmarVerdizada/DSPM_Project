@@ -17,7 +17,9 @@
 - Polished Excel, Word, and print/PDF exports with report-safe sizing, SVG charts, heatmap, trend visuals, and priority queues.
 - Threshold alert generation with optional webhook via `DSPM_ALERT_WEBHOOK_URL`.
 - Binary content extraction for DOCX, XLSX, PPTX, and lightweight PDF text streams.
-- ML detection adapter: spaCy NER if installed, heuristic PHI/finance context otherwise.
+- Optional spaCy NER adapter, off unless `DSPM_ML_NER_ENABLED=1` and the extra is installed; its
+  output is LOW severity, LOW confidence, and excluded from posture. PHI, payroll, customer and
+  repository context detection is done by the regex catalog and the GDPR/NIST context rules.
 - Frontend sign-in, credential reference flow, async scan polling, and scan history view.
 - Generic DLP policy JSON export endpoint.
 

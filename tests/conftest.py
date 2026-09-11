@@ -27,6 +27,8 @@ To run the whole suite on Postgres:
 from __future__ import annotations
 
 import os
+import pathlib
+import tempfile
 from datetime import datetime, timezone
 
 import pytest
@@ -35,13 +37,25 @@ from backend import db
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Fail fast rather than reset a possibly-production database.
+    """Isolate the findings cache, then fail fast rather than reset a possibly-
+    production database.
+
+    The scan cache defaults to `data/scan_cache`, which on a developer machine or
+    a real install holds thousands of entries from actual scans. Without this,
+    every test that builds a DSPMDiscoveryEngine read and WROTE that directory:
+    a test could pass because an earlier scan had cached the answer, fail
+    because a stale entry predated a detector change, and pollute the install's
+    cache on the way through. A temp directory per run removes all three.
 
     The per-test fixture TRUNCATEs the target Postgres database. A persistent
     install points DSPM_DB_URL at the real store, so running the suite with that
     env inherited would wipe it. Require an explicit DSPM_PG_TEST_RESET=1 opt-in
     to run the destructive suite against Postgres; otherwise abort before any
     test (or fixture) runs. SQLite is always fine (its isolation is a temp file)."""
+    os.environ.setdefault(
+        "DSPM_SCAN_CACHE_DIR",
+        str(pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-scan-cache-")).resolve()),
+    )
     if db.is_postgres() and os.getenv("DSPM_PG_TEST_RESET") != "1":
         pytest.exit(
             "DSPM_DB_URL selects PostgreSQL, but this suite RESETS (truncates) the "
@@ -58,7 +72,9 @@ def pytest_configure(config: pytest.Config) -> None:
     # before this, every full-suite run leaked ~40 junk tenants into the dev
     # store. Set DSPM_TEST_KEEP_DB=1 to opt out (e.g. to debug against a copy).
     if not db.is_postgres() and not os.getenv("DSPM_TEST_KEEP_DB"):
-        import tempfile
+        # `tempfile` and `pathlib` are imported at module scope; a local import
+        # here would make them locals for the WHOLE function and break the cache
+        # isolation above with UnboundLocalError.
         from pathlib import Path as _Path
         from backend import store as _store
         from backend import security as _security

@@ -256,8 +256,20 @@ def create_report_artifact(
         "template_id": pdf_info["template_id"],
         "page_count": pdf_info["page_count"],
     }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {key: value for key, value in metadata.items() if key not in {"storage_filename", "html_storage_filename", "media_type"}}
+    # The signed download token is a CREDENTIAL with a five-minute life. It is
+    # handed to the caller that just authenticated and is not written beside the
+    # artifact, where it would outlive its purpose in a file anyone with the
+    # data directory can read.
+    persisted = {key: value for key, value in metadata.items() if not key.endswith("_url")}
+    persisted["artifact_path"] = f"/api/v1/reports/artifacts/{artifact_id}"
+    metadata_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        **{key: value for key, value in metadata.items() if key not in {"storage_filename", "html_storage_filename", "media_type"}},
+        # Preferred delivery: the caller fetches with this in a header, so the
+        # token never enters a proxy or web-server access log.
+        "artifact_path": f"/api/v1/reports/artifacts/{artifact_id}",
+        "download_token": dl_token,
+    }
 
 
 def load_artifact_metadata(principal: Principal, artifact_id: str) -> dict | None:

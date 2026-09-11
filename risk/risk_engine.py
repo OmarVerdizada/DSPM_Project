@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 
 
@@ -73,6 +74,14 @@ FILENAME_KEYWORDS = {
     "creds",
 }
 
+# (original keyword, " word word " form) - built once, longest first so a hit
+# reports the most specific keyword that matched.
+_NORMALIZED_FILENAME_KEYWORDS = tuple(sorted(
+    ((keyword, " " + " ".join(token for token in re.split(r"[^a-z0-9]+", keyword.lower()) if token) + " ")
+     for keyword in FILENAME_KEYWORDS),
+    key=lambda pair: (-len(pair[1]), pair[0]),
+))
+
 EXTENSION_RISK = {
     ".env": 25,
     ".pem": 25,
@@ -112,19 +121,6 @@ EXTENSION_RISK = {
     ".gz": 15,
     ".pst": 15,
     ".ost": 15,
-    ".log": 10,
-    ".txt": 10,
-    ".csv": 10,
-    ".tsv": 10,
-    ".xlsx": 10,
-    ".xls": 10,
-    ".docx": 10,
-    ".doc": 10,
-    ".pdf": 10,
-    ".json": 10,
-    ".xml": 10,
-    ".yaml": 10,
-    ".yml": 10,
 }
 
 FINDING_WEIGHTS = {
@@ -133,6 +129,19 @@ FINDING_WEIGHTS = {
     "MEDIUM": 20,
     "LOW": 5,
 }
+
+# A file that carries no signal at all. It stays in the inventory - counted,
+# searchable, filterable - and is absent from severity counts, the remediation
+# queue and the posture average. LOW used to mean both "barely risky" and
+# "nothing here", which is how a clean workstation reported two low findings.
+LEVEL_NONE = "NONE"
+
+# How far an uninspected file is floored. A SEALED container (encrypted, or an
+# archive someone put a password on) is a deliberate concealment and outranks
+# most content signals. A merely UNINSPECTABLE one - no extractor, a corrupt
+# archive - is a coverage gap: real, worth showing, not the same claim.
+PROTECTION_FLOOR_SEALED = 70
+PROTECTION_FLOOR_UNINSPECTABLE = 45
 
 RISK_RULE_DESCRIPTIONS = [
     {
@@ -453,6 +462,17 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
     findings = findings or []
     acl_assessment = acl_assessment or {}
 
+    protection_state = _content_protection_state(file_obj)
+    override = _match_asset_override(file_obj)
+
+    # THE GATE. Three things make a file a finding: a detector saw something, the
+    # content was sealed against inspection, or the customer named the asset.
+    # Nothing else does - a path keyword and a document extension describe every
+    # file in an office, and scoring them is what made a clean estate read
+    # "2 low findings, posture 77".
+    if not (findings or protection_state or override):
+        return _inventory_only(acl_assessment)
+
     data_sensitivity_score = 0
     compliance_impact_score = 0
     exposure_score = 0
@@ -481,9 +501,10 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
     extension = str(file_obj.get("extension", "")).lower()
     size = int(file_obj.get("size") or 0)
 
-    if any(keyword in path for keyword in FILENAME_KEYWORDS):
+    matched_keyword = _path_keyword_hit(path)
+    if matched_keyword:
         exposure_score += 15
-        reasons.append("Sensitive keyword found in file path or name")
+        reasons.append(f'Sensitive keyword in the file path or name: "{matched_keyword}"')
         recommendations.append("Add filename/path condition to DLP policy")
 
     extension_score = EXTENSION_RISK.get(extension, 0)
@@ -500,10 +521,21 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
         reasons.extend(acl_assessment.get("issues", []))
         recommendations.append("Review AD group membership and share permissions")
 
-    if _is_protected_content(file_obj):
-        exposure_score = max(exposure_score, 70)
-        reasons.append("File is encrypted, password-protected, or could not be inspected")
+    if protection_state == "sealed":
+        exposure_score = max(exposure_score, PROTECTION_FLOOR_SEALED)
+        reasons.append("File is encrypted or password-protected, so its contents could not be inspected")
         recommendations.append("Request owner attestation, password escrow, or a decrypted inspection copy")
+    elif protection_state == "uninspectable":
+        exposure_score = max(exposure_score, PROTECTION_FLOOR_UNINSPECTABLE)
+        # Say WHICH kind of not-looked-at this was. "No extractor" and "the read
+        # failed" are different problems for whoever has to act on it.
+        failure = str(file_obj.get("scan_error") or "").strip()
+        reasons.append(
+            f"This file was not inspected, so nothing about its contents is verified: {failure}"
+            if failure
+            else "This scanner cannot read the file format, so nothing about its contents is verified"
+        )
+        recommendations.append("Convert or extract the file to a scannable form, or confirm its contents with the owner")
 
     if file_obj.get("source") == "smb":
         exposure_score += 5
@@ -524,7 +556,6 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
     compliance_severity = get_level(compliance_impact_score)
     detection_confidence = _detection_confidence_label(findings)
 
-    override = _match_asset_override(file_obj)
     if override:
         level = override["level"]
         operational_priority_score = _score_for_level(level)
@@ -550,6 +581,76 @@ def calculate_risk(file_obj: dict, findings: list[dict] | None = None, acl_asses
         operational_priority=level,
         detection_confidence=detection_confidence,
     )
+
+
+def _inventory_only(acl_assessment: dict) -> RiskAssessment:
+    """An inventory row, not a finding.
+
+    Broad or writable permissions on a file with nothing sensitive in it are an
+    ACCESS-GOVERNANCE observation, so the ACL score and its issues stay on the
+    row - they are simply not allowed to manufacture a severity that someone
+    then has to triage in a remediation queue.
+    """
+
+    issues = [str(issue) for issue in (acl_assessment.get("issues") or []) if issue]
+    return RiskAssessment(
+        score=0,
+        level=LEVEL_NONE,
+        reasons=issues or ["No sensitive signal detected"],
+        dlp_recommendations=["Review AD group membership and share permissions"] if issues else [],
+        remediation={"status": "No action", "owner": "", "sla": "", "ticket": "", "actions": []},
+        access_risk_score=_clamp_score(int(acl_assessment.get("score", 0) or 0)),
+        compliance_severity=LEVEL_NONE,
+        operational_priority=LEVEL_NONE,
+        detection_confidence=LEVEL_NONE,
+    )
+
+
+# Components that name the ACCOUNT rather than the data. The component after
+# one of these is a person's username, and matching keywords inside it meant
+# every file belonging to a user called Administrator, or to anyone whose name
+# contains "deal" or "access", carried a sensitive-path score.
+_PROFILE_ROOT_COMPONENTS = frozenset({"users", "home", "documents and settings", "profiles"})
+
+
+def _path_word_stream(path: str) -> str:
+    """A path reduced to its words, one padded stream per component.
+
+    Substring matching over the raw path is what made `hr` match "chrome", `tax`
+    match "syntax", `board` match "keyboard", `db` match "sandbox", `access`
+    match "accessibility" and `prod` match every "products" folder. A keyword is
+    a word, so it has to match one.
+    """
+
+    normalized = str(path or "").replace("\\", "/").lower()
+    components = [part for part in normalized.split("/") if part]
+    words: list[str] = []
+    skip_next = False
+    for index, component in enumerate(components):
+        if skip_next:
+            skip_next = False
+            continue
+        if component in _PROFILE_ROOT_COMPONENTS:
+            skip_next = True
+            continue
+        if index == 0 and component.endswith(":"):
+            continue  # the drive letter
+        tokens = [token for token in re.split(r"[^a-z0-9]+", component) if token]
+        if tokens:
+            words.append(" " + " ".join(tokens) + " ")
+    return "".join(words)
+
+
+def _path_keyword_hit(path: str) -> str:
+    """The first FILENAME_KEYWORDS entry that appears as a whole word."""
+
+    stream = _path_word_stream(path)
+    if not stream:
+        return ""
+    for keyword in _NORMALIZED_FILENAME_KEYWORDS:
+        if keyword[1] in stream:
+            return keyword[0]
+    return ""
 
 
 def get_level(score: int) -> str:
@@ -609,6 +710,16 @@ def _finding_compliance_impact_score(finding: dict, finding_level: str) -> int:
 
 
 def _retention_score(file_obj: dict, findings: list[dict]) -> int:
+    """How much this file's RETENTION is a problem.
+
+    Carrying a retention period is not a breach of one. Every GDPR finding
+    carries its lawful retention window as metadata, and scoring that floored
+    the whole file at 45 - so "Meeting notes for Thursday. Attendance 12." came
+    back MEDIUM because a timesheet rule matched the word "attendance" and the
+    rule happens to know how long timesheets may be kept. Only an EXPIRED
+    retention is a finding about retention.
+    """
+
     score = 0
     path = str(file_obj.get("path") or file_obj.get("name") or "").lower()
     if any(term in path for term in ("retention", "expired", "legal hold", "legal_hold", "archive", "backup")):
@@ -618,8 +729,6 @@ def _retention_score(file_obj: dict, findings: list[dict]) -> int:
     for finding in findings:
         if _truthy(finding.get("retention_expired")):
             score = max(score, 90)
-        elif finding.get("retention_period") or finding.get("retention_status"):
-            score = max(score, 45)
     return score
 
 
@@ -679,17 +788,43 @@ def _extract_confidence_score(finding: dict) -> int | None:
     return None
 
 
+# The fixed vocabulary `content_status_for_extension` emits, split by what the
+# state actually claims. `empty_or_unreadable` is in NEITHER set on purpose: it
+# means the file was read and held nothing. It used to match on the substring
+# "unreadable", which made every zero-byte .txt and .log on a workstation a HIGH
+# finding - measured on this repo's own data, an empty text file scored 70.
+_SEALED_CONTENT_STATUSES = frozenset({"protected", "password_protected", "encrypted", "locked"})
+_UNINSPECTABLE_CONTENT_STATUSES = frozenset({"protected_or_uninspectable_archive", "bad_archive"})
+
+# scan_error and protection_type are prose, not a vocabulary, so they keep
+# substring matching - minus the "unreadable" marker, for the same reason.
+_SEALED_PROSE_MARKERS = ("password", "encrypted", "locked", "protected")
+_UNINSPECTABLE_PROSE_MARKERS = ("unsupported_archive", "bad_archive")
+
+
+def _content_protection_state(file_obj: dict) -> str:
+    """"sealed", "uninspectable", or "" - why this file's content is unknown."""
+
+    status = str(file_obj.get("content_status") or "").strip().lower()
+    if status in _SEALED_CONTENT_STATUSES:
+        return "sealed"
+    if status in _UNINSPECTABLE_CONTENT_STATUSES:
+        return "uninspectable"
+    if file_obj.get("protected"):
+        return "sealed"
+    prose = " ".join(str(file_obj.get(key) or "") for key in ("scan_error", "protection_type")).strip().lower()
+    if any(marker in prose for marker in _SEALED_PROSE_MARKERS):
+        return "sealed"
+    # ANY scan error is a coverage gap. A file the collector could not read, or
+    # whose analysis raised, is not a file with nothing in it - reporting it as
+    # clean would hide the failure inside a reassuring count.
+    if prose:
+        return "uninspectable"
+    return ""
+
+
 def _is_protected_content(file_obj: dict) -> bool:
-    protection_status = str(
-        file_obj.get("content_status")
-        or file_obj.get("scan_error")
-        or file_obj.get("protection_type")
-        or ""
-    ).lower()
-    return bool(file_obj.get("protected")) or any(
-        marker in protection_status
-        for marker in ("protected", "password", "encrypted", "locked", "unreadable", "unsupported_archive", "bad_archive")
-    )
+    return bool(_content_protection_state(file_obj))
 
 
 def _truthy(value: object) -> bool:
@@ -755,10 +890,7 @@ def _build_remediation(level: str, score: int, file_obj: dict, findings: list[di
         actions.extend(["Apply regulated-data label", "Restrict external sharing", "Create DLP block rule for matching identifiers"])
     if has_compliance_category:
         actions.extend(["Apply custom GDPR/category label", "Route category-specific owner review", "Validate retention and business need"])
-    protected_content = bool(file_obj.get("protected")) or any(
-        marker in str(file_obj.get("content_status") or file_obj.get("scan_error") or "").lower()
-        for marker in ("protected", "password", "encrypted", "locked", "unreadable", "unsupported_archive", "bad_archive")
-    )
+    protected_content = _is_protected_content(file_obj)
     if has_acl_issue:
         actions.extend(["Remove broad or writable groups", "Confirm least-privilege access with the data owner"])
     if protected_content:

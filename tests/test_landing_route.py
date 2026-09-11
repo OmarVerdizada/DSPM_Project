@@ -60,6 +60,10 @@ class RootRouteTests(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "Local scan path does not exist"):
             _prepare_local_scan_data(ConnectionRequest(local_path="missing-custom-scan-folder"))
 
+    # The plaintext report export is off by default now (S7 - the encrypted
+    # artifact tier supersedes it), and this test is about failure ISOLATION,
+    # not about that policy. Turn it on so there is a secondary step to fail.
+    @patch("backend.app.PLAINTEXT_REPORT_EXPORT", True)
     @patch("backend.app.audit")
     @patch("backend.app.generate_report", side_effect=OSError("disk full"))
     @patch("backend.app.evaluate_alerts", side_effect=RuntimeError("alert sink unavailable"))

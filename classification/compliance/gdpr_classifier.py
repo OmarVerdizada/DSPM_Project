@@ -27,7 +27,7 @@ NON_PERSONAL_CONTEXT_RULE_TYPES = {
     "gdpr_vulnerability_pentest_report",
     "gdpr_security_config_firewall_rule",
 }
-GDPR_DETECTOR_VERSION = "gdpr-detector-v2"
+GDPR_DETECTOR_VERSION = "gdpr-detector-v3"  # A2: PAN gated by the shared validator
 GDPR_RULE_CATALOG_VERSION = "gdpr-rules-v2"
 GDPR_DETECTOR_TIMEOUT_SECONDS = float(os.getenv("DSPM_GDPR_DETECTOR_TIMEOUT_SECONDS", "8"))
 ALWAYS_RUN_RULE_TYPES = {

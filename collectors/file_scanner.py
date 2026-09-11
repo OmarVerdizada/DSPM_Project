@@ -71,6 +71,18 @@ TEXT_EXTENSIONS = {
     ".netrc",
     ".npmrc",
     ".ovpn",
+    # Credential material is text and has to be READ to be classified. Without
+    # these a real private key was never opened: `.pem` resolved to
+    # "metadata_only", produced no finding, and only ever showed up through its
+    # extension score - a number with no evidence behind it.
+    ".pem",
+    ".key",
+    ".crt",
+    ".cer",
+    ".pub",
+    ".asc",
+    ".ppk",
+    ".kubeconfig",
     ".pcf",
     ".pypirc",
     ".rdp",
