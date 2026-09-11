@@ -2080,17 +2080,136 @@ def _operational_frameworks(finding: dict) -> list[str]:
     return result or ["standard_scan"]
 
 
-def _upsert_operational_finding(
-    conn, tenant_id: str, scan_id: str, seq: int, asset_id: str,
-    file_obj: dict, finding: dict, *, is_current: bool,
-) -> None:
-    """Write one lightweight finding row without evidence/history payloads."""
+# How many rows one `executemany` carries. The point of the cap is MEMORY, not
+# the database: a million-row parameter list is held in full while the scan is
+# still producing more. Round trips are already amortised inside psycopg's
+# pipelined executemany, so a larger batch buys nothing - measured on this
+# host's PostgreSQL, executemany runs at 27.6us/row against 98.2us/row for a
+# loop of execute(), and a hand-built multi-row VALUES form was no faster again
+# (the cost has moved from round trips to binding and parsing).
+#
+# 1,000 is sized from the widest row we write. `assets.detail_json` measured
+# over 1,371 real rows as stored: 4.6 KB median, 11.7 KB p99, 20 KB worst. So a
+# batch holds ~4.4 MB of parameters at the median and ~11 MB at p99 - a cap that
+# still means something. At 5,000 the same p99 is 56 MB, which is not a cap.
+_WRITE_BATCH = 1000
+
+# How many ids fit in one `IN (...)`. Deliberately far below both real limits -
+# 32,766 measured on this SQLite build, 65,535 documented for PostgreSQL -
+# because older SQLite builds ship SQLITE_MAX_VARIABLE_NUMBER at 999 and this
+# product is installed on machines we do not choose. 900 still turns a
+# million-row retirement loop into ~1,100 statements.
+_ID_CHUNK = 900
+
+
+def _executemany(conn, sql: str, rows) -> int:
+    """One statement, many rows, in bounded batches. Returns the row count."""
+
+    written = 0
+    batch: list = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= _WRITE_BATCH:
+            conn.executemany(sql, batch)
+            written += len(batch)
+            batch = []
+    if batch:
+        conn.executemany(sql, batch)
+        written += len(batch)
+    return written
+
+
+def _id_chunks(ids):
+    """`ids` in slices that fit one statement's bind-parameter budget."""
+
+    ordered = list(dict.fromkeys(str(value) for value in ids if value))
+    for start in range(0, len(ordered), _ID_CHUNK):
+        yield ordered[start:start + _ID_CHUNK]
+
+
+def _existing_finding_lifecycle(conn, tenant_id: str, finding_ids) -> dict:
+    """The status/owner/SLA an analyst has already set, for these findings.
+
+    This used to be one SELECT per finding, inside the write loop - two million
+    round trips on a million-file scan, purely to avoid clobbering triage state.
+    The same answer costs one statement per 900 findings when it is asked once.
+
+    Asking once also fixes the meaning of the answer: every finding in a scan
+    now sees the same prior state, taken before the scan wrote anything. The
+    per-finding SELECT read back rows the same scan had just written, so when
+    one finding id appeared twice in a report the second occurrence inherited
+    whatever the first resolved to - an ordering dependency nobody chose.
+    """
+
+    existing: dict[str, dict] = {}
+    for chunk in _id_chunks(finding_ids):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"SELECT id, status, owner, sla_due, severity_rank FROM findings "
+            f"WHERE tenant_id = ? AND id IN ({placeholders})",
+            (tenant_id, *chunk),
+        ).fetchall()
+        for row in rows:
+            existing[str(row["id"])] = {
+                "status": row["status"], "owner": row["owner"], "sla_due": row["sla_due"],
+                "severity_rank": row["severity_rank"],
+            }
+    return existing
+
+
+def _operational_finding_id(tenant_id: str, asset_id: str, file_obj: dict, finding: dict) -> str:
+    """A finding's stable identity, computed without touching the database.
+
+    The caller needs this BEFORE the write, so it can fetch every finding's
+    existing lifecycle state in one query instead of one row at a time.
+    """
+
     from backend.domain import finding_identity
+
+    path = str(file_obj.get("path") or file_obj.get("name") or "")
+    rule = str(finding.get("type") or finding.get("rule_id") or "sensitive_data")
+    return str(finding.get("finding_id") or finding_identity(tenant_id, asset_id, rule, path))
+
+
+_FINDING_UPSERT_SQL = (
+    "INSERT INTO findings (tenant_id, id, asset_id, rule, severity, category, framework, status, "
+    "first_seen, last_seen, scan_id, seq, is_current, risk_score, owner, sla_due, display_name, "
+    "data_type, exposure, affected_asset, file_name, file_path, source, occurrence_count, confidence, "
+    "frameworks_json, search_text, severity_rank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT (tenant_id, id) DO UPDATE SET asset_id = excluded.asset_id, rule = excluded.rule, "
+    "severity = excluded.severity, category = excluded.category, framework = excluded.framework, status = excluded.status, "
+    "first_seen = COALESCE(NULLIF(findings.first_seen, ''), excluded.first_seen), last_seen = excluded.last_seen, "
+    "scan_id = CASE WHEN excluded.is_current = 1 THEN excluded.scan_id ELSE findings.scan_id END, "
+    "seq = CASE WHEN excluded.is_current = 1 THEN excluded.seq ELSE findings.seq END, "
+    "is_current = CASE WHEN excluded.is_current = 1 THEN 1 ELSE findings.is_current END, "
+    "risk_score = excluded.risk_score, owner = excluded.owner, sla_due = excluded.sla_due, "
+    "display_name = excluded.display_name, data_type = excluded.data_type, exposure = excluded.exposure, "
+    "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
+    "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
+    "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text, "
+    "severity_rank = excluded.severity_rank"
+)
+
+
+def _operational_finding_params(
+    tenant_id: str, scan_id: str, seq: int, asset_id: str, file_obj: dict, finding: dict,
+    finding_id: str, existing: dict | None, *, is_current: bool,
+) -> tuple:
+    """The row for one lightweight finding, without evidence/history payloads.
+
+    Pure with respect to the database - it issues no SQL. `existing` is whatever
+    a previous scan left behind for this finding, looked up once for the whole
+    scan by `_existing_finding_lifecycle`.
+
+    It DOES still mutate `finding` with the resolved status/owner/SLA, because
+    `_write_finding_index` indexes the enriched dict and the list and the drawer
+    have to agree about lifecycle after a re-scan.
+    """
+
     from backend.finding_contracts import get_finding_display_name
 
     path = str(file_obj.get("path") or file_obj.get("name") or "")
     rule = str(finding.get("type") or finding.get("rule_id") or "sensitive_data")
-    finding_id = str(finding.get("finding_id") or finding_identity(tenant_id, asset_id, rule, path))
     risk = finding.get("risk")
     severity = str(
         (risk.get("level") if isinstance(risk, dict) else risk)
@@ -2122,18 +2241,33 @@ def _upsert_operational_finding(
     )
     status = _finding_status(finding)
     sla_due = str(finding.get("sla_due") or finding.get("due_date") or "")
-    if is_current:
-        existing = conn.execute(
-            "SELECT status, owner, sla_due FROM findings WHERE tenant_id = ? AND id = ?",
-            (tenant_id, finding_id),
-        ).fetchone()
-        if existing is not None:
-            if not any(finding.get(key) for key in ("status", "review_status", "workflow_status")):
-                status = str(existing["status"] or status)
-            if not any(finding.get(key) for key in ("owner", "assignee", "data_owner")):
-                owner = str(existing["owner"] or owner)
-            if not any(finding.get(key) for key in ("sla_due", "due_date")):
-                sla_due = str(existing["sla_due"] or "")
+    if is_current and existing is not None:
+        # A scan observes content, not triage. Everything a human decided about
+        # this finding - its state, who owns it, when it is due - stays on the
+        # row and is re-asserted here unchanged.
+        #
+        # This used to test whether the incoming finding carried a value of its
+        # own, which sounds right and never fired: every finding reaching a scan
+        # write has been through `apply_canonical_finding_model`, which stamps
+        # "OPEN", the file's owner, and a due date computed from THIS scan's
+        # clock onto every one of them. So the test always saw a value, always
+        # took it, and every scheduled scan silently reset the whole estate -
+        # a confirmed finding back to open, an assignee back to whoever owns the
+        # file, and a due date pushed far enough forward that nothing could ever
+        # be overdue.
+        #
+        # A lifecycle change does not come through here. `update_finding_lifecycle`
+        # re-saves the same scan_id, which makes `refresh_current` False, which
+        # makes `is_current` False - and the analyst's values below win. That is
+        # what this branch being conditional has always been for.
+        status = str(existing["status"] or status)
+        owner = str(existing["owner"] or owner)
+        # The one thing a scan may still say about a deadline: a finding that got
+        # worse restarts on the shorter clock its new severity carries. Every
+        # other scan leaves the date alone, so the clock actually runs out.
+        escalated = severity_rank(severity) > int(existing["severity_rank"] or 0)
+        if not escalated:
+            sla_due = str(existing["sla_due"] or sla_due)
     # The same enriched object is indexed into the lazy detail surface below;
     # keep list and drawer lifecycle values identical after a re-scan.
     finding["status"] = status
@@ -2148,34 +2282,32 @@ def _upsert_operational_finding(
     search_text = " ".join(
         (finding_id, display_name, rule, path, file_name, affected_asset, owner, data_type, exposure, " ".join(frameworks))
     ).lower()
-    conn.execute(
-        "INSERT INTO findings (tenant_id, id, asset_id, rule, severity, category, framework, status, "
-        "first_seen, last_seen, scan_id, seq, is_current, risk_score, owner, sla_due, display_name, "
-        "data_type, exposure, affected_asset, file_name, file_path, source, occurrence_count, confidence, "
-        "frameworks_json, search_text, severity_rank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT (tenant_id, id) DO UPDATE SET asset_id = excluded.asset_id, rule = excluded.rule, "
-        "severity = excluded.severity, category = excluded.category, framework = excluded.framework, status = excluded.status, "
-        "first_seen = COALESCE(NULLIF(findings.first_seen, ''), excluded.first_seen), last_seen = excluded.last_seen, "
-        "scan_id = CASE WHEN excluded.is_current = 1 THEN excluded.scan_id ELSE findings.scan_id END, "
-        "seq = CASE WHEN excluded.is_current = 1 THEN excluded.seq ELSE findings.seq END, "
-        "is_current = CASE WHEN excluded.is_current = 1 THEN 1 ELSE findings.is_current END, "
-        "risk_score = excluded.risk_score, owner = excluded.owner, sla_due = excluded.sla_due, "
-        "display_name = excluded.display_name, data_type = excluded.data_type, exposure = excluded.exposure, "
-        "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
-        "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
-        "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text, "
-        "severity_rank = excluded.severity_rank",
-        (
-            tenant_id, finding_id, asset_id, rule, severity,
-            str(finding.get("category") or finding.get("finding_category") or ""), frameworks[0], status,
-            first_seen, last_seen, scan_id, seq, 1 if is_current else 0, risk_score, owner,
-            sla_due, display_name, data_type,
-            exposure, affected_asset, file_name, path, source, occurrence_count,
-            int(finding.get("confidence") or 0), json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")),
-            search_text, severity_rank(severity),
-        ),
+    return (
+        tenant_id, finding_id, asset_id, rule, severity,
+        str(finding.get("category") or finding.get("finding_category") or ""), frameworks[0], status,
+        first_seen, last_seen, scan_id, seq, 1 if is_current else 0, risk_score, owner,
+        sla_due, display_name, data_type,
+        exposure, affected_asset, file_name, path, source, occurrence_count,
+        int(finding.get("confidence") or 0), json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")),
+        search_text, severity_rank(severity),
     )
 
+
+def _upsert_operational_finding(
+    conn, tenant_id: str, scan_id: str, seq: int, asset_id: str,
+    file_obj: dict, finding: dict, *, is_current: bool,
+) -> None:
+    """Write one finding row. Kept for single-row callers; the scan path batches."""
+
+    finding_id = _operational_finding_id(tenant_id, asset_id, file_obj, finding)
+    existing = _existing_finding_lifecycle(conn, tenant_id, [finding_id]).get(finding_id) if is_current else None
+    conn.execute(
+        _FINDING_UPSERT_SQL,
+        _operational_finding_params(
+            tenant_id, scan_id, seq, asset_id, file_obj, finding, finding_id, existing,
+            is_current=is_current,
+        ),
+    )
 
 def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_current: bool = True) -> None:
     from backend.domain import normalize_scan_report
@@ -2232,9 +2364,9 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?",
             stale_params,
         )
-    for asset in scan.assets if write_estate and refresh_current else []:
-        conn.execute(
-            "INSERT INTO assets "
+    _executemany(
+        conn,
+        "INSERT INTO assets "
             "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
             "risk_level, risk_score, size, owner, modified_at, finding_count, "
             "top_frameworks, is_hidden, is_system, is_protected, search_text, "
@@ -2252,27 +2384,42 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "finding_types = excluded.finding_types, framework_keys = excluded.framework_keys, "
             "detail_json = excluded.detail_json, scan_label = excluded.scan_label, "
             "current_scan_id = excluded.current_scan_id, observed_at = excluded.observed_at, "
-            "reason_count = excluded.reason_count, dlp_count = excluded.dlp_count",
+        "reason_count = excluded.reason_count, dlp_count = excluded.dlp_count",
+        (
             (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
              asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
              asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
              asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
              asset.finding_types, asset.framework_keys, pack_json_text(asset.detail_json), asset.scan_label,
-             scan_id, observed_at, *_detail_counts(asset.detail_json)),
-        )
-    for version in scan.asset_versions if write_estate and refresh_current else []:
-        conn.execute(
-            "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage),
-        )
+             scan_id, observed_at, *_detail_counts(asset.detail_json))
+            for asset in (scan.assets if write_estate and refresh_current else [])
+        ),
+    )
+    _executemany(
+        conn,
+        "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage)
+            for version in (scan.asset_versions if write_estate and refresh_current else [])
+        ),
+    )
     asset_ids_by_path = {asset.path: asset.id for asset in scan.assets}
     if write_estate and refresh_current:
-        for asset_id in asset_ids_by_path.values():
+        # Every finding on the assets this scan touched becomes historical, and
+        # the current ones are re-asserted by the upsert below. This was one
+        # UPDATE per asset - a million statements on a million-file scan - to
+        # express a set operation the database can do in one.
+        for chunk in _id_chunks(asset_ids_by_path.values()):
+            placeholders = ",".join("?" for _ in chunk)
             conn.execute(
-                "UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id = ?",
-                (tenant_id, asset_id),
+                f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})",
+                (tenant_id, *chunk),
             )
     if write_estate:
+        # Two passes, because the lifecycle state an analyst set on a previous
+        # scan has to be read BEFORE the rows are built - and reading it one
+        # finding at a time was two million round trips.
+        pending: list[tuple] = []
         seq = 0
         for row in _iter_report_findings(report):
             file_obj = row["file"]
@@ -2283,16 +2430,34 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             finding = row["finding"]
             finding.setdefault("first_seen", str(report.get("timestamp") or ""))
             finding.setdefault("last_seen", str(report.get("timestamp") or ""))
-            _upsert_operational_finding(
-                conn, tenant_id, scan_id, seq, asset_id, file_obj, finding,
-                is_current=refresh_current,
-            )
+            pending.append((
+                seq, asset_id, file_obj, finding,
+                _operational_finding_id(tenant_id, asset_id, file_obj, finding),
+            ))
             seq += 1
-    for occurrence in scan.occurrences:
-        conn.execute(
-            "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
-            (tenant_id, occurrence.finding_id, occurrence.scan_id, occurrence.locator, occurrence.fingerprint, occurrence.occurrence_count),
+        existing = (
+            _existing_finding_lifecycle(conn, tenant_id, [item[4] for item in pending])
+            if refresh_current and pending else {}
         )
+        _executemany(
+            conn,
+            _FINDING_UPSERT_SQL,
+            (
+                _operational_finding_params(
+                    tenant_id, scan_id, item_seq, item_asset_id, item_file, item_finding,
+                    item_id, existing.get(item_id), is_current=refresh_current,
+                )
+                for item_seq, item_asset_id, item_file, item_finding, item_id in pending
+            ),
+        )
+    _executemany(
+        conn,
+        "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            (tenant_id, occurrence.finding_id, occurrence.scan_id, occurrence.locator, occurrence.fingerprint, occurrence.occurrence_count)
+            for occurrence in scan.occurrences
+        ),
+    )
 
     _write_finding_index(conn, tenant_id, report)
     _trim_finding_index(conn, tenant_id)
@@ -2358,18 +2523,26 @@ def _write_finding_index(conn, tenant_id: str, report: dict) -> None:
     if not scan_id:
         return
     conn.execute("DELETE FROM finding_index WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
-    seq = 0
-    for row in _iter_report_findings(report):
-        finding = row["finding"]
-        finding_id = str(finding.get("finding_id") or "")
-        if not finding_id:
-            continue
-        conn.execute(
-            "INSERT INTO finding_index (tenant_id, scan_id, seq, finding_id, status, response_json, index_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (tenant_id, scan_id, seq, finding_id, _finding_status(finding),
-             pack_json_text(json.dumps(_finding_response(row), ensure_ascii=False)), FINDING_INDEX_VERSION),
-        )
-        seq += 1
+
+    def _index_rows():
+        # `seq` counts only the findings actually indexed, exactly as the loop
+        # this replaced did - it is incremented after a row is emitted, not for
+        # every finding in the report.
+        seq = 0
+        for row in _iter_report_findings(report):
+            finding = row["finding"]
+            finding_id = str(finding.get("finding_id") or "")
+            if not finding_id:
+                continue
+            yield (tenant_id, scan_id, seq, finding_id, _finding_status(finding),
+                   pack_json_text(json.dumps(_finding_response(row), ensure_ascii=False)), FINDING_INDEX_VERSION)
+            seq += 1
+
+    _executemany(
+        conn,
+        "INSERT INTO finding_index (tenant_id, scan_id, seq, finding_id, status, response_json, index_version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        _index_rows(),
+    )
 
 
 def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
