@@ -2310,10 +2310,10 @@ def _upsert_operational_finding(
     )
 
 def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_current: bool = True) -> None:
-    from backend.domain import normalize_scan_report
+    from backend.domain import asset_identity, iter_normalized_chunks, scan_run_from_report
 
-    scan = normalize_scan_report(tenant_id, report)
-    scan_id = scan.scan_run.id
+    run = scan_run_from_report(tenant_id, report)
+    scan_id = run.id
     if not scan_id:
         return
     # Demo-dataset scans stay per-scan records (report blob, scan_runs,
@@ -2325,7 +2325,6 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
     # idempotent rather than duplicating rows.
     conn.execute("DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
 
-    run = scan.scan_run
     # DATA-002: a scan run is immutable and append-only. The first write creates
     # it; later re-saves (finding-lifecycle updates that refresh the blob) must
     # NOT overwrite it. INSERT OR IGNORE keeps the original run record; mutable
@@ -2338,7 +2337,7 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
         """,
         (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at, run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
     )
-    observed_at = str(report.get("completed_at") or report.get("timestamp") or scan.scan_run.ended_at or "")
+    observed_at = str(report.get("completed_at") or report.get("timestamp") or run.ended_at or "")
     scan_label = str(report.get("scan_label") or "").strip()[:80]
     diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
     incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
@@ -2364,9 +2363,16 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?",
             stale_params,
         )
-    _executemany(
-        conn,
-        "INSERT INTO assets "
+    # One walk of the report, in batches. `seq` and the path->id map that the
+    # finding rows need are the only things that cross a batch boundary, and
+    # both are bounded by what has actually been seen rather than by the estate.
+    seq = 0
+    source = str(report.get("source") or "local")
+    for records, piece in iter_normalized_chunks(tenant_id, report):
+        estate_rows = bool(write_estate and refresh_current)
+        _executemany(
+            conn,
+            "INSERT INTO assets "
             "(tenant_id, id, source, stable_object_id, path, name, extension, share, "
             "risk_level, risk_score, size, owner, modified_at, finding_count, "
             "top_frameworks, is_hidden, is_system, is_protected, search_text, "
@@ -2385,79 +2391,82 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "detail_json = excluded.detail_json, scan_label = excluded.scan_label, "
             "current_scan_id = excluded.current_scan_id, observed_at = excluded.observed_at, "
         "reason_count = excluded.reason_count, dlp_count = excluded.dlp_count",
-        (
-            (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
-             asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
-             asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
-             asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
-             asset.finding_types, asset.framework_keys, pack_json_text(asset.detail_json), asset.scan_label,
-             scan_id, observed_at, *_detail_counts(asset.detail_json))
-            for asset in (scan.assets if write_estate and refresh_current else [])
-        ),
-    )
-    _executemany(
-        conn,
-        "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage)
-            for version in (scan.asset_versions if write_estate and refresh_current else [])
-        ),
-    )
-    asset_ids_by_path = {asset.path: asset.id for asset in scan.assets}
-    if write_estate and refresh_current:
-        # Every finding on the assets this scan touched becomes historical, and
-        # the current ones are re-asserted by the upsert below. This was one
-        # UPDATE per asset - a million statements on a million-file scan - to
-        # express a set operation the database can do in one.
-        for chunk in _id_chunks(asset_ids_by_path.values()):
-            placeholders = ",".join("?" for _ in chunk)
-            conn.execute(
-                f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})",
-                (tenant_id, *chunk),
-            )
-    if write_estate:
-        # Two passes, because the lifecycle state an analyst set on a previous
-        # scan has to be read BEFORE the rows are built - and reading it one
-        # finding at a time was two million round trips.
-        pending: list[tuple] = []
-        seq = 0
-        for row in _iter_report_findings(report):
-            file_obj = row["file"]
-            path = str(file_obj.get("path") or file_obj.get("name") or "")
-            asset_id = asset_ids_by_path.get(path)
-            if not asset_id:
-                continue
-            finding = row["finding"]
-            finding.setdefault("first_seen", str(report.get("timestamp") or ""))
-            finding.setdefault("last_seen", str(report.get("timestamp") or ""))
-            pending.append((
-                seq, asset_id, file_obj, finding,
-                _operational_finding_id(tenant_id, asset_id, file_obj, finding),
-            ))
-            seq += 1
-        existing = (
-            _existing_finding_lifecycle(conn, tenant_id, [item[4] for item in pending])
-            if refresh_current and pending else {}
+            (
+                (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
+                 asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
+                 asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
+                 asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
+                 asset.finding_types, asset.framework_keys, pack_json_text(asset.detail_json), asset.scan_label,
+                 scan_id, observed_at, *_detail_counts(asset.detail_json))
+                for asset in (piece.assets if estate_rows else [])
+            ),
         )
         _executemany(
             conn,
-            _FINDING_UPSERT_SQL,
+            "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                _operational_finding_params(
-                    tenant_id, scan_id, item_seq, item_asset_id, item_file, item_finding,
-                    item_id, existing.get(item_id), is_current=refresh_current,
-                )
-                for item_seq, item_asset_id, item_file, item_finding, item_id in pending
+                (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage)
+                for version in (piece.asset_versions if estate_rows else [])
             ),
         )
-    _executemany(
-        conn,
-        "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            (tenant_id, occurrence.finding_id, occurrence.scan_id, occurrence.locator, occurrence.fingerprint, occurrence.occurrence_count)
-            for occurrence in scan.occurrences
-        ),
-    )
+        # Only this batch's paths. A report that lists the same path twice, with
+        # the copies in different batches, still resolves: the projection emits
+        # one asset for it, and the identity is recomputed from the record.
+        asset_ids_by_path = {asset.path: asset.id for asset in piece.assets}
+        if estate_rows:
+            # Every finding on the assets this batch touched becomes historical,
+            # and the current ones are re-asserted by the upsert below. This was
+            # one UPDATE per asset - a million statements on a million-file scan
+            # - to express a set operation the database can do in one.
+            for id_chunk in _id_chunks(asset_ids_by_path.values()):
+                placeholders = ",".join("?" for _ in id_chunk)
+                conn.execute(
+                    f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})",
+                    (tenant_id, *id_chunk),
+                )
+        if write_estate:
+            # Two passes, because the lifecycle state an analyst set on a
+            # previous scan has to be read BEFORE the rows are built - and
+            # reading it one finding at a time was two million round trips.
+            pending: list[tuple] = []
+            for file_obj in records:
+                path = str(file_obj.get("path") or file_obj.get("name") or "")
+                asset_id = asset_ids_by_path.get(path) or asset_identity(
+                    tenant_id, source,
+                    str(file_obj.get("stable_object_id") or file_obj.get("asset_id") or ""),
+                    path,
+                )
+                for finding in file_obj.get("findings") or []:
+                    finding.setdefault("first_seen", str(report.get("timestamp") or ""))
+                    finding.setdefault("last_seen", str(report.get("timestamp") or ""))
+                    pending.append((
+                        seq, asset_id, file_obj, finding,
+                        _operational_finding_id(tenant_id, asset_id, file_obj, finding),
+                    ))
+                    seq += 1
+            existing = (
+                _existing_finding_lifecycle(conn, tenant_id, [item[4] for item in pending])
+                if refresh_current and pending else {}
+            )
+            _executemany(
+                conn,
+                _FINDING_UPSERT_SQL,
+                (
+                    _operational_finding_params(
+                        tenant_id, scan_id, item_seq, item_asset_id, item_file, item_finding,
+                        item_id, existing.get(item_id), is_current=refresh_current,
+                    )
+                    for item_seq, item_asset_id, item_file, item_finding, item_id in pending
+                ),
+            )
+        _executemany(
+            conn,
+            "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                (tenant_id, occurrence.finding_id, occurrence.scan_id, occurrence.locator, occurrence.fingerprint, occurrence.occurrence_count)
+                for occurrence in piece.occurrences
+            ),
+        )
 
     _write_finding_index(conn, tenant_id, report)
     _trim_finding_index(conn, tenant_id)
@@ -4305,11 +4314,11 @@ def iter_inventory_export_rows(
 
 def _scan_report_inventory_rows(tenant_id: str, report: dict) -> list[dict]:
     """Project one authoritative report into inventory rows with run context."""
-    from backend.domain import normalize_scan_report
+    from backend.domain import iter_normalized_assets
 
     scan_id = str(report.get("scan_id") or "")
     rows: list[dict] = []
-    for asset in normalize_scan_report(tenant_id, report).assets:
+    for asset in iter_normalized_assets(tenant_id, report):
         row = {column: getattr(asset, column) for column in _INVENTORY_COLS}
         row["search_text"] = asset.search_text
         row["scan_id"] = scan_id
@@ -4392,14 +4401,14 @@ def _list_inventory_scan_report(
 
 
 def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, limit: int, direction: str = "") -> dict:
-    from backend.domain import normalize_scan_report
+    from backend.domain import iter_normalized_assets
 
     latest: dict[str, dict] = {}
     for item in read_scan_history(tenant_id, limit=1000):  # oldest-first -> newest scan overwrites
         report = read_scan_report(tenant_id, item.get("scan_id"))
         if not report:
             continue
-        for asset in normalize_scan_report(tenant_id, report).assets:
+        for asset in iter_normalized_assets(tenant_id, report):
             reasons, actions = _detail_counts(asset.detail_json)
             latest[asset.id] = (
                 {c: getattr(asset, c) for c in _INVENTORY_COLS}
@@ -4420,14 +4429,14 @@ def _decode_string_list(raw) -> list[str]:
 
 def _inventory_blob_rows(tenant_id: str) -> list[dict]:
     """Latest materialized asset state reconstructed from report blobs."""
-    from backend.domain import normalize_scan_report
+    from backend.domain import iter_normalized_assets
 
     latest: dict[str, dict] = {}
     for item in read_scan_history(tenant_id, limit=1000):
         report = read_scan_report(tenant_id, item.get("scan_id"))
         if not report:
             continue
-        for asset in normalize_scan_report(tenant_id, report).assets:
+        for asset in iter_normalized_assets(tenant_id, report):
             latest[asset.id] = asset.to_dict()
     return list(latest.values())
 
@@ -5080,12 +5089,12 @@ def get_search_reconciliation(index_uid: str) -> dict | None:
 def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dict | None:
     """Return one full asset, optionally from a specific saved scan run."""
     if scan_id:
-        from backend.domain import normalize_scan_report
+        from backend.domain import iter_normalized_assets
 
         report = read_scan_report(tenant_id, scan_id)
         if report is None:
             return None
-        for asset in normalize_scan_report(tenant_id, report).assets:
+        for asset in iter_normalized_assets(tenant_id, report):
             if str(asset.id or "") != str(asset_id or ""):
                 continue
             try:

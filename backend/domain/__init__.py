@@ -17,7 +17,10 @@ from backend.domain.models import (
     ScanRun,
     asset_identity,
     finding_identity,
+    iter_normalized_assets,
+    iter_normalized_chunks,
     normalize_scan_report,
+    scan_run_from_report,
 )
 
 __all__ = [
@@ -33,5 +36,8 @@ __all__ = [
     "ScanRun",
     "asset_identity",
     "finding_identity",
+    "iter_normalized_assets",
+    "iter_normalized_chunks",
     "normalize_scan_report",
+    "scan_run_from_report",
 ]

@@ -286,26 +286,27 @@ class NormalizedScan:
         }
 
 
-def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
-    """Decompose an existing scan-report dict into normalized entities.
+# How many file records one projection batch covers. The cap is memory: the
+# projection re-serialises every record into `Asset.detail_json`, so holding the
+# whole estate's worth of it doubles the scan in RAM for no reason - measured at
+# 6.02 KB per file, on top of the 7.45 KB the report itself already costs.
+PROJECTION_CHUNK = 1000
 
-    Pure and defensive: every field is read with a fallback so it tolerates the
-    real report shape from any collector (local/SMB/WinRM) and older stored
-    reports. Findings are de-duplicated by stable identity within the scan, so a
-    file with N matches of the same rule yields one Finding and one Occurrence
-    carrying the true occurrence_count.
+
+def scan_run_from_report(tenant_id: str, report: dict) -> ScanRun:
+    """The run record, without walking a single file.
+
+    Separated out because a streaming write needs the run before it has seen the
+    estate, and the run is a dozen fields off the report header.
     """
+
     report = report or {}
-    scan_id = str(report.get("scan_id") or "")
-    source = str(report.get("source") or "local")
-    scan_label = str(report.get("scan_label") or "").strip()[:80]
     timestamp = str(report.get("timestamp") or "")
     summary = dict(report.get("summary") or {})
-
-    scan_run = ScanRun(
-        id=scan_id,
+    return ScanRun(
+        id=str(report.get("scan_id") or ""),
         tenant_id=tenant_id,
-        source=source,
+        source=str(report.get("source") or "local"),
         mode=str(report.get("mode") or "full"),
         policy_version=str(report.get("policy_version") or report.get("version_signature") or ""),
         started_at=timestamp,
@@ -315,109 +316,179 @@ def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
         summary=summary,
     )
 
-    assets: list[Asset] = []
-    asset_versions: list[AssetVersion] = []
-    findings: list[Finding] = []
-    occurrences: list[FindingOccurrence] = []
+
+def iter_normalized_chunks(
+    tenant_id: str, report: dict, *, chunk_files: int = PROJECTION_CHUNK,
+):
+    """The same decomposition as :func:`normalize_scan_report`, in batches.
+
+    Yields ``(records, scan)`` pairs: the raw file records of the batch, and the
+    entities they produced. The caller gets both because a writer needs the
+    record as well as the row - the finding upsert reads fields the projection
+    does not carry.
+
+    Identity state - which assets and findings this scan has already emitted -
+    carries across batches, so a report that lists the same path twice behaves
+    exactly as it did when the walk was done in one pass. Everything else is
+    per-batch and is free the moment the caller lets go of it.
+    """
+
+    report = report or {}
+    source = str(report.get("source") or "local")
+    scan_label = str(report.get("scan_label") or "").strip()[:80]
+    timestamp = str(report.get("timestamp") or "")
+    scan_id = str(report.get("scan_id") or "")
+    scan_run = scan_run_from_report(tenant_id, report)
     seen_assets: set[str] = set()
-    seen_findings: dict[str, Finding] = {}
+    seen_findings: set[str] = set()
 
+    def _build(records: list[dict]) -> NormalizedScan:
+        assets: list[Asset] = []
+        asset_versions: list[AssetVersion] = []
+        findings: list[Finding] = []
+        occurrences: list[FindingOccurrence] = []
+        for record in records:
+            path = str(record.get("path") or record.get("name") or "")
+            name = str(record.get("name") or path.replace("\\", "/").rsplit("/", 1)[-1])
+            stable_object_id = str(record.get("stable_object_id") or record.get("asset_id") or "")
+            asset_id = asset_identity(tenant_id, source, stable_object_id, path)
+
+            if asset_id not in seen_assets:
+                seen_assets.add(asset_id)
+                extension = str(record.get("extension") or "").lower()
+                owner = str(record.get("owner") or "")
+                risk_level, risk_score = _asset_risk(record)
+                share = str(record.get("share") or "")
+                finding_types = _asset_finding_types(record)
+                framework_keys = _asset_framework_keys(record)
+                search_text = " ".join(
+                    str(part) for part in (
+                        path, name, owner, extension, source, share, risk_level, scan_label,
+                        *json.loads(finding_types), *json.loads(framework_keys),
+                    ) if part
+                ).lower()
+                assets.append(
+                    Asset(
+                        id=asset_id,
+                        tenant_id=tenant_id,
+                        source=source,
+                        stable_object_id=stable_object_id or path,
+                        path=path,
+                        name=name,
+                        extension=extension,
+                        share=share,
+                        risk_level=risk_level,
+                        risk_score=risk_score,
+                        size=int(record.get("size") or record.get("total_bytes") or 0),
+                        owner=owner,
+                        modified_at=str(record.get("modified_at") or record.get("mtime") or record.get("last_write_time") or ""),
+                        finding_count=len(record.get("findings") or []),
+                        top_frameworks=_asset_top_frameworks(record),
+                        is_hidden=1 if record.get("is_hidden") else 0,
+                        is_system=1 if record.get("is_system") else 0,
+                        is_protected=1 if record.get("protected") else 0,
+                        scan_label=scan_label,
+                        search_text=search_text,
+                        finding_types=finding_types,
+                        framework_keys=framework_keys,
+                        detail_json=json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                    )
+                )
+                asset_versions.append(
+                    AssetVersion(
+                        asset_id=asset_id,
+                        version=str(record.get("content_hash") or record.get("file_hash") or record.get("sha256") or record.get("mtime") or ""),
+                        size=int(record.get("size") or record.get("total_bytes") or 0),
+                        mtime=str(record.get("modified_at") or record.get("mtime") or record.get("last_write_time") or ""),
+                        content_hash=str(record.get("content_hash") or record.get("file_hash") or record.get("sha256") or ""),
+                        coverage=str(record.get("scan_completeness") or "UNKNOWN"),
+                    )
+                )
+
+            for finding in record.get("findings") or []:
+                rule = str(finding.get("type") or "sensitive_data")
+                # Canonical classifiers already emit a stable public Finding ID.
+                # Preserve it so normalized lifecycle/occurrence rows address the
+                # same object as /api/findings/{finding_id}; legacy findings still
+                # receive the deterministic tenant+asset+rule+path identity.
+                finding_id = str(finding.get("finding_id") or finding_identity(tenant_id, asset_id, rule, path))
+                if finding_id not in seen_findings:
+                    obj = Finding(
+                        id=finding_id,
+                        tenant_id=tenant_id,
+                        asset_id=asset_id,
+                        rule=rule,
+                        severity=str(finding.get("risk") or "LOW").upper(),
+                        category=str(finding.get("category") or ""),
+                        framework=str(finding.get("framework") or ""),
+                        status=_finding_lifecycle_status(finding),
+                        first_seen=timestamp,
+                        last_seen=timestamp,
+                    )
+                    seen_findings.add(finding_id)
+                    findings.append(obj)
+
+                fingerprints = finding.get("secure_value_fingerprints") or finding.get("secure_fingerprints") or []
+                occurrences.append(
+                    FindingOccurrence(
+                        finding_id=finding_id,
+                        scan_id=scan_id,
+                        locator=path,
+                        fingerprint=str(fingerprints[0]) if fingerprints else "",
+                        occurrence_count=int(finding.get("occurrence_count") or finding.get("count") or 1),
+                    )
+                )
+        return NormalizedScan(
+            scan_run=scan_run,
+            assets=assets,
+            asset_versions=asset_versions,
+            findings=findings,
+            occurrences=occurrences,
+        )
+
+    batch: list[dict] = []
     for record in report.get("files") or []:
-        path = str(record.get("path") or record.get("name") or "")
-        name = str(record.get("name") or path.replace("\\", "/").rsplit("/", 1)[-1])
-        stable_object_id = str(record.get("stable_object_id") or record.get("asset_id") or "")
-        asset_id = asset_identity(tenant_id, source, stable_object_id, path)
+        batch.append(record)
+        if len(batch) >= chunk_files:
+            yield batch, _build(batch)
+            batch = []
+    if batch:
+        yield batch, _build(batch)
 
-        if asset_id not in seen_assets:
-            seen_assets.add(asset_id)
-            extension = str(record.get("extension") or "").lower()
-            owner = str(record.get("owner") or "")
-            risk_level, risk_score = _asset_risk(record)
-            share = str(record.get("share") or "")
-            finding_types = _asset_finding_types(record)
-            framework_keys = _asset_framework_keys(record)
-            search_text = " ".join(
-                str(part) for part in (
-                    path, name, owner, extension, source, share, risk_level, scan_label,
-                    *json.loads(finding_types), *json.loads(framework_keys),
-                ) if part
-            ).lower()
-            assets.append(
-                Asset(
-                    id=asset_id,
-                    tenant_id=tenant_id,
-                    source=source,
-                    stable_object_id=stable_object_id or path,
-                    path=path,
-                    name=name,
-                    extension=extension,
-                    share=share,
-                    risk_level=risk_level,
-                    risk_score=risk_score,
-                    size=int(record.get("size") or record.get("total_bytes") or 0),
-                    owner=owner,
-                    modified_at=str(record.get("modified_at") or record.get("mtime") or record.get("last_write_time") or ""),
-                    finding_count=len(record.get("findings") or []),
-                    top_frameworks=_asset_top_frameworks(record),
-                    is_hidden=1 if record.get("is_hidden") else 0,
-                    is_system=1 if record.get("is_system") else 0,
-                    is_protected=1 if record.get("protected") else 0,
-                    scan_label=scan_label,
-                    search_text=search_text,
-                    finding_types=finding_types,
-                    framework_keys=framework_keys,
-                    detail_json=json.dumps(record, ensure_ascii=False, separators=(",", ":")),
-                )
-            )
-            asset_versions.append(
-                AssetVersion(
-                    asset_id=asset_id,
-                    version=str(record.get("content_hash") or record.get("file_hash") or record.get("sha256") or record.get("mtime") or ""),
-                    size=int(record.get("size") or record.get("total_bytes") or 0),
-                    mtime=str(record.get("modified_at") or record.get("mtime") or record.get("last_write_time") or ""),
-                    content_hash=str(record.get("content_hash") or record.get("file_hash") or record.get("sha256") or ""),
-                    coverage=str(record.get("scan_completeness") or "UNKNOWN"),
-                )
-            )
 
-        for finding in record.get("findings") or []:
-            rule = str(finding.get("type") or "sensitive_data")
-            # Canonical classifiers already emit a stable public Finding ID.
-            # Preserve it so normalized lifecycle/occurrence rows address the
-            # same object as /api/findings/{finding_id}; legacy findings still
-            # receive the deterministic tenant+asset+rule+path identity.
-            finding_id = str(finding.get("finding_id") or finding_identity(tenant_id, asset_id, rule, path))
-            if finding_id not in seen_findings:
-                obj = Finding(
-                    id=finding_id,
-                    tenant_id=tenant_id,
-                    asset_id=asset_id,
-                    rule=rule,
-                    severity=str(finding.get("risk") or "LOW").upper(),
-                    category=str(finding.get("category") or ""),
-                    framework=str(finding.get("framework") or ""),
-                    status=_finding_lifecycle_status(finding),
-                    first_seen=timestamp,
-                    last_seen=timestamp,
-                )
-                seen_findings[finding_id] = obj
-                findings.append(obj)
+def iter_normalized_assets(
+    tenant_id: str, report: dict, *, chunk_files: int = PROJECTION_CHUNK,
+):
+    """Every asset in a report, without ever holding all of them.
 
-            fingerprints = finding.get("secure_value_fingerprints") or finding.get("secure_fingerprints") or []
-            occurrences.append(
-                FindingOccurrence(
-                    finding_id=finding_id,
-                    scan_id=scan_id,
-                    locator=path,
-                    fingerprint=str(fingerprints[0]) if fingerprints else "",
-                    occurrence_count=int(finding.get("occurrence_count") or finding.get("count") or 1),
-                )
-            )
+    Most callers of :func:`normalize_scan_report` want only the assets and throw
+    the rest away - and the rest includes a re-serialised copy of every record.
+    """
 
-    return NormalizedScan(
-        scan_run=scan_run,
-        assets=assets,
-        asset_versions=asset_versions,
-        findings=findings,
-        occurrences=occurrences,
-    )
+    for _records, piece in iter_normalized_chunks(tenant_id, report, chunk_files=chunk_files):
+        yield from piece.assets
+
+
+def normalize_scan_report(tenant_id: str, report: dict) -> NormalizedScan:
+    """Decompose an existing scan-report dict into normalized entities.
+
+    Pure and defensive: every field is read with a fallback so it tolerates the
+    real report shape from any collector (local/SMB/WinRM) and older stored
+    reports. Findings are de-duplicated by stable identity within the scan, so a
+    file with N matches of the same rule yields one Finding and one Occurrence
+    carrying the true occurrence_count.
+
+    This is the whole-estate case of :func:`iter_normalized_chunks`. Callers that
+    write the result to the database should prefer the generator - on a large
+    scan this list is a second copy of the estate.
+    """
+
+    scan = NormalizedScan(scan_run=scan_run_from_report(tenant_id, report))
+    for _records, piece in iter_normalized_chunks(
+        tenant_id, report, chunk_files=PROJECTION_CHUNK,
+    ):
+        scan.assets.extend(piece.assets)
+        scan.asset_versions.extend(piece.asset_versions)
+        scan.findings.extend(piece.findings)
+        scan.occurrences.extend(piece.occurrences)
+    return scan

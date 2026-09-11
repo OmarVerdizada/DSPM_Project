@@ -511,9 +511,9 @@ def index_scan_report(tenant_id: str, report: dict) -> int:
     config = config_from_env()
     if not config.enabled or not config.dual_write:
         return 0
-    from backend.domain import normalize_scan_report
+    from backend.domain import iter_normalized_assets
 
-    assets = (asset.to_dict() | {"tenant_id": tenant_id} for asset in normalize_scan_report(tenant_id, report).assets)
+    assets = (asset.to_dict() | {"tenant_id": tenant_id} for asset in iter_normalized_assets(tenant_id, report))
     return index_assets(assets, wait=False)
 
 
