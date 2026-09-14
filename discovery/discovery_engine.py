@@ -114,6 +114,51 @@ class ScanSummary:
         }
 
 
+class ScanSummaryAccumulator:
+    """``DSPMDiscoveryEngine._build_summary``, one analyzed record at a time.
+
+    A finalize step that streams records back from storage builds the same summary
+    this way without holding them.
+    """
+
+    __slots__ = ("counts", "total", "sensitive_files", "hidden_files", "protected_files")
+
+    def __init__(self) -> None:
+        self.counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
+        self.total = 0
+        self.sensitive_files = 0
+        self.hidden_files = 0
+        self.protected_files = 0
+
+    def add(self, item: dict) -> None:
+        self.total += 1
+        # A record with no risk block was never scored, and "never scored" is
+        # NONE, not LOW. Defaulting to LOW is how an unscored file became a finding.
+        level = item.get("risk", {}).get("level") or "NONE"
+        self.counts[level] = self.counts.get(level, 0) + 1
+        if item.get("findings"):
+            self.sensitive_files += 1
+        if item.get("is_hidden"):
+            self.hidden_files += 1
+        # One definition of "protected", shared with the risk engine, so the
+        # count and the score can never disagree about what the word means.
+        if _is_protected_content(item):
+            self.protected_files += 1
+
+    def result(self) -> ScanSummary:
+        return ScanSummary(
+            total_files=self.total,
+            critical=self.counts["CRITICAL"],
+            high=self.counts["HIGH"],
+            medium=self.counts["MEDIUM"],
+            low=self.counts["LOW"],
+            clear=self.counts["NONE"],
+            sensitive_files=self.sensitive_files,
+            hidden_files=self.hidden_files,
+            protected_files=self.protected_files,
+        )
+
+
 @dataclass(slots=True)
 class ScanReport:
     timestamp: str
@@ -1541,37 +1586,10 @@ class DSPMDiscoveryEngine:
 
     @staticmethod
     def _build_summary(files: list[dict]) -> ScanSummary:
-        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
-        sensitive_files = 0
-        hidden_files = 0
-        protected_files = 0
-
+        accumulator = ScanSummaryAccumulator()
         for item in files:
-            # A record with no risk block was never scored, and "never scored"
-            # is NONE, not LOW. Defaulting to LOW is how an unscored file became
-            # a finding.
-            level = item.get("risk", {}).get("level") or "NONE"
-            counts[level] = counts.get(level, 0) + 1
-            if item.get("findings"):
-                sensitive_files += 1
-            if item.get("is_hidden"):
-                hidden_files += 1
-            # One definition of "protected", shared with the risk engine, so the
-            # count and the score can never disagree about what the word means.
-            if _is_protected_content(item):
-                protected_files += 1
-
-        return ScanSummary(
-            total_files=len(files),
-            critical=counts["CRITICAL"],
-            high=counts["HIGH"],
-            medium=counts["MEDIUM"],
-            low=counts["LOW"],
-            clear=counts["NONE"],
-            sensitive_files=sensitive_files,
-            hidden_files=hidden_files,
-            protected_files=protected_files,
-        )
+            accumulator.add(item)
+        return accumulator.result()
 
 
 def _safe_preview(content: str, max_lines: int = 8, max_chars: int = 1800) -> dict:

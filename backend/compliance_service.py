@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+import heapq
 from copy import deepcopy
 from pathlib import Path
 from typing import Iterable
@@ -229,35 +230,100 @@ def infer_data_categories(file_obj: dict) -> set[str]:
     return categories
 
 
-def build_compliance_summary(files: list[dict], profiles: list[dict]) -> dict:
-    severity_counts = Counter()
-    category_counts = Counter()
-    remediation_counts = Counter()
-    affected_assets: set[str] = set()
-    affected_file_count = 0
-    finding_group_count = 0
-    occurrence_count = 0
-    unique_sensitive_value_count = 0
-    findings: list[dict] = []
-    profile_ids = {str(profile.get("id") or "") for profile in profiles}
-    for file_obj in files:
+class _FirstN:
+    """The first ``limit`` items in arrival order, and how many arrived.
+
+    Equivalent to appending every item to a list and slicing ``[:limit]``, without
+    keeping the items that would be sliced away.
+    """
+
+    __slots__ = ("limit", "items", "count")
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.items: list = []
+        self.count = 0
+
+    def add(self, item) -> None:
+        self.count += 1
+        if len(self.items) < self.limit:
+            self.items.append(item)
+
+    def result(self) -> list:
+        return list(self.items)
+
+
+class _TopN:
+    """What ``sorted(items, key=key, reverse=True)[:limit]`` returns, without keeping every item.
+
+    Python's sort stays stable in reverse, so among equal keys the earliest arrivals
+    come first and survive the slice. The heap holds ``(key, -arrival, item)``: its
+    smallest entry is the lowest key and, among equal keys, the latest arrival -
+    exactly the entry a stable sort would drop first. Arrival numbers are unique, so
+    two entries never get as far as comparing their items.
+    """
+
+    __slots__ = ("limit", "key", "heap", "count")
+
+    def __init__(self, limit: int, key) -> None:
+        self.limit = limit
+        self.key = key
+        self.heap: list = []
+        self.count = 0
+
+    def add(self, item) -> None:
+        entry = (self.key(item), -self.count, item)
+        self.count += 1
+        if len(self.heap) < self.limit:
+            heapq.heappush(self.heap, entry)
+        elif entry[:2] > self.heap[0][:2]:
+            heapq.heapreplace(self.heap, entry)
+
+    def result(self) -> list:
+        ordered = sorted(self.heap, key=lambda entry: entry[:2], reverse=True)
+        return [item for _key, _arrival, item in ordered]
+
+
+class ComplianceSummaryAccumulator:
+    """``build_compliance_summary``, one file at a time.
+
+    Holds counters, the set of affected asset keys and the ten highest-scoring
+    files - not a row per affected file. The asset set is bounded by the number of
+    sensitive assets rather than by the scan, which is the one thing here that is
+    not constant-size.
+    """
+
+    def __init__(self, profiles: list[dict]) -> None:
+        self.profiles = profiles
+        self.profile_ids = {str(profile.get("id") or "") for profile in profiles}
+        self.severity_counts = Counter()
+        self.category_counts = Counter()
+        self.remediation_counts = Counter()
+        self.affected_assets: set[str] = set()
+        self.affected_file_count = 0
+        self.finding_group_count = 0
+        self.occurrence_count = 0
+        self.unique_sensitive_value_count = 0
+        self.top_files = _TopN(10, key=lambda item: int(item.get("score") or 0))
+
+    def add(self, file_obj: dict) -> None:
         compliance = file_obj.get("compliance") or {}
         if not compliance.get("matched_frameworks"):
-            continue
-        affected_file_count += 1
-        affected_assets.add(_asset_key(file_obj))
-        file_findings = _compliance_findings_for_file(file_obj, profile_ids)
+            return
+        self.affected_file_count += 1
+        self.affected_assets.add(_asset_key(file_obj))
+        file_findings = _compliance_findings_for_file(file_obj, self.profile_ids)
         for finding in file_findings:
             severity = str(finding.get("risk") or finding.get("severity") or compliance.get("compliance_severity") or "LOW").lower()
-            severity_counts[severity] += 1
-            finding_group_count += 1
-            occurrence_count += _finding_occurrence_count(finding)
-            unique_sensitive_value_count += _finding_unique_value_count(finding)
+            self.severity_counts[severity] += 1
+            self.finding_group_count += 1
+            self.occurrence_count += _finding_occurrence_count(finding)
+            self.unique_sensitive_value_count += _finding_unique_value_count(finding)
         for category in compliance.get("data_categories") or []:
-            category_counts[category] += max(1, len(file_findings))
+            self.category_counts[category] += max(1, len(file_findings))
         for control in compliance.get("relevant_controls") or []:
-            remediation_counts[control] += 1
-        findings.append(
+            self.remediation_counts[control] += 1
+        self.top_files.add(
             {
                 "file": file_obj.get("name") or file_obj.get("path") or "",
                 "path": file_obj.get("path") or "",
@@ -269,225 +335,266 @@ def build_compliance_summary(files: list[dict], profiles: list[dict]) -> dict:
             }
         )
 
-    findings.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
-    return {
-        "enabled": True,
-        "selected_frameworks": [profile["id"] for profile in profiles],
-        "selected_framework_names": [profile["name"] for profile in profiles],
-        "affected_asset_count": len(affected_assets),
-        "affected_file_count": affected_file_count,
-        "finding_group_count": finding_group_count,
-        "occurrence_count": occurrence_count,
-        "unique_sensitive_value_count": unique_sensitive_value_count,
-        "total_compliance_findings": finding_group_count,
-        "files_with_compliance_matches": affected_file_count,
-        "critical": severity_counts["critical"],
-        "high": severity_counts["high"],
-        "medium": severity_counts["medium"],
-        "low": severity_counts["low"],
-        "top_violated_categories": [{"category": item, "count": count} for item, count in category_counts.most_common(8)],
-        "top_risky_files": findings[:10],
-        "remediation_priorities": [{"control": item, "count": count} for item, count in remediation_counts.most_common(8)],
-    }
+    def result(self) -> dict:
+        return {
+            "enabled": True,
+            "selected_frameworks": [profile["id"] for profile in self.profiles],
+            "selected_framework_names": [profile["name"] for profile in self.profiles],
+            "affected_asset_count": len(self.affected_assets),
+            "affected_file_count": self.affected_file_count,
+            "finding_group_count": self.finding_group_count,
+            "occurrence_count": self.occurrence_count,
+            "unique_sensitive_value_count": self.unique_sensitive_value_count,
+            "total_compliance_findings": self.finding_group_count,
+            "files_with_compliance_matches": self.affected_file_count,
+            "critical": self.severity_counts["critical"],
+            "high": self.severity_counts["high"],
+            "medium": self.severity_counts["medium"],
+            "low": self.severity_counts["low"],
+            "top_violated_categories": [{"category": item, "count": count} for item, count in self.category_counts.most_common(8)],
+            "top_risky_files": self.top_files.result(),
+            "remediation_priorities": [{"control": item, "count": count} for item, count in self.remediation_counts.most_common(8)],
+        }
 
 
-def build_pci_scope_summary(files: list[dict]) -> dict:
-    category_counts = Counter()
-    category_occurrence_counts = Counter()
-    storage_counts = Counter()
-    environment_counts = Counter()
-    protection_counts = Counter()
-    entity_role_counts = Counter()
-    authorization_counts = Counter()
-    scope_candidates: list[dict] = []
-    sad_retention_candidates: list[dict] = []
-    exception_queue: list[dict] = []
-
+def build_compliance_summary(files: list[dict], profiles: list[dict]) -> dict:
+    accumulator = ComplianceSummaryAccumulator(profiles)
     for file_obj in files:
+        accumulator.add(file_obj)
+    return accumulator.result()
+
+
+class PciScopeSummaryAccumulator:
+    """``build_pci_scope_summary``, one file at a time; the three lists are top-25 by score."""
+
+    def __init__(self) -> None:
+        self.category_counts = Counter()
+        self.category_occurrence_counts = Counter()
+        self.storage_counts = Counter()
+        self.environment_counts = Counter()
+        self.protection_counts = Counter()
+        self.entity_role_counts = Counter()
+        self.authorization_counts = Counter()
+        self.scope_candidates = _TopN(25, key=lambda item: (item["score"], item["sad_findings"], item["chd_findings"]))
+        self.sad_retention_candidates = _TopN(25, key=lambda item: item["score"])
+        self.exception_queue = _TopN(25, key=lambda item: item["score"])
+
+    def add(self, file_obj: dict) -> None:
         pci_findings = [
             finding
             for finding in file_obj.get("findings") or []
             if _is_pci_scope_finding(finding)
         ]
         if not pci_findings:
-            continue
+            return
 
         file_categories = sorted({str(finding.get("pci_category") or "").upper() for finding in pci_findings if finding.get("pci_category")})
         highest_score = max((_score_for_severity(str(finding.get("risk") or "LOW")) for finding in pci_findings), default=0)
         highest_severity = _highest_finding_severity(pci_findings)
         for finding in pci_findings:
             category = str(finding.get("pci_category") or "CONTEXT").upper()
-            category_counts[category] += 1
-            category_occurrence_counts[category] += _finding_occurrence_count(finding)
-            storage_counts[str(finding.get("storage_state") or "unknown")] += 1
-            environment_counts[str(finding.get("environment") or "unknown")] += 1
-            protection_counts[str(finding.get("protection_state") or "unknown")] += 1
-            entity_role_counts[str(finding.get("entity_role") or "unknown")] += 1
-            authorization_counts[str(finding.get("authorization_state") or "unknown")] += 1
+            self.category_counts[category] += 1
+            self.category_occurrence_counts[category] += _finding_occurrence_count(finding)
+            self.storage_counts[str(finding.get("storage_state") or "unknown")] += 1
+            self.environment_counts[str(finding.get("environment") or "unknown")] += 1
+            self.protection_counts[str(finding.get("protection_state") or "unknown")] += 1
+            self.entity_role_counts[str(finding.get("entity_role") or "unknown")] += 1
+            self.authorization_counts[str(finding.get("authorization_state") or "unknown")] += 1
             if finding.get("exception_required"):
-                exception_queue.append(_pci_scope_row(file_obj, [finding], highest_score, highest_severity, reason="SAD exception required"))
+                self.exception_queue.add(_pci_scope_row(file_obj, [finding], highest_score, highest_severity, reason="SAD exception required"))
 
         has_chd = "CHD" in file_categories
         has_sad = "SAD" in file_categories
         if has_chd or has_sad:
             reason = "SAD retention candidate" if has_sad else "Cardholder data environment candidate"
             row = _pci_scope_row(file_obj, pci_findings, highest_score, highest_severity, reason=reason)
-            scope_candidates.append(row)
+            self.scope_candidates.add(row)
             if has_sad:
-                sad_retention_candidates.append(row)
+                self.sad_retention_candidates.add(row)
 
-    scope_candidates.sort(key=lambda item: (item["score"], item["sad_findings"], item["chd_findings"]), reverse=True)
-    sad_retention_candidates.sort(key=lambda item: item["score"], reverse=True)
-    exception_queue.sort(key=lambda item: item["score"], reverse=True)
-    return {
-        "enabled": True,
-        "cde_candidate_count": len(scope_candidates),
-        "sad_retention_candidate_count": len(sad_retention_candidates),
-        "exception_required_count": len(exception_queue),
-        "category_counts": dict(category_counts),
-        "category_finding_group_counts": dict(category_counts),
-        "category_occurrence_counts": dict(category_occurrence_counts),
-        "storage_state_finding_group_counts": dict(storage_counts),
-        "environment_finding_group_counts": dict(environment_counts),
-        "protection_state_finding_group_counts": dict(protection_counts),
-        "entity_role_finding_group_counts": dict(entity_role_counts),
-        "authorization_state_finding_group_counts": dict(authorization_counts),
-        "storage_state_counts": dict(storage_counts),
-        "environment_counts": dict(environment_counts),
-        "protection_state_counts": dict(protection_counts),
-        "entity_role_counts": dict(entity_role_counts),
-        "authorization_state_counts": dict(authorization_counts),
-        "scope_candidates": scope_candidates[:25],
-        "sad_retention_candidates": sad_retention_candidates[:25],
-        "exception_queue": exception_queue[:25],
-    }
+    def result(self) -> dict:
+        return {
+            "enabled": True,
+            "cde_candidate_count": self.scope_candidates.count,
+            "sad_retention_candidate_count": self.sad_retention_candidates.count,
+            "exception_required_count": self.exception_queue.count,
+            "category_counts": dict(self.category_counts),
+            "category_finding_group_counts": dict(self.category_counts),
+            "category_occurrence_counts": dict(self.category_occurrence_counts),
+            "storage_state_finding_group_counts": dict(self.storage_counts),
+            "environment_finding_group_counts": dict(self.environment_counts),
+            "protection_state_finding_group_counts": dict(self.protection_counts),
+            "entity_role_finding_group_counts": dict(self.entity_role_counts),
+            "authorization_state_finding_group_counts": dict(self.authorization_counts),
+            "storage_state_counts": dict(self.storage_counts),
+            "environment_counts": dict(self.environment_counts),
+            "protection_state_counts": dict(self.protection_counts),
+            "entity_role_counts": dict(self.entity_role_counts),
+            "authorization_state_counts": dict(self.authorization_counts),
+            "scope_candidates": self.scope_candidates.result(),
+            "sad_retention_candidates": self.sad_retention_candidates.result(),
+            "exception_queue": self.exception_queue.result(),
+        }
 
 
-def build_gdpr_report(files: list[dict]) -> dict:
-    personal_data_by_category = Counter()
-    special_category_data = Counter()
-    data_subjects = Counter()
-    owners = Counter()
-    retention_violations: list[dict] = []
-    public_exposure: list[dict] = []
-    cross_border_locations = Counter()
-    non_production_copies: list[dict] = []
-    lawful_basis_review_queue: list[dict] = []
-    dpia_candidates: list[dict] = []
-    minimization_candidates: list[dict] = []
-    data_subject_request_search: list[dict] = []
-
+def build_pci_scope_summary(files: list[dict]) -> dict:
+    accumulator = PciScopeSummaryAccumulator()
     for file_obj in files:
+        accumulator.add(file_obj)
+    return accumulator.result()
+
+
+class GdprReportAccumulator:
+    """``build_gdpr_report``, one file at a time; every queue is the first 25 in arrival order."""
+
+    def __init__(self) -> None:
+        self.personal_data_by_category = Counter()
+        self.special_category_data = Counter()
+        self.data_subjects = Counter()
+        self.owners = Counter()
+        self.retention_violations = _FirstN(25)
+        self.public_exposure = _FirstN(25)
+        self.cross_border_locations = Counter()
+        self.non_production_copies = _FirstN(25)
+        self.lawful_basis_review_queue = _FirstN(25)
+        self.dpia_candidates = _FirstN(25)
+        self.minimization_candidates = _FirstN(25)
+        self.data_subject_request_search = _FirstN(25)
+
+    def add(self, file_obj: dict) -> None:
         gdpr_findings = [finding for finding in file_obj.get("findings") or [] if _is_gdpr_finding(finding)]
         if not gdpr_findings:
-            continue
+            return
         owner = str(file_obj.get("owner") or file_obj.get("department") or "unknown")
         exposed = bool((file_obj.get("permissions") or {}).get("wide_access") or (file_obj.get("permissions") or {}).get("public"))
         non_prod = _is_non_production(file_obj)
         for finding in gdpr_findings:
             category = str(finding.get("personal_data_type") or finding.get("category") or finding.get("type") or "personal_data")
             count = _finding_occurrence_count(finding)
-            personal_data_by_category[category] += count
-            owners[owner] += 1
-            data_subjects[str(finding.get("data_subject_type") or "unknown")] += count
+            self.personal_data_by_category[category] += count
+            self.owners[owner] += 1
+            self.data_subjects[str(finding.get("data_subject_type") or "unknown")] += count
             if finding.get("special_category"):
-                special_category_data[category] += count
+                self.special_category_data[category] += count
             if finding.get("retention_expired"):
-                retention_violations.append(_gdpr_queue_row(file_obj, finding, "Retention expired"))
+                self.retention_violations.add(_gdpr_queue_row(file_obj, finding, "Retention expired"))
             if exposed:
-                public_exposure.append(_gdpr_queue_row(file_obj, finding, "Public or broad access"))
+                self.public_exposure.add(_gdpr_queue_row(file_obj, finding, "Public or broad access"))
             if finding.get("cross_border_transfer") or finding.get("data_residency"):
-                cross_border_locations[str(finding.get("data_residency") or "unknown")] += count
+                self.cross_border_locations[str(finding.get("data_residency") or "unknown")] += count
             if non_prod:
-                non_production_copies.append(_gdpr_queue_row(file_obj, finding, "Non-production copy"))
+                self.non_production_copies.add(_gdpr_queue_row(file_obj, finding, "Non-production copy"))
             if not finding.get("lawful_basis"):
-                lawful_basis_review_queue.append(_gdpr_queue_row(file_obj, finding, "Lawful basis missing"))
+                self.lawful_basis_review_queue.add(_gdpr_queue_row(file_obj, finding, "Lawful basis missing"))
             if finding.get("DPIA_required") or finding.get("dpia_required") or finding.get("special_category"):
-                dpia_candidates.append(_gdpr_queue_row(file_obj, finding, "DPIA review candidate"))
+                self.dpia_candidates.add(_gdpr_queue_row(file_obj, finding, "DPIA review candidate"))
             if count >= 10 or finding.get("retention_expired") or not finding.get("processing_purpose"):
-                minimization_candidates.append(_gdpr_queue_row(file_obj, finding, "Data minimization review"))
-            data_subject_request_search.append(_gdpr_queue_row(file_obj, finding, "DSR searchable evidence"))
+                self.minimization_candidates.add(_gdpr_queue_row(file_obj, finding, "Data minimization review"))
+            self.data_subject_request_search.add(_gdpr_queue_row(file_obj, finding, "DSR searchable evidence"))
 
-    return {
-        "enabled": True,
-        "personal_data_by_category": _counter_rows(personal_data_by_category, "category"),
-        "special_category_data": _counter_rows(special_category_data, "category"),
-        "data_subjects": _counter_rows(data_subjects, "data_subject_type"),
-        "departments_business_owners": _counter_rows(owners, "owner"),
-        "retention_violations": retention_violations[:25],
-        "public_exposure": public_exposure[:25],
-        "cross_border_locations": _counter_rows(cross_border_locations, "location"),
-        "non_production_copies": non_production_copies[:25],
-        "lawful_basis_review_queue": lawful_basis_review_queue[:25],
-        "dpia_candidates": dpia_candidates[:25],
-        "data_minimization_candidates": minimization_candidates[:25],
-        "data_subject_request_search": data_subject_request_search[:25],
-    }
+    def result(self) -> dict:
+        return {
+            "enabled": True,
+            "personal_data_by_category": _counter_rows(self.personal_data_by_category, "category"),
+            "special_category_data": _counter_rows(self.special_category_data, "category"),
+            "data_subjects": _counter_rows(self.data_subjects, "data_subject_type"),
+            "departments_business_owners": _counter_rows(self.owners, "owner"),
+            "retention_violations": self.retention_violations.result(),
+            "public_exposure": self.public_exposure.result(),
+            "cross_border_locations": _counter_rows(self.cross_border_locations, "location"),
+            "non_production_copies": self.non_production_copies.result(),
+            "lawful_basis_review_queue": self.lawful_basis_review_queue.result(),
+            "dpia_candidates": self.dpia_candidates.result(),
+            "data_minimization_candidates": self.minimization_candidates.result(),
+            "data_subject_request_search": self.data_subject_request_search.result(),
+        }
+
+
+def build_gdpr_report(files: list[dict]) -> dict:
+    accumulator = GdprReportAccumulator()
+    for file_obj in files:
+        accumulator.add(file_obj)
+    return accumulator.result()
+
+
+class NistSp80060ReportAccumulator:
+    """``build_nist_sp800_60_report``, one file at a time.
+
+    Top assets are the ten highest by score; the four review queues are the first
+    25 in arrival order, exactly as the list version sliced them.
+    """
+
+    def __init__(self) -> None:
+        self.category_counts = Counter()
+        self.rule_counts = Counter()
+        self.source_kind_counts = Counter()
+        self.handling_counts = Counter()
+        self.severity_counts = Counter()
+        self.cia_counts = Counter()
+        self.confidence_counts = Counter()
+        self.needs_review = _FirstN(25)
+        self.public_exposure = _FirstN(25)
+        self.broad_access = _FirstN(25)
+        self.unprotected_restricted = _FirstN(25)
+        self.top_assets = _TopN(10, key=lambda item: item["score"])
+        self.status = nist_catalog_status()
+
+    def add(self, file_obj: dict) -> None:
+        nist_findings = [finding for finding in file_obj.get("findings") or [] if _is_nist_finding(finding)]
+        if not nist_findings:
+            return
+        permissions = file_obj.get("permissions") or {}
+        file_score = max((int(finding.get("final_risk_score") or finding.get("risk_score") or 0) for finding in nist_findings), default=0)
+        self.top_assets.add({"file": file_obj.get("name") or file_obj.get("path") or "", "path": file_obj.get("path") or "", "score": file_score, "finding_count": len(nist_findings)})
+        for finding in nist_findings:
+            self.category_counts[str(finding.get("category_id") or finding.get("category") or "unknown")] += 1
+            self.rule_counts[str(finding.get("rule_id") or finding.get("type") or "unknown")] += 1
+            self.source_kind_counts[str(finding.get("source_kind") or "unknown")] += 1
+            self.handling_counts[str(finding.get("handling_tier") or "UNKNOWN")] += 1
+            self.severity_counts[str(finding.get("product_severity") or finding.get("risk") or "LOW")] += 1
+            self.cia_counts[str(finding.get("overall_impact") or "UNKNOWN")] += 1
+            self.confidence_counts[str(finding.get("confidence") or "unknown")] += 1
+            if finding.get("needs_review"):
+                self.needs_review.add(_nist_queue_row(file_obj, finding, "Review required"))
+            if permissions.get("public"):
+                self.public_exposure.add(_nist_queue_row(file_obj, finding, "Public exposure"))
+            if permissions.get("wide_access"):
+                self.broad_access.add(_nist_queue_row(file_obj, finding, "Broad access"))
+            if finding.get("handling_tier") == "RESTRICTED" and str(finding.get("protection_state") or "UNKNOWN").upper() in {"UNKNOWN", "NONE", "UNPROTECTED"}:
+                self.unprotected_restricted.add(_nist_queue_row(file_obj, finding, "Restricted handling without protection evidence"))
+
+    def result(self) -> dict:
+        status = self.status
+        return {
+            "enabled": True,
+            "catalog": status,
+            "total_nist_findings": sum(self.rule_counts.values()),
+            "category_distribution": _counter_rows(self.category_counts, "category"),
+            "rule_coverage": {"covered_rules": len(self.rule_counts), "catalog_rules": status.get("rule_count", 0), "top_rules": _counter_rows(self.rule_counts, "rule_id")},
+            "source_kind_distribution": dict(self.source_kind_counts),
+            "handling_tier_distribution": dict(self.handling_counts),
+            "product_severity_distribution": dict(self.severity_counts),
+            "overall_impact_distribution": dict(self.cia_counts),
+            "confidence_distribution": dict(self.confidence_counts),
+            "needs_review_findings": self.needs_review.result(),
+            "publicly_exposed_findings": self.public_exposure.result(),
+            "broad_access_findings": self.broad_access.result(),
+            "unencrypted_restricted_findings": self.unprotected_restricted.result(),
+            "top_risky_assets": self.top_assets.result(),
+            "disclaimers": [
+                "Handling tier is product-defined.",
+                "Product severity is not a NIST-defined severity.",
+                "CIA defaults may be provisional.",
+                "Automated detection is not authoritative CUI determination.",
+            ],
+        }
 
 
 def build_nist_sp800_60_report(files: list[dict]) -> dict:
-    category_counts = Counter()
-    rule_counts = Counter()
-    source_kind_counts = Counter()
-    handling_counts = Counter()
-    severity_counts = Counter()
-    cia_counts = Counter()
-    confidence_counts = Counter()
-    needs_review: list[dict] = []
-    public_exposure: list[dict] = []
-    broad_access: list[dict] = []
-    unprotected_restricted: list[dict] = []
-    top_assets: list[dict] = []
-    status = nist_catalog_status()
-
+    accumulator = NistSp80060ReportAccumulator()
     for file_obj in files:
-        nist_findings = [finding for finding in file_obj.get("findings") or [] if _is_nist_finding(finding)]
-        if not nist_findings:
-            continue
-        permissions = file_obj.get("permissions") or {}
-        file_score = max((int(finding.get("final_risk_score") or finding.get("risk_score") or 0) for finding in nist_findings), default=0)
-        top_assets.append({"file": file_obj.get("name") or file_obj.get("path") or "", "path": file_obj.get("path") or "", "score": file_score, "finding_count": len(nist_findings)})
-        for finding in nist_findings:
-            category_counts[str(finding.get("category_id") or finding.get("category") or "unknown")] += 1
-            rule_counts[str(finding.get("rule_id") or finding.get("type") or "unknown")] += 1
-            source_kind_counts[str(finding.get("source_kind") or "unknown")] += 1
-            handling_counts[str(finding.get("handling_tier") or "UNKNOWN")] += 1
-            severity_counts[str(finding.get("product_severity") or finding.get("risk") or "LOW")] += 1
-            cia_counts[str(finding.get("overall_impact") or "UNKNOWN")] += 1
-            confidence_counts[str(finding.get("confidence") or "unknown")] += 1
-            if finding.get("needs_review"):
-                needs_review.append(_nist_queue_row(file_obj, finding, "Review required"))
-            if permissions.get("public"):
-                public_exposure.append(_nist_queue_row(file_obj, finding, "Public exposure"))
-            if permissions.get("wide_access"):
-                broad_access.append(_nist_queue_row(file_obj, finding, "Broad access"))
-            if finding.get("handling_tier") == "RESTRICTED" and str(finding.get("protection_state") or "UNKNOWN").upper() in {"UNKNOWN", "NONE", "UNPROTECTED"}:
-                unprotected_restricted.append(_nist_queue_row(file_obj, finding, "Restricted handling without protection evidence"))
-
-    top_assets.sort(key=lambda item: item["score"], reverse=True)
-    return {
-        "enabled": True,
-        "catalog": status,
-        "total_nist_findings": sum(rule_counts.values()),
-        "category_distribution": _counter_rows(category_counts, "category"),
-        "rule_coverage": {"covered_rules": len(rule_counts), "catalog_rules": status.get("rule_count", 0), "top_rules": _counter_rows(rule_counts, "rule_id")},
-        "source_kind_distribution": dict(source_kind_counts),
-        "handling_tier_distribution": dict(handling_counts),
-        "product_severity_distribution": dict(severity_counts),
-        "overall_impact_distribution": dict(cia_counts),
-        "confidence_distribution": dict(confidence_counts),
-        "needs_review_findings": needs_review[:25],
-        "publicly_exposed_findings": public_exposure[:25],
-        "broad_access_findings": broad_access[:25],
-        "unencrypted_restricted_findings": unprotected_restricted[:25],
-        "top_risky_assets": top_assets[:10],
-        "disclaimers": [
-            "Handling tier is product-defined.",
-            "Product severity is not a NIST-defined severity.",
-            "CIA defaults may be provisional.",
-            "Automated detection is not authoritative CUI determination.",
-        ],
-    }
+        accumulator.add(file_obj)
+    return accumulator.result()
 
 
 def sanitize_pci_sensitive_report(report: dict) -> dict:
