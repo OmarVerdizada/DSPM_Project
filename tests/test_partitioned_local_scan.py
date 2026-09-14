@@ -247,7 +247,7 @@ class APlanNeverLosesWhatAWalkObservesTest(_LocalTest):
             one = DSPMDiscoveryEngine(self._config("unreadable-single")).run().to_dict()
         self._use_database("unreadable-partitioned")
         with patch.object(Path, "iterdir", refusing):
-            compact = partitioned_scan.run_partitioned_local_scan(
+            compact = partitioned_scan.run_partitioned_scan(
                 TENANT, self._config("unreadable-partitioned"), max_files=3)
         stored = store.read_scan_report(TENANT, compact["scan_id"])
         self.assertFalse(one["scan_diagnostics"]["incremental"]["complete"])
@@ -296,7 +296,7 @@ class APlanNeverLosesWhatAWalkObservesTest(_LocalTest):
             return real_iterdir(path)
 
         with patch.object(Path, "iterdir", counting):
-            compact = partitioned_scan.run_partitioned_local_scan(TENANT, self._config("listing"), max_files=3)
+            compact = partitioned_scan.run_partitioned_scan(TENANT, self._config("listing"), max_files=3)
         self.assertIsNotNone(compact)
         self.assertTrue(flat.is_dir())
         self.assertEqual(listed["n"], 1, "each run of the flat folder listed the whole folder again")
@@ -312,7 +312,7 @@ class APartitionedScanReportsWhatOneScanReportsTest(_LocalTest):
         return store.read_scan_report(TENANT, data["scan_id"])
 
     def _partitioned(self, config: ScanConfig, *, label: str, frameworks, max_files: int = 3) -> dict:
-        compact = partitioned_scan.run_partitioned_local_scan(
+        compact = partitioned_scan.run_partitioned_scan(
             TENANT, config, scan_label=label, compliance_enabled=bool(frameworks),
             compliance_frameworks=frameworks, max_files=max_files,
         )
@@ -387,7 +387,7 @@ class APartitionedScanReportsWhatOneScanReportsTest(_LocalTest):
             return plan
 
         with patch.object(partitioned_scan, "plan_bounded_partitions", side_effect=plan_then_delete):
-            compact = partitioned_scan.run_partitioned_local_scan(TENANT, self._config("vanish"), max_files=3)
+            compact = partitioned_scan.run_partitioned_scan(TENANT, self._config("vanish"), max_files=3)
         stored = store.read_scan_report(TENANT, compact["scan_id"])
         after, _ = self._single_walk(self._config("vanish"))
         self.assertEqual([f["path"] for f in stored["files"]], after)
@@ -397,13 +397,13 @@ class WhenNotToPartitionTest(_LocalTest):
 
     def test_a_small_target_runs_as_one_scan(self) -> None:
         self._use_database("small")
-        self.assertIsNone(partitioned_scan.run_partitioned_local_scan(TENANT, self._config("small"), max_files=10_000))
+        self.assertIsNone(partitioned_scan.run_partitioned_scan(TENANT, self._config("small"), max_files=10_000))
 
     def test_the_demo_dataset_is_never_partitioned(self) -> None:
         self._use_database("demo")
         for index in range(6):
             _write(self.estate / "enterprise_test_data" / f"sample{index}.txt", index)
-        self.assertIsNone(partitioned_scan.run_partitioned_local_scan(TENANT, self._config("demo"), max_files=3))
+        self.assertIsNone(partitioned_scan.run_partitioned_scan(TENANT, self._config("demo"), max_files=3))
 
     def test_the_flag_is_off_by_default(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
@@ -427,7 +427,7 @@ class StoppingTest(_LocalTest):
 
         with patch.object(store, "persist_partition", side_effect=persist_then_cancel):
             with self.assertRaises(RuntimeError):
-                partitioned_scan.run_partitioned_local_scan(TENANT, self._config("cancel"), job=job, max_files=3)
+                partitioned_scan.run_partitioned_scan(TENANT, self._config("cancel"), job=job, max_files=3)
         with store._connect() as conn:
             scans = [r["scan_id"] for r in conn.execute(
                 "SELECT DISTINCT scan_id FROM scan_partitions WHERE tenant_id = ?", (TENANT,)).fetchall()]
@@ -442,7 +442,7 @@ class StoppingTest(_LocalTest):
         self._use_database("deadline")
         with patch.object(discovery_engine, "SCAN_MAX_SECONDS", 1e-9):
             with self.assertRaisesRegex(RuntimeError, "time budget"):
-                partitioned_scan.run_partitioned_local_scan(TENANT, self._config("deadline"), max_files=3)
+                partitioned_scan.run_partitioned_scan(TENANT, self._config("deadline"), max_files=3)
         with store._connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM scan_partitions WHERE tenant_id = ?", (TENANT,)).fetchone()[0], 0)
 

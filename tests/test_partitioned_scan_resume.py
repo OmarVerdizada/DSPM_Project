@@ -65,7 +65,7 @@ class StallsOnTheThirdPartition(DSPMDiscoveryEngine):
 with patch.object(file_scanner, "is_skipped_scan_path", side_effect=lambda path: "node_modules" in str(path).lower()), \
         patch.object(file_scanner, "file_owner", MagicMock(return_value="CORP\\owner")), \
         patch.object(partitioned_scan, "DSPMDiscoveryEngine", StallsOnTheThirdPartition):
-    partitioned_scan.run_partitioned_local_scan(
+    partitioned_scan.run_partitioned_scan(
         settings["tenant"], ScanConfig(**settings["config"]), request=settings["request"],
         scan_label="estate", compliance_enabled=True, compliance_frameworks=settings["frameworks"], max_files=3,
     )
@@ -119,7 +119,7 @@ class AKilledScanResumesTest(_LocalTest):
 
     def test_a_scan_killed_inside_a_partition_resumes_into_the_uninterrupted_scans_report(self) -> None:
         self._use_database("whole")
-        whole_compact = partitioned_scan.run_partitioned_local_scan(
+        whole_compact = partitioned_scan.run_partitioned_scan(
             TENANT, ScanConfig(**self._settings("whole")), request=REQUEST, scan_label="estate",
             compliance_enabled=True, compliance_frameworks=ALL_FRAMEWORKS, max_files=3,
         )
@@ -187,7 +187,7 @@ class RetriesAndStopsTest(_LocalTest):
             return real_run(engine)
 
         with patch.object(partitioned_scan.DSPMDiscoveryEngine, "run", blinks_once):
-            compact = partitioned_scan.run_partitioned_local_scan(TENANT, self._config("retry"), request=REQUEST, max_files=3)
+            compact = partitioned_scan.run_partitioned_scan(TENANT, self._config("retry"), request=REQUEST, max_files=3)
         units = store.list_scan_partitions(TENANT, compact["scan_id"])
         self.assertEqual({unit["status"] for unit in units}, {"done"})
         self.assertEqual(units[1]["attempt"], 2)
@@ -211,7 +211,7 @@ class RetriesAndStopsTest(_LocalTest):
         with mock.patch.dict(os.environ, {"DSPM_PARTITION_MAX_ATTEMPTS": "2"}), \
                 patch.object(partitioned_scan.DSPMDiscoveryEngine, "run", always_fails_on_the_first):
             with self.assertRaisesRegex(partitioned_scan.ScanStopped, "failed 2 times"):
-                partitioned_scan.run_partitioned_local_scan(TENANT, self._config("exhausted"), request=REQUEST, max_files=3)
+                partitioned_scan.run_partitioned_scan(TENANT, self._config("exhausted"), request=REQUEST, max_files=3)
         (row,) = self._scan_rows()
         self.assertEqual(row["status"], "failed")
         self.assertIn("OSError", row["error"])
@@ -233,7 +233,7 @@ class RetriesAndStopsTest(_LocalTest):
 
         with patch.object(store, "persist_partition", side_effect=persist_then_cancel):
             with self.assertRaisesRegex(partitioned_scan.ScanStopped, "cancelled"):
-                partitioned_scan.run_partitioned_local_scan(TENANT, self._config("cancelled"), request=REQUEST,
+                partitioned_scan.run_partitioned_scan(TENANT, self._config("cancelled"), request=REQUEST,
                                                             job=job, max_files=3)
         (row,) = self._scan_rows()
         self.assertEqual((row["status"], row["error"]), ("failed", "Scan cancelled"))
@@ -243,7 +243,7 @@ class RetriesAndStopsTest(_LocalTest):
 
     def test_a_scan_started_without_a_request_is_failed_by_the_sweep_and_says_why(self) -> None:
         self._use_database("norequest")
-        record = partitioned_scan.start_partitioned_local_scan(TENANT, self._config("norequest"), max_files=3)
+        record = partitioned_scan.start_partitioned_scan(TENANT, self._config("norequest"), max_files=3)
         self.assertFalse(record["resumable"])
         resume = MagicMock()
         self.assertEqual(scan_resumer.resume_stale_scans(resume, stale_after_seconds=0), [record["scan_id"]])
@@ -256,7 +256,7 @@ class OneFinalizeWinsTest(_LocalTest):
 
     def test_a_finalize_after_the_first_committed_is_refused_and_the_report_stays_whole(self) -> None:
         self._use_database("second-finalize")
-        compact = partitioned_scan.run_partitioned_local_scan(TENANT, self._config("second-finalize"),
+        compact = partitioned_scan.run_partitioned_scan(TENANT, self._config("second-finalize"),
                                                               request=REQUEST, max_files=3)
         before = store.read_scan_report(TENANT, compact["scan_id"])
         late = {"timestamp": "late", "source": "local", "summary": {}, "scan_diagnostics": {},
@@ -268,7 +268,7 @@ class OneFinalizeWinsTest(_LocalTest):
 
     def test_a_finalize_that_read_the_records_before_another_committed_returns_that_report(self) -> None:
         self._use_database("raced-finalize")
-        record = partitioned_scan.start_partitioned_local_scan(TENANT, self._config("raced-finalize"),
+        record = partitioned_scan.start_partitioned_scan(TENANT, self._config("raced-finalize"),
                                                                request=REQUEST, max_files=3)
         scan_id = record["scan_id"]
         with patch.object(partitioned_scan, "_finalize_when_claimed", return_value={}):
@@ -450,15 +450,20 @@ class TheAppRebuildsTheScanTest(_FreshDatabase):
         self.assertEqual((tenant_id, scan_id, config.local_path, config.max_depth, config.server),
                          (self.tenant, "scan-s", "enterprise_test_data", 3, ""))
 
-    def test_a_remote_request_is_refused_and_a_full_queue_is_left_for_later(self) -> None:
+    def test_an_smb_scan_is_rebuilt_for_its_server_and_a_full_queue_is_left_for_later(self) -> None:
         from backend import app as app_module
 
         remote = {"tenant_id": self.tenant, "scan_id": "scan-r", "job_id": "job-r", "resumable": True,
-                  "request": {"server": "fileserver01", "credential_ref": ""}, "header": {}}
-        with patch.object(app_module, "create_job") as create_job:
-            with self.assertRaises(ValueError):
-                app_module._resume_partitioned_scan(remote)
-        create_job.assert_not_called()
+                  "request": {"server": "fileserver01", "username": "svc-scan", "domain": "CORP"}, "header": {}}
+        with patch.object(app_module, "create_job", return_value=MagicMock(id="job-r")) as create_job:
+            app_module._resume_partitioned_scan(remote)
+        runner = create_job.call_args[0][1]
+        with patch.object(app_module, "continue_partitioned_scan", return_value={"scan_id": "scan-r"}) as continued, \
+                patch.object(app_module, "evaluate_alerts", return_value=[]):
+            runner(MagicMock(progress=0, cancel_requested=False))
+        config = continued.call_args[0][2]
+        self.assertEqual((config.server, config.username, config.domain, config.password),
+                         ("fileserver01", "svc-scan", "CORP", ""))
         local = {"tenant_id": self.tenant, "scan_id": "scan-l", "job_id": "job-l", "resumable": True,
                  "request": {"local_path": "enterprise_test_data"}, "header": {}}
         with patch.object(app_module, "create_job", side_effect=RuntimeError("Async scan queue is full")):

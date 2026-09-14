@@ -3842,8 +3842,14 @@ class ScanAlreadyFinalized(RuntimeError):
 # Diagnostics that describe how one engine was configured rather than what it
 # found. Every partition's engine reports its own, and adding worker counts across
 # partitions would describe nothing, so the last partition's report stands.
-_CONFIGURATION_DIAGNOSTICS = frozenset({"parallelism", "worker_pool", "pipeline", "detector_pool"})
+_CONFIGURATION_DIAGNOSTICS = frozenset({"parallelism", "worker_pool", "pipeline", "detector_pool", "io_workers"})
 _MERGED_DIAGNOSTIC_LIST_LIMIT = 20
+# An SMB scan's share coverage (B2.3) names every share however many there are: the
+# ones it found, walked and skipped in the order the server listed them, and the ones
+# it could not read or lost the connection to sorted, as the collector sorts them. So
+# the partitions of one scan report exactly the single scan's lists.
+_SHARE_ORDER_DIAGNOSTICS = frozenset({"shares_discovered", "shares_scanned", "shares_skipped"})
+_SHARE_SORTED_DIAGNOSTICS = frozenset({"shares_access_denied", "shares_connection_reset"})
 
 
 def merge_partition_diagnostics(diagnostics: list[dict]) -> dict:
@@ -3868,6 +3874,10 @@ def _merge_diagnostic_dicts(parts: list[dict], *, top_level: bool = False) -> di
         present = [part[key] for part in parts if key in part]
         if top_level and key in _CONFIGURATION_DIAGNOSTICS:
             merged[key] = present[-1]
+        elif top_level and key in _SHARE_ORDER_DIAGNOSTICS and all(isinstance(value, list) for value in present):
+            merged[key] = list(dict.fromkeys(str(item) for value in present for item in value))
+        elif top_level and key in _SHARE_SORTED_DIAGNOSTICS and all(isinstance(value, list) for value in present):
+            merged[key] = sorted({str(item) for value in present for item in value})
         elif top_level and key == "incremental" and all(isinstance(value, dict) for value in present):
             merged[key] = _merge_incremental_diagnostics(present)
         elif key == "reuse_index" and all(isinstance(value, dict) for value in present):

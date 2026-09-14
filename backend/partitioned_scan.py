@@ -1,9 +1,10 @@
-"""Partitioned scans: each partition persists as it finishes; finalize does the rest (B2.2b, B2.4).
+"""Partitioned scans: each partition persists as it finishes; finalize does the rest (B2.2b-B2.4).
 
 A single scan holds every analyzed file until it saves them - the one holder of
 the whole estate the earlier Phase B steps could not remove. A partitioned scan
 analyzes one partition, writes it, and lets it go; memory follows the largest
-partition instead of the estate.
+partition instead of the estate. A local scan is cut into runs of its walk (B2.2b);
+an SMB scan into groups of shares that no overlap crosses (B2.3).
 
 What needs the whole scan happens once, at finalize, from what the partitions
 stored: the summary is the sum of the partitions' summaries, the diagnostics are
@@ -35,7 +36,7 @@ from typing import Callable, Iterable
 from backend import store
 from backend.compliance_service import ComplianceReportAccumulator
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
-from discovery.partition import plan_bounded_partitions
+from discovery.partition import plan_bounded_partitions, plan_share_partitions
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ def finalize_scan(
 
 
 def partitioned_scans_enabled() -> bool:
-    """Whether local scans run partitioned. Off by default.
+    """Whether local and SMB scans run partitioned. Off by default.
 
     An interrupted partitioned scan is now continued rather than left half-written
     (B2.4). The default stays off until the B2 gates are measured at the scale they
@@ -175,7 +176,7 @@ def partitioned_scans_enabled() -> bool:
 
 
 def partition_max_files() -> int:
-    """The most files one partition holds, and so what a scan's memory follows."""
+    """The most files one local partition holds, and so what a local scan's memory follows."""
     try:
         return max(1, min(int(os.getenv("DSPM_PARTITION_MAX_FILES", "2000")), 1_000_000))
     except ValueError:
@@ -258,6 +259,7 @@ class _Scan:
     tenant_id: str
     scan_id: str
     config: ScanConfig
+    source: str
     scan_root: str
     timestamp: str
     label: str
@@ -270,7 +272,7 @@ class _Scan:
 
 
 def _unit_config(config: ScanConfig, spec: dict, scan_root: str) -> ScanConfig:
-    """One partition's engine: the scan's policy, scope and reuse, over one run.
+    """One local partition's engine: the scan's policy, scope and reuse, over one run.
 
     Incremental reuse, the persistent cache and the baseline probe carry over
     unchanged - every partition probes and writes under the scan's own scope, and
@@ -287,6 +289,11 @@ def _unit_config(config: ScanConfig, spec: dict, scan_root: str) -> ScanConfig:
     )
 
 
+def _share_unit_config(config: ScanConfig, spec: dict) -> ScanConfig:
+    """One SMB partition's engine: the scan's policy, scope and reuse, over one group of shares."""
+    return replace(config, smb_shares=tuple(spec.get("shares") or ()), progress_callback=None)
+
+
 def _vanished_partition(timestamp: str, label: str) -> tuple[dict, list]:
     """A run whose folder is gone by the time it is scanned holds nothing - which is
     what a whole walk makes of a folder that disappears after its parent was listed."""
@@ -301,7 +308,7 @@ def _vanished_partition(timestamp: str, label: str) -> tuple[dict, list]:
     return header, []
 
 
-def start_partitioned_local_scan(
+def start_partitioned_scan(
     tenant_id: str,
     config: ScanConfig,
     *,
@@ -314,12 +321,13 @@ def start_partitioned_local_scan(
     max_files: int | None = None,
     stop_reason: Callable[[], str | None] | None = None,
 ) -> dict | None:
-    """Plan a local scan into partitions and record it; returns the scan's record.
+    """Plan a local or SMB scan into partitions and record it; returns the scan's record.
 
-    Returns ``None`` when the target is not worth partitioning - it fits one
-    partition, or it is not a readable local folder - or when it holds the bundled
-    demo dataset, whose files never enter the estate and which is small by
-    definition. The caller then runs an ordinary scan.
+    Returns ``None`` when the target is not worth partitioning - a local target that
+    fits one partition or is not a readable folder, a server whose shares form one
+    group, or a server that cannot be planned - or when it holds the bundled demo
+    dataset, whose files never enter the estate and which is small by definition. The
+    caller then runs an ordinary scan.
 
     Everything a restart needs to continue the scan is written before its first
     partition runs: the plan in the ledger, and beside it the request - without
@@ -332,8 +340,12 @@ def start_partitioned_local_scan(
 
     stop_reason = stop_reason or _stop_check(job, _deadline())
     budget = max_files or partition_max_files()
+    remote = bool(config.server)
     with collection_heartbeat(job) if job is not None else nullcontext():
-        plan = plan_bounded_partitions(config, max_files=budget, stop_check=stop_reason)
+        if remote:
+            plan = plan_share_partitions(config, stop_check=stop_reason)
+        else:
+            plan = plan_bounded_partitions(config, max_files=budget, stop_check=stop_reason)
     if plan is None or plan["sample_paths"]:
         return None
 
@@ -343,16 +355,19 @@ def start_partitioned_local_scan(
         # One timestamp for the whole scan: every partition stamps it on the rows it
         # writes, and a single scan's rows all carry one.
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "source": "local",
+        "source": "smb" if remote else "local",
         "scan_label": str(scan_label or "").strip()[:80],
         "compliance_enabled": bool(compliance_enabled),
         "compliance_frameworks": list(compliance_frameworks or []),
-        "local_path": config.local_path,
-        "max_depth": config.max_depth,
-        "scan_root": str(Path(config.local_path).expanduser().resolve()),
-        "max_files": budget,
         "requested_by": str(requested_by or ""),
     }
+    if not remote:
+        header.update(
+            local_path=config.local_path,
+            max_depth=config.max_depth,
+            scan_root=str(Path(config.local_path).expanduser().resolve()),
+            max_files=budget,
+        )
     record = store.register_partitioned_scan(
         tenant_id, scan_id, job_id=job_id, request=dict(request or {}), header=header,
         resumable=request is not None,
@@ -400,11 +415,14 @@ def continue_partitioned_scan(
         _running_here.add(key)
     try:
         header = record["header"]
+        source = str(header.get("source") or "local")
+        local = source == "local"
         scan = _Scan(
             tenant_id=str(tenant_id),
             scan_id=str(scan_id),
             config=config,
-            scan_root=str(header.get("scan_root") or Path(config.local_path).expanduser().resolve()),
+            source=source,
+            scan_root=str(header.get("scan_root") or (Path(config.local_path).expanduser().resolve() if local else "")),
             timestamp=str(header.get("timestamp") or datetime.now(timezone.utc).isoformat()),
             label=str(header.get("scan_label") or "").strip()[:80],
             compliance_enabled=bool(header.get("compliance_enabled")),
@@ -510,11 +528,17 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
 
     try:
         with _holding_lease(scan, unit):
-            if not Path(str(unit["spec"]["local_path"])).is_dir():
+            if scan.source == "smb":
+                engine_config = _share_unit_config(scan.config, unit["spec"])
+            elif Path(str(unit["spec"]["local_path"])).is_dir():
+                engine_config = _unit_config(scan.config, unit["spec"], scan.scan_root)
+            else:
+                engine_config = None
+            if engine_config is None:
                 header, records = _vanished_partition(scan.timestamp, scan.label)
             else:
                 with collection_heartbeat(job) if job is not None else nullcontext():
-                    report = DSPMDiscoveryEngine(_unit_config(scan.config, unit["spec"], scan.scan_root)).run().to_dict()
+                    report = DSPMDiscoveryEngine(engine_config).run().to_dict()
                 reason = stop_reason()
                 if reason:
                     raise ScanStopped(reason)
@@ -524,7 +548,7 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
                     enrichment.prepare(record)
                 header = {
                     "timestamp": scan.timestamp,
-                    "source": report.get("source") or "local",
+                    "source": report.get("source") or scan.source,
                     "mode": report.get("mode") or "full",
                     "summary": report.get("summary") or {},
                     "scan_diagnostics": report.get("scan_diagnostics") or {},
@@ -578,18 +602,21 @@ def _finalize_when_claimed(scan: _Scan, *, job, stop_reason, poll_seconds: float
     report = finalize_scan(
         scan.tenant_id, scan.scan_id,
         timestamp=scan.timestamp,
-        source="local",
+        source=scan.source,
         scan_label=scan.label,
         compliance_enabled=scan.compliance_enabled,
         compliance_frameworks=list(scan.compliance_frameworks),
         write_estate=True,
-        diagnostics_overrides={"local_path": scan.local_path, "max_depth": scan.max_depth},
+        # A local scan's diagnostics name its root and depth; each run's name its own.
+        diagnostics_overrides=(
+            {"local_path": scan.local_path, "max_depth": scan.max_depth} if scan.source == "local" else None
+        ),
     )
     store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "done")
     return report
 
 
-def run_partitioned_local_scan(
+def run_partitioned_scan(
     tenant_id: str,
     config: ScanConfig,
     *,
@@ -601,18 +628,18 @@ def run_partitioned_local_scan(
     job=None,
     max_files: int | None = None,
 ) -> dict | None:
-    """Scan a local target one partition at a time; returns the compact report.
+    """Scan a local or SMB target one partition at a time; returns the compact report.
 
     Returns ``None`` when the target is not worth partitioning (see
-    :func:`start_partitioned_local_scan`); the caller then runs an ordinary scan.
+    :func:`start_partitioned_scan`); the caller then runs an ordinary scan.
 
-    It is :func:`start_partitioned_local_scan` then :func:`continue_partitioned_scan`
-    under one time budget, which covers planning too - not each partition separately
-    (B2.2b review). ``request`` is the scan request as the API validated it: with it
-    the scan can be continued after a restart, without it it cannot.
+    It is :func:`start_partitioned_scan` then :func:`continue_partitioned_scan` under
+    one time budget, which covers planning too - not each partition separately (B2.2b
+    review). ``request`` is the scan request as the API validated it: with it the scan
+    can be continued after a restart, without it it cannot.
     """
     stop_reason = _stop_check(job, _deadline())
-    record = start_partitioned_local_scan(
+    record = start_partitioned_scan(
         tenant_id, config,
         request=request,
         requested_by=requested_by,

@@ -177,6 +177,10 @@ class SMBConfig:
     # process parallelism policy / io_workers). Each parallel worker owns an
     # isolated connection and a process-wide admission slot.
     io_workers: int = 0
+    # B2.3: the shares this scan walks, by name; None walks every share. A partitioned
+    # SMB scan gives each partition a group of shares that cannot overlap any share
+    # outside the group, so the overlapping-share collapse stays inside one partition.
+    allowed_shares: tuple[str, ...] | None = None
 
 
 class SMBScanner:
@@ -388,6 +392,9 @@ class SMBScanner:
                 discovered_shares.append(share_name)
                 if self._skip_share(share_name):
                     skipped_shares.append(share_name)
+                    continue
+                if not self._share_selected(share_name):
+                    # Another partition of the same scan walks it (B2.3): not skipped.
                     continue
                 scanned_shares.append(share_name)
 
@@ -1229,6 +1236,73 @@ class SMBScanner:
     def _norm_share_path(value: str) -> str:
         return "/" + str(value or "").replace("\\", "/").strip("/")
 
+    def _share_selected(self, share_name: str) -> bool:
+        """Whether this scan walks a share: every share, unless ``allowed_shares`` names some (B2.3)."""
+        return self.config.allowed_shares is None or share_name in self.config.allowed_shares
+
+    def plan_share_groups(self, stop_check: Callable[[], str | None] | None = None) -> list[list[str]] | None:
+        """The shares a scan walks, in its order, cut into groups no overlap crosses (B2.3).
+
+        The overlapping-share collapse only ever matches a file in one share with the
+        same file seen through a share whose root holds a folder named like the first.
+        So two shares can overlap only if one's root lists a folder with the other's
+        name. Groups that keep every such pair together - contiguous in the server's
+        listing order, so the groups in sequence are one scan's order - collapse
+        exactly what a scan of every share at once collapses.
+
+        This costs one root listing per share. A share whose root cannot be read yields
+        nothing through it in the scan either, so it overlaps nothing. Returns ``None``
+        when the plan cannot be trusted: the server cannot be reached, or a connection
+        dropped while a root was being listed.
+        """
+        if not self.connect():
+            return None
+        try:
+            shares = [
+                share.name
+                for share in list(self.connection.listShares())
+                if not self._skip_share(share.name) and self._share_selected(share.name)
+            ]
+            folders: dict[str, set[str]] = {}
+            for share_name in shares:
+                reason = stop_check() if stop_check is not None else None
+                if reason:
+                    raise RuntimeError(reason)
+                try:
+                    entries = self.connection.listPath(share_name, "/")
+                except Exception as exc:
+                    if _is_connection_error(exc):
+                        return None
+                    folders[share_name] = set()
+                    continue
+                folders[share_name] = {
+                    str(entry.filename).casefold()
+                    for entry in entries
+                    if entry.isDirectory and entry.filename not in {".", ".."}
+                }
+        finally:
+            self.close()
+        spans = sorted(
+            sorted((broad_index, narrow_index))
+            for broad_index, broad in enumerate(shares)
+            for narrow_index, narrow in enumerate(shares)
+            if narrow_index != broad_index and narrow.casefold() in folders[broad]
+        )
+        merged: list[list[int]] = []
+        for low, high in spans:
+            if merged and low <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], high)
+            else:
+                merged.append([low, high])
+        groups: list[list[str]] = []
+        position = 0
+        for low, high in merged:
+            groups.extend([name] for name in shares[position:low])
+            groups.append(shares[low:high + 1])
+            position = high + 1
+        groups.extend([name] for name in shares[position:])
+        return groups
+
     def _dedupe_overlapping_shares(self, records: list[dict]) -> list[dict]:
         """Collapse the SAME physical file surfaced through overlapping SMB shares.
 
@@ -1244,6 +1318,14 @@ class SMBScanner:
         different files that share the same bytes) - for a DLP tool that is real
         data proliferation and must stay visible. The kept record notes the
         redundant location in ``also_accessible_via``.
+
+        Every pair in a hash group is checked, narrowest location first, and a copy
+        found through a copy is credited to the narrowest (B2.3). Before, only the
+        single shortest path was compared: a third file with the same bytes elsewhere
+        hid a real overlap, and a share nested two deep collapsed one level. Two
+        locations in one share are never the same file. So the collapse depends only on
+        shares that can overlap, which lets a partitioned scan collapse inside a group
+        of shares and match a scan of every share at once.
         """
         by_hash: dict[str, list[dict]] = {}
         for record in records:
@@ -1256,15 +1338,22 @@ class SMBScanner:
                 continue
             # Shortest path first = the most-specific (nested) share -> the keeper.
             ordered = sorted(group, key=lambda r: len(self._norm_share_path(r.get("path"))))
-            keeper = ordered[0]
-            keep_share = str(keeper.get("share") or "").strip("/")
-            expected_broad = self._norm_share_path(keep_share + self._norm_share_path(keeper.get("path")))
-            for other in ordered[1:]:
-                if self._norm_share_path(other.get("path")) == expected_broad:
-                    drop.add((other.get("share"), other.get("path")))
-                    keeper.setdefault("also_accessible_via", []).append(
-                        {"share": other.get("share"), "path": other.get("path")}
-                    )
+            keeper_of: dict[int, dict] = {}
+            for record in ordered:
+                keeper = keeper_of.get(id(record), record)
+                share = str(record.get("share") or "").strip("/")
+                broad_path = self._norm_share_path(share + self._norm_share_path(record.get("path")))
+                for other in ordered:
+                    if other is record or other is keeper or id(other) in keeper_of:
+                        continue
+                    if other.get("share") == record.get("share"):
+                        continue
+                    if self._norm_share_path(other.get("path")) == broad_path:
+                        keeper_of[id(other)] = keeper
+                        drop.add((other.get("share"), other.get("path")))
+                        keeper.setdefault("also_accessible_via", []).append(
+                            {"share": other.get("share"), "path": other.get("path")}
+                        )
         if not drop:
             return records
         self.last_scan_diagnostics["overlapping_share_duplicates_collapsed"] = len(drop)

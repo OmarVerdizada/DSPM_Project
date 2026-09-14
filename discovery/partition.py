@@ -59,9 +59,9 @@ def _partition_config(config: ScanConfig, *, local_path: str, max_depth: int) ->
 def plan_partitions(config: ScanConfig) -> list[ScanConfig] | None:
     """Split a LOCAL scan into per-top-level-subtree units + a root-files unit.
 
-    Returns ``None`` when the target is not a partitionable local directory (SMB
-    per-share and endpoint per-host partitioning reuse :func:`merge_reports` but
-    need their own planners + an SMB ``allowed_shares`` knob — not built here).
+    Returns ``None`` when the target is not a partitionable local directory. SMB
+    scans are partitioned per group of shares by :func:`plan_share_partitions`
+    (B2.3); endpoint per-host partitioning is not built.
 
     Parity rules, mirroring ``file_scanner.walk``:
     - a top-level subdir becomes a unit only if the single scan would descend into
@@ -184,6 +184,37 @@ def plan_bounded_partitions(
             return plan
         # More units than one scan can order - reachable only at millions of files.
         budget *= 2
+
+
+def plan_share_partitions(config: ScanConfig, *, stop_check=None) -> dict | None:
+    """Cut an SMB scan into groups of shares that together are exactly one scan (B2.3).
+
+    Each unit is a group of shares, walked in the order the server lists them; a group
+    keeps together every pair of shares that can overlap, so the overlapping-share
+    collapse happens inside one partition (see ``SMBScanner.plan_share_groups``). A
+    share is never split: a partitioned SMB scan's memory follows its largest share,
+    or group, and not yet its largest folder.
+
+    Returns ``None`` when the scan should run whole: a local target, a server whose
+    shares form a single group, or a plan that cannot be trusted. Otherwise
+    ``{"units", "files", "sample_paths"}``, like :func:`plan_bounded_partitions`.
+    """
+    from collectors.smb_scanner import SMBConfig, SMBScanner
+
+    if not config.server:
+        return None
+    scanner = SMBScanner(SMBConfig(
+        server=config.server,
+        username=config.username,
+        password=config.password,
+        domain=config.domain,
+        include_admin_shares=config.include_admin_shares,
+        allowed_shares=config.smb_shares,
+    ))
+    groups = scanner.plan_share_groups(stop_check)
+    if not groups or len(groups) < 2:
+        return None
+    return {"units": [{"kind": "shares", "shares": group} for group in groups], "files": 0, "sample_paths": []}
 
 
 def _archive_weight(path: Path) -> int:

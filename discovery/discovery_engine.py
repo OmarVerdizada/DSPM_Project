@@ -86,6 +86,9 @@ class ScanConfig:
     # these names, in this order, and keeps what lies under the whole scan's root.
     local_entry_names: tuple[str, ...] | None = None
     scan_root: str | None = None
+    # An SMB partition is a group of shares (B2.3): the collector walks only these,
+    # in the order the server lists them. None walks every share.
+    smb_shares: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -1074,6 +1077,11 @@ class DSPMDiscoveryEngine:
             # estate until a later full scan re-adds them.
             diagnostics.get("record_limit_reached"),
             diagnostics.get("worker_errors"),
+            # An SMB share whose session reset on every attempt, or a collection the
+            # reset breaker stopped, yielded nothing for what it did not reach - the
+            # prunes would delete that share's objects as if they were gone (B2.3).
+            diagnostics.get("shares_connection_reset"),
+            diagnostics.get("scan_aborted_reason"),
         )
         complete = not any(incomplete_markers)
         diagnostics["incremental"] = {
@@ -1259,6 +1267,7 @@ class DSPMDiscoveryEngine:
                     # P-B.2: bound parallel per-share acquisition to the same
                     # resolved I/O worker budget the pipeline uses.
                     io_workers=self._parallelism().io_workers,
+                    allowed_shares=self.config.smb_shares,
                 )
             )
             records = scanner.scan()
