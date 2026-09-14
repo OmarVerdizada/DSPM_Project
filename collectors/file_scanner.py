@@ -584,8 +584,17 @@ def scan_directory(
     progress_callback: Callable[[int, int, int], None] | None = None,
     record_callback: Callable[[dict], None] | None = None,
     excluded_paths: Iterable[str | Path] | None = None,
+    include_names: Iterable[str] | None = None,
 ) -> list[dict]:
+    """Walk a folder - or read one file - into file records.
+
+    ``include_names`` restricts the walk to those names directly inside ``path``,
+    visited in the order the folder lists them, and descends into nothing. It is
+    how a partitioned scan reads one run of a large folder's loose files and gets
+    them in exactly the order a whole walk would have.
+    """
     root_path = Path(path).expanduser().resolve()
+    only_names = frozenset(include_names) if include_names is not None else None
     if not root_path.exists():
         raise FileNotFoundError(f"Scan path does not exist: {root_path}")
 
@@ -1058,6 +1067,8 @@ def scan_directory(
             return
 
         for item in entries:
+            if only_names is not None and item.name not in only_names:
+                continue
             try:
                 if item.is_symlink() or not _resolved_entry(item).is_relative_to(root_path):
                     continue
@@ -1067,6 +1078,8 @@ def scan_directory(
                 continue
 
             if is_dir:
+                if only_names is not None:
+                    continue
                 if is_skipped_scan_path(item):
                     if diagnostics is not None:
                         diagnostics["skipped_dirs"] = int(diagnostics.get("skipped_dirs") or 0) + 1

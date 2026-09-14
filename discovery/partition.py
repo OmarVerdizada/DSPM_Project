@@ -31,6 +31,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from collectors import file_scanner
 from collectors.file_scanner import is_hidden_path, is_skipped_scan_path
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
@@ -110,6 +111,158 @@ def plan_partitions(config: ScanConfig) -> list[ScanConfig] | None:
         return None  # not enough fan-out to be worth the process overhead
     subtrees.append(_partition_config(config, local_path=str(root), max_depth=0))
     return subtrees
+
+
+# The collector's own rules, looked up on its module at call time, so the planner
+# can never disagree with a walk - including one whose rules a test has replaced.
+def _skipped(path: Path) -> bool:
+    return file_scanner.is_skipped_scan_path(path)
+
+
+def _hidden(path: Path) -> bool:
+    return file_scanner.is_hidden_path(path)
+
+
+def plan_bounded_partitions(config: ScanConfig, *, max_files: int, max_units: int | None = None) -> dict | None:
+    """Cut a local scan into units that together are exactly one walk, in its order (B2.2b).
+
+    A scan's file order is its walk's: each folder's entries in the order the folder
+    lists them, descending into a subfolder the moment it is met. Several report
+    sections keep the first 25 items or break ties by arrival, so a partitioned scan
+    has to reproduce that order exactly - which a unit per top-level folder, with the
+    root's loose files last, does not.
+
+    Units are contiguous runs of the walk:
+
+    - ``subtree``: a folder whose files fit the budget, walked whole with the depth it
+      has left;
+    - ``files``: a run of at most ``max_files`` loose files of a folder too large to
+      keep whole, read in that folder's own order.
+
+    A folder is split into its runs and subfolders only when it holds more than
+    ``max_files`` files, so memory follows the largest unit rather than the estate.
+    A subfolder the walk would find nothing in is not a unit at all; one that cannot
+    be read still is, so its scan reports it. A folder whose listed path is not its
+    real path - a junction - is never the root of a unit, because a walk rooted there
+    would report different paths.
+
+    Returns ``None`` when the target should simply be scanned whole: a remote target,
+    a single file, a folder that fits the budget, or one that cannot be read.
+    Otherwise ``{"units", "files", "skipped_dirs", "sample_paths"}``: ``skipped_dirs``
+    counts skipped folders directly inside split folders, which no unit walks and so
+    no unit's scan reports; ``sample_paths`` says whether any file belongs to the
+    bundled demo dataset.
+    """
+    from backend.store import MAX_SCAN_PARTITIONS, is_sample_data_path
+
+    if config.server:
+        return None
+    try:
+        root = Path(config.local_path).expanduser().resolve()
+    except OSError:
+        return None
+    if not root.is_dir() or _skipped(root):
+        return None
+    excluded: list[Path] = []
+    if config.persistent_cache_enabled and config.cache_dir:
+        try:
+            excluded.append(Path(config.cache_dir).expanduser().resolve())
+        except OSError:
+            pass
+    limit = max_units or MAX_SCAN_PARTITIONS
+    budget = max(1, int(max_files))
+    while True:
+        plan = _plan_folders(config, root, excluded, budget, is_sample_data_path)
+        if plan is None or len(plan["units"]) <= limit:
+            return plan
+        # More units than one scan can order: the same cut, with larger units.
+        budget *= 2
+
+
+def _plan_folders(config: ScanConfig, root: Path, excluded: list[Path], budget: int, is_sample) -> dict | None:
+    include_hidden_dirs = bool(config.include_hidden or config.hidden_filter_enabled)
+    sample = {"seen": False}
+
+    def is_excluded(resolved: Path) -> bool:
+        return any(resolved == item or item in resolved.parents for item in excluded)
+
+    def subtree(folder: Path, depth: int) -> dict:
+        return {"kind": "subtree", "local_path": str(folder), "max_depth": int(config.max_depth) - depth}
+
+    def visit(folder: Path, resolved_folder: Path, depth: int):
+        """(readable, file count, units - or None to keep this folder whole, skipped folders in split parts)."""
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            return False, 0, None, 0
+        count = 0
+        units: list[dict] = []
+        pending: list[str] = []
+        skipped_here = 0
+        skipped_below = 0
+        splittable = True
+
+        def flush() -> None:
+            if pending:
+                units.append({"kind": "files", "local_path": str(folder), "names": list(pending)})
+                pending.clear()
+
+        for item in entries:
+            resolved_item = resolved_folder / item.name
+            try:
+                if item.is_symlink() or not resolved_item.is_relative_to(root):
+                    continue
+                is_dir = item.is_dir()
+                is_file = item.is_file()
+            except OSError:
+                continue
+            if is_dir:
+                if _skipped(item) or (_hidden(item) and not include_hidden_dirs):
+                    skipped_here += 1
+                    continue
+                if depth + 1 > config.max_depth:
+                    continue
+                if is_excluded(resolved_item):
+                    skipped_here += 1
+                    continue
+                flush()
+                try:
+                    real = item.resolve()
+                except OSError:
+                    real = None
+                if real != resolved_item:
+                    # A walk rooted at this folder would report different paths, so it
+                    # cannot be a unit - and neither can anything that would split its
+                    # parent around it.
+                    splittable = False
+                    count += budget + 1
+                    units.append(subtree(item, depth + 1))
+                    continue
+                readable, child_count, child_units, child_skipped = visit(item, resolved_item, depth + 1)
+                count += child_count
+                if child_units is not None:
+                    units.extend(child_units)
+                    skipped_below += child_skipped
+                elif child_count or not readable:
+                    units.append(subtree(item, depth + 1))
+                continue
+            if not is_file:
+                continue
+            count += 1
+            if not sample["seen"] and is_sample({"path": str(resolved_item)}):
+                sample["seen"] = True
+            pending.append(item.name)
+            if len(pending) >= budget:
+                flush()
+        flush()
+        if count <= budget or not splittable:
+            return True, count, None, 0
+        return True, count, units, skipped_here + skipped_below
+
+    readable, total, units, skipped = visit(root, root, 0)
+    if not readable or units is None:
+        return None
+    return {"units": units, "files": total, "skipped_dirs": skipped, "sample_paths": sample["seen"]}
 
 
 def _merge_diagnostics(diags: list[dict], *, partitions: int, workers: int) -> dict:

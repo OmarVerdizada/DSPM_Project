@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from backend.alerts import evaluate_alerts
+from backend.partitioned_scan import partitioned_scans_enabled, run_partitioned_local_scan
 from backend.reporting.router import router as reporting_router
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
@@ -1943,6 +1944,16 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_role("anal
         if not _is_local_endpoint_host(payload.server):
             _validate_scan_target(payload.server)
         _prepare_local_scan_data(payload)
+        if partitioned_scans_enabled():
+            config = _to_config(payload, principal.tenant_id)
+            if not config.server:
+                if payload.async_scan:
+                    job = create_job(principal.tenant_id, lambda job: _run_partitioned_scan_payload(config, payload, principal, job))
+                    audit(principal.tenant_id, principal.subject, "scan.queued", {"job_id": job.id, "server": _safe_target_label(payload.server)})
+                    return job.to_dict()
+                data = _run_partitioned_scan_payload(config, payload, principal)
+                audit(principal.tenant_id, principal.subject, "scan.completed", {"scan_id": data.get("scan_id")})
+                return _compact_scan_report(data) if payload.compact_result else data
         if payload.async_scan:
             job = create_scan_job(principal.tenant_id, _to_config(payload, principal.tenant_id), lambda data: _persist_compliance_scan(data, payload, principal))
             audit(principal.tenant_id, principal.subject, "scan.queued", {"job_id": job.id, "server": _safe_target_label(payload.server)})
@@ -2786,6 +2797,41 @@ def _apply_compliance(data: dict, payload: ScanRequest | EndpointScanRequest) ->
 def _persist_compliance_scan(data: dict, payload: ScanRequest | EndpointScanRequest, principal: Principal) -> None:
     _apply_compliance(data, payload)
     _persist_scan(data, payload, principal)
+
+
+def _run_partitioned_scan_payload(config: ScanConfig, payload: ScanRequest, principal: Principal, job=None) -> dict:
+    """A local scan that writes each partition as it finishes (``DSPM_PARTITIONED_SCANS=1``, B2.2b).
+
+    Returns the compact report - a partitioned scan never has every file in one list,
+    which is the point of it. A target that does not split runs as an ordinary scan
+    and returns what an ordinary scan returns.
+    """
+    if job is not None:
+        job.progress = max(job.progress, 7)
+        job.message = "Planning scan partitions"
+        config.cancel_check = lambda: job.cancel_requested
+    data = run_partitioned_local_scan(
+        principal.tenant_id,
+        config,
+        scan_label=str(getattr(payload, "scan_label", "") or ""),
+        compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
+        compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
+        job=job,
+    )
+    if data is None:
+        if job is not None:
+            from backend.jobs import _run_scan_job
+
+            return _run_scan_job(job, config, lambda report: _persist_compliance_scan(report, payload, principal))
+        data = DSPMDiscoveryEngine(config).run().to_dict()
+        _persist_compliance_scan(data, payload, principal)
+        return data
+    try:
+        data["alerts"] = evaluate_alerts(principal.tenant_id, data)
+    except Exception as exc:
+        data["alerts"] = []
+        data["scan_warnings"] = [{"stage": "alerts", "error": type(exc).__name__}]
+    return data
 
 
 def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], job=None, floor: int = 70) -> list[dict]:

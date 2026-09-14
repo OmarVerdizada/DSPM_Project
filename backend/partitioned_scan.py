@@ -13,10 +13,16 @@ report body is streamed from the partitions' records in plan order.
 
 from __future__ import annotations
 
+import os
+from contextlib import nullcontext
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Iterable
 
 from backend import store
 from backend.compliance_service import ComplianceReportAccumulator
+from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
+from discovery.partition import plan_bounded_partitions
 
 
 def summed_summary(units: list[dict]) -> dict:
@@ -36,11 +42,20 @@ def summed_summary(units: list[dict]) -> dict:
     return total
 
 
-def scan_diagnostics_for(units: list[dict], *, overrides: dict | None = None) -> dict:
-    """The scan's diagnostics: the partitions' merged, then what describes the scan as a whole."""
+def scan_diagnostics_for(
+    units: list[dict], *, overrides: dict | None = None, increments: dict | None = None,
+) -> dict:
+    """The scan's diagnostics: the partitions' merged, then what describes the scan as a whole.
+
+    ``overrides`` replace a merged value - the scan's own root and depth rather than
+    the first partition's. ``increments`` add to one - folders the planner skipped
+    that no partition walked.
+    """
     merged = store.merge_partition_diagnostics([unit.get("diagnostics") or {} for unit in units])
     for key, value in (overrides or {}).items():
         merged[key] = value
+    for key, value in (increments or {}).items():
+        merged[key] = int(merged.get(key) or 0) + int(value or 0)
     files = [int(unit.get("files") or 0) for unit in units]
     merged["partitioned"] = {
         "enabled": True,
@@ -67,6 +82,7 @@ def finalize_scan(
     compliance_frameworks: Iterable[str] | None = None,
     write_estate: bool = True,
     diagnostics_overrides: dict | None = None,
+    diagnostics_increments: dict | None = None,
 ) -> dict:
     """Finish a partitioned scan whose partitions are all done; returns its compact report.
 
@@ -85,7 +101,7 @@ def finalize_scan(
         raise store.PartitionsNotFinished(f"scan {scan_id} kept no records to finalize from")
 
     summary = summed_summary(units)
-    diagnostics = scan_diagnostics_for(units, overrides=diagnostics_overrides)
+    diagnostics = scan_diagnostics_for(units, overrides=diagnostics_overrides, increments=diagnostics_increments)
     sections = ComplianceReportAccumulator(compliance_enabled, compliance_frameworks)
     file_count = 0
     sample_count = 0
@@ -112,3 +128,132 @@ def finalize_scan(
         write_estate=write_estate, file_count=file_count, sample_count=sample_count,
     )
     return store.compact_scan_report_from_counts(report, file_count, sample_count)
+
+
+# ---- running one -------------------------------------------------------------------------------------------
+
+
+def partitioned_scans_enabled() -> bool:
+    """Whether local scans run partitioned. Off by default.
+
+    It stays off until B2.4: a partitioned scan interrupted part way through leaves
+    its finished partitions in the estate with no report, and until startup resumes
+    it, that is a worse failure than a single scan that saved nothing.
+    """
+    return os.getenv("DSPM_PARTITIONED_SCANS", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def partition_max_files() -> int:
+    """The most files one partition holds, and so what a scan's memory follows."""
+    try:
+        return max(1, min(int(os.getenv("DSPM_PARTITION_MAX_FILES", "2000")), 1_000_000))
+    except ValueError:
+        return 2000
+
+
+def _unit_config(config: ScanConfig, spec: dict) -> ScanConfig:
+    """One partition's engine: the scan's policy, scope and reuse, over one unit.
+
+    Incremental reuse, the persistent cache and the baseline probe carry over
+    unchanged - every partition probes and writes under the scan's own scope, and
+    finalize prunes that scope once - so a partitioned re-scan reuses exactly what
+    a single one would. Progress is the runner's to report, per partition.
+    """
+    common = {"progress_callback": None}
+    if spec.get("kind") == "files":
+        return replace(config, local_path=str(spec["local_path"]), max_depth=0,
+                       local_file_names=tuple(spec.get("names") or ()), **common)
+    return replace(config, local_path=str(spec["local_path"]), max_depth=int(spec["max_depth"]),
+                   local_file_names=None, **common)
+
+
+def run_partitioned_local_scan(
+    tenant_id: str,
+    config: ScanConfig,
+    *,
+    scan_label: str = "",
+    compliance_enabled: bool = False,
+    compliance_frameworks: Iterable[str] | None = None,
+    job=None,
+    max_files: int | None = None,
+) -> dict | None:
+    """Scan a local target one partition at a time; returns the compact report.
+
+    Returns ``None`` when the target is not worth partitioning - it fits one
+    partition, or it is not a readable local folder - or when it holds the bundled
+    demo dataset, whose files never enter the estate and which is small by
+    definition. The caller then runs an ordinary scan.
+
+    Each partition is analyzed by its own engine, enriched file by file, written,
+    and released before the next one starts; nothing about it is kept but its
+    ledger row. A partition that fails, or a cancellation, marks its unit failed and
+    stops the scan without finalizing it.
+    """
+    plan = plan_bounded_partitions(config, max_files=max_files or partition_max_files())
+    if plan is None or plan["sample_paths"]:
+        return None
+    from backend.jobs import collection_heartbeat
+
+    scan_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    # One timestamp for the whole scan: every partition stamps it on the rows it
+    # writes, and a single scan's rows all carry one.
+    timestamp = datetime.now(timezone.utc).isoformat()
+    label = str(scan_label or "").strip()[:80]
+    units = plan["units"]
+    store.create_scan_partitions(tenant_id, scan_id, str(getattr(job, "id", "") or ""), units)
+    done = 0
+    while True:
+        if job is not None and job.cancel_requested:
+            raise RuntimeError("Scan cancelled")
+        unit = store.claim_next_partition(tenant_id, scan_id)
+        if unit is None:
+            break
+        if job is not None:
+            job.message = f"Scanning partition {done + 1} of {len(units)}"
+        try:
+            with collection_heartbeat(job) if job is not None else nullcontext():
+                report = DSPMDiscoveryEngine(_unit_config(config, unit["spec"])).run().to_dict()
+            if job is not None and job.cancel_requested:
+                raise RuntimeError("Scan cancelled")
+            records = report.get("files") or []
+            enrichment = ComplianceReportAccumulator(compliance_enabled, compliance_frameworks)
+            for record in records:
+                enrichment.prepare(record)
+            header = {
+                "timestamp": timestamp,
+                "source": report.get("source") or "local",
+                "mode": report.get("mode") or "full",
+                "summary": report.get("summary") or {},
+                "scan_diagnostics": report.get("scan_diagnostics") or {},
+            }
+            if label:
+                header["scan_label"] = label
+            store.persist_partition(
+                tenant_id, scan_id, unit["partition_id"], unit["attempt"], header, records, write_estate=True,
+            )
+        except BaseException as exc:
+            try:
+                store.fail_scan_partition(
+                    tenant_id, scan_id, unit["partition_id"], type(exc).__name__, attempt=unit["attempt"],
+                )
+            except Exception:
+                pass
+            raise
+        report = records = header = None
+        done += 1
+        if job is not None:
+            job.progress = max(job.progress, min(94, 8 + int(86 * done / len(units))))
+    if job is not None:
+        job.message = "Finalizing report"
+        job.progress = max(job.progress, 95)
+    return finalize_scan(
+        tenant_id, scan_id,
+        timestamp=timestamp,
+        source="local",
+        scan_label=label,
+        compliance_enabled=compliance_enabled,
+        compliance_frameworks=compliance_frameworks,
+        write_estate=True,
+        diagnostics_overrides={"local_path": config.local_path, "max_depth": config.max_depth},
+        diagnostics_increments={"skipped_dirs": plan["skipped_dirs"]},
+    )
