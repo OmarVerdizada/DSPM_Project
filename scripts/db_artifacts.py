@@ -33,12 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 def _referenced() -> set[tuple[str, str]]:
     from backend import store
 
-    with store._connect() as conn:
-        rows = conn.execute(
-            "SELECT tenant_id, report_ref FROM scan_reports "
-            "WHERE COALESCE(report_ref, '') <> ''"
-        ).fetchall()
-    return {(str(r["tenant_id"]), str(r["report_ref"])) for r in rows}
+    # Report bodies and unfinalized partition records alike.
+    return store.referenced_artifact_ids()
 
 
 def main() -> int:

@@ -54,6 +54,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (9, "remediation_operational_index", store.add_remediation_operational_index),
         (10, "remediation_filter_indexes", store.add_remediation_filter_indexes),
         (11, "scan_partition_ledger", store.add_scan_partition_ledger),
+        (12, "scan_partition_records", store.add_scan_partition_records),
     ]
 
 

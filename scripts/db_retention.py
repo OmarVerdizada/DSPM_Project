@@ -98,14 +98,9 @@ def main() -> int:
     try:
         from backend import artifacts
 
-        with store._connect() as conn:
-            referenced = {
-                (str(row["tenant_id"]), str(row["report_ref"]))
-                for row in conn.execute(
-                    "SELECT tenant_id, report_ref FROM scan_reports "
-                    "WHERE COALESCE(report_ref, '') <> ''"
-                ).fetchall()
-            }
+        # Report bodies and unfinalized partition records alike: see
+        # store.referenced_artifact_ids.
+        referenced = store.referenced_artifact_ids()
         stats = artifacts.store_stats()
         if args.apply:
             collected = artifacts.prune(referenced)

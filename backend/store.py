@@ -546,6 +546,35 @@ def add_scan_partition_ledger(conn) -> None:
     add_tenant_rls(conn)
 
 
+def add_scan_partition_records(conn) -> None:
+    """Revision 0012: what a finished partition keeps for finalize (B2.2b).
+
+    Finalizing a partitioned scan reads each partition's records back in plan
+    order, one partition at a time, to build the report sections and body
+    without holding the estate. Those must be the records the partition actually
+    wrote: the ``assets`` table is current state, which a later scan can
+    overwrite first, and a demo scan does not write it at all.
+
+    ``records_ref`` points at an artifact, and ``records_json`` holds the records
+    inline when the artifact tier is off. ``summary_json`` is the partition's
+    summary as the engine counted it, before compliance enrichment strips
+    framework-only findings, so the scan summary is the exact sum.
+    ``diagnostics_json`` is the partition's own scan diagnostics, for finalize to
+    merge.
+    """
+    columns = db.table_columns(conn, "scan_partitions")
+    if "records_ref" not in columns:
+        conn.execute("ALTER TABLE scan_partitions ADD COLUMN records_ref TEXT NOT NULL DEFAULT ''")
+    if "records_bytes" not in columns:
+        conn.execute("ALTER TABLE scan_partitions ADD COLUMN records_bytes INTEGER NOT NULL DEFAULT 0")
+    if "records_json" not in columns:
+        conn.execute("ALTER TABLE scan_partitions ADD COLUMN records_json TEXT")
+    if "summary_json" not in columns:
+        conn.execute("ALTER TABLE scan_partitions ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}'")
+    if "diagnostics_json" not in columns:
+        conn.execute("ALTER TABLE scan_partitions ADD COLUMN diagnostics_json TEXT NOT NULL DEFAULT '{}'")
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1169,6 +1198,11 @@ def apply_baseline_schema(conn) -> None:
             started_at TEXT NOT NULL DEFAULT '',
             finished_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL,
+            records_ref TEXT NOT NULL DEFAULT '',
+            records_bytes INTEGER NOT NULL DEFAULT 0,
+            records_json TEXT,
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            diagnostics_json TEXT NOT NULL DEFAULT '{}',
             PRIMARY KEY (tenant_id, scan_id, partition_id)
         );
         CREATE INDEX IF NOT EXISTS idx_scan_partitions_next
@@ -1891,7 +1925,8 @@ def _dual_write_normalized(conn, tenant_id: str, report: dict, *, is_new_scan: b
         return False
 
 
-def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_scan: bool = True) -> None:
+def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_scan: bool = True,
+                                prune: bool = True) -> None:
     """Advance a scope generation inside the authoritative scan transaction.
 
     A partial/truncated scan may refresh objects it did see but never prunes the
@@ -2007,6 +2042,17 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
         if len(rows) >= 500:
             flush_rows()
     flush_rows()
+
+    if not prune:
+        # A partition writes its objects and leaves the prune to finalize. It has
+        # not seen the rest of the scan, so everything it did not write would look
+        # deleted.
+        incremental["baseline_committed"] = True
+        incremental["baseline_rows_written"] = rows_written
+        incremental["baseline_rows_skipped"] = skipped
+        incremental["deleted_objects"] = 0
+        incremental["prune_skipped"] = True
+        return
 
     stale = conn.execute(
         "SELECT COUNT(*) AS count FROM scan_object_baselines "
@@ -2445,7 +2491,8 @@ def _upsert_operational_finding(
         ),
     )
 
-def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_current: bool = True) -> None:
+def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_current: bool = True,
+                          partition: dict | None = None) -> None:
     from backend.domain import asset_identity, iter_normalized_chunks, scan_run_from_report
 
     run = scan_run_from_report(tenant_id, report)
@@ -2456,23 +2503,35 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
     # occurrences, finding index) but never enter the durable estate: the
     # dashboard and Data Inventory describe the customer's real data, and
     # synthetic sample files inflating those numbers is a defect, not a demo.
-    write_estate = _demo_assets_allowed_in_inventory() or not is_demo_sample_report(report)
+    if partition is not None and "write_estate" in partition:
+        # A partition cannot see the rest of the scan, and a majority inside one
+        # partition can disagree with the majority across all of them - so whether
+        # this is a demo scan is decided once, for the whole scan, and passed in.
+        write_estate = bool(partition["write_estate"])
+    else:
+        write_estate = _demo_assets_allowed_in_inventory() or not is_demo_sample_report(report)
     # Refresh this scan's occurrences so a re-save (e.g. a lifecycle update) is
-    # idempotent rather than duplicating rows.
-    conn.execute("DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
+    # idempotent rather than duplicating rows. A partition refreshes only its own
+    # occurrences, further down: deleting every occurrence of the scan here would
+    # erase the partitions that finished before it.
+    if partition is None:
+        conn.execute("DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
 
     # DATA-002: a scan run is immutable and append-only. The first write creates
     # it; later re-saves (finding-lifecycle updates that refresh the blob) must
     # NOT overwrite it. INSERT OR IGNORE keeps the original run record; mutable
     # finding lifecycle lives in the `findings` aggregate below, not here.
-    conn.execute(
-        """
-        INSERT OR IGNORE INTO scan_runs
-            (tenant_id, id, source, mode, policy_version, started_at, ended_at, status, total_files, summary_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at, run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
-    )
+    # A partition does not know the scan's summary yet, and this row can never be
+    # corrected once written - so a partitioned scan writes it once, at finalize.
+    if partition is None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO scan_runs
+                (tenant_id, id, source, mode, policy_version, started_at, ended_at, status, total_files, summary_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at, run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
+        )
     observed_at = str(report.get("completed_at") or report.get("timestamp") or run.ended_at or "")
     scan_label = str(report.get("scan_label") or "").strip()[:80]
     diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
@@ -2482,7 +2541,9 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
     # run, unseen assets leave the current estate and their findings become
     # historical before this run's rows are inserted. Unnamed scans are not
     # pruned because source alone is not a reliable scope identity.
-    if write_estate and refresh_current and scan_label and complete_scope:
+    # A partition never prunes: it has not seen the rest of the scan, so every
+    # asset it did not write would look like one that disappeared.
+    if partition is None and write_estate and refresh_current and scan_label and complete_scope:
         stale_sql = (
             "SELECT id FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?"
         )
@@ -2502,8 +2563,11 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
     # One walk of the report, in batches. `seq` and the path->id map that the
     # finding rows need are the only things that cross a batch boundary, and
     # both are bounded by what has actually been seen rather than by the estate.
-    seq = 0
+    seq_offset = int(partition.get("seq_offset") or 0) if partition is not None else 0
+    seq_span = int(partition.get("seq_span") or PARTITION_SEQ_SPAN) if partition is not None else 0
+    seq = seq_offset
     source = str(report.get("source") or "local")
+    cleared_occurrences: set[str] = set()
     for records, piece in iter_normalized_chunks(tenant_id, report):
         estate_rows = bool(write_estate and refresh_current)
         _executemany(
@@ -2580,6 +2644,10 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
                         _operational_finding_id(tenant_id, asset_id, file_obj, finding),
                     ))
                     seq += 1
+            if partition is not None and seq - seq_offset > seq_span:
+                # Past this point the rows would take the next partition's range and
+                # scramble the finding order across the scan.
+                raise ValueError(f"partition has more than {seq_span} findings")
             existing = (
                 _existing_finding_lifecycle(conn, tenant_id, [item[4] for item in pending])
                 if refresh_current and pending else {}
@@ -2595,6 +2663,22 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
                     for item_seq, item_asset_id, item_file, item_finding, item_id in pending
                 ),
             )
+        if partition is not None:
+            # Only this partition's occurrences, so running it again replaces them.
+            # Each id is cleared once per call: a report can list a file twice, and
+            # clearing it again in a later batch would delete what the earlier batch
+            # just wrote.
+            fresh = [
+                finding_id for finding_id in dict.fromkeys(o.finding_id for o in piece.occurrences)
+                if finding_id not in cleared_occurrences
+            ]
+            cleared_occurrences.update(fresh)
+            for id_chunk in _id_chunks(fresh):
+                placeholders = ",".join("?" for _ in id_chunk)
+                conn.execute(
+                    f"DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ? AND finding_id IN ({placeholders})",
+                    (tenant_id, scan_id, *id_chunk),
+                )
         _executemany(
             conn,
             "INSERT INTO finding_occurrences (tenant_id, finding_id, scan_id, locator, fingerprint, occurrence_count) VALUES (?, ?, ?, ?, ?, ?)",
@@ -2604,8 +2688,13 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             ),
         )
 
-    _write_finding_index(conn, tenant_id, report)
-    _trim_finding_index(conn, tenant_id)
+    if partition is None:
+        _write_finding_index(conn, tenant_id, report)
+        _trim_finding_index(conn, tenant_id)
+    else:
+        # A partition writes its own range of the index and leaves retention to
+        # finalize, the only step that knows the scan is finished.
+        _write_finding_index(conn, tenant_id, report, seq_offset=seq_offset, seq_span=seq_span)
 
 
 SEVERITY_RANKS = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -2657,7 +2746,8 @@ def _trim_finding_index(conn, tenant_id: str) -> int:
     return int(result.rowcount or 0)
 
 
-def _write_finding_index(conn, tenant_id: str, report: dict) -> None:
+def _write_finding_index(conn, tenant_id: str, report: dict, *,
+                         seq_offset: int | None = None, seq_span: int | None = None) -> None:
     """Materialize the exact per-finding list_findings response (read-switch).
 
     Stores what list_findings would produce for each finding of this scan, so
@@ -2667,18 +2757,27 @@ def _write_finding_index(conn, tenant_id: str, report: dict) -> None:
     scan_id = str(report.get("scan_id") or "")
     if not scan_id:
         return
-    conn.execute("DELETE FROM finding_index WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
+    span = int(seq_span or PARTITION_SEQ_SPAN)
+    if seq_offset is None:
+        conn.execute("DELETE FROM finding_index WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id))
+    else:
+        conn.execute(
+            "DELETE FROM finding_index WHERE tenant_id = ? AND scan_id = ? AND seq >= ? AND seq < ?",
+            (tenant_id, scan_id, int(seq_offset), int(seq_offset) + span),
+        )
 
     def _index_rows():
         # `seq` counts only the findings actually indexed, exactly as the loop
         # this replaced did - it is incremented after a row is emitted, not for
         # every finding in the report.
-        seq = 0
+        seq = int(seq_offset or 0)
         for row in _iter_report_findings(report):
             finding = row["finding"]
             finding_id = str(finding.get("finding_id") or "")
             if not finding_id:
                 continue
+            if seq_offset is not None and seq - int(seq_offset) >= span:
+                raise ValueError(f"partition has more than {span} indexed findings")
             yield (tenant_id, scan_id, seq, finding_id, _finding_status(finding),
                    pack_json_text(json.dumps(_finding_response(row), ensure_ascii=False)), FINDING_INDEX_VERSION)
             seq += 1
@@ -2872,8 +2971,15 @@ def recover_interrupted_jobs() -> int:
 SCAN_PARTITION_STATES = ("queued", "running", "done", "failed")
 _PARTITION_COLUMNS = (
     "scan_id, partition_id, job_id, ordinal, spec_json, status, attempt, files, "
-    "error, started_at, finished_at"
+    "error, started_at, finished_at, records_ref, records_bytes, summary_json, diagnostics_json"
 )
+# Plan order is encoded in the seq columns as ordinal * span + position. Both are
+# INTEGER - four bytes on PostgreSQL - so one scan can order at most 2,147
+# partitions of up to a million findings each. A plan longer than that is refused
+# when it is created, not discovered when partition 2,148 tries to write.
+PARTITION_SEQ_SPAN = 1_000_000
+_POSTGRES_INTEGER_MAX = 2_147_483_647
+MAX_SCAN_PARTITIONS = (_POSTGRES_INTEGER_MAX + 1) // PARTITION_SEQ_SPAN
 
 
 def scan_request_is_resumable(request: dict) -> bool:
@@ -2937,6 +3043,13 @@ def _partition_row(row) -> dict:
         spec = json.loads(row["spec_json"] or "{}")
     except (TypeError, ValueError):
         spec = {}
+    kept = {}
+    for column in ("summary_json", "diagnostics_json"):
+        try:
+            value = json.loads(row[column] or "{}")
+        except (TypeError, ValueError):
+            value = {}
+        kept[column] = value if isinstance(value, dict) else {}
     return {
         "scan_id": str(row["scan_id"]),
         "partition_id": str(row["partition_id"]),
@@ -2949,6 +3062,10 @@ def _partition_row(row) -> dict:
         "error": str(row["error"] or ""),
         "started_at": str(row["started_at"] or ""),
         "finished_at": str(row["finished_at"] or ""),
+        "records_ref": str(row["records_ref"] or ""),
+        "records_bytes": int(row["records_bytes"] or 0),
+        "summary": kept["summary_json"],
+        "diagnostics": kept["diagnostics_json"],
     }
 
 
@@ -2964,9 +3081,14 @@ def create_scan_partitions(tenant_id: str, scan_id: str, job_id: str, specs: lis
     continues the plan in its ledger; it does not make a new one.
     """
     now = datetime.now(timezone.utc).isoformat()
+    specs = list(specs or [])
+    if len(specs) > MAX_SCAN_PARTITIONS:
+        raise ValueError(
+            f"a scan can be ordered across at most {MAX_SCAN_PARTITIONS} partitions; this plan has {len(specs)}"
+        )
     ids: list[str] = []
     rows: list[tuple] = []
-    for ordinal, spec in enumerate(specs or []):
+    for ordinal, spec in enumerate(specs):
         spec = spec if isinstance(spec, dict) else {}
         partition_id = str(spec.get("partition_id") or f"p{ordinal:05d}")
         ids.append(partition_id)
@@ -3132,6 +3254,160 @@ def requeue_interrupted_partitions(tenant_id: str | None = None) -> int:
     with _lock:
         with _connect() as conn:
             return int(conn.execute(sql, tuple(params)).rowcount or 0)
+
+
+class PartitionNotClaimed(RuntimeError):
+    """A partition was persisted by a worker that does not hold it."""
+
+
+def iter_json_array(items):
+    """``json.dumps(list(items), ensure_ascii=False)``, a piece at a time."""
+    yield "["
+    for index, item in enumerate(items):
+        if index:
+            yield ", "
+        yield json.dumps(item, ensure_ascii=False)
+    yield "]"
+
+
+@_tenant_scoped
+def persist_partition(
+    tenant_id: str,
+    scan_id: str,
+    partition_id: str,
+    attempt: int,
+    header: dict,
+    records: list[dict],
+    *,
+    write_estate: bool,
+) -> dict:
+    """Write one finished partition of a scan: its rows, and its records for finalize.
+
+    ``header`` is the partition's report without its files - timestamp, source,
+    mode, label, and the partition's own ``summary`` and ``scan_diagnostics``.
+    Everything happens in one transaction: the estate rows, the finding-index
+    range, the baseline objects, the records finalize will read back, and marking
+    the partition done.
+
+    **The ledger decides, not the caller.** The partition's ordinal - which is
+    where its findings sit in the scan's order - is read from its ledger row inside
+    the transaction, together with the proof that this worker still holds it: the
+    row must be running under ``attempt``. A worker that lost its partition is
+    refused before anything is written, and one that loses it during the write is
+    refused at the end, which rolls the rows back. A caller-supplied ordinal once let
+    two partitions delete each other's index range (B2 review).
+
+    **What a partition never does** is anything that needs the whole scan: the scan
+    run row, the report row, pruning assets or baseline objects it did not see, and
+    finding-index retention. Those belong to finalize.
+
+    **Partitions must be disjoint by asset.** The same asset written by two
+    partitions of one scan ends up differently from one save - the later
+    partition's retirement demotes the earlier partition's findings. The planner
+    guarantees disjointness; nothing here can check it without tagging every row.
+    """
+    header = dict(header or {})
+    header.pop("files", None)
+    raw_summary = header.get("summary")
+    summary = dict(raw_summary) if isinstance(raw_summary, dict) else {}
+    raw_diagnostics = header.get("scan_diagnostics")
+    # A private copy: the baseline writer records its counts into these diagnostics,
+    # and a dict shared between partitions would carry one partition's counts into
+    # the next.
+    diagnostics = json.loads(json.dumps(raw_diagnostics, default=str)) if isinstance(raw_diagnostics, dict) else {}
+    report = {**header, "scan_id": str(scan_id), "scan_diagnostics": diagnostics, "files": records}
+    now = datetime.now(timezone.utc).isoformat()
+
+    def not_claimed() -> PartitionNotClaimed:
+        return PartitionNotClaimed(
+            f"partition {partition_id} of scan {scan_id} is not running under attempt {attempt}"
+        )
+
+    with _lock:
+        with _connect() as conn:
+            unit = conn.execute(
+                "SELECT ordinal, status, attempt FROM scan_partitions "
+                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ?",
+                (tenant_id, str(scan_id), str(partition_id)),
+            ).fetchone()
+            if unit is None or str(unit["status"]) != "running" or int(unit["attempt"] or 0) != int(attempt):
+                raise not_claimed()
+            ordinal = int(unit["ordinal"] or 0)
+            seq_offset = ordinal * PARTITION_SEQ_SPAN
+            if not 0 <= ordinal < MAX_SCAN_PARTITIONS:
+                raise ValueError(f"partition ordinal {ordinal} cannot be ordered in a four-byte seq column")
+            _write_normalized_rows(
+                conn, tenant_id, report, refresh_current=True,
+                partition={"seq_offset": seq_offset, "seq_span": PARTITION_SEQ_SPAN, "write_estate": bool(write_estate)},
+            )
+            _write_incremental_baseline(conn, tenant_id, report, is_new_scan=True, prune=False)
+            # The records are stored after the rows, because writing the rows fills
+            # lifecycle fields into the findings, and finalize has to stream what a
+            # single save would have stored. They are stored before the partition is
+            # marked done, so a completed partition always has its records - and in
+            # the same transaction as the rows, so a partition whose rows landed is
+            # never run again with a different set of files.
+            records_ref, records_bytes, inline = "", 0, None
+            if report_artifacts_enabled():
+                from backend import artifacts
+
+                ref = artifacts.put_stream(tenant_id, iter_json_array(records))
+                records_ref, records_bytes = ref.content_id, ref.size_bytes
+            else:
+                body = "".join(iter_json_array(records))
+                inline, records_bytes = pack_json_text(body), len(body.encode("utf-8"))
+            finished = conn.execute(
+                "UPDATE scan_partitions SET status = 'done', files = ?, error = '', records_ref = ?, "
+                "records_bytes = ?, records_json = ?, summary_json = ?, diagnostics_json = ?, "
+                "finished_at = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running' AND attempt = ?",
+                (
+                    len(records), records_ref, records_bytes, inline,
+                    json.dumps(summary, ensure_ascii=False, separators=(",", ":"), default=str),
+                    json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":"), default=str),
+                    now, now, tenant_id, str(scan_id), str(partition_id), int(attempt),
+                ),
+            )
+            if int(finished.rowcount or 0) != 1:
+                raise not_claimed()
+    _invalidate_inventory_query_cache(tenant_id)
+    _invalidate_remediation_query_cache(tenant_id)
+    # The search projection is best effort and runs after the authoritative
+    # transaction, exactly as it does for a single save.
+    try:
+        from backend.search import SearchUnavailable, index_scan_report
+
+        index_scan_report(tenant_id, report)
+    except SearchUnavailable as exc:
+        logger.warning("Dedicated search indexing deferred for partition %s of %s: %s", partition_id, scan_id, exc)
+    except Exception as exc:  # pragma: no cover - optional projection guard
+        logger.warning("Dedicated search indexing skipped for partition %s of %s: %s", partition_id, scan_id, type(exc).__name__)
+    return {
+        "scan_id": str(scan_id),
+        "partition_id": str(partition_id),
+        "ordinal": ordinal,
+        "files": len(records),
+        "records_ref": records_ref,
+        "records_bytes": records_bytes,
+    }
+
+
+def referenced_artifact_ids() -> set[tuple[str, str]]:
+    """Every ``(tenant_id, content_id)`` a row still depends on.
+
+    Report bodies, and the records of partitions whose scan has not been finalized
+    yet. Retention collects whatever is not in this set, so anything that stores an
+    artifact reference must be here: counting report bodies alone would let a
+    partition's records be collected an hour after they were written, and the
+    finalize or resume that needs them would fail (B2 review).
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT tenant_id, report_ref AS ref FROM scan_reports WHERE COALESCE(report_ref, '') <> '' "
+            "UNION ALL "
+            "SELECT tenant_id, records_ref AS ref FROM scan_partitions WHERE COALESCE(records_ref, '') <> ''"
+        ).fetchall()
+    return {(str(row["tenant_id"]), str(row["ref"])) for row in rows}
 
 
 def prune_job_records(max_age_seconds: int) -> int:

@@ -186,9 +186,14 @@ def _reconcile_artifacts(dest_dsn: str) -> dict:
     from backend import artifacts
 
     with psycopg.connect(dest_dsn, connect_timeout=15) as conn:
+        # Every artifact a row depends on - report bodies, and the records of
+        # partitions whose scan is not finalized - must exist before cutover.
         rows = conn.execute(
             "SELECT tenant_id, report_ref FROM scan_reports "
-            "WHERE COALESCE(report_ref, '') <> ''"
+            "WHERE COALESCE(report_ref, '') <> '' "
+            "UNION ALL "
+            "SELECT tenant_id, records_ref FROM scan_partitions "
+            "WHERE COALESCE(records_ref, '') <> ''"
         ).fetchall()
     missing = [
         f"{row[0]}/{str(row[1])[:12]}"
