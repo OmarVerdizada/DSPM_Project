@@ -50,13 +50,14 @@ import os
 import re
 import shutil
 import time
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from backend.backup import decrypt_stream, encrypt_stream
+from backend.backup import CHUNK_BYTES, EncryptingWriter, decrypt_stream, encrypt_stream
 
 OBJECT_SUFFIX = ".enc"
 # Object format marker. "SA02" = gzip-compressed plaintext inside the chunked
@@ -65,6 +66,14 @@ OBJECT_SUFFIX = ".enc"
 _MAGIC_GZIP = b"SA02"
 _SAFE_TENANT = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _IS_PRODUCTION = os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}
+# Frame size for a body encrypted as it streams - the framing `encrypt_stream`
+# writes, which `decrypt_stream` reads at any frame size.
+_STREAM_FRAME_BYTES = CHUNK_BYTES
+# Files a write creates before its object exists. A process killed mid-write
+# leaves them behind and nothing else would ever remove them, so `prune` does.
+_SCRATCH_PREFIX = ".streaming-"
+_SCRATCH_SUFFIX = ".part"
+_STAGING_SUFFIX = ".partial"
 
 
 class ArtifactMissing(RuntimeError):
@@ -138,6 +147,25 @@ def object_path(tenant_id: str, content_id: str) -> Path:
     return artifact_root() / tenant / cid[:2] / f"{cid}{OBJECT_SUFFIX}"
 
 
+def _staging_path(destination: Path) -> Path:
+    """A private name to write an object under before it is renamed into place.
+
+    Unique per write, not per process. Two threads storing the same content used
+    to share ``<id>.<pid>.partial``; on Windows one of them failed, and on POSIX
+    both would have written into one file (B1 review).
+    """
+    return destination.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:12]}{_STAGING_SUFFIX}")
+
+
+def _place(staging: Path, destination: Path) -> None:
+    """Rename a finished object into place. Losing a race to an identical write is success."""
+    try:
+        os.replace(staging, destination)
+    except OSError:
+        if not destination.exists():
+            raise
+
+
 def put_bytes(tenant_id: str, payload: bytes) -> ArtifactRef:
     """Store a body and return its reference. Idempotent by construction."""
     content_id = hashlib.sha256(payload).hexdigest()
@@ -150,7 +178,7 @@ def put_bytes(tenant_id: str, payload: bytes) -> ArtifactRef:
     fernet = Fernet(artifact_key())
     # Write to a temporary name and rename, so a crash mid-write cannot leave a
     # truncated object visible under a content id that promises the full body.
-    staging = destination.with_suffix(f".{os.getpid()}.partial")
+    staging = _staging_path(destination)
     try:
         import io as _io
 
@@ -158,7 +186,7 @@ def put_bytes(tenant_id: str, payload: bytes) -> ArtifactRef:
         with open(staging, "wb") as out:
             out.write(_MAGIC_GZIP)
             encrypt_stream(fernet, _io.BytesIO(compressed), out)
-        os.replace(staging, destination)
+        _place(staging, destination)
     finally:
         staging.unlink(missing_ok=True)
     try:
@@ -176,65 +204,58 @@ def put_stream(tenant_id: str, chunks) -> ArtifactRef:
     and not for a scan report. A million-file report is a gigabyte of JSON, and
     the only reason it was ever a single string is that it was convenient.
 
-    The two things that stop this being a plain pipe are both real: the object's
-    name is the SHA-256 of its plaintext, so the destination is unknown until
-    the last chunk has been seen, and the stored form is
-    ``MAGIC + encrypt(gzip(plaintext))``, so the compressor has to run before
-    the cipher. Both are solved by compressing into a scratch file while hashing
-    the plaintext on the way past, then encrypting that file into place once the
-    name is known. What stays in memory is one chunk.
+    The object's name is the SHA-256 of its plaintext, so the destination is
+    unknown until the last chunk has been seen, and the stored form is
+    ``MAGIC + encrypt(gzip(plaintext))``. Each chunk is hashed, compressed and
+    encrypted as it arrives, into a scratch file that is already the finished
+    object, and that file is renamed into place once its name is known. What
+    stays in memory is one chunk and one frame.
+
+    Nothing readable touches the disk. The first version compressed into the
+    scratch file and encrypted afterwards, so a process killed mid-save - an OOM
+    kill, a service stop - left a gzip of the report in the tenant directory that
+    nothing ever removed (B1 review, 2026-09-14). A killed write now leaves only
+    ciphertext, and ``prune`` sweeps it.
 
     ``chunks`` yields ``str`` (encoded UTF-8) or ``bytes``. The result is
     byte-identical in meaning to ``put_bytes`` of the concatenation, and reads
     back through the same ``get_bytes``.
     """
 
-    import io as _io
-    import tempfile as _tempfile
-
-    root = artifact_root() / _safe_tenant(tenant_id)
+    tenant = _safe_tenant(tenant_id)
+    root = artifact_root() / tenant
     root.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     size = 0
-    scratch = _tempfile.NamedTemporaryFile(
-        dir=str(root), prefix=".streaming-", suffix=".gz", delete=False,
-    )
-    scratch_path = Path(scratch.name)
+    scratch_path = root / f"{_SCRATCH_PREFIX}{os.getpid()}-{uuid.uuid4().hex}{_SCRATCH_SUFFIX}"
     try:
-        with gzip.GzipFile(fileobj=scratch, mode="wb", compresslevel=6) as compressor:
-            for chunk in chunks:
-                if isinstance(chunk, str):
-                    chunk = chunk.encode("utf-8")
-                if not chunk:
-                    continue
-                digest.update(chunk)
-                size += len(chunk)
-                compressor.write(chunk)
-        scratch.close()
+        with open(scratch_path, "wb") as out:
+            out.write(_MAGIC_GZIP)
+            sealed = EncryptingWriter(Fernet(artifact_key()), out, _STREAM_FRAME_BYTES)
+            with gzip.GzipFile(fileobj=sealed, mode="wb", compresslevel=6) as compressor:
+                for chunk in chunks:
+                    if isinstance(chunk, str):
+                        chunk = chunk.encode("utf-8")
+                    if not chunk:
+                        continue
+                    digest.update(chunk)
+                    size += len(chunk)
+                    compressor.write(chunk)
+            sealed.finish()
 
         content_id = digest.hexdigest()
-        destination = object_path(tenant_id, content_id)
-        ref = ArtifactRef(_safe_tenant(tenant_id), content_id, size)
+        destination = object_path(tenant, content_id)
+        ref = ArtifactRef(tenant, content_id, size)
         if destination.exists():
             return ref  # identical content is already stored
-
         destination.parent.mkdir(parents=True, exist_ok=True)
-        staging = destination.with_suffix(f".{os.getpid()}.partial")
-        try:
-            with open(scratch_path, "rb") as compressed, open(staging, "wb") as out:
-                out.write(_MAGIC_GZIP)
-                encrypt_stream(Fernet(artifact_key()), compressed, out)
-            os.replace(staging, destination)
-        finally:
-            staging.unlink(missing_ok=True)
+        _place(scratch_path, destination)
         try:
             os.chmod(destination, 0o600)
         except OSError:  # pragma: no cover - platform dependent
             pass
         return ref
     finally:
-        with suppress(Exception):
-            scratch.close()
         scratch_path.unlink(missing_ok=True)
 
 
@@ -348,6 +369,8 @@ def prune(referenced: set[tuple[str, str]], grace_seconds: int = 3600) -> int:
         except OSError:  # pragma: no cover - concurrent removal
             continue
 
+    _sweep_interrupted_writes(cutoff)
+
     # Directories a pruned object left behind are litter, and an empty tenant
     # subtree makes store_stats() overcount tenants. Remove the ones that are
     # now empty, deepest first; a non-empty directory raises and is skipped.
@@ -363,3 +386,25 @@ def prune(referenced: set[tuple[str, str]], grace_seconds: int = 3600) -> int:
             except OSError:
                 continue
     return removed
+
+
+def _sweep_interrupted_writes(cutoff: float) -> None:
+    """Remove the scratch and staging files of writes that never finished.
+
+    A write that raises cleans up after itself; a process that is killed cannot.
+    Only files older than the grace cutoff are removed, so a write still in
+    progress - whose file is being appended to - is left alone.
+    """
+    root = artifact_root()
+    if not root.exists():
+        return
+    for path in root.rglob("*"):
+        name = path.name
+        if not (name.startswith(_SCRATCH_PREFIX) or name.endswith(_STAGING_SUFFIX)):
+            continue
+        try:
+            if not path.is_file() or path.stat().st_mtime > cutoff:
+                continue
+            path.unlink()
+        except OSError:  # pragma: no cover - concurrent removal
+            continue

@@ -10,12 +10,14 @@ erasing a job's binding, and a typed password reaching the database.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import tempfile
 import unittest
 import uuid
 from datetime import datetime, timezone
+from unittest import mock
 
 from backend import db, migrations, store
 
@@ -139,6 +141,12 @@ class JobBindingTest(_LedgerTest):
         store.bind_job_to_scan(self.tenant, "job-3", "scan-3", {"local_path": "/data"})
         self.assertIsNone(store.read_job_binding("some-other-tenant", "job-3"))
 
+    def test_binding_says_whether_there_was_a_job_to_bind(self) -> None:
+        """A binding written to no row is a resume that silently cannot happen."""
+        self.assertFalse(store.bind_job_to_scan(self.tenant, "no-such-job", "scan-4", {})["bound"])
+        self._job("job-4")
+        self.assertTrue(store.bind_job_to_scan(self.tenant, "job-4", "scan-4", {})["bound"])
+
 
 class PartitionLifecycleTest(_LedgerTest):
 
@@ -154,13 +162,14 @@ class PartitionLifecycleTest(_LedgerTest):
         first = store.claim_next_partition(self.tenant, "scan-a")
         self.assertEqual((first["partition_id"], first["status"], first["attempt"]), ("p00000", "running", 1))
         self.assertEqual(first["spec"], {"root": "dept0"})
-        self.assertTrue(store.complete_scan_partition(self.tenant, "scan-a", "p00000", 10))
-        self.assertFalse(store.complete_scan_partition(self.tenant, "scan-a", "p00000", 99),
+        self.assertTrue(store.complete_scan_partition(self.tenant, "scan-a", "p00000", 10, attempt=first["attempt"]))
+        self.assertFalse(store.complete_scan_partition(self.tenant, "scan-a", "p00000", 99, attempt=first["attempt"]),
                          "a unit that is not running must not finish again")
 
         second = store.claim_next_partition(self.tenant, "scan-a")
         self.assertEqual(second["partition_id"], "p00001")
-        self.assertTrue(store.fail_scan_partition(self.tenant, "scan-a", "p00001", "share went away"))
+        self.assertTrue(store.fail_scan_partition(
+            self.tenant, "scan-a", "p00001", "share went away", attempt=second["attempt"]))
 
         third = store.claim_next_partition(self.tenant, "scan-a")
         self.assertEqual(third["partition_id"], "p00002")
@@ -172,26 +181,52 @@ class PartitionLifecycleTest(_LedgerTest):
             {"partitions": 3, "queued": 0, "running": 1, "done": 1, "failed": 1, "files": 10},
         )
         self.assertFalse(summary["complete"])
+        self.assertFalse(summary["finished"], "a unit is still running")
         failed = next(p for p in store.list_scan_partitions(self.tenant, "scan-a") if p["partition_id"] == "p00001")
         self.assertEqual(failed["error"], "share went away")
+
+        store.fail_scan_partition(self.tenant, "scan-a", "p00002", "gone too", attempt=third["attempt"])
+        summary = store.scan_partition_summary(self.tenant, "scan-a")
+        self.assertTrue(summary["finished"], "nothing is left to run")
+        self.assertFalse(summary["complete"], "but a scan with a failed unit is not complete")
 
     def test_a_scan_is_complete_only_when_every_unit_is_done(self) -> None:
         self._plan("scan-b", 2)
         for _ in range(2):
             unit = store.claim_next_partition(self.tenant, "scan-b")
-            store.complete_scan_partition(self.tenant, "scan-b", unit["partition_id"], 1)
-        self.assertTrue(store.scan_partition_summary(self.tenant, "scan-b")["complete"])
-        self.assertFalse(store.scan_partition_summary(self.tenant, "no-such-scan")["complete"],
-                         "a scan with no units is not complete")
+            store.complete_scan_partition(self.tenant, "scan-b", unit["partition_id"], 1, attempt=unit["attempt"])
+        summary = store.scan_partition_summary(self.tenant, "scan-b")
+        self.assertTrue(summary["complete"])
+        self.assertTrue(summary["finished"])
+        empty = store.scan_partition_summary(self.tenant, "no-such-scan")
+        self.assertFalse(empty["complete"], "a scan with no units is not complete")
+        self.assertFalse(empty["finished"], "nor finished")
 
     def test_planning_again_never_resets_a_unit_that_ran(self) -> None:
         self._plan("scan-c", 3)
         unit = store.claim_next_partition(self.tenant, "scan-c")
-        store.complete_scan_partition(self.tenant, "scan-c", unit["partition_id"], 7)
-        self._plan("scan-c", 3)
+        store.complete_scan_partition(self.tenant, "scan-c", unit["partition_id"], 7, attempt=unit["attempt"])
+        self.assertEqual(self._plan("scan-c", 3), ["p00000", "p00001", "p00002"])
         units = store.list_scan_partitions(self.tenant, "scan-c")
         self.assertEqual(len(units), 3)
         self.assertEqual((units[0]["status"], units[0]["files"]), ("done", 7))
+
+    def test_a_different_plan_for_a_planned_scan_is_refused(self) -> None:
+        """Units are numbered by position, so a re-enumeration that inserts a folder
+        would shift every id after it - one unit would never run and another would
+        run twice. A resumed scan continues the plan it has; it does not make a new one.
+        """
+        self._plan("scan-i", 3)
+        unit = store.claim_next_partition(self.tenant, "scan-i")
+        store.complete_scan_partition(self.tenant, "scan-i", unit["partition_id"], 4, attempt=unit["attempt"])
+        shifted = [{"root": "deptX"}] + [{"root": f"dept{index}"} for index in range(3)]
+        for plan in (shifted, [{"root": "dept0"}, {"root": "dept1"}], [{"root": "dept0"}, {"root": "other"}, {"root": "dept2"}]):
+            with self.subTest(plan=plan):
+                with self.assertRaises(ValueError):
+                    store.create_scan_partitions(self.tenant, "scan-i", "job-x", plan)
+        units = store.list_scan_partitions(self.tenant, "scan-i")
+        self.assertEqual([u["spec"]["root"] for u in units], ["dept0", "dept1", "dept2"])
+        self.assertEqual(units[0]["status"], "done")
 
     def test_an_interrupted_unit_goes_back_in_the_queue_and_counts_its_attempts(self) -> None:
         self._plan("scan-d", 1)
@@ -207,8 +242,60 @@ class PartitionLifecycleTest(_LedgerTest):
         fresh = store.claim_next_partition(self.tenant, "scan-e")
         self.assertFalse(store.complete_scan_partition(
             self.tenant, "scan-e", stale["partition_id"], 1, attempt=stale["attempt"]))
+        self.assertFalse(store.fail_scan_partition(
+            self.tenant, "scan-e", stale["partition_id"], "stale", attempt=stale["attempt"]))
         self.assertTrue(store.complete_scan_partition(
             self.tenant, "scan-e", fresh["partition_id"], 1, attempt=fresh["attempt"]))
+
+    def test_finishing_a_unit_requires_the_attempt_that_claimed_it(self) -> None:
+        """Without it, a stale worker finishes the newer attempt's unit."""
+        self._plan("scan-h", 1)
+        unit = store.claim_next_partition(self.tenant, "scan-h")
+        with self.assertRaises(TypeError):
+            store.complete_scan_partition(self.tenant, "scan-h", unit["partition_id"], 1)  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
+            store.fail_scan_partition(self.tenant, "scan-h", unit["partition_id"], "x")  # type: ignore[call-arg]
+
+    def test_a_claim_reports_the_attempt_it_actually_took(self) -> None:
+        """Another claimer can take and requeue the unit between the read and the update.
+
+        The claim must then report the attempt the row really holds - a worker told
+        the wrong attempt can never complete its own unit.
+        """
+        self._plan("scan-j", 1)
+        tenant = self.tenant
+        real_connect = store._connect
+        raced = {"done": False}
+
+        class _Racing:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            def execute(self, sql, params=()):
+                if not raced["done"] and str(sql).startswith("UPDATE scan_partitions SET status = 'running'"):
+                    raced["done"] = True
+                    # What a second process's claim-then-requeue leaves behind.
+                    self._conn.execute(
+                        "UPDATE scan_partitions SET attempt = attempt + 1 WHERE tenant_id = ? AND scan_id = ?",
+                        (tenant, "scan-j"),
+                    )
+                return self._conn.execute(sql, params)
+
+        @contextlib.contextmanager
+        def racing_connect(*args, **kwargs):
+            with real_connect(*args, **kwargs) as conn:
+                yield _Racing(conn)
+
+        with mock.patch.object(store, "_connect", racing_connect):
+            claimed = store.claim_next_partition(self.tenant, "scan-j")
+        self.assertTrue(raced["done"], "the race was never injected")
+        stored = store.list_scan_partitions(self.tenant, "scan-j")[0]
+        self.assertEqual(claimed["attempt"], stored["attempt"])
+        self.assertTrue(store.complete_scan_partition(
+            self.tenant, "scan-j", claimed["partition_id"], 1, attempt=claimed["attempt"]))
 
     def test_a_spec_can_name_its_own_unit(self) -> None:
         ids = store.create_scan_partitions(self.tenant, "scan-f", "job-x", [{"partition_id": "share:HR"}, {}])

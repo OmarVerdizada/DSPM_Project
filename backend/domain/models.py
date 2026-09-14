@@ -318,7 +318,7 @@ def scan_run_from_report(tenant_id: str, report: dict) -> ScanRun:
 
 
 def iter_normalized_chunks(
-    tenant_id: str, report: dict, *, chunk_files: int = PROJECTION_CHUNK,
+    tenant_id: str, report: dict, *, chunk_files: int | None = None,
 ):
     """The same decomposition as :func:`normalize_scan_report`, in batches.
 
@@ -330,9 +330,17 @@ def iter_normalized_chunks(
     Identity state - which assets and findings this scan has already emitted -
     carries across batches, so a report that lists the same path twice behaves
     exactly as it did when the walk was done in one pass. Everything else is
-    per-batch and is free the moment the caller lets go of it.
+    per-batch and is free the moment the caller lets go of it. Those two identity
+    sets are therefore the one thing here that grows with the scan - about 320
+    bytes per file, measured at 100,000 files (B1 review).
+
+    ``chunk_files`` defaults to ``PROJECTION_CHUNK`` read at call time. It used to
+    be bound when this function was defined, so changing the constant changed
+    nothing, and the test that varied it compared three single-batch saves.
     """
 
+    if chunk_files is None:
+        chunk_files = PROJECTION_CHUNK
     report = report or {}
     source = str(report.get("source") or "local")
     scan_label = str(report.get("scan_label") or "").strip()[:80]
@@ -457,7 +465,7 @@ def iter_normalized_chunks(
 
 
 def iter_normalized_assets(
-    tenant_id: str, report: dict, *, chunk_files: int = PROJECTION_CHUNK,
+    tenant_id: str, report: dict, *, chunk_files: int | None = None,
 ):
     """Every asset in a report, without ever holding all of them.
 

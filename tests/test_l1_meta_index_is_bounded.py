@@ -297,6 +297,164 @@ class ABrokenCacheIsNeverAFailedScanTest(_EstateTest):
         self.assertTrue(all(f.get("findings") for f in report["files"]))
 
 
+class AStoppedCacheIsNeverSilentTest(_EstateTest):
+    """A cache that stops working must not stop quietly (B1 review, 2026-09-14).
+
+    Damage used to be noticed only while the file was being opened. Pages damaged
+    after that turned lookups into misses and batch writes into no-ops - for every
+    scan, with nothing in any report to say so.
+    """
+
+    def _index_path(self) -> Path:
+        return self.cache / engine_module.META_INDEX_FILENAME
+
+    def _marker(self) -> Path:
+        return Path(f"{self._index_path()}{engine_module.META_INDEX_REBUILD_MARKER_SUFFIX}")
+
+    def _damage_every_page_after_the_schema(self) -> None:
+        path = self._index_path()
+        conn = sqlite3.connect(str(path))
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+        data = bytearray(path.read_bytes())
+        page_size = int.from_bytes(data[16:18], "big")
+        page_size = 65536 if page_size == 1 else page_size
+        self.assertGreater(len(data), page_size, "the index is one page; there is nothing to damage")
+        data[page_size:] = bytes(len(data) - page_size)
+        path.write_bytes(bytes(data))
+
+    def test_damage_found_during_a_scan_is_reported_and_the_next_scan_rebuilds(self) -> None:
+        first = self._run()
+        self.assertNotIn("reuse_index", first["scan_diagnostics"], "a healthy scan reports nothing")
+        self._damage_every_page_after_the_schema()
+
+        damaged = self._run()
+        self.assertEqual(len(damaged["files"]), FILES, "a damaged cache failed the scan")
+        health = damaged["scan_diagnostics"].get("reuse_index") or {}
+        self.assertEqual(health.get("state"), "rebuild_scheduled", damaged["scan_diagnostics"])
+        self.assertGreater(health.get("read_errors", 0), 0)
+        self.assertTrue(self._marker().exists(), "nothing tells the next engine to rebuild")
+
+        rebuilt = self._run()
+        self.assertNotIn("reuse_index", rebuilt["scan_diagnostics"])
+        self.assertFalse(self._marker().exists())
+        self.assertEqual(len(self._index_rows()), FILES, "the index was not rebuilt")
+
+    def test_a_read_only_index_stops_writing_and_counts_what_it_dropped(self) -> None:
+        self._run()
+        engine = DSPMDiscoveryEngine(self._config())
+        with engine._meta_index_lock:
+            writer = engine._meta_index_connection()
+        self.assertIsNotNone(writer)
+        # What SQLite hands back on Windows when another process holds the file
+        # exclusively at open: a connection that cannot write, and does not say so.
+        engine._meta_index_db = sqlite3.connect(
+            f"file:{self._index_path().as_posix()}?mode=ro", uri=True,
+            check_same_thread=False, isolation_level=None,
+        )
+        writer.close()
+        try:
+            engine._meta_pending = {"ro-1": zlib.compress(b"{}"), "ro-2": zlib.compress(b"{}")}
+            engine.flush_meta_index()
+            engine._meta_pending = {"ro-3": zlib.compress(b"{}")}
+            engine.flush_meta_index()
+        finally:
+            engine.close_meta_index()
+        health = engine._meta_index_health
+        self.assertEqual(health["state"], "read_only")
+        self.assertEqual(health["write_failures"], 1, "it kept writing to a file that cannot be written")
+        self.assertEqual(health["dropped_entries"], 3)
+        self.assertFalse({"ro-1", "ro-2", "ro-3"} & set(self._index_rows()))
+        self.assertFalse(self._marker().exists(), "a read-only file is not a damaged one")
+
+    def test_a_busy_index_drops_one_batch_and_the_next_one_lands(self) -> None:
+        import time
+
+        self._run()
+        with patch.object(engine_module, "META_INDEX_BUSY_TIMEOUT_SECONDS", 0.2):
+            engine = DSPMDiscoveryEngine(self._config())
+            blocker = sqlite3.connect(str(self._index_path()), isolation_level=None)
+            blocker.execute("BEGIN IMMEDIATE")
+            try:
+                engine._meta_pending = {"busy-1": zlib.compress(b"{}")}
+                started = time.monotonic()
+                engine.flush_meta_index()
+                waited = time.monotonic() - started
+            finally:
+                blocker.execute("ROLLBACK")
+                blocker.close()
+            engine._meta_pending = {"busy-2": zlib.compress(b"{}")}
+            engine.flush_meta_index()
+            engine.close_meta_index()
+        self.assertLess(waited, 3.0)
+        health = engine._meta_index_health
+        self.assertEqual((health["state"], health["write_failures"], health["dropped_entries"]), ("ok", 1, 1))
+        rows = set(self._index_rows())
+        self.assertIn("busy-2", rows)
+        self.assertNotIn("busy-1", rows)
+
+    def test_queuing_an_entry_never_waits_for_a_batch_write(self) -> None:
+        """Analysis threads queue under the entries lock; the disk is not theirs to wait for."""
+        import threading
+
+        engine = DSPMDiscoveryEngine(self._config())
+        entered = threading.Event()
+        release = threading.Event()
+        real = engine._write_meta_batch_holding_write_lock
+
+        def slow_write(batch):
+            entered.set()
+            release.wait(10)
+            real(batch)
+
+        engine._write_meta_batch_holding_write_lock = slow_write
+        try:
+            engine._meta_pending = {"slow": zlib.compress(b"{}")}
+            flusher = threading.Thread(target=engine.flush_meta_index)
+            flusher.start()
+            self.assertTrue(entered.wait(10))
+            acquired = engine._meta_index_lock.acquire(timeout=2)
+            if acquired:
+                engine._meta_index_lock.release()
+            release.set()
+            flusher.join(10)
+            self.assertTrue(acquired, "a batch write held the lock analysis threads queue entries under")
+        finally:
+            release.set()
+            engine.close_meta_index()
+
+    def test_a_cancelled_endpoint_scan_releases_the_index(self) -> None:
+        """Collection probes the index before analysis, and a cancel can land in between."""
+        import platform
+
+        if platform.system().lower() != "windows":
+            self.skipTest("local endpoint scans run only on Windows")
+        from backend import app as app_module
+
+        for runner, body in (
+            (app_module._run_local_endpoint_scan_payload, "_collect_and_persist_local_endpoint"),
+            (app_module._run_endpoint_scan_payload, "_collect_and_persist_remote_endpoint"),
+        ):
+            with self.subTest(body=body):
+                engine = DSPMDiscoveryEngine(self._config())
+                opened = {}
+
+                def probe_then_cancel(*_args, **_kwargs):
+                    engine._meta_index_get("any-digest")
+                    opened["db"] = engine._meta_index_db is not None
+                    raise RuntimeError("Scan cancelled")
+
+                with patch.object(app_module, "_endpoint_analysis_engine", return_value=engine), \
+                        patch.object(app_module, body, side_effect=probe_then_cancel), \
+                        patch.object(app_module, "_is_local_endpoint_host", return_value=False):
+                    with self.assertRaises(RuntimeError):
+                        runner(MagicMock(host="endpoint-host"), MagicMock(incremental_enabled=False), MagicMock())
+                self.assertTrue(opened.get("db"), "the probe never opened the index, so this proves nothing")
+                self.assertIsNone(engine._meta_index_db, f"{body}: the index outlived a cancelled scan")
+                self.assertEqual(engine._meta_index_reader_conns, [])
+                self._assert_cache_dir_is_deletable()
+
+
 class TheOldIndexIsRetiredCarefullyTest(_EstateTest):
 
     def test_a_legacy_whole_document_index_is_removed(self) -> None:

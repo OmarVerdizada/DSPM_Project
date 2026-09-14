@@ -1614,6 +1614,17 @@ def report_artifacts_enabled() -> bool:
     return os.getenv("DSPM_REPORT_ARTIFACTS", "1") != "0"
 
 
+def _json_key(key) -> str:
+    """A dict key encoded exactly as ``json.dumps`` encodes it inside an object.
+
+    JSON keys are strings, so ``json.dumps`` writes the key ``1`` as ``"1"`` and
+    ``None`` as ``"null"``, and refuses a tuple - none of which it does to a value.
+    """
+    if isinstance(key, str):
+        return json.dumps(key, ensure_ascii=False)
+    return json.dumps({key: 0}, ensure_ascii=False)[1:-4]
+
+
 def iter_report_json(report: dict):
     """The report as JSON, a piece at a time, never as one string.
 
@@ -1637,7 +1648,7 @@ def iter_report_json(report: dict):
     for index, (key, value) in enumerate(report.items()):
         if index:
             yield ", "
-        yield json.dumps(key, ensure_ascii=False)
+        yield _json_key(key)
         yield ": "
         if key == "files" and isinstance(value, (list, tuple)):
             yield "["
@@ -2250,11 +2261,20 @@ def _existing_finding_lifecycle(conn, tenant_id: str, finding_ids) -> dict:
     round trips on a million-file scan, purely to avoid clobbering triage state.
     The same answer costs one statement per 900 findings when it is asked once.
 
-    Asking once also fixes the meaning of the answer: every finding in a scan
-    now sees the same prior state, taken before the scan wrote anything. The
-    per-finding SELECT read back rows the same scan had just written, so when
-    one finding id appeared twice in a report the second occurrence inherited
-    whatever the first resolved to - an ordering dependency nobody chose.
+    Asking once per batch also fixes the meaning of the answer inside a batch:
+    every finding in it sees the prior state, taken before the batch wrote
+    anything. The per-finding SELECT read back rows the same scan had just
+    written, so when one finding id appeared twice in a report the second
+    occurrence inherited whatever the first resolved to.
+
+    Across batches that inheritance is back, and it is stated rather than hidden
+    (B1 review, 2026-09-14). Since B1.1 the estate is written 1,000 files at a
+    time, so a finding id repeated in a *later* batch reads the row an earlier
+    batch wrote. That changes a result only when the two copies disagree about
+    owner, severity or due date - which two readings of the same file in one scan
+    do not, and a test pins a path listed twice across a batch boundary. Undoing
+    it exactly would mean holding every finding's prior state for the whole scan,
+    which is the memory B1.1 exists to give back.
     """
 
     existing: dict[str, dict] = {}
@@ -2873,19 +2893,23 @@ def scan_request_is_resumable(request: dict) -> bool:
 
 @_tenant_scoped
 def bind_job_to_scan(tenant_id: str, job_id: str, scan_id: str, request: dict) -> dict:
-    """Record the scan a job runs and the request it was given, without secrets."""
+    """Record the scan a job runs and the request it was given, without secrets.
+
+    ``bound`` says whether there was a job row to write to. A binding that lands
+    nowhere is a scan that can never be resumed, which must not look like success.
+    """
     resumable = scan_request_is_resumable(request)
     cleaned = _sanitize_scan_profile_config(request if isinstance(request, dict) else {})
     encoded = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"), default=str)
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:
-            conn.execute(
+            bound = int(conn.execute(
                 "UPDATE scan_jobs SET scan_id = ?, request_json = ?, resumable = ?, updated_at = ? "
                 "WHERE id = ? AND tenant_id = ?",
                 (str(scan_id), encoded, 1 if resumable else 0, now, str(job_id), tenant_id),
-            )
-    return {"job_id": str(job_id), "scan_id": str(scan_id), "resumable": resumable}
+            ).rowcount or 0) == 1
+    return {"job_id": str(job_id), "scan_id": str(scan_id), "resumable": resumable, "bound": bound}
 
 
 @_tenant_scoped
@@ -2932,9 +2956,12 @@ def _partition_row(row) -> dict:
 def create_scan_partitions(tenant_id: str, scan_id: str, job_id: str, specs: list[dict]) -> list[str]:
     """Plan a scan's units, in order.
 
-    Idempotent: planning the same scan again never resets a unit that has already
-    run, which is what lets a resumed job re-plan without losing its progress. A
-    spec may name its own ``partition_id``; otherwise it is numbered by position.
+    Idempotent for the same plan: planning it again never resets a unit that has
+    already run. A *different* plan for a scan that is already planned is refused.
+    Units without their own ``partition_id`` are numbered by position, so a
+    re-enumeration that gained a folder would shift every id after it - one unit
+    would never run and another would run twice (B2 review). A resumed scan
+    continues the plan in its ledger; it does not make a new one.
     """
     now = datetime.now(timezone.utc).isoformat()
     ids: list[str] = []
@@ -2947,15 +2974,31 @@ def create_scan_partitions(tenant_id: str, scan_id: str, job_id: str, specs: lis
             tenant_id, str(scan_id), partition_id, str(job_id or ""), ordinal,
             json.dumps(spec, ensure_ascii=False, separators=(",", ":"), default=str), now,
         ))
-    if rows:
-        with _lock:
-            with _connect() as conn:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO scan_partitions "
-                    "(tenant_id, scan_id, partition_id, job_id, ordinal, spec_json, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    rows,
-                )
+    if not rows:
+        return ids
+    with _lock:
+        with _connect() as conn:
+            existing = [
+                (str(row["partition_id"]), int(row["ordinal"] or 0), str(row["spec_json"] or ""))
+                for row in conn.execute(
+                    "SELECT partition_id, ordinal, spec_json FROM scan_partitions "
+                    "WHERE tenant_id = ? AND scan_id = ? ORDER BY ordinal",
+                    (tenant_id, str(scan_id)),
+                ).fetchall()
+            ]
+            if existing:
+                if existing != [(row[2], row[4], row[5]) for row in rows]:
+                    raise ValueError(
+                        f"scan {scan_id} is already planned with different units; "
+                        "a resumed scan continues its ledger instead of planning again"
+                    )
+                return ids
+            conn.executemany(
+                "INSERT OR IGNORE INTO scan_partitions "
+                "(tenant_id, scan_id, partition_id, job_id, ordinal, spec_json, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
     return ids
 
 
@@ -2964,12 +3007,17 @@ def claim_next_partition(tenant_id: str, scan_id: str) -> dict | None:
     """Take the first queued unit of a scan, in plan order, and mark it running.
 
     The update is a compare-and-set on the status, so two claimers - threads now,
-    worker processes in B3 - can never take the same unit.
+    worker processes in B3 - can never take the same unit. It also matches the
+    attempt it read, so the attempt it reports is the one the row holds: a unit
+    claimed and requeued by someone else in between would otherwise hand this
+    worker a stale attempt it could never complete with (B2 review). A lost race
+    means another claimer made progress, so it takes the next queued unit rather
+    than reporting that none is left.
     """
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:
-            for _ in range(5):
+            while True:
                 row = conn.execute(
                     f"SELECT {_PARTITION_COLUMNS} FROM scan_partitions "
                     "WHERE tenant_id = ? AND scan_id = ? AND status = 'queued' "
@@ -2981,8 +3029,9 @@ def claim_next_partition(tenant_id: str, scan_id: str) -> dict | None:
                 claimed = conn.execute(
                     "UPDATE scan_partitions SET status = 'running', attempt = attempt + 1, "
                     "started_at = ?, finished_at = '', error = '', updated_at = ? "
-                    "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'queued'",
-                    (now, now, tenant_id, str(scan_id), str(row["partition_id"])),
+                    "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'queued' "
+                    "AND attempt = ?",
+                    (now, now, tenant_id, str(scan_id), str(row["partition_id"]), int(row["attempt"] or 0)),
                 )
                 if int(claimed.rowcount or 0) == 1:
                     result = _partition_row(row)
@@ -2991,11 +3040,10 @@ def claim_next_partition(tenant_id: str, scan_id: str) -> dict | None:
                         started_at=now, finished_at="", error="",
                     )
                     return result
-    return None
 
 
 def _finish_partition(tenant_id: str, scan_id: str, partition_id: str, status: str,
-                      *, files: int = 0, error: str = "", attempt: int | None = None) -> bool:
+                      *, attempt: int, files: int = 0, error: str = "") -> bool:
     now = datetime.now(timezone.utc).isoformat()
     sql = (
         "UPDATE scan_partitions SET status = ?, files = ?, error = ?, finished_at = ?, updated_at = ? "
@@ -3013,20 +3061,21 @@ def _finish_partition(tenant_id: str, scan_id: str, partition_id: str, status: s
 
 @_tenant_scoped
 def complete_scan_partition(tenant_id: str, scan_id: str, partition_id: str, files: int,
-                            *, attempt: int | None = None) -> bool:
+                            *, attempt: int) -> bool:
     """Mark a running unit done; returns whether this call did it.
 
-    Only a running unit can finish. Passing the ``attempt`` a worker claimed also
-    stops a stale worker - one whose unit was requeued and claimed again - from
-    finishing the newer attempt. Delivery in B3 is at-least-once, so that case is
-    real.
+    Only a running unit can finish, and only under the ``attempt`` that claimed it.
+    That stops a stale worker - one whose unit was requeued and claimed again -
+    from finishing the newer attempt. The attempt is required: an optional guard
+    is one a caller forgets, and then the stale worker wins (B2 review). Delivery
+    in B3 is at-least-once, so the case is real.
     """
     return _finish_partition(tenant_id, scan_id, partition_id, "done", files=files, attempt=attempt)
 
 
 @_tenant_scoped
 def fail_scan_partition(tenant_id: str, scan_id: str, partition_id: str, error: str,
-                        *, attempt: int | None = None) -> bool:
+                        *, attempt: int) -> bool:
     return _finish_partition(tenant_id, scan_id, partition_id, "failed", error=error, attempt=attempt)
 
 
@@ -3061,6 +3110,9 @@ def scan_partition_summary(tenant_id: str, scan_id: str) -> dict:
         **counts,
         "files": files,
         "complete": total > 0 and counts["done"] == total,
+        # Nothing left to run. A scan can be finished without being complete: a
+        # failed unit is terminal until something decides to retry it (B2.4).
+        "finished": total > 0 and counts["queued"] == 0 and counts["running"] == 0,
     }
 
 

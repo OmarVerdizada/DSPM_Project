@@ -11,7 +11,7 @@ import re
 import secrets
 import socket
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2834,6 +2834,23 @@ def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], 
             close_meta_index()
 
 
+@contextmanager
+def _releasing_reuse_index(engine):
+    """Close the engine's reuse index however an endpoint scan ends.
+
+    `_analyze_endpoint_records` closes it too, but collection probes the index
+    before analysis starts, and a cancellation or a collector error raised between
+    the two would leave the file open until the engine was garbage collected
+    (B1 review). Closing twice is harmless.
+    """
+    try:
+        yield engine
+    finally:
+        close_meta_index = getattr(engine, "close_meta_index", None)
+        if callable(close_meta_index):
+            close_meta_index()
+
+
 def _run_endpoint_scan_payload(
     config: WinRMEndpointConfig,
     payload: EndpointScanRequest,
@@ -2853,6 +2870,20 @@ def _run_endpoint_scan_payload(
         principal,
         baseline_available=incremental_baseline_available,
     )
+    with _releasing_reuse_index(report):
+        return _collect_and_persist_remote_endpoint(
+            config, payload, principal, job, report, incremental_baseline_available,
+        )
+
+
+def _collect_and_persist_remote_endpoint(
+    config: WinRMEndpointConfig,
+    payload: EndpointScanRequest,
+    principal: Principal,
+    job,
+    report: DSPMDiscoveryEngine,
+    incremental_baseline_available: bool,
+) -> dict:
     if job:
         job.progress = 8
         job.message = (
@@ -3108,6 +3139,17 @@ def _run_local_endpoint_scan_payload(
         job.message = "Resolving local workstation paths"
 
     report = _endpoint_analysis_engine(config, payload, principal)
+    with _releasing_reuse_index(report):
+        return _collect_and_persist_local_endpoint(config, payload, principal, job, report)
+
+
+def _collect_and_persist_local_endpoint(
+    config: WinRMEndpointConfig,
+    payload: EndpointScanRequest,
+    principal: Principal,
+    job,
+    report: DSPMDiscoveryEngine,
+) -> dict:
     scan_paths, missing_paths = _local_endpoint_paths(config)
     records: list[dict] = []
     scan_errors: list[str] = []

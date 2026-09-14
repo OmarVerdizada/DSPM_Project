@@ -311,7 +311,7 @@ class ComplianceSummaryAccumulator:
         if not compliance.get("matched_frameworks"):
             return
         self.affected_file_count += 1
-        self.affected_assets.add(_asset_key(file_obj))
+        self.affected_assets.add(_asset_key(file_obj) or f"\x00record-{self.affected_file_count}")
         file_findings = _compliance_findings_for_file(file_obj, self.profile_ids)
         for finding in file_findings:
             severity = str(finding.get("risk") or finding.get("severity") or compliance.get("compliance_severity") or "LOW").lower()
@@ -700,11 +700,18 @@ def _finding_unique_value_count(finding: dict) -> int:
 
 
 def _asset_key(file_obj: dict) -> str:
+    """The identity an affected asset is counted by, or "" when a record has none.
+
+    A record with no id, path or name used to fall back to ``id(file_obj)``. That
+    is unique only while every record is alive at once: fed one record at a time,
+    a freed record hands its id to the next one, and 1,000 such records counted
+    as 13 (B2 review). The accumulator gives each of them its own key instead.
+    """
     for key in ("asset_id", "host_id", "source_id", "device_id", "path"):
         value = file_obj.get(key)
         if value:
             return str(value)
-    return str(file_obj.get("name") or id(file_obj))
+    return str(file_obj.get("name") or "")
 
 
 def _is_pci_scope_finding(finding: dict) -> bool:

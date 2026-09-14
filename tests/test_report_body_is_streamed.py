@@ -153,6 +153,143 @@ def nested_files(root):
     return [p for p in pathlib.Path(root).rglob("*") if p.is_file()]
 
 
+class KeysAreEncodedTheWayJsonDumpsEncodesThemTest(unittest.TestCase):
+    """A top-level key goes through JSON's key coercion, not its value encoding."""
+
+    def test_non_string_keys_match_json_dumps(self):
+        for shape in ({1: "a"}, {None: "c", 2.5: "d", False: "e"}, {"files": [], 7: {"x": 1}}):
+            with self.subTest(shape=shape):
+                self.assertEqual(
+                    "".join(store.iter_report_json(shape)), json.dumps(shape, ensure_ascii=False),
+                )
+
+    def test_a_key_json_dumps_refuses_is_refused(self):
+        with self.assertRaises(TypeError):
+            json.dumps({(1, 2): 1})
+        with self.assertRaises(TypeError):
+            "".join(store.iter_report_json({(1, 2): 1}))
+
+
+class NothingReadableReachesTheDiskTest(unittest.TestCase):
+    """The artifact tier is encrypted at rest, and that includes a write in progress.
+
+    A stream is compressed into a scratch file before its name is known. If that
+    file held gzip of the plaintext, a process killed mid-save - an OOM kill, a
+    service stop, a power cut, all likelier on a large scan - would leave a
+    readable copy of the report in the tenant directory for good.
+    """
+
+    def setUp(self):
+        self._previous = os.environ.get("DSPM_ARTIFACT_DIR")
+        self._dir = tempfile.TemporaryDirectory()
+        os.environ["DSPM_ARTIFACT_DIR"] = self._dir.name
+
+    def tearDown(self):
+        if self._previous is None:
+            os.environ.pop("DSPM_ARTIFACT_DIR", None)
+        else:
+            os.environ["DSPM_ARTIFACT_DIR"] = self._previous
+        self._dir.cleanup()
+
+    def test_a_write_in_progress_holds_no_recoverable_plaintext(self):
+        import hashlib
+        import pathlib
+        import zlib
+
+        marker = "PLAINTEXT-MARKER-4111111111111111"
+        inspected = {}
+
+        def body():
+            # Hex digests barely compress, so the scratch file really fills up.
+            for index in range(40_000):
+                yield f"{marker} {hashlib.sha256(str(index).encode()).hexdigest()}\n"
+            tenant_dir = pathlib.Path(self._dir.name) / "default"
+            scratch = [p for p in tenant_dir.rglob("*") if p.is_file() and not p.name.endswith(".enc")]
+            raw = b"".join(p.read_bytes() for p in scratch)
+            try:
+                recovered = zlib.decompressobj(31).decompress(raw)
+            except zlib.error:
+                recovered = b""
+            inspected.update(files=len(scratch), size=len(raw), recovered=recovered)
+            yield "end\n"
+
+        with mock.patch.object(artifacts, "_STREAM_FRAME_BYTES", 64 * 1024):
+            ref = artifacts.put_stream("default", body())
+
+        self.assertEqual(inspected["files"], 1, "expected exactly one scratch file mid-stream")
+        self.assertGreater(inspected["size"], 0, "nothing had been written yet, so this proves nothing")
+        self.assertNotIn(marker.encode(), inspected["recovered"], "the scratch file is readable plaintext")
+        self.assertIn(marker.encode(), artifacts.get_bytes("default", ref.content_id))
+
+    def test_prune_sweeps_what_an_interrupted_write_left_behind(self):
+        import pathlib
+        import time as _time
+
+        tenant_dir = pathlib.Path(self._dir.name) / "default"
+        (tenant_dir / "ab").mkdir(parents=True)
+        old = [tenant_dir / ".streaming-dead.gz", tenant_dir / ".streaming-dead.part",
+               tenant_dir / "ab" / ("a" * 64 + ".123.partial")]
+        fresh = tenant_dir / ".streaming-live.part"
+        for path in (*old, fresh):
+            path.write_bytes(b"leftover")
+        stale = _time.time() - 7200
+        for path in old:
+            os.utime(path, (stale, stale))
+
+        artifacts.prune(set(), grace_seconds=3600)
+
+        self.assertEqual([p for p in old if p.exists()], [], "a crashed write's leftovers survived prune")
+        self.assertTrue(fresh.exists(), "a write still in progress was swept")
+
+
+class TwoWritersOfTheSameContentTest(unittest.TestCase):
+
+    def setUp(self):
+        self._previous = os.environ.get("DSPM_ARTIFACT_DIR")
+        self._dir = tempfile.TemporaryDirectory()
+        os.environ["DSPM_ARTIFACT_DIR"] = self._dir.name
+
+    def tearDown(self):
+        if self._previous is None:
+            os.environ.pop("DSPM_ARTIFACT_DIR", None)
+        else:
+            os.environ["DSPM_ARTIFACT_DIR"] = self._previous
+        self._dir.cleanup()
+
+    def test_both_succeed_and_the_object_reads_back(self):
+        """They used to share one staging name, so on Windows one of them failed."""
+        import threading
+
+        from backend import backup
+
+        barrier = threading.Barrier(2, timeout=10)
+        real_encrypt = backup.encrypt_stream
+
+        def meet_then_encrypt(fernet, src, out):
+            barrier.wait()
+            return real_encrypt(fernet, src, out)
+
+        payload = b"the same report body, twice " * 2000
+        errors: list[BaseException] = []
+
+        def writer():
+            try:
+                artifacts.put_bytes("default", payload)
+            except BaseException as exc:  # noqa: BLE001 - the test reports it
+                errors.append(exc)
+
+        with mock.patch.object(artifacts, "encrypt_stream", meet_then_encrypt):
+            threads = [threading.Thread(target=writer) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+        self.assertEqual(errors, [])
+        import hashlib
+
+        self.assertEqual(artifacts.get_bytes("default", hashlib.sha256(payload).hexdigest()), payload)
+
+
 class TheSaveNeverBuildsTheWholeBodyTest(unittest.TestCase):
 
     def setUp(self):

@@ -178,5 +178,26 @@ class SectionsStayBoundedTest(unittest.TestCase):
         self.assertEqual(accumulator.result().total_files, len(self.files))
 
 
+class RecordsStreamedOneAtATimeTest(unittest.TestCase):
+    """Finalize folds records read back from storage and lets each one go.
+
+    A record with no id, path or name was counted by ``id(record)``, which is
+    unique only while every record is alive at once. Streamed, a freed record hands
+    its id to the next one - 1,000 such records counted as 13 (B2 review).
+    """
+
+    def test_records_without_an_identity_are_each_counted(self) -> None:
+        profiles = [{"id": "pci_dss", "name": "PCI DSS"}, {"id": "gdpr", "name": "GDPR"}]
+        template = synthetic_files(seed=3, count=1)[0]
+        accumulator = service.ComplianceSummaryAccumulator(profiles)
+        for _ in range(1000):
+            record = {key: value for key, value in template.items() if key not in ("path", "name")}
+            accumulator.add(record)
+            del record
+        result = accumulator.result()
+        self.assertEqual(result["affected_file_count"], 1000)
+        self.assertEqual(result["affected_asset_count"], 1000)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -180,29 +180,60 @@ class TheWriteDoesNotBuildTheWholeEstateTest(unittest.TestCase):
         # be measuring that.
         fingerprints = []
         for size in (7, 50, 10_000):
-            with store._connect() as conn:
-                for table in cleared:
-                    conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (self.tenant,))
-            original = models.PROJECTION_CHUNK
-            models.PROJECTION_CHUNK = size
-            try:
-                store.save_scan_history(self.tenant, _report("s1", 120))
-            finally:
-                models.PROJECTION_CHUNK = original
-            with store._connect() as conn:
-                rows = []
-                for table in tables:
-                    table_rows = conn.execute(
-                        f"SELECT * FROM {table} WHERE tenant_id = ?", (self.tenant,)
-                    ).fetchall()
-                    rows.append(sorted(
-                        json.dumps([str(value) for value in tuple(row)]) for row in table_rows
-                    ))
+            rows, batches = self._save_at_batch_size(models, _report("s1", 120), size, tables, cleared)
+            # The knob has to reach the save. It once did not - the chunk size was
+            # bound when the function was defined - and this test compared three
+            # single-batch saves with each other.
+            self.assertEqual(len(batches), -(-120 // size), f"batch size {size} was not honoured: {batches}")
             fingerprints.append(rows)
         self.assertTrue(all(any(part) for part in fingerprints[0]), "nothing was written")
 
         self.assertEqual(fingerprints[0], fingerprints[1], "batch size 7 and 50 disagreed")
         self.assertEqual(fingerprints[1], fingerprints[2], "batching disagreed with one pass")
+
+    def test_a_path_listed_twice_across_a_batch_boundary_writes_what_one_pass_writes(self):
+        """Overlapping scan roots can list a file twice; the copies land in different batches."""
+
+        import backend.domain.models as models
+
+        tables = ("assets", "findings", "asset_versions", "finding_occurrences", "finding_index")
+        cleared = tables + ("scan_reports", "scan_runs")
+        report = _report("s1", 20)
+        report["files"].append(json.loads(json.dumps(report["files"][0])))
+        split, batches = self._save_at_batch_size(models, json.loads(json.dumps(report)), 7, tables, cleared)
+        self.assertGreater(len(batches), 1)
+        whole, _ = self._save_at_batch_size(models, json.loads(json.dumps(report)), 10_000, tables, cleared)
+        self.assertEqual(split, whole)
+
+    def _save_at_batch_size(self, models, report, size, tables, cleared):
+        from unittest import mock
+
+        import backend.domain as domain
+
+        with store._connect() as conn:
+            for table in cleared:
+                conn.execute(f"DELETE FROM {table} WHERE tenant_id = ?", (self.tenant,))
+        real = domain.iter_normalized_chunks
+        batches: list[int] = []
+
+        def counting(*args, **kwargs):
+            for records, piece in real(*args, **kwargs):
+                batches.append(len(records))
+                yield records, piece
+
+        with mock.patch.object(models, "PROJECTION_CHUNK", size), \
+                mock.patch.object(domain, "iter_normalized_chunks", counting):
+            store.save_scan_history(self.tenant, report)
+        with store._connect() as conn:
+            rows = []
+            for table in tables:
+                table_rows = conn.execute(
+                    f"SELECT * FROM {table} WHERE tenant_id = ?", (self.tenant,)
+                ).fetchall()
+                rows.append(sorted(
+                    json.dumps([str(value) for value in tuple(row)]) for row in table_rows
+                ))
+        return rows, batches
 
 
 if __name__ == "__main__":

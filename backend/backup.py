@@ -91,6 +91,43 @@ def encrypt_stream(fernet: Fernet, src, out) -> tuple[str, str]:
     return plain_hash.hexdigest(), cipher_hash.hexdigest()
 
 
+class EncryptingWriter:
+    """The framing of :func:`encrypt_stream`, pushed one write at a time.
+
+    ``encrypt_stream`` pulls from a readable. A producer that pushes - a gzip
+    compressor fed from a generator - would otherwise have to write its output
+    somewhere readable first, and for a streamed artifact that somewhere was a
+    scratch file of compressed plaintext. :func:`decrypt_stream` reads the result
+    whatever frame size is used.
+    """
+
+    def __init__(self, fernet: Fernet, out, frame_bytes: int = CHUNK_BYTES) -> None:
+        self._fernet = fernet
+        self._out = out
+        self._frame_bytes = max(1, int(frame_bytes))
+        self._buffer = bytearray()
+
+    def write(self, data) -> int:
+        self._buffer += data
+        while len(self._buffer) >= self._frame_bytes:
+            self._seal(bytes(self._buffer[: self._frame_bytes]))
+            del self._buffer[: self._frame_bytes]
+        return len(data)
+
+    def flush(self) -> None:
+        """Frames are written whole; a partial one waits for :meth:`finish`."""
+
+    def finish(self) -> None:
+        if self._buffer:
+            self._seal(bytes(self._buffer))
+            self._buffer.clear()
+
+    def _seal(self, chunk: bytes) -> None:
+        token = self._fernet.encrypt(chunk)
+        self._out.write(struct.pack(">I", len(token)))
+        self._out.write(token)
+
+
 def decrypt_stream(fernet: Fernet, src, out) -> str:
     """Decrypt a readable into a writable; returns the plaintext SHA-256."""
     plain_hash = hashlib.sha256()

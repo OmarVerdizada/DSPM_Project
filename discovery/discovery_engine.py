@@ -194,12 +194,40 @@ SCAN_MAX_SECONDS = int(os.getenv("DSPM_SCAN_MAX_SECONDS", "1800"))
 # at a time and written in batches, so neither end of the scan holds the index.
 META_INDEX_FILENAME = "meta_index.sqlite"
 META_INDEX_FLUSH_BATCH = 1000
+# How long a batch write waits for another engine's write on the same cache
+# directory before it gives up on that batch.
+META_INDEX_BUSY_TIMEOUT_SECONDS = 5.0
+# Left beside an index found damaged after it opened, so the next engine to open
+# it throws it away and starts again instead of reading from it.
+META_INDEX_REBUILD_MARKER_SUFFIX = ".rebuild"
 # Every scan compresses every entry it writes, so the compressor is on the hot
 # path. Measured on 2,000 real entries (25.5 KB raw): level 6 is 274 us at 6.1x,
 # level 1 is 82 us at 4.4x - 3.3x less CPU for 1.7 KB more per entry.
 META_INDEX_COMPRESSION_LEVEL = 1
 # How the whole-document index began, so it can be recognised and removed.
 _LEGACY_META_INDEX_HEADER = '{"index_version": 1'
+
+
+def _sqlite_failure(exc: BaseException | None) -> str:
+    """Why a SQLite call failed: ``corrupt``, ``read_only``, ``busy`` or ``other``."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        primary = code & 0xFF
+        if primary in (11, 26):  # SQLITE_CORRUPT, SQLITE_NOTADB
+            return "corrupt"
+        if primary == 8:  # SQLITE_READONLY
+            return "read_only"
+        if primary in (5, 6):  # SQLITE_BUSY, SQLITE_LOCKED
+            return "busy"
+        return "other"
+    message = str(exc or "").lower()
+    if "malformed" in message or "not a database" in message:
+        return "corrupt"
+    if "readonly" in message or "read-only" in message:
+        return "read_only"
+    if "locked" in message or "busy" in message:
+        return "busy"
+    return "other"
 
 
 class DSPMDiscoveryEngine:
@@ -234,6 +262,16 @@ class DSPMDiscoveryEngine:
         self._meta_index_reader_lock = threading.Lock()
         # Serialised, compressed entries waiting for the next batch write.
         self._meta_pending: dict[str, bytes] = {}
+        # Batch writes are serialised by their own lock, so an analysis thread
+        # queuing an entry takes `_meta_index_lock` for a dict insert and never
+        # waits for the disk - or for another engine's write on the same cache
+        # directory. Lock order is always this one, then `_meta_index_lock`.
+        self._meta_index_write_lock = threading.Lock()
+        self._meta_index_writes_disabled = False
+        # What went wrong with the index during this engine's life. Published in
+        # the scan diagnostics only when something did (`reuse_index`).
+        self._meta_index_health_lock = threading.Lock()
+        self._meta_index_health = {"state": "ok", "write_failures": 0, "dropped_entries": 0, "read_errors": 0}
         self._finding_digests: set | None = None
         self._cache_root_path: Path | None = None
         self._incremental_counts = {
@@ -655,14 +693,31 @@ class DSPMDiscoveryEngine:
         root = self._cache_root()
         if root is None or not self.config.persistent_cache_enabled:
             self._meta_index_unavailable = True
+            if self.config.persistent_cache_enabled:
+                self._set_meta_index_state("unavailable")
             return None
         path = root / META_INDEX_FILENAME
+        marker = Path(f"{path}{META_INDEX_REBUILD_MARKER_SUFFIX}")
+        if marker.exists():
+            # An earlier engine found this index damaged after it had opened. It is
+            # a cache: throw it away and start again. If another engine still holds
+            # it open the delete fails, and this one does without an index rather
+            # than read from a file known to be damaged.
+            try:
+                for suffix in ("", "-wal", "-shm"):
+                    Path(f"{path}{suffix}").unlink(missing_ok=True)
+                marker.unlink(missing_ok=True)
+            except OSError:
+                self._meta_index_unavailable = True
+                self._set_meta_index_state("rebuild_pending")
+                return None
         for attempt in (1, 2):
             conn = None
             try:
                 root.mkdir(parents=True, exist_ok=True)
                 conn = sqlite3.connect(
-                    str(path), timeout=5.0, check_same_thread=False, isolation_level=None,
+                    str(path), timeout=META_INDEX_BUSY_TIMEOUT_SECONDS,
+                    check_same_thread=False, isolation_level=None,
                 )
                 conn.execute("PRAGMA journal_mode=WAL")
                 # A cache survives a power cut by being rebuilt, not by fsync.
@@ -684,12 +739,14 @@ class DSPMDiscoveryEngine:
                             Path(f"{path}{suffix}").unlink()
                     continue
                 self._meta_index_unavailable = True
+                self._set_meta_index_state("unavailable")
                 return None
             except OSError:
                 if conn is not None:
                     with suppress(Exception):
                         conn.close()
                 self._meta_index_unavailable = True
+                self._set_meta_index_state("unavailable")
                 return None
         self._retire_legacy_meta_index(root)
         return self._meta_index_db
@@ -736,7 +793,9 @@ class DSPMDiscoveryEngine:
             local.failed = True
             return None
         try:
-            conn = sqlite3.connect(str(path), timeout=5.0, check_same_thread=False, isolation_level=None)
+            conn = sqlite3.connect(
+                str(path), timeout=META_INDEX_BUSY_TIMEOUT_SECONDS, check_same_thread=False, isolation_level=None,
+            )
             # A primary-key lookup touches a handful of pages. SQLite's default
             # page cache is about 2 MB per connection and the I/O pool can hold
             # dozens of them, which would quietly spend memory in the step that
@@ -759,34 +818,107 @@ class DSPMDiscoveryEngine:
             return None
         try:
             row = reader.execute("SELECT payload FROM entries WHERE digest = ?", (digest,)).fetchone()
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            self._note_meta_index_failure(exc, reading=True)
             return None
         if row is None:
             return None
         try:
             data = json.loads(zlib.decompress(row[0]).decode("utf-8"))
         except (zlib.error, UnicodeDecodeError, ValueError):
+            # Every entry is written compressed JSON; one that does not decode was
+            # damaged on disk (zlib checks its own checksum).
+            self._note_meta_index_failure(None, reading=True, kind="corrupt")
             return None
         return data if isinstance(data, dict) else None
 
-    def _flush_meta_pending_locked(self) -> None:
-        """Write what is pending and forget it. Caller holds `_meta_index_lock`."""
-        if not self._meta_pending:
-            return
+    def _take_meta_batch_locked(self) -> dict[str, bytes]:
+        """Detach what is pending. Caller holds `_meta_index_lock`."""
         pending, self._meta_pending = self._meta_pending, {}
-        conn = self._meta_index_connection()
-        if conn is None:
+        return pending
+
+    def _write_meta_batch(self, batch: dict[str, bytes]) -> None:
+        """Write one detached batch. Never called with `_meta_index_lock` held."""
+        if not batch:
+            return
+        with self._meta_index_write_lock:
+            self._write_meta_batch_holding_write_lock(batch)
+
+    def _write_meta_batch_holding_write_lock(self, batch: dict[str, bytes]) -> None:
+        """Write one batch. Caller holds `_meta_index_write_lock`.
+
+        A cache write that fails is a miss on the next scan, never a failed scan -
+        but it is no longer silent, and what happens next depends on why it failed
+        (B1 review, 2026-09-14):
+
+        - **damaged file:** stop writing, and leave a marker so the next engine
+          rebuilds the index instead of reading from it;
+        - **read-only:** stop writing for this engine. On Windows, SQLite quietly
+          opens a file read-only when another process holds it exclusively, and
+          every later write would fail the same way;
+        - **busy past the timeout,** or anything else: drop this batch and count it.
+          The next batch tries again.
+        """
+        if not batch:
+            return
+        with self._meta_index_lock:
+            conn = self._meta_index_connection()
+        if conn is None or self._meta_index_writes_disabled:
+            self._count_dropped_meta_entries(len(batch))
             return
         try:
             conn.execute("BEGIN")
             conn.executemany(
                 "INSERT OR REPLACE INTO entries (digest, payload) VALUES (?, ?)",
-                pending.items(),
+                batch.items(),
             )
             conn.execute("COMMIT")
-        except sqlite3.DatabaseError:
-            with suppress(sqlite3.DatabaseError):
+        except sqlite3.Error as exc:
+            with suppress(sqlite3.Error):
                 conn.execute("ROLLBACK")
+            self._note_meta_index_failure(exc, reading=False)
+            self._count_dropped_meta_entries(len(batch))
+
+    def _set_meta_index_state(self, state: str) -> None:
+        with self._meta_index_health_lock:
+            self._meta_index_health["state"] = state
+
+    def _count_dropped_meta_entries(self, count: int) -> None:
+        with self._meta_index_health_lock:
+            self._meta_index_health["dropped_entries"] += int(count)
+
+    def _note_meta_index_failure(self, exc: BaseException | None, *, reading: bool, kind: str | None = None) -> None:
+        kind = kind or _sqlite_failure(exc)
+        with self._meta_index_health_lock:
+            health = self._meta_index_health
+            health["read_errors" if reading else "write_failures"] += 1
+            if kind == "corrupt":
+                self._meta_index_writes_disabled = True
+                if health["state"] != "rebuild_scheduled":
+                    health["state"] = "rebuild_scheduled"
+                    if self._meta_index_path is not None:
+                        with suppress(OSError):
+                            Path(f"{self._meta_index_path}{META_INDEX_REBUILD_MARKER_SUFFIX}").write_text(
+                                "damaged\n", encoding="utf-8",
+                            )
+            elif kind == "read_only" and not reading:
+                self._meta_index_writes_disabled = True
+                if health["state"] == "ok":
+                    health["state"] = "read_only"
+
+    def _publish_meta_index_health(self) -> None:
+        """Put the index's state in the scan diagnostics, when anything went wrong.
+
+        A healthy scan publishes nothing, so its report is unchanged.
+        """
+        with self._meta_index_health_lock:
+            health = dict(self._meta_index_health)
+        if health["state"] == "ok" and not any(
+            health[key] for key in ("write_failures", "dropped_entries", "read_errors")
+        ):
+            return
+        if isinstance(self.last_scan_diagnostics, dict):
+            self.last_scan_diagnostics["reuse_index"] = health
 
     def _finding_digest_exists(self, digest: str) -> bool:
         """Fail-closed pairing check against a directory listing taken once,
@@ -820,7 +952,8 @@ class DSPMDiscoveryEngine:
         so all that is left to do here is the last partial batch.
         """
         with self._meta_index_lock:
-            self._flush_meta_pending_locked()
+            batch = self._take_meta_batch_locked()
+        self._write_meta_batch(batch)
 
     def close_meta_index(self) -> None:
         """Flush, then release the index file.
@@ -829,13 +962,20 @@ class DSPMDiscoveryEngine:
         directory is something operators and the benchmark scripts clear between
         runs - so the handle must not outlive the scan that opened it, whether
         that scan finished or failed.
+
+        Close ends the index's life for a scan. A read after it opens the file
+        again, and whoever reads must close again; the endpoint runners close from
+        an outer ``finally`` for that reason.
         """
-        with self._meta_index_lock:
-            self._flush_meta_pending_locked()
-            conn, self._meta_index_db = self._meta_index_db, None
-            # A read after close goes back through the locked open, which recreates
-            # the schema, instead of connecting straight to a file that may be gone.
-            self._meta_index_ready = False
+        with self._meta_index_write_lock:
+            with self._meta_index_lock:
+                batch = self._take_meta_batch_locked()
+            self._write_meta_batch_holding_write_lock(batch)
+            with self._meta_index_lock:
+                conn, self._meta_index_db = self._meta_index_db, None
+                # A read after close goes back through the locked open, which recreates
+                # the schema, instead of connecting straight to a file that may be gone.
+                self._meta_index_ready = False
         with self._meta_index_reader_lock:
             readers, self._meta_index_reader_conns = self._meta_index_reader_conns, []
             # A fresh thread-local, so no thread is left holding a closed handle.
@@ -844,6 +984,7 @@ class DSPMDiscoveryEngine:
             if handle is not None:
                 with suppress(sqlite3.Error):
                     handle.close()
+        self._publish_meta_index_health()
 
     def _reuse_probe(self, path: str, size: int, mtime: str) -> dict | None:
         """Cheap metadata lookup used during collection.
@@ -958,6 +1099,7 @@ class DSPMDiscoveryEngine:
         diagnostics["files_discovered"] = total
         diagnostics["triage"] = self._triage_diagnostics()
         self.last_scan_diagnostics = diagnostics
+        self._publish_meta_index_health()
 
     def _write_meta_sidecar(self, record: dict, cache_key: tuple | None = None) -> None:
         """Persist the cheap-to-restore snapshot so an unchanged file can be
@@ -1037,10 +1179,13 @@ class DSPMDiscoveryEngine:
         except (TypeError, ValueError):
             # Not serialisable means not reusable: a miss next scan, not a crash now.
             return
+        batch = None
         with self._meta_index_lock:
             self._meta_pending[digest] = packed
             if len(self._meta_pending) >= META_INDEX_FLUSH_BATCH:
-                self._flush_meta_pending_locked()
+                batch = self._take_meta_batch_locked()
+        if batch:
+            self._write_meta_batch(batch)
 
     def _read_full_content(self, record: dict) -> str:
         """Safety fallback: read a reused file's content when its findings cache
