@@ -10009,6 +10009,7 @@ const AUDIT_ACTIONS = {
   "scan.queued": "Queued a scan",
   "scan.completed": "Finished a scan",
   "scan.cancel": "Cancelled a scan",
+  "scan.resumed": "Resumed a scan interrupted by a restart",
   "scan.secondary_operations_degraded": "Scan finished with a degraded step",
   "scan_profile.saved": "Saved a scan profile",
   "scan_profile.deleted": "Deleted a scan profile",

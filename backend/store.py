@@ -3071,11 +3071,19 @@ def read_job(tenant_id: str, job_id: str) -> dict | None:
     }
 
 
+INTERRUPTED_JOB_ERROR = "Scan was interrupted by a backend restart. Re-run the scan."
+RESUMING_JOB_ERROR = (
+    "Scan was interrupted by a backend restart. It continues automatically from its last finished partition."
+)
+
+
 def recover_interrupted_jobs() -> int:
     """Mark jobs left queued/running by a prior process as failed (ARCH-003).
 
     Called at startup: the in-memory executor cannot survive a restart, so any
-    still-open job is orphaned. Returns the number recovered.
+    still-open job is orphaned. Returns the number recovered. The job of a
+    partitioned scan that can be resumed says so instead of asking for a re-run:
+    the resume sweep continues that scan under the same job id (B2.4).
     """
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
@@ -3085,12 +3093,16 @@ def recover_interrupted_jobs() -> int:
                 UPDATE scan_jobs
                 SET status = 'failed',
                     message = 'Interrupted',
-                    error = 'Scan was interrupted by a backend restart. Re-run the scan.',
+                    error = CASE WHEN EXISTS (
+                        SELECT 1 FROM partitioned_scans p
+                        WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id
+                          AND p.status IN ('running', 'finalizing') AND p.resumable = 1
+                    ) THEN ? ELSE ? END,
                     finished_at = COALESCE(finished_at, ?),
                     updated_at = ?
                 WHERE status IN ('queued', 'running')
                 """,
-                (now, now),
+                (RESUMING_JOB_ERROR, INTERRUPTED_JOB_ERROR, now, now),
             )
             return cursor.rowcount
 
@@ -3507,16 +3519,19 @@ _PARTITIONED_SCAN_COLUMNS = (
 
 
 @_tenant_scoped
-def register_partitioned_scan(tenant_id: str, scan_id: str, *, job_id: str, request: dict, header: dict) -> dict:
+def register_partitioned_scan(
+    tenant_id: str, scan_id: str, *, job_id: str, request: dict, header: dict, resumable: bool | None = None,
+) -> dict:
     """Record a partitioned scan before its first partition runs; returns the stored row.
 
     The request goes through the same secret filter scan profiles use, so a typed
     password never reaches the database - and a scan whose only credential was a typed
-    password is recorded as not resumable. Registering a scan that is already recorded
-    changes nothing and returns what is there: a resumed scan continues with the header
-    it started with.
+    password is recorded as not resumable. ``resumable=False`` records a scan that
+    cannot be resumed for another reason, such as having no request to rebuild it from.
+    Registering a scan that is already recorded changes nothing and returns what is
+    there: a resumed scan continues with the header it started with.
     """
-    resumable = scan_request_is_resumable(request)
+    resumable = scan_request_is_resumable(request) and resumable is not False
     cleaned = _sanitize_scan_profile_config(request if isinstance(request, dict) else {})
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
@@ -3569,12 +3584,53 @@ def list_unfinished_partitioned_scans(*, resumable_only: bool = False) -> list[d
 
 @_tenant_scoped
 def bind_partitioned_scan_job(tenant_id: str, scan_id: str, job_id: str) -> bool:
-    """Point a partitioned scan at the job now running it - a resumed scan gets a new job."""
+    """Point a partitioned scan at the job now running it."""
     with _lock:
         with _connect() as conn:
             return int(conn.execute(
                 "UPDATE partitioned_scans SET job_id = ?, updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
                 (str(job_id or ""), datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id)),
+            ).rowcount or 0) == 1
+
+
+@_tenant_scoped
+def touch_partitioned_scan(tenant_id: str, scan_id: str) -> bool:
+    """Record that an unfinished scan's runner is alive; returns whether the scan is still unfinished.
+
+    The resume sweep takes over only a scan nobody has touched for a lease, so a runner
+    touches its scan between partitions and, from its lease thread, while one runs.
+    """
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE partitioned_scans SET updated_at = ? "
+                "WHERE tenant_id = ? AND scan_id = ? AND status IN ('running', 'finalizing')",
+                (datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id)),
+            ).rowcount or 0) == 1
+
+
+@_tenant_scoped
+def claim_partitioned_scan_resume(tenant_id: str, scan_id: str, *, job_id: str, stale_after_seconds: int) -> bool:
+    """Take over an unfinished scan nobody has touched for ``stale_after_seconds``; returns whether this caller did.
+
+    A compare-and-set on the scan's last sign of life, so two sweeps never both continue
+    one scan, and a runner that is alive - touching its scan every third of a lease -
+    keeps it. The claim is itself a touch, and points the scan at ``job_id``. A scan
+    left ``finalizing`` goes back to ``running``, so its new runner claims the finalize
+    at once instead of waiting out a second lease.
+
+    ``updated_at`` is ``isoformat()`` text with a ``+00:00`` offset, which compares
+    correctly as a string even when its microseconds are dropped: ``+`` sorts before
+    ``.``, unlike the ``Z`` a lease ends with.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(seconds=max(0, int(stale_after_seconds)))).isoformat()
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE partitioned_scans SET status = 'running', job_id = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND scan_id = ? AND status IN ('running', 'finalizing') AND updated_at < ?",
+                (str(job_id or ""), now.isoformat(), tenant_id, str(scan_id), cutoff),
             ).rowcount or 0) == 1
 
 
@@ -3603,13 +3659,20 @@ def claim_scan_finalize(tenant_id: str, scan_id: str, *, stale_after_seconds: in
 
 @_tenant_scoped
 def mark_partitioned_scan(tenant_id: str, scan_id: str, status: str, *, error: str = "") -> bool:
+    """Set a partitioned scan's status; returns whether it changed.
+
+    Only an unfinished scan is ever marked failed: a runner that lost a race to a
+    finalize that succeeded must not turn that scan's success into a failure.
+    """
     if status not in PARTITIONED_SCAN_STATES:
         raise ValueError(f"not a partitioned scan state: {status}")
+    sql = "UPDATE partitioned_scans SET status = ?, error = ?, updated_at = ? WHERE tenant_id = ? AND scan_id = ?"
+    if status == "failed":
+        sql += " AND status IN ('running', 'finalizing')"
     with _lock:
         with _connect() as conn:
             return int(conn.execute(
-                "UPDATE partitioned_scans SET status = ?, error = ?, updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
-                (status, str(error or "")[:500], datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id)),
+                sql, (status, str(error or "")[:500], datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id)),
             ).rowcount or 0) == 1
 
 
@@ -3772,6 +3835,10 @@ class PartitionsNotFinished(RuntimeError):
     """A partitioned scan was finalized before every one of its partitions was done."""
 
 
+class ScanAlreadyFinalized(RuntimeError):
+    """Another finalize of this partitioned scan committed first; its report stands."""
+
+
 # Diagnostics that describe how one engine was configured rather than what it
 # found. Every partition's engine reports its own, and adding worker counts across
 # partitions would describe nothing, so the last partition's report stands.
@@ -3921,6 +3988,13 @@ def finalize_partitioned_scan(
     created_at = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:
+            # Two finalizes of one scan wait for each other here: the update takes the
+            # scan record's row lock on PostgreSQL and makes this a write transaction on
+            # SQLite, so the one that waited sees what the first committed (B2.4).
+            conn.execute(
+                "UPDATE partitioned_scans SET updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
+                (created_at, tenant_id, scan_id),
+            )
             states = {
                 str(row["status"]): int(row["n"] or 0)
                 for row in conn.execute(
@@ -3933,6 +4007,15 @@ def finalize_partitioned_scan(
             existing = conn.execute(
                 "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id),
             ).fetchone()
+            held = conn.execute(
+                "SELECT COUNT(*) AS n FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? "
+                "AND (records_ref <> '' OR records_json IS NOT NULL)",
+                (tenant_id, scan_id),
+            ).fetchone()
+            if existing is not None and not int(held["n"] or 0):
+                # The first finalize released the records its body was built from; this
+                # one would stream an empty body over that report.
+                raise ScanAlreadyFinalized(f"scan {scan_id} is already finalized")
             if existing and existing["created_at"]:
                 created_at = existing["created_at"]
             run = scan_run_from_report(tenant_id, report)

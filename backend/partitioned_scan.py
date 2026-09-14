@@ -1,4 +1,4 @@
-"""Partitioned scans: each partition persists as it finishes; finalize does the rest (B2.2b).
+"""Partitioned scans: each partition persists as it finishes; finalize does the rest (B2.2b, B2.4).
 
 A single scan holds every analyzed file until it saves them - the one holder of
 the whole estate the earlier Phase B steps could not remove. A partitioned scan
@@ -9,22 +9,35 @@ What needs the whole scan happens once, at finalize, from what the partitions
 stored: the summary is the sum of the partitions' summaries, the diagnostics are
 merged, the compliance sections are folded one stored record at a time, and the
 report body is streamed from the partitions' records in plan order.
+
+A partitioned scan is recorded before its first partition runs - its plan, its
+request without secrets, and the header every partition stamps - and each
+partition is leased to the worker running it. A process that dies part way
+through therefore leaves a scan that can be continued rather than a half-written
+estate: :mod:`backend.scan_resumer` finds it, and :func:`continue_partitioned_scan`
+runs what is left (B2.4).
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import socket
+import threading
 import time
-from contextlib import nullcontext
-from dataclasses import replace
+import uuid
+from contextlib import contextmanager, nullcontext, suppress
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from backend import store
 from backend.compliance_service import ComplianceReportAccumulator
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from discovery.partition import plan_bounded_partitions
+
+logger = logging.getLogger(__name__)
 
 
 def summed_summary(units: list[dict]) -> dict:
@@ -91,7 +104,8 @@ def finalize_scan(
     Two passes over the stored records, one partition in memory at a time: the
     first folds the compliance sections and counts the files, the second streams
     the body - which has to carry ``summary`` before ``files``, the key order every
-    report has. Finalizing a scan that is already finalized returns its report.
+    report has. Finalizing a scan that is already finalized returns its report,
+    including when another finalize of it committed while this one was reading.
     """
     units = store.list_scan_partitions(tenant_id, scan_id)
     if not units or any(unit["status"] != "done" for unit in units):
@@ -107,11 +121,19 @@ def finalize_scan(
     sections = ComplianceReportAccumulator(compliance_enabled, compliance_frameworks)
     file_count = 0
     sample_count = 0
-    for record in _stored_files(tenant_id, scan_id):
-        sections.add(record)
-        file_count += 1
-        if store.is_sample_data_path(record):
-            sample_count += 1
+    try:
+        for record in _stored_files(tenant_id, scan_id):
+            sections.add(record)
+            file_count += 1
+            if store.is_sample_data_path(record):
+                sample_count += 1
+    except store.PartitionsNotFinished:
+        # Another finalize committed after the partitions were listed, and released
+        # the records this pass was reading.
+        existing = store.read_scan_report_compact(tenant_id, scan_id)
+        if existing is None:
+            raise
+        return existing
 
     report = {
         "timestamp": timestamp,
@@ -125,22 +147,29 @@ def finalize_scan(
     label = str(scan_label or "").strip()[:80]
     if label:
         report["scan_label"] = label
-    store.finalize_partitioned_scan(
-        tenant_id, scan_id, report,
-        write_estate=write_estate, file_count=file_count, sample_count=sample_count,
-    )
+    try:
+        store.finalize_partitioned_scan(
+            tenant_id, scan_id, report,
+            write_estate=write_estate, file_count=file_count, sample_count=sample_count,
+        )
+    except store.ScanAlreadyFinalized:
+        existing = store.read_scan_report_compact(tenant_id, scan_id)
+        if existing is None:
+            raise
+        return existing
     return store.compact_scan_report_from_counts(report, file_count, sample_count)
 
 
-# ---- running one -------------------------------------------------------------------------------------------
+# ---- settings ----------------------------------------------------------------------------------------------
 
 
 def partitioned_scans_enabled() -> bool:
     """Whether local scans run partitioned. Off by default.
 
-    It stays off until B2.4: a partitioned scan interrupted part way through leaves
-    its finished partitions in the estate with no report, and until startup resumes
-    it, that is a worse failure than a single scan that saved nothing.
+    An interrupted partitioned scan is now continued rather than left half-written
+    (B2.4). The default stays off until the B2 gates are measured at the scale they
+    are about (plan §8): this is the path a pilot's largest scans take, and it should
+    be turned on by that evidence, not by being finished.
     """
     return os.getenv("DSPM_PARTITIONED_SCANS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -151,6 +180,93 @@ def partition_max_files() -> int:
         return max(1, min(int(os.getenv("DSPM_PARTITION_MAX_FILES", "2000")), 1_000_000))
     except ValueError:
         return 2000
+
+
+def partition_max_attempts() -> int:
+    """How many times one partition is tried before its scan fails.
+
+    A partition fails for reasons that may pass - a file locked for a moment, a
+    folder briefly unreadable - so it is tried again once nothing else is queued. One
+    that keeps failing stops the scan instead of retrying forever.
+    """
+    try:
+        return max(1, min(int(os.getenv("DSPM_PARTITION_MAX_ATTEMPTS", "3")), 20))
+    except ValueError:
+        return 3
+
+
+def partition_lease_seconds() -> int:
+    """How long a claimed partition stays its worker's without a renewal.
+
+    A running worker renews it every third of this. It is also how long the resume
+    sweep waits after a scan's last sign of life before taking the scan over, so it
+    bounds how soon an interrupted scan continues.
+    """
+    try:
+        return max(1, min(int(os.getenv("DSPM_PARTITION_LEASE_SECONDS", str(store.DEFAULT_PARTITION_LEASE_SECONDS))), 86_400))
+    except ValueError:
+        return store.DEFAULT_PARTITION_LEASE_SECONDS
+
+
+# ---- running one -------------------------------------------------------------------------------------------
+
+
+class ScanStopped(RuntimeError):
+    """A partitioned scan stopped for good: cancelled, out of time, or a partition out of attempts.
+
+    The scan is marked failed and never resumed. A scan whose process died has not
+    stopped - it stays unfinished, and the resume sweep continues it.
+    """
+
+
+_running_here: set[tuple[str, str]] = set()
+_running_here_lock = threading.Lock()
+
+
+def is_running_here(tenant_id: str, scan_id: str) -> bool:
+    """Whether this process is running the scan now; the resume sweep leaves such a scan alone.
+
+    A scan being finalized cannot show it is alive - finalize is one transaction that
+    holds the store for its whole length - so within a process this says so instead.
+    Across processes the finalize guard makes a take-over harmless.
+    """
+    with _running_here_lock:
+        return (str(tenant_id), str(scan_id)) in _running_here
+
+
+def _deadline() -> float | None:
+    from discovery.discovery_engine import SCAN_MAX_SECONDS
+
+    return time.monotonic() + SCAN_MAX_SECONDS if SCAN_MAX_SECONDS > 0 else None
+
+
+def _stop_check(job, deadline: float | None) -> Callable[[], str | None]:
+    def stop_reason() -> str | None:
+        if job is not None and job.cancel_requested:
+            return "Scan cancelled"
+        if deadline is not None and time.monotonic() > deadline:
+            return "Scan exceeded its time budget"
+        return None
+
+    return stop_reason
+
+
+@dataclass(frozen=True)
+class _Scan:
+    """What every partition of one scan shares, read back from the scan's record."""
+
+    tenant_id: str
+    scan_id: str
+    config: ScanConfig
+    scan_root: str
+    timestamp: str
+    label: str
+    compliance_enabled: bool
+    compliance_frameworks: tuple[str, ...]
+    local_path: str
+    max_depth: int
+    worker: str
+    lease_seconds: int
 
 
 def _unit_config(config: ScanConfig, spec: dict, scan_root: str) -> ScanConfig:
@@ -185,10 +301,300 @@ def _vanished_partition(timestamp: str, label: str) -> tuple[dict, list]:
     return header, []
 
 
+def start_partitioned_local_scan(
+    tenant_id: str,
+    config: ScanConfig,
+    *,
+    request: dict | None = None,
+    requested_by: str = "",
+    scan_label: str = "",
+    compliance_enabled: bool = False,
+    compliance_frameworks: Iterable[str] | None = None,
+    job=None,
+    max_files: int | None = None,
+    stop_reason: Callable[[], str | None] | None = None,
+) -> dict | None:
+    """Plan a local scan into partitions and record it; returns the scan's record.
+
+    Returns ``None`` when the target is not worth partitioning - it fits one
+    partition, or it is not a readable local folder - or when it holds the bundled
+    demo dataset, whose files never enter the estate and which is small by
+    definition. The caller then runs an ordinary scan.
+
+    Everything a restart needs to continue the scan is written before its first
+    partition runs: the plan in the ledger, and beside it the request - without
+    secrets - and the header every partition stamps. The record is written first, so
+    a process that dies in between leaves a scan the resume sweep can see and fail,
+    not partitions nothing points at. A scan started without a request is recorded
+    but cannot be resumed: nothing could rebuild its engine.
+    """
+    from backend.jobs import collection_heartbeat
+
+    stop_reason = stop_reason or _stop_check(job, _deadline())
+    budget = max_files or partition_max_files()
+    with collection_heartbeat(job) if job is not None else nullcontext():
+        plan = plan_bounded_partitions(config, max_files=budget, stop_check=stop_reason)
+    if plan is None or plan["sample_paths"]:
+        return None
+
+    scan_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    job_id = str(getattr(job, "id", "") or "")
+    header = {
+        # One timestamp for the whole scan: every partition stamps it on the rows it
+        # writes, and a single scan's rows all carry one.
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "local",
+        "scan_label": str(scan_label or "").strip()[:80],
+        "compliance_enabled": bool(compliance_enabled),
+        "compliance_frameworks": list(compliance_frameworks or []),
+        "local_path": config.local_path,
+        "max_depth": config.max_depth,
+        "scan_root": str(Path(config.local_path).expanduser().resolve()),
+        "max_files": budget,
+        "requested_by": str(requested_by or ""),
+    }
+    record = store.register_partitioned_scan(
+        tenant_id, scan_id, job_id=job_id, request=dict(request or {}), header=header,
+        resumable=request is not None,
+    )
+    store.create_scan_partitions(tenant_id, scan_id, job_id, plan["units"])
+    return record
+
+
+def continue_partitioned_scan(
+    tenant_id: str,
+    scan_id: str,
+    config: ScanConfig,
+    *,
+    job=None,
+    stop_reason: Callable[[], str | None] | None = None,
+    poll_seconds: float = 1.0,
+) -> dict:
+    """Run a recorded scan's remaining partitions and finalize it; returns the compact report.
+
+    The same call runs a new scan's partitions and continues one a stopped process
+    left behind: what is done stays done, a partition whose holder went quiet is
+    taken back once its lease has run out, and a partition that failed is tried again
+    up to ``DSPM_PARTITION_MAX_ATTEMPTS`` times. Each partition is leased to this call,
+    and the lease is renewed while the partition runs, so a live worker never loses
+    its partition to a sweep.
+
+    A cancellation, the time budget or a partition out of attempts stops the scan for
+    good: it is marked failed and :class:`ScanStopped` is raised. Any other error marks
+    it failed too, with the error's type. Only a process that dies leaves a scan
+    unfinished, for the resume sweep to find.
+    """
+    record = store.read_partitioned_scan(tenant_id, scan_id)
+    if record is None:
+        raise LookupError(f"partitioned scan {scan_id} is not recorded")
+    if record["status"] == "done":
+        existing = store.read_scan_report_compact(tenant_id, scan_id)
+        if existing is not None:
+            return existing
+    if record["status"] == "failed":
+        raise ScanStopped(record["error"] or f"scan {scan_id} failed")
+    key = (str(tenant_id), str(scan_id))
+    with _running_here_lock:
+        if key in _running_here:
+            raise RuntimeError(f"scan {scan_id} is already running in this process")
+        _running_here.add(key)
+    try:
+        header = record["header"]
+        scan = _Scan(
+            tenant_id=str(tenant_id),
+            scan_id=str(scan_id),
+            config=config,
+            scan_root=str(header.get("scan_root") or Path(config.local_path).expanduser().resolve()),
+            timestamp=str(header.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+            label=str(header.get("scan_label") or "").strip()[:80],
+            compliance_enabled=bool(header.get("compliance_enabled")),
+            compliance_frameworks=tuple(header.get("compliance_frameworks") or ()),
+            local_path=str(header.get("local_path") or config.local_path),
+            max_depth=int(header.get("max_depth", config.max_depth)),
+            worker=f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
+            lease_seconds=partition_lease_seconds(),
+        )
+        stop_reason = stop_reason or _stop_check(job, _deadline())
+        try:
+            _run_partitions(scan, job=job, stop_reason=stop_reason, poll_seconds=poll_seconds)
+            return _finalize_when_claimed(scan, job=job, stop_reason=stop_reason, poll_seconds=poll_seconds)
+        except Exception as exc:
+            with suppress(Exception):
+                store.mark_partitioned_scan(
+                    scan.tenant_id, scan.scan_id, "failed",
+                    error=str(exc) if isinstance(exc, ScanStopped) else type(exc).__name__,
+                )
+            raise
+    finally:
+        with _running_here_lock:
+            _running_here.discard(key)
+
+
+def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> None:
+    units = store.list_scan_partitions(scan.tenant_id, scan.scan_id)
+    if not units:
+        raise ScanStopped(f"scan {scan.scan_id} stopped before its plan was recorded")
+    total = len(units)
+    done = sum(1 for unit in units if unit["status"] == "done")
+    max_attempts = partition_max_attempts()
+    # A partition whose holder died is taken back once its lease has run out.
+    store.requeue_expired_partitions(tenant_id=scan.tenant_id)
+    while True:
+        reason = stop_reason()
+        if reason:
+            raise ScanStopped(reason)
+        store.touch_partitioned_scan(scan.tenant_id, scan.scan_id)
+        unit = store.claim_next_partition(
+            scan.tenant_id, scan.scan_id, worker_id=scan.worker, lease_seconds=scan.lease_seconds,
+        )
+        if unit is not None:
+            if job is not None:
+                job.message = f"Scanning partition {done + 1} of {total}"
+            if _run_unit(scan, unit, job=job, stop_reason=stop_reason):
+                done += 1
+                if job is not None:
+                    job.progress = max(job.progress, min(94, 8 + int(86 * done / total)))
+            continue
+        if store.requeue_failed_partitions(scan.tenant_id, scan.scan_id, max_attempts=max_attempts):
+            continue
+        units = store.list_scan_partitions(scan.tenant_id, scan.scan_id)
+        if all(unit["status"] == "done" for unit in units):
+            return
+        exhausted = [unit for unit in units if unit["status"] == "failed" and unit["attempt"] >= max_attempts]
+        if exhausted:
+            first = exhausted[0]
+            raise ScanStopped(
+                f"partition {first['partition_id']} failed {first['attempt']} times ({first['error'] or 'no error recorded'})"
+            )
+        # What is left runs under another worker's lease: take back any that ran out, or wait.
+        if not store.requeue_expired_partitions(tenant_id=scan.tenant_id):
+            time.sleep(poll_seconds)
+
+
+@contextmanager
+def _holding_lease(scan: _Scan, unit: dict):
+    """Keep a claimed partition's lease, and its scan's sign of life, fresh while the partition runs."""
+    stop = threading.Event()
+
+    def renew() -> None:
+        while not stop.wait(max(0.5, scan.lease_seconds / 3)):
+            try:
+                if not store.renew_partition_lease(
+                    scan.tenant_id, scan.scan_id, unit["partition_id"],
+                    attempt=unit["attempt"], worker_id=scan.worker, lease_seconds=scan.lease_seconds,
+                ):
+                    return
+                store.touch_partitioned_scan(scan.tenant_id, scan.scan_id)
+            except Exception:
+                continue
+
+    thread = threading.Thread(target=renew, name=f"partition-lease-{unit['partition_id']}", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
+def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
+    """Analyze, enrich and write one claimed partition; returns whether it was written.
+
+    Nothing about the partition is kept once it is written but its ledger row. A
+    partition that raises is marked failed under its attempt and the scan goes on; it
+    is tried again once nothing else is queued. A stop - cancellation, the time
+    budget - is not the partition's failure and stops the scan. A partition taken back
+    while it ran, because its lease ran out, is left to its new holder.
+    """
+    from backend.jobs import collection_heartbeat
+
+    try:
+        with _holding_lease(scan, unit):
+            if not Path(str(unit["spec"]["local_path"])).is_dir():
+                header, records = _vanished_partition(scan.timestamp, scan.label)
+            else:
+                with collection_heartbeat(job) if job is not None else nullcontext():
+                    report = DSPMDiscoveryEngine(_unit_config(scan.config, unit["spec"], scan.scan_root)).run().to_dict()
+                reason = stop_reason()
+                if reason:
+                    raise ScanStopped(reason)
+                records = report.get("files") or []
+                enrichment = ComplianceReportAccumulator(scan.compliance_enabled, list(scan.compliance_frameworks))
+                for record in records:
+                    enrichment.prepare(record)
+                header = {
+                    "timestamp": scan.timestamp,
+                    "source": report.get("source") or "local",
+                    "mode": report.get("mode") or "full",
+                    "summary": report.get("summary") or {},
+                    "scan_diagnostics": report.get("scan_diagnostics") or {},
+                }
+                if scan.label:
+                    header["scan_label"] = scan.label
+                report = None
+            store.persist_partition(
+                scan.tenant_id, scan.scan_id, unit["partition_id"], unit["attempt"], header, records, write_estate=True,
+            )
+        return True
+    except store.PartitionNotClaimed:
+        return False
+    except BaseException as exc:
+        with suppress(Exception):
+            store.fail_scan_partition(
+                scan.tenant_id, scan.scan_id, unit["partition_id"], type(exc).__name__, attempt=unit["attempt"],
+            )
+        if not isinstance(exc, Exception) or isinstance(exc, ScanStopped):
+            raise
+        reason = stop_reason()
+        if reason:
+            raise ScanStopped(reason) from exc
+        logger.warning(
+            "Partition %s of scan %s failed on attempt %s: %s",
+            unit["partition_id"], scan.scan_id, unit["attempt"], type(exc).__name__,
+        )
+        return False
+
+
+def _finalize_when_claimed(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> dict:
+    if job is not None:
+        job.message = "Finalizing report"
+        job.progress = max(job.progress, 95)
+    # Exactly one finalize runs. One left claimed by a process that died is taken back
+    # once it has been quiet for a lease; the finalize guard makes a take-back that
+    # raced a slow but live finalize return that finalize's report.
+    while not store.claim_scan_finalize(scan.tenant_id, scan.scan_id, stale_after_seconds=scan.lease_seconds):
+        current = store.read_partitioned_scan(scan.tenant_id, scan.scan_id) or {}
+        if current.get("status") == "done":
+            existing = store.read_scan_report_compact(scan.tenant_id, scan.scan_id)
+            if existing is None:
+                raise ScanStopped(f"scan {scan.scan_id} finished, but its report is gone")
+            return existing
+        if current.get("status") == "failed":
+            raise ScanStopped(current.get("error") or f"scan {scan.scan_id} failed")
+        reason = stop_reason()
+        if reason:
+            raise ScanStopped(reason)
+        time.sleep(poll_seconds)
+    report = finalize_scan(
+        scan.tenant_id, scan.scan_id,
+        timestamp=scan.timestamp,
+        source="local",
+        scan_label=scan.label,
+        compliance_enabled=scan.compliance_enabled,
+        compliance_frameworks=list(scan.compliance_frameworks),
+        write_estate=True,
+        diagnostics_overrides={"local_path": scan.local_path, "max_depth": scan.max_depth},
+    )
+    store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "done")
+    return report
+
+
 def run_partitioned_local_scan(
     tenant_id: str,
     config: ScanConfig,
     *,
+    request: dict | None = None,
+    requested_by: str = "",
     scan_label: str = "",
     compliance_enabled: bool = False,
     compliance_frameworks: Iterable[str] | None = None,
@@ -197,105 +603,26 @@ def run_partitioned_local_scan(
 ) -> dict | None:
     """Scan a local target one partition at a time; returns the compact report.
 
-    Returns ``None`` when the target is not worth partitioning - it fits one
-    partition, or it is not a readable local folder - or when it holds the bundled
-    demo dataset, whose files never enter the estate and which is small by
-    definition. The caller then runs an ordinary scan.
+    Returns ``None`` when the target is not worth partitioning (see
+    :func:`start_partitioned_local_scan`); the caller then runs an ordinary scan.
 
-    Each partition is analyzed by its own engine, enriched file by file, written,
-    and released before the next one starts; nothing about it is kept but its
-    ledger row. A partition that fails, or a cancellation, marks its unit failed and
-    stops the scan without finalizing it.
+    It is :func:`start_partitioned_local_scan` then :func:`continue_partitioned_scan`
+    under one time budget, which covers planning too - not each partition separately
+    (B2.2b review). ``request`` is the scan request as the API validated it: with it
+    the scan can be continued after a restart, without it it cannot.
     """
-    from backend.jobs import collection_heartbeat
-    from discovery.discovery_engine import SCAN_MAX_SECONDS
-
-    # The scan's time budget covers the whole partitioned scan, planning included -
-    # not each partition separately (B2.2b review).
-    deadline = time.monotonic() + SCAN_MAX_SECONDS if SCAN_MAX_SECONDS > 0 else None
-
-    def stop_reason() -> str | None:
-        if job is not None and job.cancel_requested:
-            return "Scan cancelled"
-        if deadline is not None and time.monotonic() > deadline:
-            return "Scan exceeded its time budget"
-        return None
-
-    with collection_heartbeat(job) if job is not None else nullcontext():
-        plan = plan_bounded_partitions(
-            config, max_files=max_files or partition_max_files(), stop_check=stop_reason,
-        )
-    if plan is None or plan["sample_paths"]:
-        return None
-    scan_root = str(Path(config.local_path).expanduser().resolve())
-
-    scan_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-    # One timestamp for the whole scan: every partition stamps it on the rows it
-    # writes, and a single scan's rows all carry one.
-    timestamp = datetime.now(timezone.utc).isoformat()
-    label = str(scan_label or "").strip()[:80]
-    units = plan["units"]
-    store.create_scan_partitions(tenant_id, scan_id, str(getattr(job, "id", "") or ""), units)
-    done = 0
-    while True:
-        reason = stop_reason()
-        if reason:
-            raise RuntimeError(reason)
-        unit = store.claim_next_partition(tenant_id, scan_id)
-        if unit is None:
-            break
-        if job is not None:
-            job.message = f"Scanning partition {done + 1} of {len(units)}"
-        try:
-            if not Path(str(unit["spec"]["local_path"])).is_dir():
-                header, records = _vanished_partition(timestamp, label)
-                store.persist_partition(
-                    tenant_id, scan_id, unit["partition_id"], unit["attempt"], header, records, write_estate=True,
-                )
-                done += 1
-                continue
-            with collection_heartbeat(job) if job is not None else nullcontext():
-                report = DSPMDiscoveryEngine(_unit_config(config, unit["spec"], scan_root)).run().to_dict()
-            if job is not None and job.cancel_requested:
-                raise RuntimeError("Scan cancelled")
-            records = report.get("files") or []
-            enrichment = ComplianceReportAccumulator(compliance_enabled, compliance_frameworks)
-            for record in records:
-                enrichment.prepare(record)
-            header = {
-                "timestamp": timestamp,
-                "source": report.get("source") or "local",
-                "mode": report.get("mode") or "full",
-                "summary": report.get("summary") or {},
-                "scan_diagnostics": report.get("scan_diagnostics") or {},
-            }
-            if label:
-                header["scan_label"] = label
-            store.persist_partition(
-                tenant_id, scan_id, unit["partition_id"], unit["attempt"], header, records, write_estate=True,
-            )
-        except BaseException as exc:
-            try:
-                store.fail_scan_partition(
-                    tenant_id, scan_id, unit["partition_id"], type(exc).__name__, attempt=unit["attempt"],
-                )
-            except Exception:
-                pass
-            raise
-        report = records = header = None
-        done += 1
-        if job is not None:
-            job.progress = max(job.progress, min(94, 8 + int(86 * done / len(units))))
-    if job is not None:
-        job.message = "Finalizing report"
-        job.progress = max(job.progress, 95)
-    return finalize_scan(
-        tenant_id, scan_id,
-        timestamp=timestamp,
-        source="local",
-        scan_label=label,
+    stop_reason = _stop_check(job, _deadline())
+    record = start_partitioned_local_scan(
+        tenant_id, config,
+        request=request,
+        requested_by=requested_by,
+        scan_label=scan_label,
         compliance_enabled=compliance_enabled,
         compliance_frameworks=compliance_frameworks,
-        write_estate=True,
-        diagnostics_overrides={"local_path": config.local_path, "max_depth": config.max_depth},
+        job=job,
+        max_files=max_files,
+        stop_reason=stop_reason,
     )
+    if record is None:
+        return None
+    return continue_partitioned_scan(tenant_id, record["scan_id"], config, job=job, stop_reason=stop_reason)

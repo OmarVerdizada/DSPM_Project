@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from backend.alerts import evaluate_alerts
-from backend.partitioned_scan import partitioned_scans_enabled, run_partitioned_local_scan
+from backend.partitioned_scan import continue_partitioned_scan, partitioned_scans_enabled, run_partitioned_local_scan
 from backend.reporting.router import router as reporting_router
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
@@ -222,6 +222,12 @@ async def app_lifespan(_: FastAPI):
         prune_job_records(30 * 24 * 3600)
     except Exception:
         pass
+    # B2.4: a partitioned scan a stopped process left unfinished is continued, once it
+    # has been quiet for a partition lease, under the job id it had.
+    with suppress(Exception):
+        from backend.scan_resumer import start_scan_resumer
+
+        start_scan_resumer(_resume_partitioned_scan)
     with suppress(Exception):
         from backend.search import start_search_reconciler
 
@@ -258,6 +264,10 @@ async def app_lifespan(_: FastAPI):
             from backend.store import DB_PATH as _db_path
 
             _db.optimize_sqlite(_db_path)
+        with suppress(Exception):
+            from backend.scan_resumer import stop_scan_resumer
+
+            stop_scan_resumer()
         with suppress(Exception):
             from backend.search import stop_search_reconciler
 
@@ -2813,6 +2823,10 @@ def _run_partitioned_scan_payload(config: ScanConfig, payload: ScanRequest, prin
     data = run_partitioned_local_scan(
         principal.tenant_id,
         config,
+        # The validated request is what lets the scan be continued after a restart;
+        # the store keeps it without secrets.
+        request=payload.model_dump(mode="json") if isinstance(payload, BaseModel) else None,
+        requested_by=str(getattr(principal, "subject", "") or ""),
         scan_label=str(getattr(payload, "scan_label", "") or ""),
         compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
         compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
@@ -2826,6 +2840,57 @@ def _run_partitioned_scan_payload(config: ScanConfig, payload: ScanRequest, prin
         data = DSPMDiscoveryEngine(config).run().to_dict()
         _persist_compliance_scan(data, payload, principal)
         return data
+    return _finish_partitioned_scan_payload(data, payload, principal)
+
+
+def _continue_partitioned_scan_payload(scan_id: str, config: ScanConfig, payload: ScanRequest,
+                                       principal: Principal, job) -> dict:
+    """The job that runs what is left of a resumed partitioned scan (B2.4)."""
+    job.progress = max(job.progress, 7)
+    job.message = "Resuming scan"
+    config.cancel_check = lambda: job.cancel_requested
+    data = continue_partitioned_scan(principal.tenant_id, scan_id, config, job=job)
+    return _finish_partitioned_scan_payload(data, payload, principal)
+
+
+def _resume_partitioned_scan(record: dict) -> None:
+    """Continue a partitioned scan a stopped process left unfinished (B2.4).
+
+    The engine is rebuilt from the request the scan was recorded with, through the
+    same validation and credential resolution a new scan gets, and the scan continues
+    under the job id it had, so a console still polling that job sees it running
+    again. Only local scans are partitioned; a recorded remote one is refused.
+    """
+    from backend.scan_resumer import ResumeLater
+    from backend.store import bind_partitioned_scan_job
+
+    tenant_id = record["tenant_id"]
+    scan_id = record["scan_id"]
+    payload = ScanRequest.model_validate(record["request"])
+    config = _to_config(payload, tenant_id)
+    if config.server:
+        raise ValueError("only local partitioned scans can be resumed")
+    principal = Principal(
+        subject=str((record.get("header") or {}).get("requested_by") or "system:scan-resumer"),
+        role="analyst",
+        tenant_id=tenant_id,
+        auth_type="system",
+    )
+    try:
+        job = create_job(
+            tenant_id,
+            lambda job: _continue_partitioned_scan_payload(scan_id, config, payload, principal, job),
+            job_id=record.get("job_id") or None,
+        )
+    except (RuntimeError, ValueError) as exc:
+        # A full queue, or the old job still winding down: a later sweep tries again.
+        raise ResumeLater(str(exc)) from exc
+    bind_partitioned_scan_job(tenant_id, scan_id, job.id)
+    audit(tenant_id, "system:scan-resumer", "scan.resumed", {"scan_id": scan_id, "job_id": job.id})
+
+
+def _finish_partitioned_scan_payload(data: dict, payload, principal: Principal) -> dict:
+    """What a partitioned scan does once its report is written: alerts, and saying what it could not do."""
     warnings: list[dict] = []
     try:
         data["alerts"] = evaluate_alerts(principal.tenant_id, data)

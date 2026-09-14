@@ -147,7 +147,12 @@ def active_job_count(tenant_id: str | None = None) -> int:
         )
 
 
-def create_job(tenant_id: str, runner: Callable[[ScanJob], dict]) -> ScanJob:
+def create_job(tenant_id: str, runner: Callable[[ScanJob], dict], *, job_id: str | None = None) -> ScanJob:
+    """Queue ``runner`` as a job; returns it.
+
+    ``job_id`` reuses an id - a resumed scan continues under the job its console is
+    still polling (B2.4). An id whose job is still active here is refused.
+    """
     cleanup_jobs()
     with _lock:
         active_total = sum(1 for job in _jobs.values() if job.status in {"queued", "running"})
@@ -156,7 +161,9 @@ def create_job(tenant_id: str, runner: Callable[[ScanJob], dict]) -> ScanJob:
             raise RuntimeError("Async scan queue is full")
         if active_tenant >= MAX_JOBS_PER_TENANT:
             raise RuntimeError("Too many active scans for this tenant")
-        job = ScanJob(id=str(uuid.uuid4()), tenant_id=tenant_id)
+        if job_id and job_id in _jobs and _jobs[job_id].status in {"queued", "running"}:
+            raise ValueError(f"job {job_id} is still active")
+        job = ScanJob(id=str(job_id or uuid.uuid4()), tenant_id=tenant_id)
         _jobs[job.id] = job
     _persist(job)
     executor.submit(_run_custom_job, job, runner)
