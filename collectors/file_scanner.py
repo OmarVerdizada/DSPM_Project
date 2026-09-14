@@ -585,19 +585,32 @@ def scan_directory(
     record_callback: Callable[[dict], None] | None = None,
     excluded_paths: Iterable[str | Path] | None = None,
     include_names: Iterable[str] | None = None,
+    containment_root: str | Path | None = None,
+    resolve_root: bool = True,
 ) -> list[dict]:
     """Walk a folder - or read one file - into file records.
 
-    ``include_names`` restricts the walk to those names directly inside ``path``,
-    visited in the order the folder lists them, and descends into nothing. It is
-    how a partitioned scan reads one run of a large folder's loose files and gets
-    them in exactly the order a whole walk would have.
+    A partitioned scan reads one run of a folder's entries at a time (B2.2b), and has
+    to get exactly the records, in exactly the order, a whole walk would:
+
+    - ``include_names`` walks only those entries of ``path``, in the order given - the
+      order the folder listed them when the scan was planned - and descends into the
+      folders among them as a whole walk would. The folder is not listed again, so a
+      huge flat folder read in many runs is not listed once per run.
+    - ``containment_root`` is the root of the whole scan. An entry is kept only if its
+      real path lies under it - the same test a whole walk applies - rather than under
+      this run's own folder, which a junction to a sibling folder would fail.
+    - ``resolve_root=False`` keeps ``path`` as the walk spelled it, so a run inside a
+      junction reports the paths a whole walk reports.
     """
-    root_path = Path(path).expanduser().resolve()
-    only_names = frozenset(include_names) if include_names is not None else None
+    root_path = Path(path).expanduser()
+    if resolve_root:
+        root_path = root_path.resolve()
+    named_entries = list(include_names) if include_names is not None else None
     if not root_path.exists():
         raise FileNotFoundError(f"Scan path does not exist: {root_path}")
 
+    containment = Path(containment_root).expanduser().resolve() if containment_root is not None else root_path
     extension_filter = normalize_extension_filter(allowed_extensions)
     excluded_roots: list[Path] = []
     for excluded in excluded_paths or []:
@@ -669,7 +682,7 @@ def scan_directory(
         if _excluded(item):
             return
         try:
-            if item.is_symlink() or not _resolved_entry(item).is_relative_to(root_path):
+            if item.is_symlink() or not _resolved_entry(item).is_relative_to(containment):
                 return
         except OSError:
             return
@@ -1058,7 +1071,10 @@ def scan_directory(
                 diagnostics["skipped_dirs"] = int(diagnostics.get("skipped_dirs") or 0) + 1
             return
         try:
-            entries = list(folder.iterdir())
+            if depth == 0 and named_entries is not None:
+                entries = [folder / name for name in named_entries]
+            else:
+                entries = list(folder.iterdir())
         except OSError as exc:
             if diagnostics is not None:
                 unreadable = diagnostics.setdefault("unreadable_dirs", [])
@@ -1067,10 +1083,8 @@ def scan_directory(
             return
 
         for item in entries:
-            if only_names is not None and item.name not in only_names:
-                continue
             try:
-                if item.is_symlink() or not _resolved_entry(item).is_relative_to(root_path):
+                if item.is_symlink() or not _resolved_entry(item).is_relative_to(containment):
                     continue
                 is_dir = item.is_dir()
                 is_file = item.is_file()
@@ -1078,8 +1092,6 @@ def scan_directory(
                 continue
 
             if is_dir:
-                if only_names is not None:
-                    continue
                 if is_skipped_scan_path(item):
                     if diagnostics is not None:
                         diagnostics["skipped_dirs"] = int(diagnostics.get("skipped_dirs") or 0) + 1

@@ -8,7 +8,9 @@ sections and estate - while no partition ever holds more than its share.
 
 The order is the hard part. A scan's file order is its walk's, files and subfolders
 interleaved as each folder lists them, and several report sections keep the first 25
-items or break ties by arrival.
+items or break ties by arrival. The other hard part is what a walk observes without
+producing a record - an unreadable folder, a skipped one - because a plan that drops
+one makes a scan look complete when it was not, and finalize then prunes.
 """
 
 from __future__ import annotations
@@ -16,9 +18,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
-import uuid
 from pathlib import Path
 from unittest import mock
 from unittest.mock import MagicMock, patch
@@ -26,6 +29,7 @@ from unittest.mock import MagicMock, patch
 from backend import partitioned_scan, store
 from backend.compliance_service import enrich_report_with_compliance, load_compliance_profiles
 from collectors import file_scanner
+from discovery import discovery_engine
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from discovery.parity import accuracy_projection
 from discovery.partition import plan_bounded_partitions
@@ -64,6 +68,7 @@ def build_estate(root: Path) -> int:
         "g_root.txt",
         "h_mixed/h1.txt", "h_mixed/sub_a/s1.txt", "h_mixed/h2.txt", "h_mixed/sub_b/s2.txt", "h_mixed/sub_b/s3.txt",
         "h_mixed/sub_b/s4.txt", "h_mixed/sub_b/s5.txt", "h_mixed/h3.txt",
+        "i_only_folders/inner/node_modules/hidden_by_rule.txt",
         ".hidden_dir/secret.txt",
         "node_modules/package.txt",
     ]
@@ -115,6 +120,27 @@ class _LocalTest(unittest.TestCase):
         settings.update(overrides)
         return ScanConfig(**settings)
 
+    def _root(self, config: ScanConfig) -> str:
+        return str(Path(config.local_path).resolve())
+
+    def _single_walk(self, config: ScanConfig) -> tuple[list[str], dict]:
+        engine = DSPMDiscoveryEngine(config)
+        return [r["path"] for r in engine._collect_records()], engine.last_scan_diagnostics
+
+    def _pieced_walk(self, config: ScanConfig, plan: dict, *, limit: int | None = None) -> tuple[list[str], int, list]:
+        paths: list[str] = []
+        skipped = 0
+        unreadable: list = []
+        for unit in plan["units"]:
+            engine = DSPMDiscoveryEngine(partitioned_scan._unit_config(config, unit, self._root(config)))
+            records = engine._collect_records()
+            if limit is not None:
+                self.assertLessEqual(len(records), limit, f"a unit holds more than the budget: {unit}")
+            paths.extend(r["path"] for r in records)
+            skipped += int(engine.last_scan_diagnostics.get("skipped_dirs") or 0)
+            unreadable.extend(engine.last_scan_diagnostics.get("unreadable_dirs") or [])
+        return paths, skipped, unreadable
+
     def _rows(self) -> dict:
         """The estate, less what differs between any two runs of the same scan.
 
@@ -160,37 +186,120 @@ class _LocalTest(unittest.TestCase):
 
 class ThePlanIsTheWalkCutIntoPiecesTest(_LocalTest):
 
-    def test_units_in_order_collect_exactly_the_single_walk(self) -> None:
-        single = [r["path"] for r in DSPMDiscoveryEngine(self._config())._collect_records()]
+    def test_runs_in_order_collect_exactly_the_single_walk(self) -> None:
+        config = self._config()
+        single, diagnostics = self._single_walk(config)
         self.assertGreater(len(single), 15)
-        plan = plan_bounded_partitions(self._config(), max_files=3)
+        plan = plan_bounded_partitions(config, max_files=3)
         self.assertIsNotNone(plan)
-        kinds = {unit["kind"] for unit in plan["units"]}
-        self.assertEqual(kinds, {"files", "subtree"}, "the estate should need both kinds of unit")
-
-        pieced: list[str] = []
-        for unit in plan["units"]:
-            records = DSPMDiscoveryEngine(partitioned_scan._unit_config(self._config(), unit))._collect_records()
-            self.assertLessEqual(len(records), 3, f"a unit holds more than the budget: {unit}")
-            self.assertGreater(len(records), 0, f"a unit with nothing to scan: {unit}")
-            pieced.extend(r["path"] for r in records)
+        self.assertEqual({unit["kind"] for unit in plan["units"]}, {"run"})
+        pieced, skipped, _unreadable = self._pieced_walk(config, plan, limit=3)
         self.assertEqual(pieced, single, "the partitions do not reproduce the walk's order")
         self.assertEqual(plan["files"], len(single))
-        self.assertEqual(plan["skipped_dirs"], 2, "the hidden folder and node_modules are skipped at the root")
+        self.assertEqual(skipped, diagnostics.get("skipped_dirs"),
+                         "a skipped folder was dropped from the plan, so no partition reports it")
 
     def test_a_target_that_fits_one_partition_is_not_partitioned(self) -> None:
         self.assertIsNone(plan_bounded_partitions(self._config(), max_files=10_000))
 
-    def test_a_depth_limit_is_honoured_by_every_unit(self) -> None:
-        for depth in (0, 1, 2):
-            config = self._config(max_depth=depth)
-            single = [r["path"] for r in DSPMDiscoveryEngine(config)._collect_records()]
-            plan = plan_bounded_partitions(config, max_files=2)
-            if plan is None:
-                continue
-            pieced = [r["path"] for unit in plan["units"]
-                      for r in DSPMDiscoveryEngine(partitioned_scan._unit_config(config, unit))._collect_records()]
-            self.assertEqual(pieced, single, f"max_depth={depth}")
+    def test_every_depth_limit_is_honoured(self) -> None:
+        for depth in (0, 1, 2, 3, 4):
+            with self.subTest(max_depth=depth):
+                config = self._config(max_depth=depth)
+                single, diagnostics = self._single_walk(config)
+                plan = plan_bounded_partitions(config, max_files=2)
+                if plan is None:
+                    continue
+                pieced, skipped, _ = self._pieced_walk(config, plan, limit=2)
+                self.assertEqual(pieced, single)
+                self.assertEqual(skipped, diagnostics.get("skipped_dirs"))
+
+
+class APlanNeverLosesWhatAWalkObservesTest(_LocalTest):
+
+    def test_an_unreadable_folder_is_still_walked_and_the_scan_is_not_complete(self) -> None:
+        """A folder holding only an unreadable subfolder used to vanish from the plan.
+
+        The partitioned scan then reported no unreadable folder, called itself complete,
+        and finalize pruned whatever had been under it on the previous scan.
+        """
+        denied = self.estate / "j_parent" / "denied"
+        _write(denied / "payroll.txt", 3)
+        real_iterdir = Path.iterdir
+
+        def refusing(path):
+            if path.name == "denied":
+                raise PermissionError(13, "Access is denied", str(path))
+            return real_iterdir(path)
+
+        with patch.object(Path, "iterdir", refusing):
+            config = self._config()
+            single, diagnostics = self._single_walk(config)
+            plan = plan_bounded_partitions(config, max_files=3)
+            pieced, skipped, unreadable = self._pieced_walk(config, plan, limit=3)
+        self.assertEqual(pieced, single)
+        self.assertTrue(diagnostics.get("unreadable_dirs"))
+        self.assertEqual(len(unreadable), len(diagnostics["unreadable_dirs"]),
+                         "the unreadable folder was dropped from the plan")
+
+        self._use_database("unreadable-single")
+        with patch.object(Path, "iterdir", refusing):
+            one = DSPMDiscoveryEngine(self._config("unreadable-single")).run().to_dict()
+        self._use_database("unreadable-partitioned")
+        with patch.object(Path, "iterdir", refusing):
+            compact = partitioned_scan.run_partitioned_local_scan(
+                TENANT, self._config("unreadable-partitioned"), max_files=3)
+        stored = store.read_scan_report(TENANT, compact["scan_id"])
+        self.assertFalse(one["scan_diagnostics"]["incremental"]["complete"])
+        self.assertFalse(stored["scan_diagnostics"]["incremental"]["complete"],
+                         "a partitioned scan that could not read a folder called itself complete")
+
+    @unittest.skipUnless(os.name == "nt", "junctions are a Windows feature")
+    def test_a_junction_to_a_sibling_folder_is_walked_as_a_single_scan_walks_it(self) -> None:
+        link = self.estate / "h_mixed" / "k_link"
+        created = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(self.estate / "b_dept")],
+                                 capture_output=True, text=True)
+        if created.returncode != 0:
+            self.skipTest(f"could not create a junction: {created.stderr.strip()}")
+        try:
+            config = self._config()
+            single, diagnostics = self._single_walk(config)
+            self.assertTrue(any("k_link" in path for path in single), "the single walk did not follow the junction")
+            plan = plan_bounded_partitions(config, max_files=3)
+            pieced, skipped, _ = self._pieced_walk(config, plan)
+            self.assertEqual(pieced, single, "files reached through a junction were lost or reordered")
+            self.assertEqual(skipped, diagnostics.get("skipped_dirs"))
+        finally:
+            os.rmdir(link)
+
+    def test_a_wide_tree_of_small_folders_packs_into_few_units(self) -> None:
+        wide = self.base / "wide"
+        for index in range(60):
+            _write(wide / f"folder{index:02d}" / "only.txt", index)
+        config = self._config(local_path=str(wide))
+        single, _ = self._single_walk(config)
+        plan = plan_bounded_partitions(config, max_files=10)
+        self.assertIsNotNone(plan)
+        self.assertLessEqual(len(plan["units"]), 7, "sixty one-file folders were not packed")
+        pieced, _, _ = self._pieced_walk(config, plan, limit=10)
+        self.assertEqual(pieced, single)
+
+    def test_a_flat_folder_is_listed_once_not_once_per_run(self) -> None:
+        self._use_database("listing")
+        flat = self.estate / "d_flat"
+        real_iterdir = Path.iterdir
+        listed = {"n": 0}
+
+        def counting(path):
+            if path.name == "d_flat":
+                listed["n"] += 1
+            return real_iterdir(path)
+
+        with patch.object(Path, "iterdir", counting):
+            compact = partitioned_scan.run_partitioned_local_scan(TENANT, self._config("listing"), max_files=3)
+        self.assertIsNotNone(compact)
+        self.assertTrue(flat.is_dir())
+        self.assertEqual(listed["n"], 1, "each run of the flat folder listed the whole folder again")
 
 
 class APartitionedScanReportsWhatOneScanReportsTest(_LocalTest):
@@ -236,7 +345,7 @@ class APartitionedScanReportsWhatOneScanReportsTest(_LocalTest):
         for key in ("compliance_summary", "pci_scope_summary", "gdpr_report", "nist_sp800_60_enterprise_report"):
             self.assertIn(key, single)
             self.assertEqual(partitioned[key], single[key], f"{key} differs")
-        for key in ("records", "skipped_dirs", "files_discovered"):
+        for key in ("records", "skipped_dirs", "files_discovered", "unreadable_dirs"):
             self.assertEqual(partitioned["scan_diagnostics"].get(key), single["scan_diagnostics"].get(key), key)
         self.assertEqual(partitioned["scan_diagnostics"]["local_path"], single["scan_diagnostics"]["local_path"])
         single_incremental = single["scan_diagnostics"]["incremental"]
@@ -268,6 +377,21 @@ class APartitionedScanReportsWhatOneScanReportsTest(_LocalTest):
             baselines = conn.execute("SELECT COUNT(*) FROM scan_object_baselines WHERE tenant_id = ?", (TENANT,)).fetchone()[0]
         self.assertEqual(baselines, incremental["total_objects"])
 
+    def test_a_folder_that_disappears_after_planning_does_not_stop_the_scan(self) -> None:
+        self._use_database("vanish")
+        real_plan = partitioned_scan.plan_bounded_partitions
+
+        def plan_then_delete(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            shutil.rmtree(self.estate / "d_flat")
+            return plan
+
+        with patch.object(partitioned_scan, "plan_bounded_partitions", side_effect=plan_then_delete):
+            compact = partitioned_scan.run_partitioned_local_scan(TENANT, self._config("vanish"), max_files=3)
+        stored = store.read_scan_report(TENANT, compact["scan_id"])
+        after, _ = self._single_walk(self._config("vanish"))
+        self.assertEqual([f["path"] for f in stored["files"]], after)
+
 
 class WhenNotToPartitionTest(_LocalTest):
 
@@ -289,9 +413,9 @@ class WhenNotToPartitionTest(_LocalTest):
             self.assertTrue(partitioned_scan.partitioned_scans_enabled())
 
 
-class ACancelledScanStopsTest(_LocalTest):
+class StoppingTest(_LocalTest):
 
-    def test_it_stops_marks_its_unit_failed_and_writes_no_report(self) -> None:
+    def test_a_cancelled_scan_stops_marks_its_unit_failed_and_writes_no_report(self) -> None:
         self._use_database("cancel")
         job = MagicMock(id="job-cancel", cancel_requested=False, progress=0, message="")
         real_persist = store.persist_partition
@@ -314,6 +438,14 @@ class ACancelledScanStopsTest(_LocalTest):
         self.assertEqual(summary["done"], 1)
         self.assertEqual(summary["running"], 0, "the scan left a unit claimed")
 
+    def test_the_time_budget_covers_the_whole_scan_and_planning_too(self) -> None:
+        self._use_database("deadline")
+        with patch.object(discovery_engine, "SCAN_MAX_SECONDS", 1e-9):
+            with self.assertRaisesRegex(RuntimeError, "time budget"):
+                partitioned_scan.run_partitioned_local_scan(TENANT, self._config("deadline"), max_files=3)
+        with store._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM scan_partitions WHERE tenant_id = ?", (TENANT,)).fetchone()[0], 0)
+
 
 class TheApiRunsItTest(_LocalTest):
 
@@ -321,13 +453,15 @@ class TheApiRunsItTest(_LocalTest):
         from backend import app as app_module
 
         self._use_database("api")
-        payload = MagicMock(scan_label="api-scan", compliance_enabled=True, compliance_frameworks=["gdpr", "pci_dss"])
+        payload = MagicMock(scan_label="api-scan", compliance_enabled=True, compliance_frameworks=["gdpr", "pci_dss"],
+                            save_report=False)
         principal = MagicMock(tenant_id=TENANT, subject="tester")
         with patch.object(partitioned_scan, "partition_max_files", return_value=3):
             data = app_module._run_partitioned_scan_payload(self._config("api"), payload, principal)
         self.assertTrue(data["files_omitted"])
         self.assertEqual(data["scan_label"], "api-scan")
         self.assertIn("alerts", data)
+        self.assertNotIn("scan_warnings", data)
         stored = store.read_scan_report(TENANT, data["scan_id"])
         self.assertEqual(len(stored["files"]), data["file_count"])
         self.assertTrue(stored["scan_diagnostics"]["partitioned"]["enabled"])

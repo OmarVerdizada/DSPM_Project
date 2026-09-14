@@ -14,9 +14,11 @@ report body is streamed from the partitions' records in plan order.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Iterable
 
 from backend import store
@@ -151,20 +153,36 @@ def partition_max_files() -> int:
         return 2000
 
 
-def _unit_config(config: ScanConfig, spec: dict) -> ScanConfig:
-    """One partition's engine: the scan's policy, scope and reuse, over one unit.
+def _unit_config(config: ScanConfig, spec: dict, scan_root: str) -> ScanConfig:
+    """One partition's engine: the scan's policy, scope and reuse, over one run.
 
     Incremental reuse, the persistent cache and the baseline probe carry over
     unchanged - every partition probes and writes under the scan's own scope, and
-    finalize prunes that scope once - so a partitioned re-scan reuses exactly what
-    a single one would. Progress is the runner's to report, per partition.
+    finalize prunes that scope once - so a partitioned re-scan reuses exactly what a
+    single one would. Progress is the runner's to report, per partition.
     """
-    common = {"progress_callback": None}
-    if spec.get("kind") == "files":
-        return replace(config, local_path=str(spec["local_path"]), max_depth=0,
-                       local_file_names=tuple(spec.get("names") or ()), **common)
-    return replace(config, local_path=str(spec["local_path"]), max_depth=int(spec["max_depth"]),
-                   local_file_names=None, **common)
+    return replace(
+        config,
+        local_path=str(spec["local_path"]),
+        max_depth=int(spec["max_depth"]),
+        local_entry_names=tuple(spec.get("names") or ()),
+        scan_root=scan_root,
+        progress_callback=None,
+    )
+
+
+def _vanished_partition(timestamp: str, label: str) -> tuple[dict, list]:
+    """A run whose folder is gone by the time it is scanned holds nothing - which is
+    what a whole walk makes of a folder that disappears after its parent was listed."""
+    from discovery.discovery_engine import ScanSummary
+
+    header = {
+        "timestamp": timestamp, "source": "local", "mode": "full",
+        "summary": ScanSummary(0, 0, 0, 0, 0, 0).to_dict(), "scan_diagnostics": {},
+    }
+    if label:
+        header["scan_label"] = label
+    return header, []
 
 
 def run_partitioned_local_scan(
@@ -189,10 +207,27 @@ def run_partitioned_local_scan(
     ledger row. A partition that fails, or a cancellation, marks its unit failed and
     stops the scan without finalizing it.
     """
-    plan = plan_bounded_partitions(config, max_files=max_files or partition_max_files())
+    from backend.jobs import collection_heartbeat
+    from discovery.discovery_engine import SCAN_MAX_SECONDS
+
+    # The scan's time budget covers the whole partitioned scan, planning included -
+    # not each partition separately (B2.2b review).
+    deadline = time.monotonic() + SCAN_MAX_SECONDS if SCAN_MAX_SECONDS > 0 else None
+
+    def stop_reason() -> str | None:
+        if job is not None and job.cancel_requested:
+            return "Scan cancelled"
+        if deadline is not None and time.monotonic() > deadline:
+            return "Scan exceeded its time budget"
+        return None
+
+    with collection_heartbeat(job) if job is not None else nullcontext():
+        plan = plan_bounded_partitions(
+            config, max_files=max_files or partition_max_files(), stop_check=stop_reason,
+        )
     if plan is None or plan["sample_paths"]:
         return None
-    from backend.jobs import collection_heartbeat
+    scan_root = str(Path(config.local_path).expanduser().resolve())
 
     scan_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     # One timestamp for the whole scan: every partition stamps it on the rows it
@@ -203,16 +238,24 @@ def run_partitioned_local_scan(
     store.create_scan_partitions(tenant_id, scan_id, str(getattr(job, "id", "") or ""), units)
     done = 0
     while True:
-        if job is not None and job.cancel_requested:
-            raise RuntimeError("Scan cancelled")
+        reason = stop_reason()
+        if reason:
+            raise RuntimeError(reason)
         unit = store.claim_next_partition(tenant_id, scan_id)
         if unit is None:
             break
         if job is not None:
             job.message = f"Scanning partition {done + 1} of {len(units)}"
         try:
+            if not Path(str(unit["spec"]["local_path"])).is_dir():
+                header, records = _vanished_partition(timestamp, label)
+                store.persist_partition(
+                    tenant_id, scan_id, unit["partition_id"], unit["attempt"], header, records, write_estate=True,
+                )
+                done += 1
+                continue
             with collection_heartbeat(job) if job is not None else nullcontext():
-                report = DSPMDiscoveryEngine(_unit_config(config, unit["spec"])).run().to_dict()
+                report = DSPMDiscoveryEngine(_unit_config(config, unit["spec"], scan_root)).run().to_dict()
             if job is not None and job.cancel_requested:
                 raise RuntimeError("Scan cancelled")
             records = report.get("files") or []
@@ -255,5 +298,4 @@ def run_partitioned_local_scan(
         compliance_frameworks=compliance_frameworks,
         write_estate=True,
         diagnostics_overrides={"local_path": config.local_path, "max_depth": config.max_depth},
-        diagnostics_increments={"skipped_dirs": plan["skipped_dirs"]},
     )

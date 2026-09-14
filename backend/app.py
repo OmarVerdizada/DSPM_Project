@@ -2826,11 +2826,23 @@ def _run_partitioned_scan_payload(config: ScanConfig, payload: ScanRequest, prin
         data = DSPMDiscoveryEngine(config).run().to_dict()
         _persist_compliance_scan(data, payload, principal)
         return data
+    warnings: list[dict] = []
     try:
         data["alerts"] = evaluate_alerts(principal.tenant_id, data)
     except Exception as exc:
         data["alerts"] = []
-        data["scan_warnings"] = [{"stage": "alerts", "error": type(exc).__name__}]
+        warnings.append({"stage": "alerts", "error": type(exc).__name__})
+    if getattr(payload, "save_report", False) and PLAINTEXT_REPORT_EXPORT:
+        # A plaintext export needs every file in one document, which a partitioned
+        # scan never builds. Said out loud rather than skipped silently.
+        warnings.append({"stage": "report_export", "error": "NotAvailableForPartitionedScan"})
+    if warnings:
+        data["scan_warnings"] = warnings
+        try:
+            audit(principal.tenant_id, principal.subject, "scan.secondary_operations_degraded",
+                  {"scan_id": data.get("scan_id"), "warnings": warnings})
+        except Exception:
+            pass
     return data
 
 

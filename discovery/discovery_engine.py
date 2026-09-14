@@ -82,9 +82,10 @@ class ScanConfig:
     incremental_enabled: bool = True
     incremental_scope: str = ""
     baseline_probe: Callable[[str, int, str, str], dict | None] | None = None
-    # A partition that is a run of one folder's loose files names them here; the
-    # collector reads only those, in the folder's own order (B2.2b).
-    local_file_names: tuple[str, ...] | None = None
+    # A partition is a run of one folder's entries (B2.2b): the collector walks just
+    # these names, in this order, and keeps what lies under the whole scan's root.
+    local_entry_names: tuple[str, ...] | None = None
+    scan_root: str | None = None
 
 
 @dataclass(slots=True)
@@ -1281,7 +1282,9 @@ class DSPMDiscoveryEngine:
                 progress_callback=self._collection_progress,
                 record_callback=record_callback,
                 excluded_paths=[self.config.cache_dir] if self.config.persistent_cache_enabled and self.config.cache_dir else [],
-                include_names=self.config.local_file_names,
+                include_names=self.config.local_entry_names,
+                containment_root=self.config.scan_root,
+                resolve_root=not self.config.scan_root,
             )
             diagnostics = {
                 "mode": "local",
