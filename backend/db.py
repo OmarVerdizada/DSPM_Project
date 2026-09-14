@@ -177,6 +177,7 @@ _PK: dict[str, tuple[str, ...]] = {
     "scan_object_baselines": ("tenant_id", "scope_key", "object_key"),
     "findings": ("tenant_id", "id"),
     "scan_jobs": ("id",),
+    "scan_partitions": ("tenant_id", "scan_id", "partition_id"),
     "secrets": ("tenant_id", "secret_id"),
     "revoked_tokens": ("jti",),
     "tenants": ("tenant_id",),

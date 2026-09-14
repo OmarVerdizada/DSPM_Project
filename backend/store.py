@@ -500,6 +500,52 @@ def repair_tenant_rls_predicate(conn) -> None:
     add_tenant_rls(conn)
 
 
+def add_scan_partition_ledger(conn) -> None:
+    """Revision 0011: the partition ledger resumable scans need (Phase B, B2.1).
+
+    A restart used to lose every running scan: the job row held a status and
+    nothing about what the job had been asked to do, so
+    ``recover_interrupted_jobs`` could only mark it failed. This adds what
+    resuming needs and nothing that uses it yet - ``scan_jobs`` learns its scan,
+    its sanitized request and whether it can resume, and ``scan_partitions``
+    records each unit of a scan with its status and attempt count.
+
+    Revisions 0003 and 0004 enumerate tenant tables when they run, so a table
+    added later inherits neither the tenant foreign key nor row-level security.
+    Both are idempotent, and re-running them here is how the new table gets them;
+    ``tenant_isolation_coverage`` fails the build otherwise.
+    """
+    columns = db.table_columns(conn, "scan_jobs")
+    if "scan_id" not in columns:
+        conn.execute("ALTER TABLE scan_jobs ADD COLUMN scan_id TEXT NOT NULL DEFAULT ''")
+    if "request_json" not in columns:
+        conn.execute("ALTER TABLE scan_jobs ADD COLUMN request_json TEXT NOT NULL DEFAULT '{}'")
+    if "resumable" not in columns:
+        conn.execute("ALTER TABLE scan_jobs ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0")
+    conn.execute("""CREATE TABLE IF NOT EXISTS scan_partitions (
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            partition_id TEXT NOT NULL,
+            job_id TEXT NOT NULL DEFAULT '',
+            ordinal INTEGER NOT NULL DEFAULT 0,
+            spec_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'queued',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            files INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, scan_id, partition_id)
+        );""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scan_partitions_next "
+        "ON scan_partitions (tenant_id, scan_id, status, ordinal)"
+    )
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1095,10 +1141,38 @@ def apply_baseline_schema(conn) -> None:
             created_at TEXT NOT NULL,
             finished_at TEXT,
             error TEXT,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            -- B2, revision 0011: which scan the job runs and what it was asked
+            -- to do, so a restart can resume it. The request is stored without
+            -- secrets, and a job whose only credential was a typed password is
+            -- not resumable.
+            scan_id TEXT NOT NULL DEFAULT '',
+            request_json TEXT NOT NULL DEFAULT '{}',
+            resumable INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_scan_jobs_tenant
             ON scan_jobs (tenant_id, created_at);
+
+        -- B2, revision 0011: the partition ledger. One row per unit of a scan,
+        -- and a restart resumes from the first unit that is not done.
+        CREATE TABLE IF NOT EXISTS scan_partitions (
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            partition_id TEXT NOT NULL,
+            job_id TEXT NOT NULL DEFAULT '',
+            ordinal INTEGER NOT NULL DEFAULT 0,
+            spec_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'queued',
+            attempt INTEGER NOT NULL DEFAULT 0,
+            files INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, scan_id, partition_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_partitions_next
+            ON scan_partitions (tenant_id, scan_id, status, ordinal);
 
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -2685,11 +2759,23 @@ def record_job(job: dict) -> None:
         try:
             with _lock:
                 with _connect() as conn:
+                    # An explicit upsert rather than INSERT OR REPLACE. On
+                    # SQLite a REPLACE deletes the row and inserts a new one, so
+                    # every column this statement does not name - the scan
+                    # binding a resumable job carries - would reset to its
+                    # default on each progress write. PostgreSQL translates the
+                    # same statement into an update and keeps them, so the loss
+                    # would have been SQLite-only and invisible in production.
                     conn.execute(
                         """
-                        INSERT OR REPLACE INTO scan_jobs
+                        INSERT INTO scan_jobs
                             (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (id) DO UPDATE SET
+                            tenant_id = excluded.tenant_id, status = excluded.status,
+                            progress = excluded.progress, message = excluded.message,
+                            created_at = excluded.created_at, finished_at = excluded.finished_at,
+                            error = excluded.error, updated_at = excluded.updated_at
                         """,
                         params,
                     )
@@ -2759,6 +2845,241 @@ def recover_interrupted_jobs() -> int:
                 (now, now),
             )
             return cursor.rowcount
+
+
+# --- B2: resumable scans ------------------------------------------------------
+
+SCAN_PARTITION_STATES = ("queued", "running", "done", "failed")
+_PARTITION_COLUMNS = (
+    "scan_id, partition_id, job_id, ordinal, spec_json, status, attempt, files, "
+    "error, started_at, finished_at"
+)
+
+
+def scan_request_is_resumable(request: dict) -> bool:
+    """Whether a scan could be resumed after a restart.
+
+    Resuming a remote scan means connecting again, and the product never stores
+    a typed password. A request whose credential is a vault reference, or that
+    needs no credential at all, can resume. A request whose only credential is a
+    typed password cannot: after a restart it fails, as every scan used to, and
+    says why.
+    """
+    request = request if isinstance(request, dict) else {}
+    typed_password = bool(str(request.get("password") or ""))
+    vaulted = bool(str(request.get("credential_ref") or "").strip())
+    return vaulted or not typed_password
+
+
+@_tenant_scoped
+def bind_job_to_scan(tenant_id: str, job_id: str, scan_id: str, request: dict) -> dict:
+    """Record the scan a job runs and the request it was given, without secrets."""
+    resumable = scan_request_is_resumable(request)
+    cleaned = _sanitize_scan_profile_config(request if isinstance(request, dict) else {})
+    encoded = json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"), default=str)
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE scan_jobs SET scan_id = ?, request_json = ?, resumable = ?, updated_at = ? "
+                "WHERE id = ? AND tenant_id = ?",
+                (str(scan_id), encoded, 1 if resumable else 0, now, str(job_id), tenant_id),
+            )
+    return {"job_id": str(job_id), "scan_id": str(scan_id), "resumable": resumable}
+
+
+@_tenant_scoped
+def read_job_binding(tenant_id: str, job_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT scan_id, request_json, resumable FROM scan_jobs WHERE id = ? AND tenant_id = ?",
+            (str(job_id), tenant_id),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        request = json.loads(row["request_json"] or "{}")
+    except (TypeError, ValueError):
+        request = {}
+    return {
+        "scan_id": str(row["scan_id"] or ""),
+        "request": request if isinstance(request, dict) else {},
+        "resumable": bool(row["resumable"]),
+    }
+
+
+def _partition_row(row) -> dict:
+    try:
+        spec = json.loads(row["spec_json"] or "{}")
+    except (TypeError, ValueError):
+        spec = {}
+    return {
+        "scan_id": str(row["scan_id"]),
+        "partition_id": str(row["partition_id"]),
+        "job_id": str(row["job_id"] or ""),
+        "ordinal": int(row["ordinal"] or 0),
+        "spec": spec if isinstance(spec, dict) else {},
+        "status": str(row["status"]),
+        "attempt": int(row["attempt"] or 0),
+        "files": int(row["files"] or 0),
+        "error": str(row["error"] or ""),
+        "started_at": str(row["started_at"] or ""),
+        "finished_at": str(row["finished_at"] or ""),
+    }
+
+
+@_tenant_scoped
+def create_scan_partitions(tenant_id: str, scan_id: str, job_id: str, specs: list[dict]) -> list[str]:
+    """Plan a scan's units, in order.
+
+    Idempotent: planning the same scan again never resets a unit that has already
+    run, which is what lets a resumed job re-plan without losing its progress. A
+    spec may name its own ``partition_id``; otherwise it is numbered by position.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    ids: list[str] = []
+    rows: list[tuple] = []
+    for ordinal, spec in enumerate(specs or []):
+        spec = spec if isinstance(spec, dict) else {}
+        partition_id = str(spec.get("partition_id") or f"p{ordinal:05d}")
+        ids.append(partition_id)
+        rows.append((
+            tenant_id, str(scan_id), partition_id, str(job_id or ""), ordinal,
+            json.dumps(spec, ensure_ascii=False, separators=(",", ":"), default=str), now,
+        ))
+    if rows:
+        with _lock:
+            with _connect() as conn:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO scan_partitions "
+                    "(tenant_id, scan_id, partition_id, job_id, ordinal, spec_json, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+    return ids
+
+
+@_tenant_scoped
+def claim_next_partition(tenant_id: str, scan_id: str) -> dict | None:
+    """Take the first queued unit of a scan, in plan order, and mark it running.
+
+    The update is a compare-and-set on the status, so two claimers - threads now,
+    worker processes in B3 - can never take the same unit.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            for _ in range(5):
+                row = conn.execute(
+                    f"SELECT {_PARTITION_COLUMNS} FROM scan_partitions "
+                    "WHERE tenant_id = ? AND scan_id = ? AND status = 'queued' "
+                    "ORDER BY ordinal LIMIT 1",
+                    (tenant_id, str(scan_id)),
+                ).fetchone()
+                if row is None:
+                    return None
+                claimed = conn.execute(
+                    "UPDATE scan_partitions SET status = 'running', attempt = attempt + 1, "
+                    "started_at = ?, finished_at = '', error = '', updated_at = ? "
+                    "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'queued'",
+                    (now, now, tenant_id, str(scan_id), str(row["partition_id"])),
+                )
+                if int(claimed.rowcount or 0) == 1:
+                    result = _partition_row(row)
+                    result.update(
+                        status="running", attempt=result["attempt"] + 1,
+                        started_at=now, finished_at="", error="",
+                    )
+                    return result
+    return None
+
+
+def _finish_partition(tenant_id: str, scan_id: str, partition_id: str, status: str,
+                      *, files: int = 0, error: str = "", attempt: int | None = None) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    sql = (
+        "UPDATE scan_partitions SET status = ?, files = ?, error = ?, finished_at = ?, updated_at = ? "
+        "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running'"
+    )
+    params: list = [status, int(files or 0), str(error or "")[:500], now, now,
+                    tenant_id, str(scan_id), str(partition_id)]
+    if attempt is not None:
+        sql += " AND attempt = ?"
+        params.append(int(attempt))
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(sql, tuple(params)).rowcount or 0) == 1
+
+
+@_tenant_scoped
+def complete_scan_partition(tenant_id: str, scan_id: str, partition_id: str, files: int,
+                            *, attempt: int | None = None) -> bool:
+    """Mark a running unit done; returns whether this call did it.
+
+    Only a running unit can finish. Passing the ``attempt`` a worker claimed also
+    stops a stale worker - one whose unit was requeued and claimed again - from
+    finishing the newer attempt. Delivery in B3 is at-least-once, so that case is
+    real.
+    """
+    return _finish_partition(tenant_id, scan_id, partition_id, "done", files=files, attempt=attempt)
+
+
+@_tenant_scoped
+def fail_scan_partition(tenant_id: str, scan_id: str, partition_id: str, error: str,
+                        *, attempt: int | None = None) -> bool:
+    return _finish_partition(tenant_id, scan_id, partition_id, "failed", error=error, attempt=attempt)
+
+
+@_tenant_scoped
+def list_scan_partitions(tenant_id: str, scan_id: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT {_PARTITION_COLUMNS} FROM scan_partitions "
+            "WHERE tenant_id = ? AND scan_id = ? ORDER BY ordinal",
+            (tenant_id, str(scan_id)),
+        ).fetchall()
+    return [_partition_row(row) for row in rows]
+
+
+@_tenant_scoped
+def scan_partition_summary(tenant_id: str, scan_id: str) -> dict:
+    counts = {state: 0 for state in SCAN_PARTITION_STATES}
+    files = 0
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n, COALESCE(SUM(files), 0) AS f FROM scan_partitions "
+            "WHERE tenant_id = ? AND scan_id = ? GROUP BY status",
+            (tenant_id, str(scan_id)),
+        ).fetchall()
+    for row in rows:
+        counts[str(row["status"])] = int(row["n"] or 0)
+        files += int(row["f"] or 0)
+    total = sum(counts.values())
+    return {
+        "scan_id": str(scan_id),
+        "partitions": total,
+        **counts,
+        "files": files,
+        "complete": total > 0 and counts["done"] == total,
+    }
+
+
+def requeue_interrupted_partitions(tenant_id: str | None = None) -> int:
+    """Put units a stopped process left running back in the queue.
+
+    Not wired to startup yet - that is B2.4. With no tenant it spans every tenant,
+    as ``recover_interrupted_jobs`` does. The attempt count is left alone here and
+    raised by the next claim, so it counts attempts that actually started.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    sql = "UPDATE scan_partitions SET status = 'queued', updated_at = ? WHERE status = 'running'"
+    params: list = [now]
+    if tenant_id:
+        sql += " AND tenant_id = ?"
+        params.append(tenant_id)
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(sql, tuple(params)).rowcount or 0)
 
 
 def prune_job_records(max_age_seconds: int) -> int:
@@ -5689,6 +6010,7 @@ _TENANT_ERASURE_TABLES = (
     "findings",
     "finding_occurrences",
     "finding_index",
+    "scan_partitions",
     "scan_jobs",
 )
 

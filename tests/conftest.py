@@ -104,7 +104,7 @@ def pytest_configure(config: pytest.Config) -> None:
 # sequences so per-test id-ordering assertions are deterministic.
 _APP_TABLES = (
     "finding_index", "finding_occurrences", "findings", "asset_versions",
-    "scan_object_baselines", "assets", "scan_runs", "scan_jobs", "alert_events", "audit_events",
+    "scan_object_baselines", "assets", "scan_runs", "scan_partitions", "scan_jobs", "alert_events", "audit_events",
     "secrets", "scan_reports", "scan_profiles", "registration_invites", "api_keys",
     "login_failures", "revoked_tokens", "users", "tenants",
 )
