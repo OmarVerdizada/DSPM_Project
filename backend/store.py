@@ -1648,6 +1648,24 @@ def report_artifacts_enabled() -> bool:
     return os.getenv("DSPM_REPORT_ARTIFACTS", "1") != "0"
 
 
+class StreamedFiles:
+    """A report's ``files`` that are produced while the body is written, not held.
+
+    ``iter_report_json`` walks it exactly as it walks a list, so the body is byte-for-
+    byte what the list would have produced. ``json.dumps`` refuses it, which is the
+    point: nothing can quietly turn it back into one string. Each iteration calls
+    ``factory`` again, so a body can be streamed more than once.
+    """
+
+    __slots__ = ("factory",)
+
+    def __init__(self, factory) -> None:
+        self.factory = factory
+
+    def __iter__(self):
+        return iter(self.factory())
+
+
 def _json_key(key) -> str:
     """A dict key encoded exactly as ``json.dumps`` encodes it inside an object.
 
@@ -1684,7 +1702,7 @@ def iter_report_json(report: dict):
             yield ", "
         yield _json_key(key)
         yield ": "
-        if key == "files" and isinstance(value, (list, tuple)):
+        if key == "files" and isinstance(value, (list, tuple, StreamedFiles)):
             yield "["
             for position, record in enumerate(value):
                 if position:
@@ -2054,6 +2072,18 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
         incremental["prune_skipped"] = True
         return
 
+    incremental["baseline_committed"] = True
+    incremental["baseline_rows_written"] = rows_written
+    incremental["baseline_rows_skipped"] = skipped
+    _prune_incremental_baseline(conn, tenant_id, incremental, scope_key, scan_id)
+
+
+def _prune_incremental_baseline(conn, tenant_id: str, incremental: dict, scope_key: str, scan_id: str) -> None:
+    """Delete a scope's objects this scan did not write - only if the scan was complete.
+
+    Shared by the single save and by finalize, which is the only point a
+    partitioned scan knows it saw everything.
+    """
     stale = conn.execute(
         "SELECT COUNT(*) AS count FROM scan_object_baselines "
         "WHERE tenant_id = ? AND scope_key = ? AND last_scan_id <> ?",
@@ -2067,9 +2097,6 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
             "WHERE tenant_id = ? AND scope_key = ? AND last_scan_id <> ?",
             (tenant_id, scope_key, scan_id),
         )
-    incremental["baseline_committed"] = True
-    incremental["baseline_rows_written"] = rows_written
-    incremental["baseline_rows_skipped"] = skipped
     incremental["deleted_objects"] = deleted if complete else 0
     incremental["prune_skipped"] = not complete
 
@@ -2537,29 +2564,10 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
     diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
     incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
     complete_scope = not isinstance(incremental, dict) or bool(incremental.get("complete"))
-    # A named scan is an authoritative inventory scope. On a complete newer
-    # run, unseen assets leave the current estate and their findings become
-    # historical before this run's rows are inserted. Unnamed scans are not
-    # pruned because source alone is not a reliable scope identity.
-    # A partition never prunes: it has not seen the rest of the scan, so every
-    # asset it did not write would look like one that disappeared.
-    if partition is None and write_estate and refresh_current and scan_label and complete_scope:
-        stale_sql = (
-            "SELECT id FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?"
-        )
-        stale_params = (tenant_id, scan_label, scan_id)
-        conn.execute(
-            f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
-            (tenant_id, *stale_params),
-        )
-        conn.execute(
-            f"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
-            (tenant_id, *stale_params),
-        )
-        conn.execute(
-            "DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?",
-            stale_params,
-        )
+    # A named, complete scan prunes the assets it did not see - after its own rows
+    # are written, below. A partition never prunes: it has not seen the rest of
+    # the scan, so every asset it did not write would look like one that
+    # disappeared. Finalize runs the same prune once every partition is done.
     # One walk of the report, in batches. `seq` and the path->id map that the
     # finding rows need are the only things that cross a batch boundary, and
     # both are bounded by what has actually been seen rather than by the estate.
@@ -2689,12 +2697,46 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
         )
 
     if partition is None:
+        if write_estate and refresh_current and scan_label and complete_scope:
+            _prune_unseen_assets(conn, tenant_id, scan_label, scan_id)
         _write_finding_index(conn, tenant_id, report)
         _trim_finding_index(conn, tenant_id)
     else:
         # A partition writes its own range of the index and leaves retention to
         # finalize, the only step that knows the scan is finished.
         _write_finding_index(conn, tenant_id, report, seq_offset=seq_offset, seq_span=seq_span)
+
+
+def _prune_unseen_assets(conn, tenant_id: str, scan_label: str, scan_id: str) -> None:
+    """Take the assets a named, complete scan did not see out of the current estate.
+
+    A named scan is an authoritative inventory scope; an unnamed one is not pruned,
+    because source alone is not a reliable scope identity. The unseen assets'
+    findings become historical, and the assets and their versions leave.
+
+    **This runs after the scan's own rows are written** (B2.2b, 2026-09-14). It used
+    to run before them, and ``current_scan_id <> scan_id`` then also matched every
+    asset the scan was about to see again - so a complete re-scan deleted and
+    re-inserted those rows and threw away their version history. That was never
+    the intent, and a partitioned scan, which can only prune once every partition
+    is done, could not reproduce it. Run afterwards, the same condition matches
+    exactly the assets this scan did not see, for a single scan and a partitioned
+    one alike.
+    """
+    stale_sql = "SELECT id FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?"
+    stale_params = (tenant_id, scan_label, scan_id)
+    conn.execute(
+        f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
+        (tenant_id, *stale_params),
+    )
+    conn.execute(
+        f"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
+        (tenant_id, *stale_params),
+    )
+    conn.execute(
+        "DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?",
+        stale_params,
+    )
 
 
 SEVERITY_RANKS = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -2971,7 +3013,8 @@ def recover_interrupted_jobs() -> int:
 SCAN_PARTITION_STATES = ("queued", "running", "done", "failed")
 _PARTITION_COLUMNS = (
     "scan_id, partition_id, job_id, ordinal, spec_json, status, attempt, files, "
-    "error, started_at, finished_at, records_ref, records_bytes, summary_json, diagnostics_json"
+    "error, started_at, finished_at, records_ref, records_bytes, summary_json, diagnostics_json, "
+    "CASE WHEN records_json IS NOT NULL OR records_ref <> '' THEN 1 ELSE 0 END AS has_records"
 )
 # Plan order is encoded in the seq columns as ordinal * span + position. Both are
 # INTEGER - four bytes on PostgreSQL - so one scan can order at most 2,147
@@ -3064,6 +3107,7 @@ def _partition_row(row) -> dict:
         "finished_at": str(row["finished_at"] or ""),
         "records_ref": str(row["records_ref"] or ""),
         "records_bytes": int(row["records_bytes"] or 0),
+        "has_records": bool(row["has_records"]),
         "summary": kept["summary_json"],
         "diagnostics": kept["diagnostics_json"],
     }
@@ -3410,6 +3454,238 @@ def referenced_artifact_ids() -> set[tuple[str, str]]:
     return {(str(row["tenant_id"]), str(row["ref"])) for row in rows}
 
 
+class PartitionsNotFinished(RuntimeError):
+    """A partitioned scan was finalized before every one of its partitions was done."""
+
+
+# Diagnostics that describe how one engine was configured rather than what it
+# found. Every partition's engine reports its own, and adding worker counts across
+# partitions would describe nothing, so the last partition's report stands.
+_CONFIGURATION_DIAGNOSTICS = frozenset({"parallelism", "worker_pool", "pipeline", "detector_pool"})
+_MERGED_DIAGNOSTIC_LIST_LIMIT = 20
+
+
+def merge_partition_diagnostics(diagnostics: list[dict]) -> dict:
+    """One scan's diagnostics from its partitions', in plan order.
+
+    Counts add up. A flag is set if any partition set it, except that the scan is
+    ``complete`` - and its baseline ``baseline_committed`` - only if every partition
+    was, because completeness is what licenses the prunes. ``delta_ratio`` is
+    recomputed from the summed counts. Lists that differ are joined without
+    duplicates and kept to 20 entries, the limit a single collector applies; text
+    keeps the first partition's value. Keys keep the order they first appear in.
+    """
+    parts = [part for part in diagnostics if isinstance(part, dict)]
+    if not parts:
+        return {}
+    return _merge_diagnostic_dicts(parts, top_level=True)
+
+
+def _merge_diagnostic_dicts(parts: list[dict], *, top_level: bool = False) -> dict:
+    merged: dict = {}
+    for key in dict.fromkeys(key for part in parts for key in part):
+        present = [part[key] for part in parts if key in part]
+        if top_level and key in _CONFIGURATION_DIAGNOSTICS:
+            merged[key] = present[-1]
+        elif top_level and key == "incremental" and all(isinstance(value, dict) for value in present):
+            merged[key] = _merge_incremental_diagnostics(present)
+        elif key == "reuse_index" and all(isinstance(value, dict) for value in present):
+            index = _merge_diagnostic_dicts(present)
+            index["state"] = next(
+                (str(value.get("state")) for value in present if value.get("state") not in (None, "ok")), "ok",
+            )
+            merged[key] = index
+        else:
+            merged[key] = _merge_diagnostic_values(present)
+    return merged
+
+
+def _merge_diagnostic_values(values: list):
+    if all(isinstance(value, bool) for value in values):
+        return any(values)
+    if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):
+        return sum(values)
+    if all(isinstance(value, dict) for value in values):
+        return _merge_diagnostic_dicts(values)
+    if all(isinstance(value, list) for value in values):
+        if all(value == values[0] for value in values):
+            return list(values[0])
+        joined: list = []
+        for value in values:
+            for item in value:
+                if item not in joined:
+                    joined.append(item)
+                    if len(joined) >= _MERGED_DIAGNOSTIC_LIST_LIMIT:
+                        return joined
+        return joined
+    return values[0]
+
+
+def _merge_incremental_diagnostics(parts: list[dict]) -> dict:
+    merged = _merge_diagnostic_dicts(parts)
+    if "complete" in merged:
+        merged["complete"] = all(bool(part.get("complete")) for part in parts)
+    if "baseline_committed" in merged:
+        merged["baseline_committed"] = all(bool(part.get("baseline_committed")) for part in parts)
+    if "delta_ratio" in merged:
+        total = int(merged.get("total_objects") or 0)
+        reads = int(merged.get("content_reads") or 0)
+        merged["delta_ratio"] = round(reads / total, 6) if total else 0.0
+    return merged
+
+
+def iter_partition_records(tenant_id: str, scan_id: str):
+    """Each finished partition's records, in plan order, one partition in memory at a time.
+
+    Every database read is scoped to the tenant itself, rather than relying on the
+    caller's scope: a generator runs whenever it is iterated, not when it was made.
+    """
+    with db.tenant_scope(str(tenant_id)):
+        with _connect() as conn:
+            units = [
+                (str(row["partition_id"]), str(row["status"]))
+                for row in conn.execute(
+                    "SELECT partition_id, status FROM scan_partitions "
+                    "WHERE tenant_id = ? AND scan_id = ? ORDER BY ordinal",
+                    (tenant_id, str(scan_id)),
+                ).fetchall()
+            ]
+    for partition_id, status in units:
+        if status != "done":
+            raise PartitionsNotFinished(f"partition {partition_id} of scan {scan_id} is {status}")
+        with db.tenant_scope(str(tenant_id)):
+            with _connect() as conn:
+                row = conn.execute(
+                    "SELECT records_ref, records_json FROM scan_partitions "
+                    "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ?",
+                    (tenant_id, str(scan_id), partition_id),
+                ).fetchone()
+        content_id = str(row["records_ref"] or "") if row is not None else ""
+        if content_id:
+            from backend import artifacts
+
+            with db.tenant_scope(str(tenant_id)):
+                records = json.loads(artifacts.get_text(tenant_id, content_id) or "[]")
+        elif row is not None and row["records_json"] is not None:
+            records = json.loads(unpack_json_text(row["records_json"]) or "[]")
+        else:
+            raise PartitionsNotFinished(f"partition {partition_id} of scan {scan_id} kept no records")
+        yield partition_id, records
+        records = None
+
+
+@_tenant_scoped
+def finalize_partitioned_scan(
+    tenant_id: str,
+    scan_id: str,
+    report: dict,
+    *,
+    write_estate: bool,
+    file_count: int,
+    sample_count: int,
+) -> str:
+    """Write everything about a partitioned scan that needs the whole scan.
+
+    ``report`` is the finished report with its ``files`` as a :class:`StreamedFiles`
+    over the partitions' records, and its summary, diagnostics and compliance
+    sections already folded. In one transaction this writes what the partitions
+    could not: the scan run, the unseen-asset prune for a named complete scan, the
+    baseline prune, finding-index retention, the report body (streamed, never one
+    string) and the report row - and then lets the partitions' records go, so
+    retention can collect them.
+
+    It is the second half of ``save_scan_history``, and a test holds it to that:
+    the same records written as partitions and finalized leave the same rows and
+    the same stored body as one save. The one deliberate difference is
+    ``rows_json``, which stays empty rather than building a list of the whole
+    estate; its reader projects the body instead.
+    """
+    from backend.domain import scan_run_from_report
+
+    scan_id = str(scan_id)
+    report["scan_id"] = scan_id
+    created_at = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            states = {
+                str(row["status"]): int(row["n"] or 0)
+                for row in conn.execute(
+                    "SELECT status, COUNT(*) AS n FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? GROUP BY status",
+                    (tenant_id, scan_id),
+                ).fetchall()
+            }
+            if not states or set(states) != {"done"}:
+                raise PartitionsNotFinished(f"scan {scan_id} cannot be finalized: partitions {states or 'none'}")
+            existing = conn.execute(
+                "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id),
+            ).fetchone()
+            if existing and existing["created_at"]:
+                created_at = existing["created_at"]
+            run = scan_run_from_report(tenant_id, report)
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO scan_runs
+                    (tenant_id, id, source, mode, policy_version, started_at, ended_at, status, total_files, summary_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at,
+                 run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
+            )
+            scan_label = str(report.get("scan_label") or "").strip()[:80]
+            diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
+            incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
+            complete_scope = not isinstance(incremental, dict) or bool(incremental.get("complete"))
+            if write_estate and scan_label and complete_scope:
+                _prune_unseen_assets(conn, tenant_id, scan_label, scan_id)
+            if (
+                isinstance(incremental, dict)
+                and incremental.get("baseline_update", incremental.get("enabled"))
+                and incremental.get("baseline_committed")
+                and str(incremental.get("scope_key") or "")
+            ):
+                _prune_incremental_baseline(conn, tenant_id, incremental, str(incremental.get("scope_key")), scan_id)
+            _trim_finding_index(conn, tenant_id)
+            report_ref, report_bytes, inline_body = _store_report_body(tenant_id, report)
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO scan_reports
+                    (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
+                     report_json, report_ref, report_bytes, rows_json, compact_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tenant_id,
+                    scan_id,
+                    report.get("timestamp"),
+                    report.get("source"),
+                    scan_label,
+                    json.dumps(report.get("summary", {}), ensure_ascii=False),
+                    inline_body,
+                    report_ref,
+                    report_bytes,
+                    None,
+                    pack_json_text(json.dumps(
+                        compact_scan_report_from_counts(report, file_count, sample_count),
+                        ensure_ascii=False, separators=(",", ":"),
+                    )),
+                    created_at,
+                ),
+            )
+            # The body now holds every record, so the partitions' own copies are
+            # unreferenced from here on and retention collects them.
+            conn.execute(
+                "UPDATE scan_partitions SET records_ref = '', records_bytes = 0, records_json = NULL, updated_at = ? "
+                "WHERE tenant_id = ? AND scan_id = ?",
+                (datetime.now(timezone.utc).isoformat(), tenant_id, scan_id),
+            )
+    _invalidate_inventory_query_cache(tenant_id)
+    _invalidate_remediation_query_cache(tenant_id)
+    _forget_scan_report_rows(tenant_id)
+    with suppress(Exception):
+        db.optimize_sqlite(DB_PATH)
+    return scan_id
+
+
 def prune_job_records(max_age_seconds: int) -> int:
     """Delete terminal (completed/failed/cancelled) job records older than
     max_age_seconds, so scan_jobs does not grow without bound (ARCH-003/F8)."""
@@ -3500,6 +3776,13 @@ _SAMPLE_DATA_PATH = re.compile(
 )
 
 
+def is_sample_data_path(file_obj: dict) -> bool:
+    """Whether a file belongs to the bundled synthetic demo dataset."""
+    return bool(_SAMPLE_DATA_PATH.search(
+        str(file_obj.get("path") or file_obj.get("full_path") or file_obj.get("name") or "")
+    ))
+
+
 def compact_scan_report(report: dict) -> dict:
     """Metadata-only scan payload used by the windowed console.
 
@@ -3507,20 +3790,27 @@ def compact_scan_report(report: dict) -> dict:
     preserves summaries and diagnostics but replaces the unbounded file array
     with an omission marker so browsers never deserialise it accidentally.
     """
-    compact = dict(report or {})
     files = report.get("files") if isinstance(report, dict) else []
     files = files if isinstance(files, list) else []
-    file_count = len(files) or int((compact.get("summary") or {}).get("total_files") or 0)
-    sample_count = sum(
-        1 for file_obj in files
-        if _SAMPLE_DATA_PATH.search(str(file_obj.get("path") or file_obj.get("full_path") or file_obj.get("name") or ""))
-    )
+    sample_count = sum(1 for file_obj in files if is_sample_data_path(file_obj))
+    return compact_scan_report_from_counts(report, len(files), sample_count)
+
+
+def compact_scan_report_from_counts(report: dict, file_count: int, sample_count: int) -> dict:
+    """``compact_scan_report`` for a report whose files were counted, not held.
+
+    A partitioned scan never has its files in one list; finalize counts them as it
+    folds the report sections and builds the same compact form from the counts.
+    """
+    compact = dict(report or {})
+    records = int(file_count or 0)
+    file_count = records or int((compact.get("summary") or {}).get("total_files") or 0)
     compact["files"] = []
     compact["files_omitted"] = True
     compact["file_count"] = file_count
     compact["result_file_count"] = file_count
     compact["result_truncated"] = bool(file_count)
-    compact["is_demo_sample"] = bool(compact.get("is_demo_sample") or (files and sample_count / len(files) >= 0.5))
+    compact["is_demo_sample"] = bool(compact.get("is_demo_sample") or (records and sample_count / records >= 0.5))
     return compact
 
 

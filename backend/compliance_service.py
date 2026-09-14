@@ -46,57 +46,117 @@ def selected_profiles(frameworks: Iterable[str] | None) -> list[dict]:
 
 
 def enrich_report_with_compliance(report: dict, enabled: bool, frameworks: Iterable[str] | None) -> dict:
-    framework_ids = normalize_framework_ids(frameworks)
-    if not enabled or not framework_ids:
-        for file_obj in report.get("files") or []:
-            file_obj.pop("compliance", None)
-            file_obj["findings"] = [finding for finding in file_obj.get("findings") or [] if not _is_framework_only_finding(finding)]
-            for finding in file_obj["findings"]:
-                _strip_compliance_projection(finding)
-                finding["display_name"] = finding.get("display_name") or get_finding_display_name(finding)
-            for entity in file_obj.get("canonical_entities") or []:
-                entity["framework_mappings"] = []
-                entity["framework_mapping_details"] = []
-        report["compliance_summary"] = {
-            "enabled": False,
-            "selected_frameworks": [],
-            "affected_asset_count": 0,
-            "affected_file_count": 0,
-            "finding_group_count": 0,
-            "occurrence_count": 0,
-            "unique_sensitive_value_count": 0,
-            "total_compliance_findings": 0,
-            "critical": 0,
-            "high": 0,
-            "medium": 0,
-            "low": 0,
-            "top_violated_categories": [],
-            "top_risky_files": [],
-            "remediation_priorities": [],
-        }
-        report.pop("pci_scope_summary", None)
-        report.pop("gdpr_report", None)
-        report.pop("nist_sp800_60_enterprise_report", None)
-        return report
+    """Compliance enrichment for a whole report: each file, then the report sections.
 
-    profiles = selected_profiles(framework_ids)
-    files = report.get("files") or []
-    sanitize_pci_sensitive_report(report)
-    for file_obj in files:
-        for finding in file_obj.get("findings") or []:
-            finding["display_name"] = finding.get("display_name") or get_finding_display_name(finding)
-        compliance = evaluate_file(file_obj, profiles)
-        if compliance["matched_frameworks"]:
-            file_obj["compliance"] = compliance
-
-    report["compliance_summary"] = build_compliance_summary(files, profiles)
-    if "pci_dss" in framework_ids:
-        report["pci_scope_summary"] = build_pci_scope_summary(files)
-    if "gdpr" in framework_ids:
-        report["gdpr_report"] = build_gdpr_report(files)
-    if "nist_sp800_60_enterprise" in framework_ids:
-        report["nist_sp800_60_enterprise_report"] = build_nist_sp800_60_report(files)
+    The per-file half is :func:`prepare_file_for_compliance` and the sections are a
+    :class:`ComplianceReportAccumulator`, so a partitioned scan can do the first as
+    each partition finishes and fold the second at finalize, and arrive at exactly
+    this.
+    """
+    accumulator = ComplianceReportAccumulator(enabled, frameworks)
+    # Only a list of files was ever PCI-sanitised; that stays exactly as it was.
+    sanitize = isinstance(report.get("files"), list)
+    for file_obj in report.get("files") or []:
+        accumulator.prepare(file_obj, sanitize=sanitize)
+        accumulator.add(file_obj)
+    accumulator.apply(report)
     return report
+
+
+def _disabled_compliance_summary() -> dict:
+    return {
+        "enabled": False,
+        "selected_frameworks": [],
+        "affected_asset_count": 0,
+        "affected_file_count": 0,
+        "finding_group_count": 0,
+        "occurrence_count": 0,
+        "unique_sensitive_value_count": 0,
+        "total_compliance_findings": 0,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "top_violated_categories": [],
+        "top_risky_files": [],
+        "remediation_priorities": [],
+    }
+
+
+def prepare_file_for_compliance(
+    file_obj: dict, framework_ids: list[str], profiles: list[dict], *, sanitize: bool = True,
+) -> None:
+    """The per-file half of compliance enrichment.
+
+    With no framework selected, a file loses its compliance block, its
+    framework-only findings and the framework labels on the rest. With frameworks
+    selected, PCI values are masked, and the file is evaluated against the
+    profiles. Nothing here looks at any other file.
+    """
+    if not framework_ids:
+        file_obj.pop("compliance", None)
+        file_obj["findings"] = [finding for finding in file_obj.get("findings") or [] if not _is_framework_only_finding(finding)]
+        for finding in file_obj["findings"]:
+            _strip_compliance_projection(finding)
+            finding["display_name"] = finding.get("display_name") or get_finding_display_name(finding)
+        for entity in file_obj.get("canonical_entities") or []:
+            entity["framework_mappings"] = []
+            entity["framework_mapping_details"] = []
+        return
+    if sanitize:
+        _sanitize_pci_file(file_obj)
+    for finding in file_obj.get("findings") or []:
+        finding["display_name"] = finding.get("display_name") or get_finding_display_name(finding)
+    compliance = evaluate_file(file_obj, profiles)
+    if compliance["matched_frameworks"]:
+        file_obj["compliance"] = compliance
+
+
+class ComplianceReportAccumulator:
+    """The report sections compliance enrichment adds, folded one prepared file at a time.
+
+    ``prepare`` does a file's own enrichment, ``add`` folds an already-prepared file
+    into the sections, and ``apply`` writes the sections onto a report - in the order,
+    and with the removals, ``enrich_report_with_compliance`` always used.
+    """
+
+    _REMOVED_WHEN_DISABLED = ("pci_scope_summary", "gdpr_report", "nist_sp800_60_enterprise_report")
+
+    def __init__(self, enabled: bool, frameworks: Iterable[str] | None) -> None:
+        framework_ids = normalize_framework_ids(frameworks)
+        self.framework_ids = framework_ids if enabled and framework_ids else []
+        self.profiles = selected_profiles(self.framework_ids) if self.framework_ids else []
+        selected = self.framework_ids
+        self.summary = ComplianceSummaryAccumulator(self.profiles) if selected else None
+        self.pci = PciScopeSummaryAccumulator() if "pci_dss" in selected else None
+        self.gdpr = GdprReportAccumulator() if "gdpr" in selected else None
+        self.nist = NistSp80060ReportAccumulator() if "nist_sp800_60_enterprise" in selected else None
+
+    def prepare(self, file_obj: dict, *, sanitize: bool = True) -> None:
+        prepare_file_for_compliance(file_obj, self.framework_ids, self.profiles, sanitize=sanitize)
+
+    def add(self, file_obj: dict) -> None:
+        if self.summary is None:
+            return
+        self.summary.add(file_obj)
+        for section in (self.pci, self.gdpr, self.nist):
+            if section is not None:
+                section.add(file_obj)
+
+    def apply(self, report: dict) -> dict:
+        if self.summary is None:
+            report["compliance_summary"] = _disabled_compliance_summary()
+            for key in self._REMOVED_WHEN_DISABLED:
+                report.pop(key, None)
+            return report
+        report["compliance_summary"] = self.summary.result()
+        if self.pci is not None:
+            report["pci_scope_summary"] = self.pci.result()
+        if self.gdpr is not None:
+            report["gdpr_report"] = self.gdpr.result()
+        if self.nist is not None:
+            report["nist_sp800_60_enterprise_report"] = self.nist.result()
+        return report
 
 
 def _is_framework_only_finding(finding: dict) -> bool:
