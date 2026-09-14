@@ -2854,6 +2854,15 @@ def _continue_partitioned_scan_payload(scan_id: str, config: ScanConfig, payload
     return _finish_partitioned_scan_payload(data, payload, principal)
 
 
+def rebuild_scan_config(record: dict) -> ScanConfig:
+    """A recorded partitioned scan's engine configuration, rebuilt from its stored request.
+
+    The same validation and credential resolution a scan started from the console
+    gets. A resumed scan (B2.4) and a queue worker (B3) both start here.
+    """
+    return _to_config(ScanRequest.model_validate(record["request"]), record["tenant_id"])
+
+
 def _resume_partitioned_scan(record: dict) -> None:
     """Continue a partitioned scan a stopped process left unfinished (B2.4).
 
@@ -2869,7 +2878,7 @@ def _resume_partitioned_scan(record: dict) -> None:
     tenant_id = record["tenant_id"]
     scan_id = record["scan_id"]
     payload = ScanRequest.model_validate(record["request"])
-    config = _to_config(payload, tenant_id)
+    config = rebuild_scan_config(record)
     principal = Principal(
         subject=str((record.get("header") or {}).get("requested_by") or "system:scan-resumer"),
         role="analyst",

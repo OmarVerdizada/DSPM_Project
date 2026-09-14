@@ -1,4 +1,4 @@
-"""Partitioned scans: each partition persists as it finishes; finalize does the rest (B2.2b-B2.4).
+"""Partitioned scans: each partition persists as it finishes; finalize does the rest (B2.2b-B3).
 
 A single scan holds every analyzed file until it saves them - the one holder of
 the whole estate the earlier Phase B steps could not remove. A partitioned scan
@@ -16,7 +16,8 @@ request without secrets, and the header every partition stamps - and each
 partition is leased to the worker running it. A process that dies part way
 through therefore leaves a scan that can be continued rather than a half-written
 estate: :mod:`backend.scan_resumer` finds it, and :func:`continue_partitioned_scan`
-runs what is left (B2.4).
+runs what is left (B2.4). The same record lets a queue worker run any one partition
+of a scan it did not start (:func:`run_queued_partition`, B3).
 """
 
 from __future__ import annotations
@@ -271,6 +272,28 @@ class _Scan:
     lease_seconds: int
 
 
+def _scan_from_record(record: dict, config: ScanConfig, *, worker: str | None = None) -> _Scan:
+    """What every partition of a recorded scan shares - from its header, whoever runs it."""
+    header = record.get("header") or {}
+    source = str(header.get("source") or "local")
+    local = source == "local"
+    return _Scan(
+        tenant_id=str(record["tenant_id"]),
+        scan_id=str(record["scan_id"]),
+        config=config,
+        source=source,
+        scan_root=str(header.get("scan_root") or (Path(config.local_path).expanduser().resolve() if local else "")),
+        timestamp=str(header.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+        label=str(header.get("scan_label") or "").strip()[:80],
+        compliance_enabled=bool(header.get("compliance_enabled")),
+        compliance_frameworks=tuple(header.get("compliance_frameworks") or ()),
+        local_path=str(header.get("local_path") or config.local_path),
+        max_depth=int(header.get("max_depth", config.max_depth)),
+        worker=worker or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
+        lease_seconds=partition_lease_seconds(),
+    )
+
+
 def _unit_config(config: ScanConfig, spec: dict, scan_root: str) -> ScanConfig:
     """One local partition's engine: the scan's policy, scope and reuse, over one run.
 
@@ -414,24 +437,7 @@ def continue_partitioned_scan(
             raise RuntimeError(f"scan {scan_id} is already running in this process")
         _running_here.add(key)
     try:
-        header = record["header"]
-        source = str(header.get("source") or "local")
-        local = source == "local"
-        scan = _Scan(
-            tenant_id=str(tenant_id),
-            scan_id=str(scan_id),
-            config=config,
-            source=source,
-            scan_root=str(header.get("scan_root") or (Path(config.local_path).expanduser().resolve() if local else "")),
-            timestamp=str(header.get("timestamp") or datetime.now(timezone.utc).isoformat()),
-            label=str(header.get("scan_label") or "").strip()[:80],
-            compliance_enabled=bool(header.get("compliance_enabled")),
-            compliance_frameworks=tuple(header.get("compliance_frameworks") or ()),
-            local_path=str(header.get("local_path") or config.local_path),
-            max_depth=int(header.get("max_depth", config.max_depth)),
-            worker=f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
-            lease_seconds=partition_lease_seconds(),
-        )
+        scan = _scan_from_record(record, config)
         stop_reason = stop_reason or _stop_check(job, _deadline())
         try:
             _run_partitions(scan, job=job, stop_reason=stop_reason, poll_seconds=poll_seconds)
@@ -480,13 +486,14 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
             return
         exhausted = [unit for unit in units if unit["status"] == "failed" and unit["attempt"] >= max_attempts]
         if exhausted:
-            first = exhausted[0]
-            raise ScanStopped(
-                f"partition {first['partition_id']} failed {first['attempt']} times ({first['error'] or 'no error recorded'})"
-            )
+            raise ScanStopped(_exhausted_message(exhausted[0]))
         # What is left runs under another worker's lease: take back any that ran out, or wait.
         if not store.requeue_expired_partitions(tenant_id=scan.tenant_id):
             time.sleep(poll_seconds)
+
+
+def _exhausted_message(unit: dict) -> str:
+    return f"partition {unit['partition_id']} failed {unit['attempt']} times ({unit['error'] or 'no error recorded'})"
 
 
 @contextmanager
@@ -579,6 +586,25 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
         return False
 
 
+def _finalize(scan: _Scan) -> dict:
+    """Finalize a scan whose finalize this caller has claimed, and mark it done."""
+    report = finalize_scan(
+        scan.tenant_id, scan.scan_id,
+        timestamp=scan.timestamp,
+        source=scan.source,
+        scan_label=scan.label,
+        compliance_enabled=scan.compliance_enabled,
+        compliance_frameworks=list(scan.compliance_frameworks),
+        write_estate=True,
+        # A local scan's diagnostics name its root and depth; each run's name its own.
+        diagnostics_overrides=(
+            {"local_path": scan.local_path, "max_depth": scan.max_depth} if scan.source == "local" else None
+        ),
+    )
+    store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "done")
+    return report
+
+
 def _finalize_when_claimed(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> dict:
     if job is not None:
         job.message = "Finalizing report"
@@ -599,21 +625,62 @@ def _finalize_when_claimed(scan: _Scan, *, job, stop_reason, poll_seconds: float
         if reason:
             raise ScanStopped(reason)
         time.sleep(poll_seconds)
-    report = finalize_scan(
-        scan.tenant_id, scan.scan_id,
-        timestamp=scan.timestamp,
-        source=scan.source,
-        scan_label=scan.label,
-        compliance_enabled=scan.compliance_enabled,
-        compliance_frameworks=list(scan.compliance_frameworks),
-        write_estate=True,
-        # A local scan's diagnostics name its root and depth; each run's name its own.
-        diagnostics_overrides=(
-            {"local_path": scan.local_path, "max_depth": scan.max_depth} if scan.source == "local" else None
-        ),
+    return _finalize(scan)
+
+
+# ---- run by a queue worker (B3) ----------------------------------------------------------------------------
+
+
+def run_queued_partition(record: dict, config: ScanConfig, partition_id: str, *, worker_id: str) -> str:
+    """Run one named partition of a recorded scan for a queue worker; returns what happened.
+
+    ``written`` - this call ran and committed it. ``finished`` - it was already done.
+    ``held`` - another worker holds it, or took it back while this call ran. ``retry`` -
+    it failed and is queued in the ledger again. ``stopped`` - it failed its last
+    attempt, and the scan is marked failed. ``dropped`` - the scan has no such partition.
+
+    The claim is the ledger's compare-and-set, so a duplicate delivery - a message
+    reclaimed from a worker that died after its commit - finds the partition done and
+    runs nothing twice.
+    """
+    scan = _scan_from_record(record, config, worker=worker_id)
+    unit = store.claim_partition(
+        scan.tenant_id, scan.scan_id, partition_id, worker_id=scan.worker, lease_seconds=scan.lease_seconds,
     )
-    store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "done")
-    return report
+    if unit is not None and _run_unit(scan, unit, job=None, stop_reason=lambda: None):
+        return "written"
+    current = store.read_scan_partition(scan.tenant_id, scan.scan_id, partition_id)
+    if current is None:
+        return "dropped"
+    if current["status"] == "done":
+        return "finished"
+    if current["status"] != "failed":
+        return "held"
+    max_attempts = partition_max_attempts()
+    if current["attempt"] < max_attempts:
+        store.requeue_failed_partitions(scan.tenant_id, scan.scan_id, max_attempts=max_attempts)
+        return "retry"
+    store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "failed", error=_exhausted_message(current))
+    return "stopped"
+
+
+def finalize_if_complete(record: dict, config: ScanConfig) -> dict | None:
+    """Finalize a recorded scan whose partitions are all done, unless another caller already is.
+
+    Returns the compact report when this call finalized it, else ``None``.
+    """
+    units = store.list_scan_partitions(record["tenant_id"], record["scan_id"])
+    if not units or any(unit["status"] != "done" for unit in units):
+        return None
+    scan = _scan_from_record(record, config)
+    if not store.claim_scan_finalize(scan.tenant_id, scan.scan_id, stale_after_seconds=scan.lease_seconds):
+        return None
+    try:
+        return _finalize(scan)
+    except Exception as exc:
+        with suppress(Exception):
+            store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "failed", error=type(exc).__name__)
+        raise
 
 
 def run_partitioned_scan(

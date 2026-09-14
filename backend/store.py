@@ -3331,6 +3331,57 @@ def claim_next_partition(
                     return result
 
 
+@_tenant_scoped
+def claim_partition(
+    tenant_id: str, scan_id: str, partition_id: str, *, worker_id: str = "",
+    lease_seconds: int = DEFAULT_PARTITION_LEASE_SECONDS,
+) -> dict | None:
+    """Claim one named partition if it is queued; returns it, or ``None`` when it is not queued.
+
+    A queue worker is handed a partition, not the next one in plan order (B3). This is
+    the same compare-and-set on status and attempt as :func:`claim_next_partition`, with
+    the same lease, so queue workers and an in-process runner can share one scan.
+    """
+    moment = datetime.now(timezone.utc)
+    now = moment.isoformat()
+    expires = _lease_time(moment + timedelta(seconds=max(1, int(lease_seconds))))
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute(
+                f"SELECT {_PARTITION_COLUMNS} FROM scan_partitions "
+                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'queued'",
+                (tenant_id, str(scan_id), str(partition_id)),
+            ).fetchone()
+            if row is None:
+                return None
+            claimed = conn.execute(
+                "UPDATE scan_partitions SET status = 'running', attempt = attempt + 1, "
+                "started_at = ?, finished_at = '', error = '', updated_at = ?, "
+                "lease_owner = ?, lease_expires_at = ? "
+                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'queued' AND attempt = ?",
+                (now, now, str(worker_id or ""), expires, tenant_id, str(scan_id), str(partition_id),
+                 int(row["attempt"] or 0)),
+            )
+            if int(claimed.rowcount or 0) != 1:
+                return None
+    result = _partition_row(row)
+    result.update(
+        status="running", attempt=result["attempt"] + 1, started_at=now, finished_at="", error="",
+        lease_owner=str(worker_id or ""), lease_expires_at=expires,
+    )
+    return result
+
+
+@_tenant_scoped
+def read_scan_partition(tenant_id: str, scan_id: str, partition_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT {_PARTITION_COLUMNS} FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? AND partition_id = ?",
+            (tenant_id, str(scan_id), str(partition_id)),
+        ).fetchone()
+    return _partition_row(row) if row is not None else None
+
+
 def _finish_partition(tenant_id: str, scan_id: str, partition_id: str, status: str,
                       *, attempt: int, files: int = 0, error: str = "") -> bool:
     now = datetime.now(timezone.utc).isoformat()
@@ -3580,6 +3631,23 @@ def list_unfinished_partitioned_scans(*, resumable_only: bool = False) -> list[d
     with _connect() as conn:
         rows = conn.execute(sql).fetchall()
     return [_partitioned_scan_row(row) for row in rows]
+
+
+def next_queued_partition() -> tuple[str, str, str] | None:
+    """The first queued partition of the oldest running, resumable partitioned scan, across tenants (B3).
+
+    What the ledger queue hands a worker. Only a resumable scan has a request a worker
+    can rebuild its engine from, and a scan being finalized has nothing left to hand out.
+    Naming a partition claims nothing: the worker's claim is the compare-and-set.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT p.tenant_id AS tenant_id, p.scan_id AS scan_id, p.partition_id AS partition_id "
+            "FROM scan_partitions p JOIN partitioned_scans s ON s.tenant_id = p.tenant_id AND s.scan_id = p.scan_id "
+            "WHERE p.status = 'queued' AND s.status = 'running' AND s.resumable = 1 "
+            "ORDER BY s.created_at, s.scan_id, p.ordinal LIMIT 1"
+        ).fetchone()
+    return (str(row["tenant_id"]), str(row["scan_id"]), str(row["partition_id"])) if row is not None else None
 
 
 @_tenant_scoped
