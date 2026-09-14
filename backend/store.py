@@ -599,6 +599,49 @@ def add_partition_write_indexes(conn) -> None:
     conn.execute("DROP INDEX IF EXISTS idx_finding_index_tenant_scan")
 
 
+def add_partitioned_scan_ledger(conn) -> None:
+    """Revision 0014: continuing a partitioned scan, and leases (B2.4, the base of B3).
+
+    A partitioned scan's header - the timestamp every partition stamps, its label,
+    compliance settings and file budget - and its request lived only in the process
+    running it, so a restart could not continue it. ``partitioned_scans`` keeps them,
+    with the request stored without secrets, and a status whose compare-and-set lets
+    exactly one finalize run.
+
+    ``scan_partitions`` gains a lease. Requeuing every running unit is correct only at
+    the startup of the one process that owns the scans; with a lease, a unit is taken
+    back only once its holder has stopped renewing it, which is what lets more than
+    one worker share a ledger (B2 review).
+
+    Revisions 0003 and 0004 enumerate tenant tables when they run, so both are re-run
+    here to give the new table its tenant foreign key and row-level security.
+    """
+    columns = db.table_columns(conn, "scan_partitions")
+    if "lease_owner" not in columns:
+        conn.execute("ALTER TABLE scan_partitions ADD COLUMN lease_owner TEXT NOT NULL DEFAULT ''")
+    if "lease_expires_at" not in columns:
+        conn.execute("ALTER TABLE scan_partitions ADD COLUMN lease_expires_at TEXT NOT NULL DEFAULT ''")
+    conn.execute("""CREATE TABLE IF NOT EXISTS partitioned_scans (
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            job_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'running',
+            request_json TEXT NOT NULL DEFAULT '{}',
+            header_json TEXT NOT NULL DEFAULT '{}',
+            resumable INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, scan_id)
+        );""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_partitioned_scans_status "
+        "ON partitioned_scans (status, updated_at)"
+    )
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1227,10 +1270,30 @@ def apply_baseline_schema(conn) -> None:
             records_json TEXT,
             summary_json TEXT NOT NULL DEFAULT '{}',
             diagnostics_json TEXT NOT NULL DEFAULT '{}',
+            lease_owner TEXT NOT NULL DEFAULT '',
+            lease_expires_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (tenant_id, scan_id, partition_id)
         );
         CREATE INDEX IF NOT EXISTS idx_scan_partitions_next
             ON scan_partitions (tenant_id, scan_id, status, ordinal);
+
+        -- B2.4, revision 0014: one row per partitioned scan - what continuing it after
+        -- a restart, or from another worker, needs.
+        CREATE TABLE IF NOT EXISTS partitioned_scans (
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            job_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'running',
+            request_json TEXT NOT NULL DEFAULT '{}',
+            header_json TEXT NOT NULL DEFAULT '{}',
+            resumable INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, scan_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_partitioned_scans_status
+            ON partitioned_scans (status, updated_at);
 
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -3038,8 +3101,20 @@ SCAN_PARTITION_STATES = ("queued", "running", "done", "failed")
 _PARTITION_COLUMNS = (
     "scan_id, partition_id, job_id, ordinal, spec_json, status, attempt, files, "
     "error, started_at, finished_at, records_ref, records_bytes, summary_json, diagnostics_json, "
+    "lease_owner, lease_expires_at, "
     "CASE WHEN records_json IS NOT NULL OR records_ref <> '' THEN 1 ELSE 0 END AS has_records"
 )
+PARTITIONED_SCAN_STATES = ("running", "finalizing", "done", "failed")
+DEFAULT_PARTITION_LEASE_SECONDS = 300
+
+
+def _lease_time(moment: datetime) -> str:
+    """A UTC instant as fixed-width text, so leases compare correctly as strings on both backends.
+
+    ``isoformat()`` drops the microseconds when they are zero, and a shorter string then
+    sorts before a longer one from the same second.
+    """
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 # Plan order is encoded in the seq columns as ordinal * span + position. Both are
 # INTEGER - four bytes on PostgreSQL - so one scan can order at most 2,147
 # partitions of up to a million findings each. A plan longer than that is refused
@@ -3134,6 +3209,8 @@ def _partition_row(row) -> dict:
         "has_records": bool(row["has_records"]),
         "summary": kept["summary_json"],
         "diagnostics": kept["diagnostics_json"],
+        "lease_owner": str(row["lease_owner"] or ""),
+        "lease_expires_at": str(row["lease_expires_at"] or ""),
     }
 
 
@@ -3193,7 +3270,9 @@ def create_scan_partitions(tenant_id: str, scan_id: str, job_id: str, specs: lis
 
 
 @_tenant_scoped
-def claim_next_partition(tenant_id: str, scan_id: str) -> dict | None:
+def claim_next_partition(
+    tenant_id: str, scan_id: str, *, worker_id: str = "", lease_seconds: int = DEFAULT_PARTITION_LEASE_SECONDS,
+) -> dict | None:
     """Take the first queued unit of a scan, in plan order, and mark it running.
 
     The update is a compare-and-set on the status, so two claimers - threads now,
@@ -3203,8 +3282,13 @@ def claim_next_partition(tenant_id: str, scan_id: str) -> dict | None:
     worker a stale attempt it could never complete with (B2 review). A lost race
     means another claimer made progress, so it takes the next queued unit rather
     than reporting that none is left.
+
+    The claim takes a lease for ``worker_id`` that expires after ``lease_seconds``
+    unless renewed; only an expired lease is ever taken back from a running unit.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    moment = datetime.now(timezone.utc)
+    now = moment.isoformat()
+    expires = _lease_time(moment + timedelta(seconds=max(1, int(lease_seconds))))
     with _lock:
         with _connect() as conn:
             while True:
@@ -3218,16 +3302,19 @@ def claim_next_partition(tenant_id: str, scan_id: str) -> dict | None:
                     return None
                 claimed = conn.execute(
                     "UPDATE scan_partitions SET status = 'running', attempt = attempt + 1, "
-                    "started_at = ?, finished_at = '', error = '', updated_at = ? "
+                    "started_at = ?, finished_at = '', error = '', updated_at = ?, "
+                    "lease_owner = ?, lease_expires_at = ? "
                     "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'queued' "
                     "AND attempt = ?",
-                    (now, now, tenant_id, str(scan_id), str(row["partition_id"]), int(row["attempt"] or 0)),
+                    (now, now, str(worker_id or ""), expires, tenant_id, str(scan_id), str(row["partition_id"]),
+                     int(row["attempt"] or 0)),
                 )
                 if int(claimed.rowcount or 0) == 1:
                     result = _partition_row(row)
                     result.update(
                         status="running", attempt=result["attempt"] + 1,
                         started_at=now, finished_at="", error="",
+                        lease_owner=str(worker_id or ""), lease_expires_at=expires,
                     )
                     return result
 
@@ -3236,7 +3323,8 @@ def _finish_partition(tenant_id: str, scan_id: str, partition_id: str, status: s
                       *, attempt: int, files: int = 0, error: str = "") -> bool:
     now = datetime.now(timezone.utc).isoformat()
     sql = (
-        "UPDATE scan_partitions SET status = ?, files = ?, error = ?, finished_at = ?, updated_at = ? "
+        "UPDATE scan_partitions SET status = ?, files = ?, error = ?, finished_at = ?, updated_at = ?, "
+        "lease_owner = '', lease_expires_at = '' "
         "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running'"
     )
     params: list = [status, int(files or 0), str(error or "")[:500], now, now,
@@ -3307,14 +3395,19 @@ def scan_partition_summary(tenant_id: str, scan_id: str) -> dict:
 
 
 def requeue_interrupted_partitions(tenant_id: str | None = None) -> int:
-    """Put units a stopped process left running back in the queue.
+    """Put units a stopped process left running back in the queue, whatever their lease.
 
-    Not wired to startup yet - that is B2.4. With no tenant it spans every tenant,
-    as ``recover_interrupted_jobs`` does. The attempt count is left alone here and
-    raised by the next claim, so it counts attempts that actually started.
+    Correct only at the startup of the one process that runs scans in-process: every
+    running unit then belongs to a process that no longer exists. Workers sharing a
+    ledger use :func:`requeue_expired_partitions` instead. With no tenant it spans every
+    tenant, as ``recover_interrupted_jobs`` does. The attempt count is left alone here
+    and raised by the next claim, so it counts attempts that actually started.
     """
     now = datetime.now(timezone.utc).isoformat()
-    sql = "UPDATE scan_partitions SET status = 'queued', updated_at = ? WHERE status = 'running'"
+    sql = (
+        "UPDATE scan_partitions SET status = 'queued', updated_at = ?, lease_owner = '', lease_expires_at = '' "
+        "WHERE status = 'running'"
+    )
     params: list = [now]
     if tenant_id:
         sql += " AND tenant_id = ?"
@@ -3322,6 +3415,202 @@ def requeue_interrupted_partitions(tenant_id: str | None = None) -> int:
     with _lock:
         with _connect() as conn:
             return int(conn.execute(sql, tuple(params)).rowcount or 0)
+
+
+@_tenant_scoped
+def renew_partition_lease(
+    tenant_id: str, scan_id: str, partition_id: str, *, attempt: int, worker_id: str,
+    lease_seconds: int = DEFAULT_PARTITION_LEASE_SECONDS,
+) -> bool:
+    """Extend a running unit's lease; returns whether the caller still holds it.
+
+    Only the worker that claimed this attempt can renew it. ``False`` means the unit was
+    taken back - its lease expired and someone requeued it - and the caller should stop
+    working on it: its write would be refused anyway.
+    """
+    expires = _lease_time(datetime.now(timezone.utc) + timedelta(seconds=max(1, int(lease_seconds))))
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE scan_partitions SET lease_expires_at = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running' "
+                "AND attempt = ? AND lease_owner = ?",
+                (expires, datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id), str(partition_id),
+                 int(attempt), str(worker_id or "")),
+            ).rowcount or 0) == 1
+
+
+def requeue_expired_partitions(*, tenant_id: str | None = None, now: datetime | None = None) -> int:
+    """Take back running units whose lease has run out, whoever held them.
+
+    Safe with many workers: a unit whose holder is alive keeps renewing and is never
+    touched. A unit without a lease - claimed before leases existed - is left to
+    :func:`requeue_interrupted_partitions` at startup. With no tenant it spans every
+    tenant; the attempt count is raised by the next claim.
+    """
+    cutoff = _lease_time(now or datetime.now(timezone.utc))
+    sql = (
+        "UPDATE scan_partitions SET status = 'queued', lease_owner = '', lease_expires_at = '', updated_at = ? "
+        "WHERE status = 'running' AND lease_expires_at <> '' AND lease_expires_at < ?"
+    )
+    params: list = [datetime.now(timezone.utc).isoformat(), cutoff]
+    if tenant_id:
+        sql += " AND tenant_id = ?"
+        params.append(tenant_id)
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(sql, tuple(params)).rowcount or 0)
+
+
+@_tenant_scoped
+def requeue_failed_partitions(tenant_id: str, scan_id: str, *, max_attempts: int) -> int:
+    """Give failed units of a scan another run, until they have had ``max_attempts``.
+
+    A unit fails for reasons that may pass - a share that was briefly unreachable, a
+    file locked for a moment. One that has failed ``max_attempts`` times stays failed,
+    and the scan cannot be finalized until someone decides what to do with it.
+    """
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE scan_partitions SET status = 'queued', lease_owner = '', lease_expires_at = '', updated_at = ? "
+                "WHERE tenant_id = ? AND scan_id = ? AND status = 'failed' AND attempt < ?",
+                (datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id), int(max_attempts)),
+            ).rowcount or 0)
+
+
+def _partitioned_scan_row(row) -> dict:
+    parsed = {}
+    for column in ("request_json", "header_json"):
+        try:
+            value = json.loads(row[column] or "{}")
+        except (TypeError, ValueError):
+            value = {}
+        parsed[column] = value if isinstance(value, dict) else {}
+    return {
+        "tenant_id": str(row["tenant_id"]),
+        "scan_id": str(row["scan_id"]),
+        "job_id": str(row["job_id"] or ""),
+        "status": str(row["status"]),
+        "request": parsed["request_json"],
+        "header": parsed["header_json"],
+        "resumable": bool(row["resumable"]),
+        "error": str(row["error"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+_PARTITIONED_SCAN_COLUMNS = (
+    "tenant_id, scan_id, job_id, status, request_json, header_json, resumable, error, created_at, updated_at"
+)
+
+
+@_tenant_scoped
+def register_partitioned_scan(tenant_id: str, scan_id: str, *, job_id: str, request: dict, header: dict) -> dict:
+    """Record a partitioned scan before its first partition runs; returns the stored row.
+
+    The request goes through the same secret filter scan profiles use, so a typed
+    password never reaches the database - and a scan whose only credential was a typed
+    password is recorded as not resumable. Registering a scan that is already recorded
+    changes nothing and returns what is there: a resumed scan continues with the header
+    it started with.
+    """
+    resumable = scan_request_is_resumable(request)
+    cleaned = _sanitize_scan_profile_config(request if isinstance(request, dict) else {})
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO partitioned_scans "
+                "(tenant_id, scan_id, job_id, status, request_json, header_json, resumable, error, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'running', ?, ?, ?, '', ?, ?)",
+                (
+                    tenant_id, str(scan_id), str(job_id or ""),
+                    json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"), default=str),
+                    json.dumps(header if isinstance(header, dict) else {}, ensure_ascii=False, separators=(",", ":"), default=str),
+                    1 if resumable else 0, now, now,
+                ),
+            )
+            row = conn.execute(
+                f"SELECT {_PARTITIONED_SCAN_COLUMNS} FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?",
+                (tenant_id, str(scan_id)),
+            ).fetchone()
+    return _partitioned_scan_row(row)
+
+
+@_tenant_scoped
+def read_partitioned_scan(tenant_id: str, scan_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT {_PARTITIONED_SCAN_COLUMNS} FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?",
+            (tenant_id, str(scan_id)),
+        ).fetchone()
+    return _partitioned_scan_row(row) if row is not None else None
+
+
+def list_unfinished_partitioned_scans(*, resumable_only: bool = False) -> list[dict]:
+    """Partitioned scans that are neither done nor failed, across every tenant, oldest first.
+
+    Spans tenants the way job recovery does: it is read at startup, and by workers
+    looking for work, before any tenant is known.
+    """
+    sql = (
+        f"SELECT {_PARTITIONED_SCAN_COLUMNS} FROM partitioned_scans "
+        "WHERE status IN ('running', 'finalizing')"
+    )
+    if resumable_only:
+        sql += " AND resumable = 1"
+    sql += " ORDER BY created_at, scan_id"
+    with _connect() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [_partitioned_scan_row(row) for row in rows]
+
+
+@_tenant_scoped
+def bind_partitioned_scan_job(tenant_id: str, scan_id: str, job_id: str) -> bool:
+    """Point a partitioned scan at the job now running it - a resumed scan gets a new job."""
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE partitioned_scans SET job_id = ?, updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
+                (str(job_id or ""), datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id)),
+            ).rowcount or 0) == 1
+
+
+@_tenant_scoped
+def claim_scan_finalize(tenant_id: str, scan_id: str, *, stale_after_seconds: int | None = None) -> bool:
+    """Move a scan from running to finalizing; returns whether this caller may finalize it.
+
+    A compare-and-set, so of several workers that each see the last partition finish,
+    exactly one finalizes (B2.2b review: two finalizes at once made the second raise).
+    A scan left ``finalizing`` by a process that died can be claimed again once it has
+    been idle for ``stale_after_seconds`` - safe, because finalize is one transaction
+    that either happened or did not.
+    """
+    now = datetime.now(timezone.utc)
+    sql = "UPDATE partitioned_scans SET status = 'finalizing', updated_at = ? WHERE tenant_id = ? AND scan_id = ? AND ("
+    sql += "status = 'running'"
+    params: list = [now.isoformat(), tenant_id, str(scan_id)]
+    if stale_after_seconds is not None:
+        sql += " OR (status = 'finalizing' AND updated_at < ?)"
+        params.append((now - timedelta(seconds=max(0, int(stale_after_seconds)))).isoformat())
+    sql += ")"
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(sql, tuple(params)).rowcount or 0) == 1
+
+
+@_tenant_scoped
+def mark_partitioned_scan(tenant_id: str, scan_id: str, status: str, *, error: str = "") -> bool:
+    if status not in PARTITIONED_SCAN_STATES:
+        raise ValueError(f"not a partitioned scan state: {status}")
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE partitioned_scans SET status = ?, error = ?, updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
+                (status, str(error or "")[:500], datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id)),
+            ).rowcount or 0) == 1
 
 
 class PartitionNotClaimed(RuntimeError):
@@ -3426,6 +3715,7 @@ def persist_partition(
                 inline, records_bytes = pack_json_text(body), len(body.encode("utf-8"))
             finished = conn.execute(
                 "UPDATE scan_partitions SET status = 'done', files = ?, error = '', records_ref = ?, "
+                "lease_owner = '', lease_expires_at = '', "
                 "records_bytes = ?, records_json = ?, summary_json = ?, diagnostics_json = ?, "
                 "finished_at = ?, updated_at = ? "
                 "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running' AND attempt = ?",
@@ -6653,6 +6943,7 @@ _TENANT_ERASURE_TABLES = (
     "finding_occurrences",
     "finding_index",
     "scan_partitions",
+    "partitioned_scans",
     "scan_jobs",
 )
 
