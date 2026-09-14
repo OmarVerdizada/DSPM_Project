@@ -138,7 +138,7 @@ class TheScanRecordTest(_LeaseTest):
     def test_registering_strips_a_typed_password_and_keeps_the_header(self) -> None:
         row = store.register_partitioned_scan(
             self.tenant, SCAN, job_id="job-1",
-            request={"local_path": "C:/data", "password": "typed-secret-never-stored", "username": "svc"},
+            request={"server": "fs01", "password": "typed-secret-never-stored", "username": "svc"},
             header={"timestamp": "2026-09-14T00:00:00Z", "scan_label": "nightly", "max_files": 2000},
         )
         self.assertFalse(row["resumable"])
@@ -173,7 +173,8 @@ class TheScanRecordTest(_LeaseTest):
         other = f"t{uuid.uuid4().hex[:8]}"
         store.create_tenant(other, "other")
         store.register_partitioned_scan(self.tenant, "scan-1", job_id="a", request={"local_path": "x"}, header={})
-        store.register_partitioned_scan(other, "scan-2", job_id="b", request={"password": "typed"}, header={})
+        store.register_partitioned_scan(other, "scan-2", job_id="b", request={"server": "fs01", "password": "typed"},
+                                        header={})
         store.register_partitioned_scan(self.tenant, "scan-3", job_id="c", request={}, header={})
         store.mark_partitioned_scan(self.tenant, "scan-3", "done")
         listed = {(row["tenant_id"], row["scan_id"]) for row in store.list_unfinished_partitioned_scans()}
@@ -189,6 +190,75 @@ class TheScanRecordTest(_LeaseTest):
         with store._connect() as conn:
             left = conn.execute("SELECT COUNT(*) FROM partitioned_scans WHERE tenant_id = ?", (self.tenant,)).fetchone()[0]
         self.assertEqual(left, 0)
+
+
+class WhatTheReviewFoundTest(_LeaseTest):
+    """B2.4/B3 review: a partition that kills its holders, a live scan that looked dead."""
+
+    def _age_scan(self, scan_id: str, seconds: int) -> None:
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE partitioned_scans SET updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat(), self.tenant, scan_id),
+            )
+
+    def _scan_age(self, scan_id: str = SCAN) -> float:
+        updated = store.read_partitioned_scan(self.tenant, scan_id)["updated_at"]
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(updated)).total_seconds()
+
+    def test_a_holder_that_dies_on_its_last_attempt_fails_the_partition_instead_of_requeuing_it(self) -> None:
+        self._plan(1)
+        later = lambda: datetime.now(timezone.utc) + timedelta(seconds=30)  # noqa: E731
+        store.claim_next_partition(self.tenant, SCAN, worker_id="gone", lease_seconds=1)
+        self.assertEqual(store.requeue_expired_partitions(now=later(), max_attempts=2), 1)
+        self.assertEqual(store.list_scan_partitions(self.tenant, SCAN)[0]["status"], "queued")
+        store.claim_next_partition(self.tenant, SCAN, worker_id="gone-again", lease_seconds=1)
+        self.assertEqual(store.requeue_expired_partitions(now=later(), max_attempts=2), 1)
+        unit = store.list_scan_partitions(self.tenant, SCAN)[0]
+        self.assertEqual((unit["status"], unit["attempt"], unit["error"], unit["lease_owner"]),
+                         ("failed", 2, "lease expired on its last attempt", ""))
+
+    def test_claiming_and_writing_a_partition_show_its_scan_is_alive(self) -> None:
+        store.register_partitioned_scan(self.tenant, SCAN, job_id="j", request={}, header={})
+        self._plan(2)
+        self._age_scan(SCAN, 3600)
+        unit = store.claim_next_partition(self.tenant, SCAN, worker_id="w")
+        self.assertLess(self._scan_age(), 60, "a claim did not touch the scan")
+        self._age_scan(SCAN, 3600)
+        self.assertIsNotNone(store.claim_partition(self.tenant, SCAN, "p00001", worker_id="w"))
+        self.assertLess(self._scan_age(), 60, "a named claim did not touch the scan")
+        self._age_scan(SCAN, 3600)
+        store.persist_partition(
+            self.tenant, SCAN, unit["partition_id"], unit["attempt"],
+            {"timestamp": "2026-09-14T00:00:00+00:00", "source": "local", "mode": "full", "summary": {},
+             "scan_diagnostics": {}},
+            [], write_estate=True,
+        )
+        self.assertLess(self._scan_age(), 60, "a partition's write did not touch the scan")
+
+    def test_a_finalize_is_given_longer_than_a_running_scan_before_it_is_taken_over(self) -> None:
+        for scan_id in ("scan-running", "scan-finalizing"):
+            store.register_partitioned_scan(self.tenant, scan_id, job_id="j", request={}, header={})
+        self.assertTrue(store.claim_scan_finalize(self.tenant, "scan-finalizing"))
+        for scan_id in ("scan-running", "scan-finalizing"):
+            self._age_scan(scan_id, 400)
+
+        def claim(scan_id: str) -> bool:
+            return store.claim_partitioned_scan_resume(
+                self.tenant, scan_id, job_id="j", stale_after_seconds=300, finalizing_stale_after_seconds=3600)
+
+        self.assertTrue(claim("scan-running"))
+        self.assertFalse(claim("scan-finalizing"), "a finalize still writing was taken over after one lease")
+        self._age_scan("scan-finalizing", 4000)
+        self.assertTrue(claim("scan-finalizing"))
+
+    def test_with_resuming_off_a_restart_asks_for_a_re_run(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        store.record_job({"id": "job-r", "tenant_id": self.tenant, "status": "running", "progress": 1,
+                          "message": "Running", "created_at": now})
+        store.register_partitioned_scan(self.tenant, SCAN, job_id="job-r", request={"local_path": "estate"}, header={})
+        store.recover_interrupted_jobs(resuming=False)
+        self.assertIn("Re-run the scan", store.read_job(self.tenant, "job-r")["error"])
 
 
 if __name__ == "__main__":

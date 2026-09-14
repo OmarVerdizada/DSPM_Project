@@ -57,13 +57,17 @@ def resume_stale_scans(resume: Callable[[dict], object], *, stale_after_seconds:
     scan failed, since it would fail the same way next time.
     """
     stale = partitioned_scan.partition_lease_seconds() if stale_after_seconds is None else max(0, int(stale_after_seconds))
+    # A finalize cannot show it is alive while its write runs, so it is given far longer.
+    finalizing = partitioned_scan.finalize_stale_seconds() if stale_after_seconds is None else stale
     taken: list[str] = []
     for record in store.list_unfinished_partitioned_scans():
         tenant_id, scan_id = record["tenant_id"], record["scan_id"]
         if partitioned_scan.is_running_here(tenant_id, scan_id):
             continue
         job_id = record["job_id"] or str(uuid.uuid4())
-        if not store.claim_partitioned_scan_resume(tenant_id, scan_id, job_id=job_id, stale_after_seconds=stale):
+        if not store.claim_partitioned_scan_resume(
+            tenant_id, scan_id, job_id=job_id, stale_after_seconds=stale, finalizing_stale_after_seconds=finalizing,
+        ):
             continue
         taken.append(scan_id)
         if not record["resumable"]:

@@ -97,6 +97,16 @@ def _is_connection_error(exc: Exception) -> bool:
     )
 
 
+def _is_access_denied(exc: Exception) -> bool:
+    """True for a clean refusal to list a folder - the account may not read it - which
+    refuses the scan the same way; False for a dropped connection, a timeout, or anything
+    that might list fine a moment later."""
+    if _is_connection_error(exc):
+        return False
+    text = str(exc).lower()
+    return any(token in text for token in ("access denied", "access_denied", "0xc0000022", "unable to open directory"))
+
+
 @dataclass(slots=True)
 class _SMBFileWork:
     """Metadata-only placeholder filled during P1's acquisition phase.
@@ -1271,7 +1281,10 @@ class SMBScanner:
                 try:
                     entries = self.connection.listPath(share_name, "/")
                 except Exception as exc:
-                    if _is_connection_error(exc):
+                    # Only a root this account may not read is known to yield nothing in
+                    # the scan as well. A dropped connection or a timeout might list fine a
+                    # moment later, and hide an overlap between groups (B2.3 review).
+                    if not _is_access_denied(exc):
                         return None
                     folders[share_name] = set()
                     continue

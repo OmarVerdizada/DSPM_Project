@@ -9,14 +9,22 @@ never imported. The gates in their fundamental form:
   exactly an uninterrupted scan's.
 - **No sensitive value in Redis:** a scan of files holding a known card number and a
   known password leaves neither anywhere in the stream - only identifiers ever enter it.
+
+And what a review of the first version found: a worker that could not see a local scan's
+folders would have written them as empty and let finalize prune the estate; a dead
+worker's partition was never taken back on the Redis queue; one misconfigured worker
+failed scans for everyone; a busy database ended the worker; a scan whose last worker
+died before finalizing stayed unfinished.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -201,6 +209,13 @@ class WorkersRunAScanTest(_LocalTest):
     def _rebuild(self, name: str):
         return lambda record: ScanConfig(**self._settings(name))
 
+    def _redis_queue(self, record: dict) -> tuple[FakeRedis, RedisStreamQueue, list[dict]]:
+        redis = FakeRedis()
+        queue = RedisStreamQueue(redis)
+        units = store.list_scan_partitions(TENANT, record["scan_id"])
+        queue.publish(TENANT, record["scan_id"], [unit["partition_id"] for unit in units])
+        return redis, queue, units
+
     def test_a_worker_killed_after_its_commit_and_before_xack_writes_nothing_twice(self) -> None:
         self._use_database("uninterrupted")
         whole = partitioned_scan.run_partitioned_scan(
@@ -210,10 +225,7 @@ class WorkersRunAScanTest(_LocalTest):
         whole_paths = [f["path"] for f in store.read_scan_report(TENANT, whole["scan_id"])["files"]]
 
         record = self._start("redis")
-        redis = FakeRedis()
-        queue = RedisStreamQueue(redis)
-        units = store.list_scan_partitions(TENANT, record["scan_id"])
-        queue.publish(TENANT, record["scan_id"], [unit["partition_id"] for unit in units])
+        redis, queue, units = self._redis_queue(record)
 
         first = queue.take("worker-a")
         self.assertEqual(partitioned_scan.run_queued_partition(
@@ -264,26 +276,97 @@ class WorkersRunAScanTest(_LocalTest):
         walked, _ = self._single_walk(ScanConfig(**self._settings("ledger")))
         self.assertEqual([f["path"] for f in store.read_scan_report(TENANT, record["scan_id"])["files"]], walked)
 
-    def test_a_message_for_a_finished_or_unrebuildable_scan_is_dropped(self) -> None:
-        record = self._start("dropped")
-        redis = FakeRedis()
-        queue = RedisStreamQueue(redis)
-        unit = store.list_scan_partitions(TENANT, record["scan_id"])[0]
-        queue.publish(TENANT, record["scan_id"], [unit["partition_id"]])
+    def test_a_scan_this_worker_cannot_rebuild_is_left_alone_and_a_finished_one_is_dropped(self) -> None:
+        record = self._start("unbuildable")
+        redis, queue, units = self._redis_queue(record)
         delivery = queue.take("worker-a")
 
         def cannot_rebuild(_record):
-            raise ValueError("the credential is gone from the vault")
+            raise ValueError("the credential is not in this worker's vault")
 
-        self.assertEqual(partition_worker.handle_delivery(queue, delivery, cannot_rebuild, worker_id="worker-a"), "dropped")
+        self.assertEqual(partition_worker.handle_delivery(queue, delivery, cannot_rebuild, worker_id="worker-a"),
+                         "unbuildable")
+        self.assertIn(delivery.receipt, redis.pending(), "acknowledged, so no other worker would ever get it")
+        self.assertEqual(store.read_partitioned_scan(TENANT, record["scan_id"])["status"], "running",
+                         "one worker's configuration failed a scan other workers could run")
+        self.assertEqual(store.read_scan_partition(TENANT, record["scan_id"], delivery.partition_id)["status"], "queued")
+
+        store.mark_partitioned_scan(TENANT, record["scan_id"], "failed", error="cancelled")
+        self.assertEqual(partition_worker.handle_delivery(queue, delivery, self._rebuild("unbuildable"),
+                                                          worker_id="worker-b"), "dropped")
         self.assertEqual(redis.pending(), {})
+
+    def test_a_local_scan_planned_on_another_host_is_left_to_that_host(self) -> None:
+        record = self._start("elsewhere")
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE partitioned_scans SET header_json = ? WHERE tenant_id = ? AND scan_id = ?",
+                (json.dumps(dict(record["header"], host="another-host")), TENANT, record["scan_id"]),
+            )
+        self.assertIsNone(LedgerQueue().take("worker-a"), "the ledger queue handed out another host's folders")
+        redis, queue, units = self._redis_queue(record)
+        delivery = queue.take("worker-a")
+        self.assertEqual(partition_worker.handle_delivery(queue, delivery, self._rebuild("elsewhere"),
+                                                          worker_id="worker-a"), "elsewhere")
+        self.assertIn(delivery.receipt, redis.pending())
+        self.assertEqual({unit["status"] for unit in store.list_scan_partitions(TENANT, record["scan_id"])}, {"queued"},
+                         "a partition naming another host's folders was run here")
+
+    def test_a_dead_workers_partition_is_taken_back_and_finished_on_the_redis_queue(self) -> None:
+        record = self._start("dead-worker")
+        redis, queue, units = self._redis_queue(record)
+        first = queue.take("worker-a")
+        # worker-a claims its partition and dies before writing it: the row stays running.
+        self.assertIsNotNone(store.claim_partition(TENANT, record["scan_id"], first.partition_id,
+                                                   worker_id="worker-a", lease_seconds=1))
+        time.sleep(1.2)
+        redis.now_ms += 400_000
+        partition_worker.run_worker(queue, self._rebuild("dead-worker"), worker_id="worker-b", stop_when_idle=True)
+        self.assertEqual(store.read_partitioned_scan(TENANT, record["scan_id"])["status"], "done",
+                         "the dead worker's partition was never taken back, so the scan could not finish")
+        self.assertEqual(store.read_scan_partition(TENANT, record["scan_id"], first.partition_id)["attempt"], 2)
+        self.assertEqual(redis.pending(), {})
+
+    def test_a_partition_whose_holder_died_on_its_last_attempt_fails_the_scan(self) -> None:
+        record = self._start("poison")
+        unit = store.list_scan_partitions(TENANT, record["scan_id"])[0]
+        with mock.patch.dict(os.environ, {"DSPM_PARTITION_MAX_ATTEMPTS": "1"}):
+            self.assertIsNotNone(store.claim_partition(TENANT, record["scan_id"], unit["partition_id"],
+                                                       worker_id="worker-a", lease_seconds=1))
+            time.sleep(1.2)
+            handled = partition_worker.run_worker(LedgerQueue(), self._rebuild("poison"), worker_id="worker-b",
+                                                  stop_when_idle=True)
         stored = store.read_partitioned_scan(TENANT, record["scan_id"])
         self.assertEqual(stored["status"], "failed")
-        self.assertIn("ValueError", stored["error"])
-        queue.publish(TENANT, record["scan_id"], [unit["partition_id"]])
-        late = queue.take("worker-b")
-        self.assertEqual(partition_worker.handle_delivery(queue, late, self._rebuild("dropped"), worker_id="worker-b"),
-                         "dropped")
+        self.assertIn("lease expired on its last attempt", stored["error"])
+        self.assertEqual(handled, 0, "the rest of a scan that could never finish was run anyway")
+
+    def test_a_scan_whose_last_worker_died_before_finalizing_is_finished_by_another(self) -> None:
+        record = self._start("stranded")
+        for unit in store.list_scan_partitions(TENANT, record["scan_id"]):
+            self.assertEqual(partitioned_scan.run_queued_partition(
+                record, ScanConfig(**self._settings("stranded")), unit["partition_id"], worker_id="worker-a"), "written")
+        # worker-a died before it could finalize.
+        self.assertEqual(store.read_partitioned_scan(TENANT, record["scan_id"])["status"], "running")
+        partition_worker.run_worker(LedgerQueue(), self._rebuild("stranded"), worker_id="worker-b", stop_when_idle=True)
+        self.assertEqual(store.read_partitioned_scan(TENANT, record["scan_id"])["status"], "done")
+        walked, _ = self._single_walk(ScanConfig(**self._settings("stranded")))
+        self.assertEqual([f["path"] for f in store.read_scan_report(TENANT, record["scan_id"])["files"]], walked)
+
+    def test_the_worker_waits_out_a_busy_database(self) -> None:
+        self._use_database("busy")
+        calls = {"n": 0}
+
+        class BusyOnce(LedgerQueue):
+            def take(self, worker_id, *, block_seconds=0.0):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise sqlite3.OperationalError("database is locked")
+                return None
+
+        handled = partition_worker.run_worker(BusyOnce(), self._rebuild("busy"), worker_id="worker-a",
+                                              idle_seconds=0.01, stop_when_idle=True)
+        self.assertEqual((handled, calls["n"]), (0, 2))
 
     def test_a_failed_partition_is_queued_again_until_its_attempts_run_out(self) -> None:
         record = self._start("retry")

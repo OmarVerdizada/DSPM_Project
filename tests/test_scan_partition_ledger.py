@@ -124,6 +124,8 @@ class JobBindingTest(_LedgerTest):
     def test_the_resumability_rule(self) -> None:
         cases = [
             ({"local_path": "/data"}, True),
+            # A local scan needs no credential; a password left in the form is not one.
+            ({"local_path": "/data", "password": "left-over-from-the-form"}, True),
             ({"server": "fs01"}, True),
             ({"server": "fs01", "credential_ref": "cred-1"}, True),
             ({"server": "fs01", "username": "svc", "password": "typed"}, False),

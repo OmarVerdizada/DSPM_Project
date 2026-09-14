@@ -17,7 +17,8 @@ partition is leased to the worker running it. A process that dies part way
 through therefore leaves a scan that can be continued rather than a half-written
 estate: :mod:`backend.scan_resumer` finds it, and :func:`continue_partitioned_scan`
 runs what is left (B2.4). The same record lets a queue worker run any one partition
-of a scan it did not start (:func:`run_queued_partition`, B3).
+of a scan it did not start (:func:`run_queued_partition`, B3) - of a local scan, only
+on the host that planned it.
 """
 
 from __future__ import annotations
@@ -123,12 +124,17 @@ def finalize_scan(
     sections = ComplianceReportAccumulator(compliance_enabled, compliance_frameworks)
     file_count = 0
     sample_count = 0
+    touched = time.monotonic()
     try:
         for record in _stored_files(tenant_id, scan_id):
             sections.add(record)
             file_count += 1
             if store.is_sample_data_path(record):
                 sample_count += 1
+            if time.monotonic() - touched > 30:
+                # A long first pass must not look like a dead finalizer (B2.4 review).
+                store.touch_partitioned_scan(tenant_id, scan_id)
+                touched = time.monotonic()
     except store.PartitionsNotFinished:
         # Another finalize committed after the partitions were listed, and released
         # the records this pass was reading.
@@ -189,7 +195,8 @@ def partition_max_attempts() -> int:
 
     A partition fails for reasons that may pass - a file locked for a moment, a
     folder briefly unreadable - so it is tried again once nothing else is queued. One
-    that keeps failing stops the scan instead of retrying forever.
+    that keeps failing, or whose holder keeps dying, stops the scan instead of
+    retrying forever.
     """
     try:
         return max(1, min(int(os.getenv("DSPM_PARTITION_MAX_ATTEMPTS", "3")), 20))
@@ -208,6 +215,15 @@ def partition_lease_seconds() -> int:
         return max(1, min(int(os.getenv("DSPM_PARTITION_LEASE_SECONDS", str(store.DEFAULT_PARTITION_LEASE_SECONDS))), 86_400))
     except ValueError:
         return store.DEFAULT_PARTITION_LEASE_SECONDS
+
+
+def finalize_stale_seconds() -> int:
+    """How long a finalize may look idle before it is taken for dead: twelve leases, at least an hour.
+
+    Finalize's write is one transaction that cannot touch the scan record while it
+    streams the body, so a lease is far too short a judge of it (B2.4 review).
+    """
+    return max(12 * partition_lease_seconds(), 3600)
 
 
 # ---- running one -------------------------------------------------------------------------------------------
@@ -234,6 +250,25 @@ def is_running_here(tenant_id: str, scan_id: str) -> bool:
     """
     with _running_here_lock:
         return (str(tenant_id), str(scan_id)) in _running_here
+
+
+def _this_host() -> str:
+    return socket.gethostname().casefold()
+
+
+def runs_here(record: dict) -> bool:
+    """Whether this host can run the recorded scan's partitions.
+
+    A local scan's paths name folders on the host that planned it. On another host the
+    same path is another folder or none at all - and a partition that found nothing
+    there would be written as empty, and finalize would prune everything under it (B3
+    review). An SMB scan runs wherever the server can be reached.
+    """
+    header = record.get("header") or {}
+    if str(header.get("source") or "local") != "local":
+        return True
+    host = str(header.get("host") or "")
+    return not host or host.casefold() == _this_host()
 
 
 def _deadline() -> float | None:
@@ -317,14 +352,24 @@ def _share_unit_config(config: ScanConfig, spec: dict) -> ScanConfig:
     return replace(config, smb_shares=tuple(spec.get("shares") or ()), progress_callback=None)
 
 
-def _vanished_partition(timestamp: str, label: str) -> tuple[dict, list]:
-    """A run whose folder is gone by the time it is scanned holds nothing - which is
-    what a whole walk makes of a folder that disappears after its parent was listed."""
+def _vanished_partition(timestamp: str, label: str, folder: str) -> tuple[dict, list]:
+    """A run whose folder is gone by the time it is scanned holds nothing.
+
+    A whole walk that cannot list a folder reports it unreadable, and that leaves the
+    scan incomplete, so nothing under it is pruned; the partition says the same (B3
+    review - it used to report nothing, and the scan called itself complete).
+    """
     from discovery.discovery_engine import ScanSummary
 
     header = {
         "timestamp": timestamp, "source": "local", "mode": "full",
-        "summary": ScanSummary(0, 0, 0, 0, 0, 0).to_dict(), "scan_diagnostics": {},
+        "summary": ScanSummary(0, 0, 0, 0, 0, 0).to_dict(),
+        # Completeness is merged from the partitions' incremental blocks alone, so the
+        # unreadable folder has to say so there too.
+        "scan_diagnostics": {
+            "unreadable_dirs": [f"{folder}: folder no longer exists"],
+            "incremental": {"complete": False},
+        },
     }
     if label:
         header["scan_label"] = label
@@ -390,6 +435,7 @@ def start_partitioned_scan(
             max_depth=config.max_depth,
             scan_root=str(Path(config.local_path).expanduser().resolve()),
             max_files=budget,
+            host=socket.gethostname(),
         )
     record = store.register_partitioned_scan(
         tenant_id, scan_id, job_id=job_id, request=dict(request or {}), header=header,
@@ -461,8 +507,9 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
     total = len(units)
     done = sum(1 for unit in units if unit["status"] == "done")
     max_attempts = partition_max_attempts()
-    # A partition whose holder died is taken back once its lease has run out.
-    store.requeue_expired_partitions(tenant_id=scan.tenant_id)
+    # A partition whose holder died is taken back once its lease has run out - or, on
+    # its last attempt, failed.
+    store.requeue_expired_partitions(tenant_id=scan.tenant_id, max_attempts=max_attempts)
     while True:
         reason = stop_reason()
         if reason:
@@ -488,7 +535,7 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
         if exhausted:
             raise ScanStopped(_exhausted_message(exhausted[0]))
         # What is left runs under another worker's lease: take back any that ran out, or wait.
-        if not store.requeue_expired_partitions(tenant_id=scan.tenant_id):
+        if not store.requeue_expired_partitions(tenant_id=scan.tenant_id, max_attempts=max_attempts):
             time.sleep(poll_seconds)
 
 
@@ -537,12 +584,16 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
         with _holding_lease(scan, unit):
             if scan.source == "smb":
                 engine_config = _share_unit_config(scan.config, unit["spec"])
+            elif not Path(scan.scan_root).is_dir():
+                # Not a folder that vanished: the whole scan is out of reach from here.
+                # Writing that as an empty partition would let finalize prune the estate.
+                raise FileNotFoundError(f"the scan root is not reachable from {socket.gethostname()}")
             elif Path(str(unit["spec"]["local_path"])).is_dir():
                 engine_config = _unit_config(scan.config, unit["spec"], scan.scan_root)
             else:
                 engine_config = None
             if engine_config is None:
-                header, records = _vanished_partition(scan.timestamp, scan.label)
+                header, records = _vanished_partition(scan.timestamp, scan.label, str(unit["spec"]["local_path"]))
             else:
                 with collection_heartbeat(job) if job is not None else nullcontext():
                     report = DSPMDiscoveryEngine(engine_config).run().to_dict()
@@ -587,7 +638,13 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
 
 
 def _finalize(scan: _Scan) -> dict:
-    """Finalize a scan whose finalize this caller has claimed, and mark it done."""
+    """Finalize a scan whose finalize this caller has claimed, and mark it done.
+
+    Once the finalize has committed the scan has succeeded, whatever happens to the
+    status update after it: a failure there leaves the scan ``finalizing``, the sweep
+    later takes it back, and finalizing again returns the report and marks it done.
+    It is never allowed to turn into a failed scan with a report (B3 review).
+    """
     report = finalize_scan(
         scan.tenant_id, scan.scan_id,
         timestamp=scan.timestamp,
@@ -601,7 +658,10 @@ def _finalize(scan: _Scan) -> dict:
             {"local_path": scan.local_path, "max_depth": scan.max_depth} if scan.source == "local" else None
         ),
     )
-    store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "done")
+    try:
+        store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "done")
+    except Exception as exc:
+        logger.warning("Scan %s finalized, but could not be marked done: %s", scan.scan_id, type(exc).__name__)
     return report
 
 
@@ -610,9 +670,9 @@ def _finalize_when_claimed(scan: _Scan, *, job, stop_reason, poll_seconds: float
         job.message = "Finalizing report"
         job.progress = max(job.progress, 95)
     # Exactly one finalize runs. One left claimed by a process that died is taken back
-    # once it has been quiet for a lease; the finalize guard makes a take-back that
-    # raced a slow but live finalize return that finalize's report.
-    while not store.claim_scan_finalize(scan.tenant_id, scan.scan_id, stale_after_seconds=scan.lease_seconds):
+    # once it has looked idle for far longer than a lease; the finalize guard makes a
+    # take-back that raced a slow but live finalize return that finalize's report.
+    while not store.claim_scan_finalize(scan.tenant_id, scan.scan_id, stale_after_seconds=finalize_stale_seconds()):
         current = store.read_partitioned_scan(scan.tenant_id, scan.scan_id) or {}
         if current.get("status") == "done":
             existing = store.read_scan_report_compact(scan.tenant_id, scan.scan_id)
@@ -638,11 +698,14 @@ def run_queued_partition(record: dict, config: ScanConfig, partition_id: str, *,
     ``held`` - another worker holds it, or took it back while this call ran. ``retry`` -
     it failed and is queued in the ledger again. ``stopped`` - it failed its last
     attempt, and the scan is marked failed. ``dropped`` - the scan has no such partition.
+    ``elsewhere`` - a local scan planned on another host, which this host must not run.
 
     The claim is the ledger's compare-and-set, so a duplicate delivery - a message
     reclaimed from a worker that died after its commit - finds the partition done and
     runs nothing twice.
     """
+    if not runs_here(record):
+        return "elsewhere"
     scan = _scan_from_record(record, config, worker=worker_id)
     unit = store.claim_partition(
         scan.tenant_id, scan.scan_id, partition_id, worker_id=scan.worker, lease_seconds=scan.lease_seconds,
@@ -664,23 +727,35 @@ def run_queued_partition(record: dict, config: ScanConfig, partition_id: str, *,
     return "stopped"
 
 
-def finalize_if_complete(record: dict, config: ScanConfig) -> dict | None:
-    """Finalize a recorded scan whose partitions are all done, unless another caller already is.
+def settle_if_finished(record: dict, config: ScanConfig) -> str | None:
+    """Finish a recorded scan nothing is left to run for; returns ``finalized``, ``failed`` or ``None``.
 
-    Returns the compact report when this call finalized it, else ``None``.
+    A partition out of attempts: mark the scan failed at once - it can never finish, and
+    nothing else of it is worth running. Every partition done: finalize it, unless another
+    caller already is. Anything else: nothing to do yet. Queue workers call this after
+    their writes and while they idle, so a scan whose last worker died between its commit
+    and the finalize is still finished (B3 review).
     """
     units = store.list_scan_partitions(record["tenant_id"], record["scan_id"])
-    if not units or any(unit["status"] != "done" for unit in units):
+    if not units:
+        return None
+    max_attempts = partition_max_attempts()
+    exhausted = [unit for unit in units if unit["status"] == "failed" and unit["attempt"] >= max_attempts]
+    if exhausted:
+        store.mark_partitioned_scan(record["tenant_id"], record["scan_id"], "failed", error=_exhausted_message(exhausted[0]))
+        return "failed"
+    if any(unit["status"] != "done" for unit in units):
         return None
     scan = _scan_from_record(record, config)
-    if not store.claim_scan_finalize(scan.tenant_id, scan.scan_id, stale_after_seconds=scan.lease_seconds):
+    if not store.claim_scan_finalize(scan.tenant_id, scan.scan_id, stale_after_seconds=finalize_stale_seconds()):
         return None
     try:
-        return _finalize(scan)
+        _finalize(scan)
     except Exception as exc:
         with suppress(Exception):
             store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "failed", error=type(exc).__name__)
         raise
+    return "finalized"
 
 
 def run_partitioned_scan(

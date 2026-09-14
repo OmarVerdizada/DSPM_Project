@@ -76,6 +76,7 @@ class _Server:
     def __init__(self, tree: dict) -> None:
         self.tree = dict(tree)
         self.reset_shares: set[str] = set()
+        self.timeout_shares: set[str] = set()
 
 
 class _Connection:
@@ -88,6 +89,8 @@ class _Connection:
     def listPath(self, share: str, folder: str):
         if share in self.server.reset_shares:
             raise ConnectionResetError("[WinError 10054] An existing connection was forcibly closed")
+        if share in self.server.timeout_shares:
+            raise TimeoutError("timed out")
         files = self.server.tree.get(share)
         if files is None:
             raise Exception(f"Failed to list {folder} on {share}: Unable to open directory")
@@ -182,6 +185,13 @@ class TheCollectorWalksWhatItIsGivenTest(_SmbTest):
 
     def test_a_connection_lost_while_planning_gives_no_plan(self) -> None:
         self.server.reset_shares = {"Public"}
+        self.assertIsNone(self._scanner().plan_share_groups())
+        self.assertIsNone(plan_share_partitions(self._smb_config()))
+
+    def test_a_root_that_times_out_while_planning_gives_no_plan(self) -> None:
+        # A timeout is not a refusal: the root may list fine when the scan runs, and the
+        # overlap it hid would split shares that must stay together (B2.3 review).
+        self.server.timeout_shares = {"Shares"}
         self.assertIsNone(self._scanner().plan_share_groups())
         self.assertIsNone(plan_share_partitions(self._smb_config()))
 

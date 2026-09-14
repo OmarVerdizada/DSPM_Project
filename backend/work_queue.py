@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Protocol
 
@@ -103,34 +104,49 @@ class PartitionQueue(Protocol):
 
     def reclaim(self, worker_id: str, *, idle_seconds: float) -> list[Delivery]: ...
 
+    def pass_over(self, delivery: Delivery, *, seconds: float) -> None: ...
+
 
 class LedgerQueue:
     """Partitions queued in the ledger, taken straight from it.
 
     Nothing is published or acknowledged: a partition is queued in the ledger from the
     moment its scan is planned, and done once it is written there. ``take`` names the
-    oldest resumable scan's first queued partition without claiming it - the worker's
-    claim is the compare-and-set - so two workers may be handed the same partition and
-    exactly one runs it. ``reclaim`` takes back partitions whose lease ran out, which
-    queues them again.
+    first queued partition of the oldest running, resumable scan this host can run,
+    without claiming it - the worker's claim is the compare-and-set - so two workers may
+    be handed the same partition and exactly one runs it. A scan the worker passed over
+    - planned on another host, or not rebuildable here - is skipped for a while, so it
+    never hides the scans behind it. Expired leases are taken back by the worker's
+    maintenance pass, for every kind of queue.
     """
+
+    def __init__(self) -> None:
+        self._passed: dict[tuple[str, str], float] = {}
 
     def publish(self, tenant_id: str, scan_id: str, partition_ids: Iterable[str]) -> int:
         return 0
 
     def take(self, worker_id: str, *, block_seconds: float = 0.0) -> Delivery | None:
-        found = store.next_queued_partition()
-        if found is None:
-            return None
-        tenant_id, scan_id, partition_id = found
-        return Delivery(tenant_id=tenant_id, scan_id=scan_id, partition_id=partition_id)
+        from backend.partitioned_scan import runs_here
+
+        now = time.monotonic()
+        for record in store.list_unfinished_partitioned_scans(resumable_only=True):
+            key = (record["tenant_id"], record["scan_id"])
+            if record["status"] != "running" or self._passed.get(key, 0.0) > now or not runs_here(record):
+                continue
+            partition_id = store.first_queued_partition(*key)
+            if partition_id is not None:
+                return Delivery(tenant_id=key[0], scan_id=key[1], partition_id=partition_id)
+        return None
 
     def ack(self, delivery: Delivery) -> None:
         return None
 
     def reclaim(self, worker_id: str, *, idle_seconds: float) -> list[Delivery]:
-        store.requeue_expired_partitions()
         return []
+
+    def pass_over(self, delivery: Delivery, *, seconds: float) -> None:
+        self._passed[(delivery.tenant_id, delivery.scan_id)] = time.monotonic() + max(0.0, seconds)
 
 
 class RedisStreamQueue:
@@ -140,8 +156,9 @@ class RedisStreamQueue:
     acknowledges an entry only after its database commit, so a worker that dies in
     between leaves the entry pending, and :meth:`reclaim` hands it to another worker once
     it has been idle long enough - whose claim then finds the partition done and simply
-    acknowledges it. The stream is never trimmed: an unacknowledged entry is work, and
-    Memurai runs ``noeviction`` (plan §4).
+    acknowledges it. An entry a worker passes over stays pending, and comes back to
+    someone once it has been idle. The stream is never trimmed: an unacknowledged entry
+    is work, and Memurai runs ``noeviction`` (plan §4).
     """
 
     def __init__(self, client, *, stream: str = DEFAULT_STREAM, group: str = DEFAULT_GROUP) -> None:
@@ -218,6 +235,9 @@ class RedisStreamQueue:
             if delivery is not None:
                 deliveries.append(delivery)
         return deliveries
+
+    def pass_over(self, delivery: Delivery, *, seconds: float) -> None:
+        return None
 
 
 def work_queue_from_env() -> PartitionQueue:

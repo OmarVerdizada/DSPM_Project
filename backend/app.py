@@ -218,7 +218,10 @@ async def app_lifespan(_: FastAPI):
     # failed and prune old terminal records. Done here (not at import) so tools
     # and tests that import the app do not mutate persisted job state.
     try:
-        recover_interrupted_jobs()
+        from backend.scan_resumer import resume_interval_seconds
+
+        # A job whose scan will be resumed says so; with resuming off, it asks for a re-run.
+        recover_interrupted_jobs(resuming=resume_interval_seconds() > 0)
         prune_job_records(30 * 24 * 3600)
     except Exception:
         pass

@@ -391,6 +391,10 @@ class APartitionedScanReportsWhatOneScanReportsTest(_LocalTest):
         stored = store.read_scan_report(TENANT, compact["scan_id"])
         after, _ = self._single_walk(self._config("vanish"))
         self.assertEqual([f["path"] for f in stored["files"]], after)
+        # A walk that cannot list a folder reports it and is not complete; neither is
+        # this scan, so finalize does not prune what the folder held (B3 review).
+        self.assertFalse(stored["scan_diagnostics"]["incremental"]["complete"])
+        self.assertTrue(any("d_flat" in entry for entry in stored["scan_diagnostics"]["unreadable_dirs"]))
 
 
 class WhenNotToPartitionTest(_LocalTest):
@@ -445,6 +449,18 @@ class StoppingTest(_LocalTest):
                 partitioned_scan.run_partitioned_scan(TENANT, self._config("deadline"), max_files=3)
         with store._connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM scan_partitions WHERE tenant_id = ?", (TENANT,)).fetchone()[0], 0)
+
+    def test_a_scan_root_out_of_reach_fails_its_partitions_instead_of_writing_them_empty(self) -> None:
+        # A worker on another host, or a root taken away mid-scan: written as empty
+        # partitions, finalize would prune everything under it (B3 review).
+        self._use_database("unreachable")
+        record = partitioned_scan.start_partitioned_scan(TENANT, self._config("unreachable"),
+                                                         request={"local_path": "estate"}, max_files=3)
+        shutil.rmtree(self.estate)
+        with mock.patch.dict(os.environ, {"DSPM_PARTITION_MAX_ATTEMPTS": "1"}):
+            with self.assertRaisesRegex(partitioned_scan.ScanStopped, "FileNotFoundError"):
+                partitioned_scan.continue_partitioned_scan(TENANT, record["scan_id"], self._config("unreachable"))
+        self.assertNotIn("done", {unit["status"] for unit in store.list_scan_partitions(TENANT, record["scan_id"])})
 
 
 class TheApiRunsItTest(_LocalTest):

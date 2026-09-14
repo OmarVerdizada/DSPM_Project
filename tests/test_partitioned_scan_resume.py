@@ -252,6 +252,25 @@ class RetriesAndStopsTest(_LocalTest):
         self.assertEqual((stored["status"], stored["error"]), ("failed", scan_resumer.NO_REQUEST_ERROR))
 
 
+class AFinalizeThatCommittedHasSucceededTest(_LocalTest):
+
+    def test_a_done_mark_that_fails_after_the_finalize_committed_does_not_fail_the_scan(self) -> None:
+        self._use_database("mark-fails")
+        real_mark = store.mark_partitioned_scan
+
+        def done_refused(tenant_id, scan_id, status, **kwargs):
+            if status == "done":
+                raise RuntimeError("database is locked")
+            return real_mark(tenant_id, scan_id, status, **kwargs)
+
+        with patch.object(store, "mark_partitioned_scan", side_effect=done_refused):
+            compact = partitioned_scan.run_partitioned_scan(TENANT, self._config("mark-fails"), request=REQUEST,
+                                                            max_files=3)
+        stored = store.read_partitioned_scan(TENANT, compact["scan_id"])
+        self.assertEqual(stored["status"], "finalizing", "a scan whose report was written was marked failed")
+        self.assertEqual(len(store.read_scan_report(TENANT, compact["scan_id"])["files"]), compact["file_count"])
+
+
 class OneFinalizeWinsTest(_LocalTest):
 
     def test_a_finalize_after_the_first_committed_is_refused_and_the_report_stays_whole(self) -> None:
@@ -315,6 +334,16 @@ class _FreshDatabase(unittest.TestCase):
 
 class TheSweepTest(_FreshDatabase):
 
+    def test_by_default_a_finalize_is_given_far_longer_than_a_lease(self) -> None:
+        self._record("scan-running", quiet_for=400)
+        self._record("scan-finalizing")
+        self.assertTrue(store.claim_scan_finalize(self.tenant, "scan-finalizing"))
+        self._age("scan-finalizing", 400)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DSPM_PARTITION_LEASE_SECONDS", None)
+            self.assertEqual(scan_resumer.resume_stale_scans(MagicMock()), ["scan-running"],
+                             "a finalize still writing its body was taken over after one lease")
+
     def test_a_scan_touched_within_a_lease_is_left_alone(self) -> None:
         self._record(quiet_for=10)
         resume = MagicMock()
@@ -358,7 +387,7 @@ class TheSweepTest(_FreshDatabase):
             self.assertEqual(scan_resumer.resume_stale_scans(MagicMock(), stale_after_seconds=0), [])
 
     def test_a_typed_password_scan_is_failed_and_says_why_without_the_password(self) -> None:
-        self._record(request={"local_path": "estate", "password": "typed-secret-never-stored"}, quiet_for=400)
+        self._record(request={"server": "fs01", "password": "typed-secret-never-stored"}, quiet_for=400)
         resume = MagicMock()
         scan_resumer.resume_stale_scans(resume, stale_after_seconds=300)
         resume.assert_not_called()
@@ -406,7 +435,7 @@ class JobsTest(_FreshDatabase):
             store.record_job({"id": job_id, "tenant_id": self.tenant, "status": "running", "progress": 40,
                               "message": "Running", "created_at": now})
         self._record("scan-resumable", job_id="job-resumable")
-        self._record("scan-typed", job_id="job-typed", request={"password": "typed"})
+        self._record("scan-typed", job_id="job-typed", request={"server": "fs01", "password": "typed"})
         store.recover_interrupted_jobs()
         errors = {job_id: store.read_job(self.tenant, job_id)["error"] for job_id in ("job-resumable", "job-typed", "job-plain")}
         self.assertIn("continues automatically", errors["job-resumable"])
@@ -426,6 +455,13 @@ class JobsTest(_FreshDatabase):
             time.sleep(0.05)
         again = jobs.create_job(self.tenant, lambda job: {}, job_id=first.id)
         self.assertEqual(again.id, first.id)
+        # The job records its state from a worker thread: let it finish before the test's
+        # database is deleted, or Windows refuses to remove a file still open.
+        deadline = time.monotonic() + 10
+        while again.status in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        self.assertEqual(again.status, "completed")
 
 
 class TheAppRebuildsTheScanTest(_FreshDatabase):
