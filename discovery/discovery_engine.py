@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from collections import defaultdict, deque
+from contextlib import suppress
 import copy
 from functools import lru_cache
 import hashlib
@@ -12,6 +13,8 @@ import json
 import os
 import re
 import threading
+import sqlite3
+import zlib
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -138,6 +141,21 @@ class ScanReport:
 # running (or hanging) unbounded. 0 disables it.
 SCAN_MAX_SECONDS = int(os.getenv("DSPM_SCAN_MAX_SECONDS", "1800"))
 
+# The L1 reuse index. It used to be one JSON document with an entry per file -
+# 27.6 KB each, about 26 GB for a million files - loaded whole at the start of
+# every incremental scan and rewritten whole at the end of every scan. That
+# rewrite was the measured peak of a production-default scan: 106.8 KB/file
+# traced, double the analysis before it. It is a SQLite file now, read one entry
+# at a time and written in batches, so neither end of the scan holds the index.
+META_INDEX_FILENAME = "meta_index.sqlite"
+META_INDEX_FLUSH_BATCH = 1000
+# Every scan compresses every entry it writes, so the compressor is on the hot
+# path. Measured on 2,000 real entries (25.5 KB raw): level 6 is 274 us at 6.1x,
+# level 1 is 82 us at 4.4x - 3.3x less CPU for 1.7 KB more per entry.
+META_INDEX_COMPRESSION_LEVEL = 1
+# How the whole-document index began, so it can be recognised and removed.
+_LEGACY_META_INDEX_HEADER = '{"index_version": 1'
+
 
 class DSPMDiscoveryEngine:
     def __init__(self, config: ScanConfig):
@@ -157,8 +175,20 @@ class DSPMDiscoveryEngine:
         self._deadline: float | None = None
         self._incremental_lock = threading.Lock()
         self._meta_index_lock = threading.Lock()
-        self._meta_index_cache: dict | None = None
-        self._meta_pending: dict = {}
+        self._meta_index_db: sqlite3.Connection | None = None
+        self._meta_index_unavailable = False
+        # Readers get a connection per thread and, once the index is open, do not
+        # take the lock. The SMB collector probes from one thread per share being
+        # walked - min(io_workers, shares), up to 64 - and with 2 ms of simulated
+        # network I/O per probe a SELECT under the lock cost nothing up to 8
+        # threads but 1.36x probe throughput at 16.
+        self._meta_index_ready = False
+        self._meta_index_path: Path | None = None
+        self._meta_index_readers = threading.local()
+        self._meta_index_reader_conns: list[sqlite3.Connection] = []
+        self._meta_index_reader_lock = threading.Lock()
+        # Serialised, compressed entries waiting for the next batch write.
+        self._meta_pending: dict[str, bytes] = {}
         self._finding_digests: set | None = None
         self._cache_root_path: Path | None = None
         self._incremental_counts = {
@@ -225,18 +255,23 @@ class DSPMDiscoveryEngine:
         self._deadline = (time.monotonic() + SCAN_MAX_SECONDS) if SCAN_MAX_SECONDS > 0 else None
         plan = self._parallelism()
         try:
-            if plan.pipeline_enabled:
-                records, analyzed_files = self._collect_and_analyze_pipelined(plan)
-            else:
-                records = self._collect_records()
-                self._emit_progress("collected", len(records), len(records))
-                analyzed_files = self._analyze_records(normalize_records(records))
+            try:
+                if plan.pipeline_enabled:
+                    records, analyzed_files = self._collect_and_analyze_pipelined(plan)
+                else:
+                    records = self._collect_records()
+                    self._emit_progress("collected", len(records), len(records))
+                    analyzed_files = self._analyze_records(normalize_records(records))
+            finally:
+                self._detector_pool.shutdown()
+            summary = self._build_summary(analyzed_files)
+            self._set_detector_pool_diagnostics()
+            self._finalize_incremental_diagnostics(analyzed_files)
         finally:
-            self._detector_pool.shutdown()
-        summary = self._build_summary(analyzed_files)
-        self._set_detector_pool_diagnostics()
-        self._finalize_incremental_diagnostics(analyzed_files)
-        self.flush_meta_index()
+            # Finished or failed - including after analysis, in the summary - the
+            # scan writes what it learned and lets go of the index file. Windows
+            # will not delete a file that is still open.
+            self.close_meta_index()
 
         return ScanReport(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -536,31 +571,158 @@ class DSPMDiscoveryEngine:
         root = self._cache_root()
         return (root or Path(self.config.cache_dir)) / f"{digest}.meta.json"
 
-    def _meta_index(self) -> dict:
-        """Reuse metadata for the whole cache, loaded once into RAM.
+    def _meta_index_connection(self) -> sqlite3.Connection | None:
+        """The L1 reuse index, opened once per engine. Caller holds the lock.
 
-        This used to be one small file open per scanned file inside the probe -
-        ~33 ms each under real-time AV, 11.9 s of a 14 s scan. One consolidated
-        manifest read replaces all of them. Per-file sidecars are still read as
-        a fallback so caches written by older builds keep working.
+        One file for the whole index is load-bearing, not tidy. This index began
+        as a file per scanned file, and under real-time antivirus each open cost
+        about 33 ms - 11.9 s of a 14 s scan - which is why it was consolidated.
+        The JSON document that replaced it fixed the opens and broke memory
+        instead; a single database file keeps the first fix without the second.
+        Do not split it back into a file per entry.
+
+        A cache that cannot be opened is a cache miss, never a failed scan: the
+        durable database baseline answers every question this index answers,
+        only more slowly. A file that is not a database is thrown away and
+        rebuilt once, because it is a cache and nothing else depends on it.
         """
-        if self._meta_index_cache is not None:
-            return self._meta_index_cache
-        with self._meta_index_lock:
-            if self._meta_index_cache is not None:
-                return self._meta_index_cache
-            index: dict = {}
-            root = self._cache_root()
-            if root is not None:
-                try:
-                    raw = json.loads((root / "index.json").read_text(encoding="utf-8"))
-                    entries = raw.get("entries") if isinstance(raw, dict) else None
-                    if isinstance(entries, dict):
-                        index = entries
-                except (OSError, json.JSONDecodeError, ValueError):
-                    index = {}
-            self._meta_index_cache = index
-            return index
+        if self._meta_index_db is not None or self._meta_index_unavailable:
+            return self._meta_index_db
+        root = self._cache_root()
+        if root is None or not self.config.persistent_cache_enabled:
+            self._meta_index_unavailable = True
+            return None
+        path = root / META_INDEX_FILENAME
+        for attempt in (1, 2):
+            conn = None
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(
+                    str(path), timeout=5.0, check_same_thread=False, isolation_level=None,
+                )
+                conn.execute("PRAGMA journal_mode=WAL")
+                # A cache survives a power cut by being rebuilt, not by fsync.
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS entries (digest TEXT PRIMARY KEY, payload BLOB NOT NULL)"
+                )
+                self._meta_index_db = conn
+                self._meta_index_path = path
+                self._meta_index_ready = True
+                break
+            except sqlite3.DatabaseError:
+                if conn is not None:
+                    with suppress(Exception):
+                        conn.close()
+                if attempt == 1:
+                    for suffix in ("", "-wal", "-shm"):
+                        with suppress(OSError):
+                            Path(f"{path}{suffix}").unlink()
+                    continue
+                self._meta_index_unavailable = True
+                return None
+            except OSError:
+                if conn is not None:
+                    with suppress(Exception):
+                        conn.close()
+                self._meta_index_unavailable = True
+                return None
+        self._retire_legacy_meta_index(root)
+        return self._meta_index_db
+
+    @staticmethod
+    def _retire_legacy_meta_index(root: Path) -> None:
+        """Remove the whole-document index this replaces - but only if it is one.
+
+        Nothing reads it any more, it can run to gigabytes, and leaving it would
+        quietly keep the disk this change exists to give back. A file is only
+        removed if it begins exactly the way that index began.
+        """
+        legacy = root / "index.json"
+        try:
+            with open(legacy, "rb") as handle:
+                head = handle.read(len(_LEGACY_META_INDEX_HEADER)).decode("utf-8", "replace")
+        except OSError:
+            return
+        if head == _LEGACY_META_INDEX_HEADER:
+            with suppress(OSError):
+                legacy.unlink()
+
+    def _meta_index_reader(self) -> sqlite3.Connection | None:
+        """This thread's read connection, opened on first use.
+
+        The lock is taken only until the index has been opened once by anyone -
+        that open is what creates the file and its schema, and where a corrupt
+        index is rebuilt. After that a thread opens its own connection without
+        waiting, so a probe thread started in the middle of a batch write does
+        not queue behind it. WAL mode lets readers run alongside the writer and
+        alongside each other.
+        """
+        local = self._meta_index_readers
+        conn = getattr(local, "conn", None)
+        if conn is not None or getattr(local, "failed", False):
+            return conn
+        if not self._meta_index_ready:
+            with self._meta_index_lock:
+                if self._meta_index_connection() is None:
+                    local.failed = True
+                    return None
+        path = self._meta_index_path
+        if path is None:
+            local.failed = True
+            return None
+        try:
+            conn = sqlite3.connect(str(path), timeout=5.0, check_same_thread=False, isolation_level=None)
+            # A primary-key lookup touches a handful of pages. SQLite's default
+            # page cache is about 2 MB per connection and the I/O pool can hold
+            # dozens of them, which would quietly spend memory in the step that
+            # exists to save it.
+            conn.execute("PRAGMA cache_size=-256")
+            conn.execute("PRAGMA query_only=ON")
+        except (sqlite3.Error, OSError):
+            local.failed = True
+            return None
+        local.conn = conn
+        with self._meta_index_reader_lock:
+            self._meta_index_reader_conns.append(conn)
+        return conn
+
+    def _meta_index_get(self, digest: str) -> dict | None:
+        """One entry, read on demand - never the whole index, and once the index is
+        open, never under the lock."""
+        reader = self._meta_index_reader()
+        if reader is None:
+            return None
+        try:
+            row = reader.execute("SELECT payload FROM entries WHERE digest = ?", (digest,)).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        try:
+            data = json.loads(zlib.decompress(row[0]).decode("utf-8"))
+        except (zlib.error, UnicodeDecodeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _flush_meta_pending_locked(self) -> None:
+        """Write what is pending and forget it. Caller holds `_meta_index_lock`."""
+        if not self._meta_pending:
+            return
+        pending, self._meta_pending = self._meta_pending, {}
+        conn = self._meta_index_connection()
+        if conn is None:
+            return
+        try:
+            conn.execute("BEGIN")
+            conn.executemany(
+                "INSERT OR REPLACE INTO entries (digest, payload) VALUES (?, ?)",
+                pending.items(),
+            )
+            conn.execute("COMMIT")
+        except sqlite3.DatabaseError:
+            with suppress(sqlite3.DatabaseError):
+                conn.execute("ROLLBACK")
 
     def _finding_digest_exists(self, digest: str) -> bool:
         """Fail-closed pairing check against a directory listing taken once,
@@ -585,33 +747,39 @@ class DSPMDiscoveryEngine:
         return digest in (self._finding_digests or set())
 
     def flush_meta_index(self) -> None:
-        """Write the accumulated reuse metadata as one manifest.
+        """Write whatever reuse metadata is still pending.
 
-        Replaces one sidecar write per file (724 writes, 2.7 s) with a single
-        atomic file.
+        This used to merge the scan's entries into the whole index and write the
+        result back as one JSON document, which meant holding every entry for
+        the entire scan and then serialising all of them at once. Entries now
+        leave memory in batches of META_INDEX_FLUSH_BATCH as they are produced,
+        so all that is left to do here is the last partial batch.
         """
         with self._meta_index_lock:
-            pending = dict(self._meta_pending)
-            self._meta_pending.clear()
-        if not pending:
-            return
-        root = self._cache_root()
-        if root is None:
-            return
-        merged = dict(self._meta_index())
-        merged.update(pending)
-        self._meta_index_cache = merged
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-            index_path = root / "index.json"
-            tmp = index_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps({"index_version": 1, "entries": merged}, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            os.replace(tmp, index_path)
-        except OSError:
-            return
+            self._flush_meta_pending_locked()
+
+    def close_meta_index(self) -> None:
+        """Flush, then release the index file.
+
+        Windows will not delete a file that is still open, and the cache
+        directory is something operators and the benchmark scripts clear between
+        runs - so the handle must not outlive the scan that opened it, whether
+        that scan finished or failed.
+        """
+        with self._meta_index_lock:
+            self._flush_meta_pending_locked()
+            conn, self._meta_index_db = self._meta_index_db, None
+            # A read after close goes back through the locked open, which recreates
+            # the schema, instead of connecting straight to a file that may be gone.
+            self._meta_index_ready = False
+        with self._meta_index_reader_lock:
+            readers, self._meta_index_reader_conns = self._meta_index_reader_conns, []
+            # A fresh thread-local, so no thread is left holding a closed handle.
+            self._meta_index_readers = threading.local()
+        for handle in (*readers, conn):
+            if handle is not None:
+                with suppress(sqlite3.Error):
+                    handle.close()
 
     def _reuse_probe(self, path: str, size: int, mtime: str) -> dict | None:
         """Cheap metadata lookup used during collection.
@@ -638,7 +806,7 @@ class DSPMDiscoveryEngine:
         if self.config.persistent_cache_enabled and self.config.cache_dir and not archive_bundle_required:
             try:
                 digest = self._meta_digest(path, size, mtime)
-                data = self._meta_index().get(digest)
+                data = self._meta_index_get(digest)
                 if data is None:
                     # Legacy per-file sidecar (cache written by an older build).
                     data = json.loads(self._meta_path(digest).read_text(encoding="utf-8"))
@@ -793,8 +961,22 @@ class DSPMDiscoveryEngine:
             "finding_cache_digest": _cache_key_digest(cache_key) if cache_key else "",
             "snapshot": snapshot,
         }
+        digest = self._meta_digest(identity, size, mtime)
+        # Serialise and compress here, in the analysis thread, so the lock guards a
+        # dict insert and nothing more - and so what waits for the next batch is
+        # the few kilobytes it will be stored as, not the object it was built from.
+        try:
+            packed = zlib.compress(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+                META_INDEX_COMPRESSION_LEVEL,
+            )
+        except (TypeError, ValueError):
+            # Not serialisable means not reusable: a miss next scan, not a crash now.
+            return
         with self._meta_index_lock:
-            self._meta_pending[self._meta_digest(identity, size, mtime)] = payload
+            self._meta_pending[digest] = packed
+            if len(self._meta_pending) >= META_INDEX_FLUSH_BATCH:
+                self._flush_meta_pending_locked()
 
     def _read_full_content(self, record: dict) -> str:
         """Safety fallback: read a reused file's content when its findings cache

@@ -2826,6 +2826,12 @@ def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], 
     finally:
         report.config.cancel_check = prior_cancel
         report.config.progress_callback = prior_progress
+        # Endpoint analysis drives the engine without run(), so nothing else would
+        # ever write its reuse entries or release the index file. Before this, an
+        # endpoint scan built its whole L1 index in memory and then discarded it.
+        close_meta_index = getattr(report, "close_meta_index", None)
+        if callable(close_meta_index):
+            close_meta_index()
 
 
 def _run_endpoint_scan_payload(
