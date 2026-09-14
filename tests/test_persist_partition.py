@@ -380,6 +380,42 @@ class LimitsAndSchemaTest(_PartitionTest):
                 store._write_normalized_rows(conn, self.tenant, report,
                                              partition={"seq_offset": 0, "seq_span": 3, "write_estate": True})
 
+    def test_a_partitions_deletes_seek_to_its_own_rows(self) -> None:
+        """Measured before revision 0013: both deletes walked every row the scan had
+        written, so each partition's write cost more memory and time than the last."""
+        with store._connect() as conn:
+            occurrences = " ".join(str(row[3]) for row in conn.execute(
+                "EXPLAIN QUERY PLAN DELETE FROM finding_occurrences "
+                "WHERE tenant_id = ? AND scan_id = ? AND finding_id IN (?, ?)", ("t", "s", "a", "b"),
+            ).fetchall())
+            index_range = " ".join(str(row[3]) for row in conn.execute(
+                "EXPLAIN QUERY PLAN DELETE FROM finding_index "
+                "WHERE tenant_id = ? AND scan_id = ? AND seq >= ? AND seq < ?", ("t", "s", 0, 10),
+            ).fetchall())
+        self.assertIn("idx_occurrences_scan_finding (tenant_id=? AND scan_id=? AND finding_id=?)", occurrences)
+        self.assertIn("idx_finding_index_tenant_scan_seq (tenant_id=? AND scan_id=? AND seq>? AND seq<?)", index_range)
+
+    def test_revision_0013_replaces_the_indexes_on_an_existing_database(self) -> None:
+        path = os.path.join(self._dir.name, "indexes-0012.sqlite")
+        raw = sqlite3.connect(path)
+        raw.executescript(
+            "CREATE TABLE finding_occurrences (tenant_id TEXT, finding_id TEXT, scan_id TEXT, locator TEXT);"
+            "CREATE TABLE finding_index (tenant_id TEXT, scan_id TEXT, seq INTEGER, finding_id TEXT);"
+            "CREATE INDEX idx_occurrences_scan ON finding_occurrences (tenant_id, scan_id);"
+            "CREATE INDEX idx_finding_index_tenant_scan ON finding_index (tenant_id, scan_id);"
+        )
+        raw.commit()
+        raw.close()
+        for _ in range(2):
+            with db.connect(path) as conn:
+                store.add_partition_write_indexes(conn)
+        with db.connect(path) as conn:
+            names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        self.assertIn("idx_occurrences_scan_finding", names)
+        self.assertIn("idx_finding_index_tenant_scan_seq", names)
+        self.assertNotIn("idx_occurrences_scan", names)
+        self.assertNotIn("idx_finding_index_tenant_scan", names)
+
     def test_revision_0012_upgrades_an_existing_ledger(self) -> None:
         path = os.path.join(self._dir.name, "ledger-0011.sqlite")
         raw = sqlite3.connect(path)

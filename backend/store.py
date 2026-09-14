@@ -575,6 +575,30 @@ def add_scan_partition_records(conn) -> None:
         conn.execute("ALTER TABLE scan_partitions ADD COLUMN diagnostics_json TEXT NOT NULL DEFAULT '{}'")
 
 
+def add_partition_write_indexes(conn) -> None:
+    """Revision 0013: a partition's deletes seek to its own rows (B2.2b).
+
+    A partition refreshes its own finding occurrences and its own range of the
+    finding index before writing them. Both deletes had only a (tenant_id, scan_id)
+    index to work with, so each walked every row the scan had already written and
+    filtered it down: measured, a partitioned scan's write peak grew about 1.25 MB
+    per partition as those pages filled the connection's page cache, and the scan was
+    quadratic in time. With the partition's own column in the index both deletes
+    seek. Each new index extends the one it replaces, so every query the old one
+    served still has it, and writes pay for no extra index.
+    """
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_occurrences_scan_finding "
+        "ON finding_occurrences (tenant_id, scan_id, finding_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan_seq "
+        "ON finding_index (tenant_id, scan_id, seq)"
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_occurrences_scan")
+    conn.execute("DROP INDEX IF EXISTS idx_finding_index_tenant_scan")
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1123,12 +1147,12 @@ def apply_baseline_schema(conn) -> None:
             ON scan_runs (tenant_id, started_at);
         CREATE INDEX IF NOT EXISTS idx_findings_tenant_asset
             ON findings (tenant_id, asset_id);
-        CREATE INDEX IF NOT EXISTS idx_occurrences_scan
-            ON finding_occurrences (tenant_id, scan_id);
+        CREATE INDEX IF NOT EXISTS idx_occurrences_scan_finding
+            ON finding_occurrences (tenant_id, scan_id, finding_id);
         CREATE INDEX IF NOT EXISTS idx_occurrences_finding
             ON finding_occurrences (finding_id);
-        CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan
-            ON finding_index (tenant_id, scan_id);
+        CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_scan_seq
+            ON finding_index (tenant_id, scan_id, seq);
         CREATE INDEX IF NOT EXISTS idx_finding_index_tenant_finding_scan
             ON finding_index (tenant_id, finding_id, scan_id);
         CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_risk_id
