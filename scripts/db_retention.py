@@ -23,7 +23,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -65,33 +65,15 @@ def main() -> int:
         print(f"legal hold active for {len(held)} tenant(s); their rows are preserved")
 
     now = datetime.now(timezone.utc)
+    # One definition of the policy, shared with the housekeeping sweep that runs it
+    # unattended (B5): store.prune_event_tables.
+    results = store.prune_event_tables(now=now, apply=args.apply, overrides=overrides)
     total_removed = 0
-    results: list[dict] = []
-    for table, column, env_var, default_days in POLICIES:
-        days = overrides.get(table) or int(os.getenv(env_var, str(default_days)))
-        cutoff = (now - timedelta(days=days)).isoformat()
-        exclude = ""
-        params: tuple = (cutoff,)
-        if held:
-            placeholders = ", ".join("?" for _ in held)
-            exclude = f" AND tenant_id NOT IN ({placeholders})"
-            params = (cutoff, *sorted(held))
-        with store._connect() as conn:
-            row = conn.execute(
-                f"SELECT COUNT(*) AS n FROM {table} WHERE {column} < ?{exclude}", params
-            ).fetchone()
-            stale = int(row["n"])
-            if args.apply and stale:
-                conn.execute(f"DELETE FROM {table} WHERE {column} < ?{exclude}", params)
+    for result in results:
         action = "removed" if args.apply else "would remove"
-        print(f"{table:<14} older than {days:>4}d: {action} {stale}")
-        results.append({
-            "data_class": table,
-            "retention_days": days,
-            "eligible_rows": stale,
-            "removed_rows": stale if args.apply else 0,
-        })
-        total_removed += stale if args.apply else 0
+        print(f"{result['data_class']:<14} older than {result['retention_days']:>4}d: "
+              f"{action} {result['eligible_rows']}")
+        total_removed += int(result["removed_rows"])
 
     # Unreferenced artifact objects: garbage collection, not retention.
     # Nothing reachable from a row is ever removed here.

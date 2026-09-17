@@ -227,6 +227,25 @@ async def app_lifespan(_: FastAPI):
     from backend.vault import validate_vault_key
 
     validate_vault_key()
+    # B5: production never writes a plaintext dump of every scanned file. The switch
+    # exists for an install with an external reader; enabling it in production is a
+    # configuration mistake, and startup says so rather than filling data/ with previews.
+    if ENVIRONMENT in {"prod", "production"} and PLAINTEXT_REPORT_EXPORT:
+        raise RuntimeError(
+            "DSPM_PLAINTEXT_REPORT_EXPORT=1 is refused in production: it writes every "
+            "scanned file, previews included, to DSPM_REPORT_DIR as plaintext."
+        )
+    with suppress(Exception):
+        from backend.housekeeping import plaintext_report_files
+        from scripts.logger import get_logger
+
+        existing = plaintext_report_files(REPORT_DIR)
+        if existing:
+            get_logger("backend.app").warning(
+                "%s plaintext scan report file(s) in %s. They are not written by default any more; "
+                "set DSPM_RETAIN_REPORT_FILE_DAYS to have housekeeping age them out.",
+                len(existing), REPORT_DIR,
+            )
     # ARCH-003: at server startup, mark jobs orphaned by a prior process as
     # failed and prune old terminal records. Done here (not at import) so tools
     # and tests that import the app do not mutate persisted job state.
@@ -249,6 +268,11 @@ async def app_lifespan(_: FastAPI):
         from backend.scan_scheduler import start_scan_scheduler
 
         start_scan_scheduler(_start_scheduled_scan)
+    # B5: retention, on the same model - claimed through the database, once a day.
+    with suppress(Exception):
+        from backend.housekeeping import start_housekeeping
+
+        start_housekeeping(REPORT_DIR)
     with suppress(Exception):
         from backend.search import start_search_reconciler
 
@@ -293,6 +317,10 @@ async def app_lifespan(_: FastAPI):
             from backend.scan_scheduler import stop_scan_scheduler
 
             stop_scan_scheduler()
+        with suppress(Exception):
+            from backend.housekeeping import stop_housekeeping
+
+            stop_housekeeping()
         with suppress(Exception):
             from backend.search import stop_search_reconciler
 

@@ -3167,6 +3167,88 @@ def recover_interrupted_jobs(*, resuming: bool = True) -> int:
             return cursor.rowcount
 
 
+# --- B5: retention, and the housekeeping that runs it -------------------------
+
+# What grows on its own and is not evidence anybody keeps: the two append-only
+# event tables. Scan reports, findings, assets and the current audit window are
+# never touched here - shortening the audit window is an operator decision, made
+# with DSPM_RETAIN_AUDIT_DAYS and never by default.
+RETENTION_POLICIES = (
+    # (table, timestamp column, environment variable, default days)
+    ("alert_events", "created_at", "DSPM_RETAIN_ALERT_DAYS", 365),
+    ("audit_events", "timestamp", "DSPM_RETAIN_AUDIT_DAYS", 730),
+)
+
+
+def prune_event_tables(*, now: datetime | None = None, apply: bool = False,
+                       overrides: dict | None = None) -> list[dict]:
+    """Count - and with ``apply``, delete - event rows past their retention window.
+
+    One definition, used by ``scripts/db_retention.py`` and by the housekeeping sweep
+    that runs unattended (B5), so the two can never drift apart. A tenant under legal
+    hold keeps every row: the hold suspends scheduled deletion for that tenant, and the
+    rest of the run goes ahead rather than being refused.
+    """
+    moment = now or datetime.now(timezone.utc)
+    held = sorted(tenants_under_legal_hold())
+    results: list[dict] = []
+    for table, column, env_var, default_days in RETENTION_POLICIES:
+        wanted = (overrides or {}).get(table)
+        try:
+            days = int(wanted if wanted else os.getenv(env_var, str(default_days)))
+        except (TypeError, ValueError):
+            days = default_days
+        days = max(1, days)
+        cutoff = (moment - timedelta(days=days)).isoformat()
+        clause = f"{column} < ?"
+        params: tuple = (cutoff,)
+        if held:
+            clause += f" AND tenant_id NOT IN ({', '.join('?' for _ in held)})"
+            params = (cutoff, *held)
+        with _lock:
+            with _connect() as conn:
+                stale = int(conn.execute(
+                    f"SELECT COUNT(*) AS n FROM {table} WHERE {clause}", params,
+                ).fetchone()["n"] or 0)
+                if apply and stale:
+                    conn.execute(f"DELETE FROM {table} WHERE {clause}", params)
+        results.append({
+            "data_class": table,
+            "retention_days": days,
+            "eligible_rows": stale,
+            "removed_rows": stale if apply else 0,
+            "held_tenants": len(held),
+        })
+    return results
+
+
+def claim_housekeeping_run(name: str, *, interval_seconds: int, now: datetime | None = None) -> bool:
+    """Take the next run of an unattended job; returns whether this caller took it.
+
+    A compare-and-set on when it last ran, kept in ``app_settings``, so several backends
+    sharing one database run it once between them - and a backend that restarts every
+    hour does not run a daily job every hour.
+    """
+    key = f"housekeeping.{name}.last_run"
+    moment = now or datetime.now(timezone.utc)
+    stamp = moment.isoformat()
+    cutoff = (moment - timedelta(seconds=max(1, int(interval_seconds)))).isoformat()
+    with _lock:
+        with _connect() as conn:
+            taken = int(conn.execute(
+                "UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ? AND value < ?",
+                (stamp, stamp, key, cutoff),
+            ).rowcount or 0)
+            if taken == 1:
+                return True
+            started = int(conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO NOTHING",
+                (key, stamp, stamp),
+            ).rowcount or 0)
+    return started == 1
+
+
 # --- B3: scans that run unattended -------------------------------------------
 
 # A schedule is a scan, not a cron tick: anything under five minutes is a mistake
