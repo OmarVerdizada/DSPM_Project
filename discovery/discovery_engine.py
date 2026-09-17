@@ -37,7 +37,7 @@ from risk.risk_engine import RiskAssessment, _is_protected_content, calculate_ri
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
-GENERIC_DETECTOR_VERSION = "generic-regex-v3"  # A3 removed the ML heuristic; A6 changed what a sample says
+GENERIC_DETECTOR_VERSION = "generic-regex-v4"  # B7: findings carry the canonical entity type and its fingerprints
 PCI_DETECTOR_VERSION = "pci-detector-v3"  # A2: one PAN validator, issuer-gated
 # Bumped v2 -> v3 for SC-1: previews and the classification cache are now
 # produced by the universal evidence sanitizer, so every pre-existing findings

@@ -478,6 +478,29 @@ RULES = [
 ]
 
 
+def _entity_type_for_rule(rule_name: str, data_class: str) -> str:
+    """What this rule's values are, in the canonical vocabulary - "" when nothing names it."""
+    from classification.compliance.canonical_entities import canonical_entity_type_for_finding
+
+    return canonical_entity_type_for_finding({"type": rule_name, "data_class": data_class})
+
+
+def _add_entity_fingerprint(prints: list[str], entity_type: str, value: str, redact: bool, tenant_id: str) -> None:
+    """The same value's canonical fingerprint, computed the way every detector computes it.
+
+    Without this the generic detector's email and the GDPR detector's email were two
+    entities: the registry falls back to hashing whatever fingerprint a finding carries,
+    and those were a masked token here and a digest of the raw value there (B7).
+    """
+    if not redact or not entity_type or not value:
+        return
+    from classification.compliance.canonical_entities import canonical_entity_fingerprint
+
+    fingerprint = canonical_entity_fingerprint(entity_type, value, tenant_id)
+    if fingerprint not in prints:
+        prints.append(fingerprint)
+
+
 def _add_fingerprint(fingerprints: list[str], value: str, redact: bool) -> None:
     """Context rules match a KEYWORD, not a value, so they have nothing to
     fingerprint - their sample is the keyword and it is shown as it was."""
@@ -604,7 +627,13 @@ def _prefilter_active() -> bool:
     return os.getenv("DSPM_DETECTOR_PREFILTER", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
-def classify_content(content: str, *, _prefilter: bool | None = None) -> list[dict]:
+def classify_content(content: str, *, tenant_id: str = "default", _prefilter: bool | None = None) -> list[dict]:
+    """Every generic rule over one file's text.
+
+    ``tenant_id`` salts the canonical entity fingerprints (B7) exactly as the
+    compliance detectors salt theirs, which is what lets one value found by two
+    detectors register as one entity rather than two.
+    """
     if not content:
         return []
 
@@ -627,12 +656,15 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
         extra_fields: dict = {}
         data_class = data_class_for_rule(rule.name)
         fingerprints: list[str] = []
+        entity_prints: list[str] = []
+        entity_type = _entity_type_for_rule(rule.name, data_class)
         if rule.finder is not None:
             produced = rule.finder(content)
             for value, extra in produced[:COUNT_CAP]:
                 if len(samples) < SAMPLE_CAP:
                     samples.append(_redact(value, data_class) if rule.redact else value)
                     _add_fingerprint(fingerprints, value, rule.redact)
+                    _add_entity_fingerprint(entity_prints, entity_type, value, rule.redact, tenant_id)
                 total += 1
                 extra_fields = _merge_rule_extra(extra_fields, extra)
             count_capped = len(produced) > COUNT_CAP
@@ -649,6 +681,8 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
                     "samples": samples,
                     "data_class": data_class,
                     "secure_value_fingerprints": fingerprints,
+                    "canonical_entity_type": entity_type,
+                    "canonical_entity_fingerprints": entity_prints,
                     "unique_value_count": len(set(fingerprints)) or len(set(samples)),
                     **extra_fields,
                 })
@@ -664,6 +698,7 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
                 if len(samples) < SAMPLE_CAP:
                     samples.append(_redact(value, data_class) if rule.redact else value)
                     _add_fingerprint(fingerprints, value, rule.redact)
+                    _add_entity_fingerprint(entity_prints, entity_type, value, rule.redact, tenant_id)
                 total += 1
             if total >= COUNT_CAP or examined >= MATCH_SCAN_CAP:
                 count_capped = True
@@ -688,6 +723,8 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
                 # off these instead, so two different cards that mask to the
                 # same first-six/last-four are still two values.
                 "secure_value_fingerprints": fingerprints,
+                "canonical_entity_type": entity_type,
+                "canonical_entity_fingerprints": entity_prints,
                 "unique_value_count": len(set(fingerprints)) or len(set(samples)),
             }
         )

@@ -64,7 +64,10 @@ def run_detector_stage(payload: dict[str, Any]) -> dict[str, Any]:
     detector_rows: list[dict] = []
     findings: list[dict] = []
 
-    generic_findings, row = timed_detector("generic", lambda: classify_content(content), timeout_seconds)
+    tenant_id = str(record.get("tenant_id") or record.get("tenant") or "default")
+    generic_findings, row = timed_detector(
+        "generic", lambda: classify_content(content, tenant_id=tenant_id), timeout_seconds,
+    )
     detector_rows.append(row)
     findings.extend(generic_findings)
 

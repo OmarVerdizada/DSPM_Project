@@ -7,6 +7,36 @@ import os
 from classification.compliance.evidence_keys import evidence_hmac_key
 
 
+# One vocabulary for what a value IS (B7). The generic detector names a masking
+# `data_class`, the compliance detectors name an `entity_type`, and before this the
+# registry could only unify the second: one email in one file registered as two
+# entities, one under each name, and the same card as a CREDIT_CARD and a PAN.
+ENTITY_TYPE_BY_DATA_CLASS = {
+    "pan": "PAN",
+    "iban": "IBAN",
+    "email": "EMAIL_ADDRESS",
+    "phone": "PHONE_NUMBER",
+    "government_id": "GOVERNMENT_ID",
+    "secret": "CREDENTIAL",
+    "private_key": "PRIVATE_KEY",
+    "connection_string": "CONNECTION_STRING",
+    "password": "PASSWORD",
+    # "generic" is deliberately absent: a value nobody can name is not an entity,
+    # and giving it one would merge unrelated findings into a single bucket.
+}
+
+# Two names for one thing. A payment card is a PAN wherever it was found.
+ENTITY_TYPE_ALIASES = {
+    "CREDIT_CARD": "PAN",
+    "CARD_NUMBER": "PAN",
+    "PAYMENT_CARD": "PAN",
+    "EMAIL": "EMAIL_ADDRESS",
+    "E_MAIL": "EMAIL_ADDRESS",
+    "PHONE": "PHONE_NUMBER",
+    "NATIONAL_ID": "GOVERNMENT_ID",
+    "SSN": "GOVERNMENT_ID",
+}
+
 ENTITY_TYPE_BY_FINDING = {
     "gdpr_full_name": "PERSON_NAME",
     "gdpr_email_address": "EMAIL_ADDRESS",
@@ -40,14 +70,30 @@ def canonical_entity_fingerprint(entity_type: str, value: str, tenant_id: str = 
     return hmac.new(f"{secret}:{tenant_id}".encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def normalize_entity_type(value: str) -> str:
+    """One name per kind of value: aliases resolved, case and spacing settled."""
+    text = str(value or "").strip().upper().replace(" ", "_").replace("-", "_")
+    return ENTITY_TYPE_ALIASES.get(text, text)
+
+
 def canonical_entity_type_for_finding(finding: dict) -> str:
-    explicit = str(finding.get("canonical_entity_type") or "").strip().upper()
+    """What this finding is about, in the one vocabulary (B7).
+
+    Asked of every detector's output, so a value found by two detectors resolves to the
+    same name and registers as one entity. The order is most specific first: what the
+    finding says about itself, then what its rule is known to produce, then the generic
+    detector's masking class, then whatever type it carries.
+    """
+    explicit = normalize_entity_type(finding.get("canonical_entity_type"))
     if explicit:
         return explicit
     finding_type = str(finding.get("type") or "").lower()
     if finding_type in ENTITY_TYPE_BY_FINDING:
         return ENTITY_TYPE_BY_FINDING[finding_type]
-    entity_type = str(finding.get("entity_type") or "").strip().upper()
+    data_class = str(finding.get("data_class") or "").strip().lower()
+    if data_class in ENTITY_TYPE_BY_DATA_CLASS:
+        return ENTITY_TYPE_BY_DATA_CLASS[data_class]
+    entity_type = normalize_entity_type(finding.get("entity_type"))
     if entity_type and entity_type != "SENSITIVE_DATA":
         return entity_type
     return ""

@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 
 from backend.finding_contracts import get_finding_display_name, normalize_framework_id
+from classification.compliance.canonical_entities import canonical_entity_type_for_finding
 
 
 SEVERITY_SCORE = {"CRITICAL": 95, "HIGH": 80, "MEDIUM": 55, "LOW": 20}
@@ -140,6 +141,11 @@ def _framework_mappings(finding: dict) -> list[str]:
 
 
 def _entity_type(finding: dict) -> str:
+    # B7: one vocabulary. The registry decides what a value is called, so the id a
+    # finding gets and the entity it points at cannot disagree.
+    canonical = canonical_entity_type_for_finding(finding)
+    if canonical:
+        return canonical
     if finding.get("data_element"):
         return str(finding["data_element"]).upper().replace(" ", "_")
     if finding.get("pci_category") == "SAD":
