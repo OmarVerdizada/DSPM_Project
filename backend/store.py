@@ -3503,9 +3503,11 @@ def suppression_rules_for_scan(tenant_id: str) -> list[dict]:
     """
     try:
         return list_suppression_rules(tenant_id, active_only=True)
-    except Exception:
+    except Exception as exc:
         # A scan is not the place to discover that the rules table is unreadable; it
-        # reports everything it finds, which is the safe direction.
+        # reports everything it finds, which is the safe direction - but silently
+        # reporting more than the tenant asked for is worth a line in the log.
+        logger.warning("Suppression rules unreadable for tenant %s; scanning without them: %s", tenant_id, exc)
         return []
 
 
@@ -4585,7 +4587,8 @@ def merge_partition_diagnostics(diagnostics: list[dict]) -> dict:
     Counts add up. A flag is set if any partition set it, except that the scan is
     ``complete`` - and its baseline ``baseline_committed`` - only if every partition
     was, because completeness is what licenses the prunes. ``delta_ratio`` is
-    recomputed from the summed counts. Lists that differ are joined without
+    recomputed from the summed counts, and the number of suppression rules is the
+    scan's, not the sum of its partitions'. Lists that differ are joined without
     duplicates and kept to 20 entries, the limit a single collector applies; text
     keeps the first partition's value. Keys keep the order they first appear in.
     """
@@ -4607,6 +4610,8 @@ def _merge_diagnostic_dicts(parts: list[dict], *, top_level: bool = False) -> di
             merged[key] = sorted({str(item) for value in present for item in value})
         elif top_level and key == "incremental" and all(isinstance(value, dict) for value in present):
             merged[key] = _merge_incremental_diagnostics(present)
+        elif top_level and key == "suppression" and all(isinstance(value, dict) for value in present):
+            merged[key] = _merge_suppression_diagnostics(present)
         elif key == "reuse_index" and all(isinstance(value, dict) for value in present):
             index = _merge_diagnostic_dicts(present)
             index["state"] = next(
@@ -4615,6 +4620,18 @@ def _merge_diagnostic_dicts(parts: list[dict], *, top_level: bool = False) -> di
             merged[key] = index
         else:
             merged[key] = _merge_diagnostic_values(present)
+    return merged
+
+
+def _merge_suppression_diagnostics(parts: list[dict]) -> dict:
+    """What the rules did adds up; how many there were does not (B6).
+
+    Every partition of one scan carries the same compiled rules, so summing ``rules``
+    reported a tenant with one rule as a tenant with one per partition - six, for a scan
+    cut into six. The counts beside it are real counts and still add up.
+    """
+    merged = _merge_diagnostic_dicts(parts)
+    merged["rules"] = max((int(part.get("rules") or 0) for part in parts), default=0)
     return merged
 
 

@@ -40,8 +40,6 @@ from datetime import datetime, timezone
 # what keeps it a rounding error rather than a scan-time cost.
 MAX_SUPPRESSION_RULES = 500
 
-RULE_FIELDS = ("rule_id", "finding_type", "source", "path_pattern", "fingerprint")
-
 
 def normalized_path(value: str) -> str:
     """One spelling for a path: forward slashes, no trailing separator, casefolded."""
