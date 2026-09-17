@@ -92,6 +92,12 @@ from backend.store import (
     update_scan_schedule,
     delete_scan_schedule,
     scan_request_is_resumable,
+    create_suppression_rule,
+    list_suppression_rules,
+    get_suppression_rule,
+    update_suppression_rule,
+    delete_suppression_rule,
+    suppression_rules_for_scan,
     tenant_exists,
     get_finding,
     get_finding_history,
@@ -736,6 +742,28 @@ class FindingWorkflowUpdate(BaseModel):
         return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
 
 
+class SuppressionRulePayload(BaseModel):
+    """What a scan must not report again (B6)."""
+
+    finding_type: str = Field(default="", max_length=80)
+    source: str = Field(default="", max_length=40)
+    path_pattern: str = Field(default="", max_length=1024)
+    fingerprint: str = Field(default="", max_length=128)
+    reason: str = Field(default="", max_length=500)
+    expires_at: str = Field(default="", max_length=40)
+
+    @field_validator("finding_type", "source", "path_pattern", "fingerprint", "reason", "expires_at")
+    @classmethod
+    def _clean_rule_text(cls, value: str) -> str:
+        return re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
+
+
+class SuppressionRuleUpdate(BaseModel):
+    active: bool | None = None
+    reason: str | None = Field(default=None, max_length=500)
+    expires_at: str | None = Field(default=None, max_length=40)
+
+
 class FindingLifecyclePayload(BaseModel):
     status: str = Field(default="", max_length=40)
     owner: str = Field(default="", max_length=160)
@@ -750,6 +778,11 @@ class FindingLifecyclePayload(BaseModel):
     accepted_volume: int = Field(default=0, ge=0, le=100000000)
     review_date: str = Field(default="", max_length=40)
     sla_due: str = Field(default="", max_length=40)
+    # B6: dismissing a finding can also write the rule that stops the next scan
+    # creating it again. Off unless asked for: a dismissal is about one finding
+    # until somebody says it is about more.
+    suppress_future: bool = False
+    suppression_scope: str = Field(default="file", max_length=20)
 
     @field_validator("status", "owner", "comment", "reason", "resolution", "business_justification", "approver", "expiration_date", "review_date", "sla_due")
     @classmethod
@@ -2519,6 +2552,122 @@ def finding_occurrences(finding_id: str, principal: Principal = Depends(require_
     return {"occurrences": occurrences}
 
 
+BACKSLASH = chr(92)
+SUPPRESSION_SCOPES = ("file", "folder", "type", "value")
+
+
+def _suppression_rule_from_finding(finding: dict, scope: str, reason: str) -> dict:
+    """Turn a dismissed finding into the rule that keeps it dismissed (B6).
+
+    The scope is the analyst's answer to "and what else?": this finding in this file,
+    anything of this kind under this folder, this kind of finding anywhere, or this one
+    value wherever it turns up.
+    """
+    scope = str(scope or "file").strip().lower()
+    if scope not in SUPPRESSION_SCOPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported suppression scope: {scope}")
+    file_obj = finding.get("file") if isinstance(finding.get("file"), dict) else {}
+    finding_type = str(finding.get("type") or finding.get("data_type") or "").strip()
+    path = str(file_obj.get("path") or finding.get("file_path") or "")
+    source = str(file_obj.get("source") or finding.get("source") or "")
+    if not finding_type:
+        raise HTTPException(status_code=400, detail="This finding does not say what kind it is")
+    rule = {"finding_type": finding_type, "source": source, "reason": reason}
+    if scope == "file":
+        if not path:
+            raise HTTPException(status_code=400, detail="This finding does not say which file it is in")
+        rule["path_pattern"] = path
+    elif scope == "folder":
+        normalized = path.replace(BACKSLASH, "/")
+        folder = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+        if not folder:
+            raise HTTPException(status_code=400, detail="This finding is not in a folder that can be named")
+        rule["path_pattern"] = f"{folder}/*"
+    elif scope == "value":
+        fingerprints = finding.get("secure_value_fingerprints") or finding.get("secure_fingerprints") or []
+        if not fingerprints:
+            raise HTTPException(status_code=400, detail="This finding carries no value fingerprint to suppress")
+        if len(set(str(item) for item in fingerprints)) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail="This finding carries several values; suppress the file or the folder instead",
+            )
+        rule["fingerprint"] = str(fingerprints[0])
+        rule["source"] = ""
+    else:
+        # "type": everywhere. Deliberately keeps no path and no source.
+        rule["source"] = ""
+    return rule
+
+
+@app.get("/api/suppression-rules")
+def suppression_rules_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    """What this tenant's scans have been told not to report again."""
+    return {"rules": list_suppression_rules(principal.tenant_id)}
+
+
+@app.post("/api/suppression-rules")
+def suppression_rule_create(
+    payload: SuppressionRulePayload,
+    principal: Principal = Depends(require_role("analyst")),
+) -> dict:
+    try:
+        rule = create_suppression_rule(
+            principal.tenant_id,
+            finding_type=payload.finding_type,
+            source=payload.source,
+            path_pattern=payload.path_pattern,
+            fingerprint=payload.fingerprint,
+            reason=payload.reason,
+            expires_at=payload.expires_at,
+            created_by=principal.subject,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit(principal.tenant_id, principal.subject, "suppression.created", {
+        "rule_id": rule["rule_id"],
+        "finding_type": rule["finding_type"],
+        "path_pattern": rule["path_pattern"],
+        "scope": "manual",
+    })
+    return {"rule": rule}
+
+
+@app.patch("/api/suppression-rules/{rule_id}")
+def suppression_rule_update(
+    rule_id: str,
+    payload: SuppressionRuleUpdate,
+    principal: Principal = Depends(require_role("analyst")),
+) -> dict:
+    update = {key: value for key, value in payload.model_dump().items() if value is not None}
+    try:
+        rule = update_suppression_rule(principal.tenant_id, rule_id, update)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Suppression rule not found")
+    audit(principal.tenant_id, principal.subject, "suppression.updated", {
+        "rule_id": rule["rule_id"],
+        "active": rule["active"],
+    })
+    return {"rule": rule}
+
+
+@app.delete("/api/suppression-rules/{rule_id}")
+def suppression_rule_delete(
+    rule_id: str,
+    principal: Principal = Depends(require_role("analyst")),
+) -> dict:
+    rule = get_suppression_rule(principal.tenant_id, rule_id)
+    if rule is None or not delete_suppression_rule(principal.tenant_id, rule_id):
+        raise HTTPException(status_code=404, detail="Suppression rule not found")
+    audit(principal.tenant_id, principal.subject, "suppression.deleted", {
+        "rule_id": rule_id,
+        "finding_type": rule["finding_type"],
+    })
+    return {"deleted": True, "rule_id": rule_id}
+
+
 def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLifecyclePayload, principal: Principal) -> dict:
     try:
         finding = update_finding_lifecycle(principal.tenant_id, finding_id, action, payload.model_dump(), principal.subject)
@@ -2526,7 +2675,32 @@ def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLife
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if finding is None:
         raise HTTPException(status_code=404, detail="Finding not found")
-    return {"finding": finding}
+    response = {"finding": finding}
+    if payload.suppress_future and action in {"false-positive", "suppress"}:
+        # The dismissal changed this row; the rule is what stops the next scan
+        # creating the same finding for somebody to dismiss again (B6).
+        stored = get_finding(principal.tenant_id, finding_id) or finding
+        reason = payload.reason or payload.comment or f"Dismissed as a false positive by {principal.subject}"
+        rule_fields = _suppression_rule_from_finding(stored, payload.suppression_scope, reason)
+        try:
+            rule = create_suppression_rule(
+                principal.tenant_id,
+                **rule_fields,
+                created_by=principal.subject,
+                source_finding_id=finding_id,
+                source_scan_id=str(stored.get("scan_id") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        audit(principal.tenant_id, principal.subject, "suppression.created", {
+            "rule_id": rule["rule_id"],
+            "finding_type": rule["finding_type"],
+            "path_pattern": rule["path_pattern"],
+            "scope": payload.suppression_scope,
+            "finding_id": finding_id,
+        })
+        response["suppression_rule"] = rule
+    return response
 
 
 @app.patch("/api/history/{scan_id}/findings/workflow")
@@ -4067,6 +4241,8 @@ def _endpoint_analysis_engine(
             ],
             incremental_enabled=enabled,
             incremental_scope=scope_key,
+            # B6: read once, here, so one scan is explained by one set of rules.
+            suppression_rules=suppression_rules_for_scan(principal.tenant_id),
             baseline_probe=_incremental_probe(
                 principal.tenant_id,
                 scope_key,
@@ -4124,6 +4300,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         ],
         incremental_enabled=incremental_enabled,
         incremental_scope=scope_key,
+        suppression_rules=suppression_rules_for_scan(tenant_id),
         baseline_probe=_incremental_probe(tenant_id, scope_key, incremental_enabled),
     )
 

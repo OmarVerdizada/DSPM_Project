@@ -31,6 +31,7 @@ from discovery import triage
 from discovery.detector_pool import build_pool
 from discovery.detector_stage import run_detector_stage, timed_detector
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
+from discovery.suppression import compile_rules
 from permissions.acl_analyzer import analyze_acl
 from risk.risk_engine import RiskAssessment, _is_protected_content, calculate_risk
 from scripts.logger import get_logger
@@ -89,6 +90,12 @@ class ScanConfig:
     # An SMB partition is a group of shares (B2.3): the collector walks only these,
     # in the order the server lists them. None walks every share.
     smb_shares: tuple[str, ...] | None = None
+    # What an analyst has told this tenant's scans not to report again (B6). Read
+    # when the scan's configuration is built and compiled once per engine, so a rule
+    # written while a scan runs cannot change what it has already reported. A
+    # partitioned scan builds a configuration per unit, so a rule written mid-scan
+    # reaches the units that start after it.
+    suppression_rules: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -293,6 +300,10 @@ class DSPMDiscoveryEngine:
         # P-C triage aggregate (analysis runs across worker threads, so guard it).
         self._triage_lock = threading.Lock()
         self._triage_counts = {"full": 0, "skipped_non_text": 0, "sampled": 0}
+        # B6: compiled once per scan, asked once per finding.
+        self._suppression = compile_rules(config.suppression_rules)
+        self._suppression_lock = threading.Lock()
+        self._suppression_counts = {"findings": 0, "files": 0}
 
     def _cancelled(self) -> bool:
         """True if the caller cancelled (e.g. the job heartbeat set cancel) OR the
@@ -648,6 +659,11 @@ class DSPMDiscoveryEngine:
                 (
                     json.dumps(self.config.asset_overrides, sort_keys=True, ensure_ascii=False, default=str),
                     float(self.config.detector_timeout_seconds or 0),
+                    # B6: a rule written or withdrawn invalidates reuse. Without this an
+                    # unchanged file would replay the findings of the previous policy -
+                    # a new rule would not take effect, and a deleted one would go on
+                    # hiding what it used to cover.
+                    self._suppression.digest,
                 )
             ),
         )
@@ -1056,6 +1072,15 @@ class DSPMDiscoveryEngine:
 
     def _finalize_incremental_diagnostics(self, analyzed_files: list[dict]) -> None:
         diagnostics = dict(self.last_scan_diagnostics or {})
+        if self._suppression or self._suppression_counts["findings"]:
+            # A scan that reported less than it found says so, in the same place it
+            # says everything else about how it ran.
+            with self._suppression_lock:
+                diagnostics["suppression"] = {
+                    "rules": len(self._suppression),
+                    "suppressed_findings": self._suppression_counts["findings"],
+                    "files_affected": self._suppression_counts["files"],
+                }
         counts = dict(self._incremental_counts)
         total = len(analyzed_files)
         reused = sum(1 for item in analyzed_files if item.get("cache_reused") or item.get("incremental_reused"))
@@ -1343,6 +1368,42 @@ class DSPMDiscoveryEngine:
             self.last_scan_diagnostics = diagnostics
         return filtered
 
+    def _apply_suppression(self, findings: list[dict], record: dict) -> list[dict]:
+        """Drop the findings this tenant has already decided about (B6).
+
+        Applied where the scan emits, not where it detects: the detectors still run and
+        the findings cache still holds everything they found, so deleting a rule brings
+        a finding back on the next scan without re-reading a file. Nothing is written
+        here - the estate never sees a suppressed finding, so there is no row to
+        dismiss again.
+        """
+        if not self._suppression or not findings:
+            return findings
+        path = str(record.get("path") or "")
+        source = str(record.get("source") or "")
+        kept: list[dict] = []
+        suppressed: list[dict] = []
+        for finding in findings:
+            rule_id = self._suppression.match(
+                finding_type=str(finding.get("type") or ""),
+                source=source,
+                path=path,
+                fingerprints=finding.get("secure_value_fingerprints") or finding.get("secure_fingerprints") or (),
+                truncated=bool(finding.get("occurrence_truncated") or finding.get("count_capped")),
+            )
+            if rule_id:
+                suppressed.append({"type": str(finding.get("type") or ""), "rule_id": rule_id})
+            else:
+                kept.append(finding)
+        if suppressed:
+            # The type and the rule, never the value: what was suppressed has to be
+            # explainable from the report, and a suppressed PAN is still a PAN.
+            record["suppressed_findings"] = suppressed
+            with self._suppression_lock:
+                self._suppression_counts["findings"] += len(suppressed)
+                self._suppression_counts["files"] += 1
+        return kept
+
     def _analyze_record(self, record: dict) -> dict:
         # The prior analysis this record was collected with is taken, not read.
         # On the reuse path it becomes the result; on every other path it is dead
@@ -1419,6 +1480,7 @@ class DSPMDiscoveryEngine:
             record["detector_metrics"] = detector_metrics
         if cached is None:
             self._store_cached_findings(cache_key, findings, record)
+        findings = self._apply_suppression(findings, record)
         scan_meta = {
             "scan_completeness": record.get("scan_completeness") or "UNKNOWN",
             "bytes_scanned": int(record.get("bytes_scanned") or 0),
@@ -1492,6 +1554,10 @@ class DSPMDiscoveryEngine:
         public_record.pop("content", None)
         public_record.pop("baseline_result", None)
         public_record.pop("asset_overrides", None)
+        # A replayed record was analyzed under the rules of its own scan. Changing the
+        # rules changes the version signature, so a replay under different rules should
+        # be impossible - this is the belt to that brace, and it costs one call.
+        public_record["findings"] = self._apply_suppression(public_record.get("findings") or [], record)
         public_record["cache_reused"] = True
         public_record["incremental_reused"] = True
         public_record["incremental_scan_reason"] = "durable_baseline_unchanged_file"

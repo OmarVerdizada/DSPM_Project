@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend import db
+from discovery.suppression import MAX_SUPPRESSION_RULES
 from risk.risk_engine import finding_recommendation, finding_reason
 from scripts.logger import get_logger
 
@@ -675,6 +676,46 @@ def add_scan_schedules(conn) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scan_schedules_due "
         "ON scan_schedules (enabled, next_run_at)"
+    )
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
+def add_suppression_rules(conn) -> None:
+    """Revision 0016: the findings an analyst has told the scan not to report (B6).
+
+    A false positive was a decision the estate remembered and every scan re-made:
+    the row kept its status, and the next scan created the finding again for the
+    analyst to dismiss again. ``suppression_rules`` is the decision itself - a
+    finding type, a path or prefix, a source, or one salted value fingerprint - and
+    the scan applies it when it emits, so the finding is never created.
+
+    The rule stores a fingerprint, never a value: the same thing a finding stores,
+    for the same reason.
+
+    Revisions 0003 and 0004 enumerate tenant tables when they run, so both are re-run
+    here to give the new table its tenant foreign key and row-level security.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS suppression_rules (
+            tenant_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            finding_type TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            path_pattern TEXT NOT NULL DEFAULT '',
+            fingerprint TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            expires_at TEXT NOT NULL DEFAULT '',
+            source_finding_id TEXT NOT NULL DEFAULT '',
+            source_scan_id TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, rule_id)
+        );""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_suppression_rules_active "
+        "ON suppression_rules (tenant_id, active)"
     )
     add_tenant_integrity(conn)
     add_tenant_rls(conn)
@@ -1353,6 +1394,26 @@ def apply_baseline_schema(conn) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_scan_schedules_due
             ON scan_schedules (enabled, next_run_at);
+
+        CREATE TABLE IF NOT EXISTS suppression_rules (
+            tenant_id TEXT NOT NULL,
+            rule_id TEXT NOT NULL,
+            finding_type TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
+            path_pattern TEXT NOT NULL DEFAULT '',
+            fingerprint TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            active INTEGER NOT NULL DEFAULT 1,
+            expires_at TEXT NOT NULL DEFAULT '',
+            source_finding_id TEXT NOT NULL DEFAULT '',
+            source_scan_id TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, rule_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_suppression_rules_active
+            ON suppression_rules (tenant_id, active);
 
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -3255,6 +3316,199 @@ def claim_housekeeping_run(name: str, *, interval_seconds: int, now: datetime | 
 # nobody meant to make, and the floor says so rather than letting scans pile up.
 SCHEDULE_MIN_INTERVAL_SECONDS = 300
 SCHEDULE_MAX_INTERVAL_SECONDS = 366 * 24 * 3600
+_SUPPRESSION_COLUMNS = (
+    "tenant_id, rule_id, finding_type, source, path_pattern, fingerprint, reason, active, "
+    "expires_at, source_finding_id, source_scan_id, created_by, created_at, updated_at"
+)
+
+
+def _suppression_row(row) -> dict:
+    return {
+        "tenant_id": str(row["tenant_id"]),
+        "rule_id": str(row["rule_id"]),
+        "finding_type": str(row["finding_type"] or ""),
+        "source": str(row["source"] or ""),
+        "path_pattern": str(row["path_pattern"] or ""),
+        "fingerprint": str(row["fingerprint"] or ""),
+        "reason": str(row["reason"] or ""),
+        "active": bool(row["active"]),
+        "expires_at": str(row["expires_at"] or ""),
+        "source_finding_id": str(row["source_finding_id"] or ""),
+        "source_scan_id": str(row["source_scan_id"] or ""),
+        "created_by": str(row["created_by"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def _suppression_expiry(value) -> str:
+    """An expiry as a UTC timestamp, or empty for a rule that does not expire."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Suppression expiry must be an ISO timestamp") from exc
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+@_tenant_scoped
+def create_suppression_rule(
+    tenant_id: str,
+    *,
+    finding_type: str = "",
+    source: str = "",
+    path_pattern: str = "",
+    fingerprint: str = "",
+    reason: str = "",
+    created_by: str = "",
+    expires_at: str = "",
+    source_finding_id: str = "",
+    source_scan_id: str = "",
+) -> dict:
+    """Store what the next scan must not report again (B6).
+
+    Refused outright: a rule that names nothing, which would suppress the estate. A
+    rule identical to one already active is not stored twice - the analyst who
+    dismisses the same finding from two places gets the same rule back.
+    """
+    finding_type = str(finding_type or "").strip().lower()[:80]
+    source = str(source or "").strip().lower()[:40]
+    path_pattern = str(path_pattern or "").strip()[:1024]
+    fingerprint = str(fingerprint or "").strip()[:128]
+    reason = str(reason or "").strip()[:500]
+    if not (finding_type or path_pattern or fingerprint):
+        raise ValueError("A suppression rule must name a finding type, a path or a fingerprint")
+    if not reason:
+        raise ValueError("A suppression rule needs a reason")
+    expiry = _suppression_expiry(expires_at)
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            existing = conn.execute(
+                f"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules "
+                "WHERE tenant_id = ? AND active = 1 AND finding_type = ? AND source = ? "
+                "AND path_pattern = ? AND fingerprint = ?",
+                (tenant_id, finding_type, source, path_pattern, fingerprint),
+            ).fetchone()
+            if existing is not None:
+                return _suppression_row(existing)
+            total = conn.execute(
+                "SELECT COUNT(*) AS n FROM suppression_rules WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchone()
+            if int((total["n"] if total else 0) or 0) >= MAX_SUPPRESSION_RULES:
+                raise ValueError(f"A tenant may hold at most {MAX_SUPPRESSION_RULES} suppression rules")
+            rule_id = f"sup_{secrets.token_urlsafe(9)}"
+            conn.execute(
+                "INSERT INTO suppression_rules (tenant_id, rule_id, finding_type, source, path_pattern, "
+                "fingerprint, reason, active, expires_at, source_finding_id, source_scan_id, created_by, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+                (
+                    tenant_id, rule_id, finding_type, source, path_pattern, fingerprint, reason,
+                    expiry, str(source_finding_id or "")[:120], str(source_scan_id or "")[:120],
+                    str(created_by or "")[:160], now, now,
+                ),
+            )
+            row = conn.execute(
+                f"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ? AND rule_id = ?",
+                (tenant_id, rule_id),
+            ).fetchone()
+    return _suppression_row(row)
+
+
+@_tenant_scoped
+def list_suppression_rules(tenant_id: str, *, active_only: bool = False) -> list[dict]:
+    clause = " AND active = 1" if active_only else ""
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ?{clause} "
+            "ORDER BY created_at DESC, rule_id",
+            (tenant_id,),
+        ).fetchall()
+    return [_suppression_row(row) for row in rows]
+
+
+@_tenant_scoped
+def get_suppression_rule(tenant_id: str, rule_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ? AND rule_id = ?",
+            (tenant_id, rule_id),
+        ).fetchone()
+    return _suppression_row(row) if row is not None else None
+
+
+@_tenant_scoped
+def update_suppression_rule(tenant_id: str, rule_id: str, update: dict) -> dict | None:
+    """Change what a rule says about itself - never what it matches.
+
+    A rule that matched something else would be a different decision wearing the same
+    id, and the scans that ran under the old one would be unexplainable. Turn this one
+    off and write the other.
+    """
+    sets: list[str] = []
+    values: list = []
+    if "active" in update:
+        sets.append("active = ?")
+        values.append(1 if bool(update.get("active")) else 0)
+    if "reason" in update:
+        reason = str(update.get("reason") or "").strip()[:500]
+        if not reason:
+            raise ValueError("A suppression rule needs a reason")
+        sets.append("reason = ?")
+        values.append(reason)
+    if "expires_at" in update:
+        sets.append("expires_at = ?")
+        values.append(_suppression_expiry(update.get("expires_at")))
+    if not sets:
+        return get_suppression_rule(tenant_id, rule_id)
+    sets.append("updated_at = ?")
+    values.append(datetime.now(timezone.utc).isoformat())
+    with _lock:
+        with _connect() as conn:
+            cursor = conn.execute(
+                f"UPDATE suppression_rules SET {', '.join(sets)} WHERE tenant_id = ? AND rule_id = ?",
+                (*values, tenant_id, rule_id),
+            )
+            if not cursor.rowcount:
+                return None
+            row = conn.execute(
+                f"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ? AND rule_id = ?",
+                (tenant_id, rule_id),
+            ).fetchone()
+    return _suppression_row(row) if row is not None else None
+
+
+@_tenant_scoped
+def delete_suppression_rule(tenant_id: str, rule_id: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM suppression_rules WHERE tenant_id = ? AND rule_id = ?",
+                (tenant_id, rule_id),
+            )
+            return bool(cursor.rowcount)
+
+
+def suppression_rules_for_scan(tenant_id: str) -> list[dict]:
+    """The active rules a scan carries, as plain dicts the engine can compile.
+
+    Read when the scan's configuration is built, never per file. A partitioned scan
+    builds one per unit, so a rule written mid-scan reaches the units that start after
+    it - never the records already reported.
+    """
+    try:
+        return list_suppression_rules(tenant_id, active_only=True)
+    except Exception:
+        # A scan is not the place to discover that the rules table is unreadable; it
+        # reports everything it finds, which is the safe direction.
+        return []
+
+
 _SCHEDULE_COLUMNS = (
     "tenant_id, schedule_id, name, request_json, interval_seconds, enabled, next_run_at, "
     "last_run_at, last_scan_id, last_status, last_error, runs, created_by, created_at, updated_at"
@@ -7493,6 +7747,7 @@ def delete_tenant(tenant_id: str) -> bool:
 _TENANT_ERASURE_TABLES = (
     "registration_invites",
     "scan_schedules",
+    "suppression_rules",
     "api_keys",
     # Saved scan configurations reference vaulted credentials; leaving them
     # behind after erasure kept a dead tenant's connection settings alive
