@@ -26,7 +26,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from backend.alerts import evaluate_alerts
-from backend.partitioned_scan import continue_partitioned_scan, partitioned_scans_enabled, run_partitioned_scan
+from backend.partitioned_scan import (
+    continue_partitioned_scan,
+    enqueue_partitioned_scan,
+    follow_partitioned_scan,
+    partitioned_scans_enabled,
+    queued_execution,
+    run_partitioned_scan,
+    start_partitioned_scan,
+)
 from backend.reporting.router import router as reporting_router
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
@@ -2814,29 +2822,39 @@ def _persist_compliance_scan(data: dict, payload: ScanRequest | EndpointScanRequ
 
 
 def _run_partitioned_scan_payload(config: ScanConfig, payload: ScanRequest, principal: Principal, job=None) -> dict:
-    """A local scan that writes each partition as it finishes (``DSPM_PARTITIONED_SCANS=1``, B2.2b).
+    """A scan that writes each partition as it finishes (``DSPM_PARTITIONED_SCANS=1``, B2.2b).
 
     Returns the compact report - a partitioned scan never has every file in one list,
     which is the point of it. A target that does not split runs as an ordinary scan
     and returns what an ordinary scan returns.
+
+    With ``DSPM_SCAN_EXECUTION=queue`` an asynchronous scan is planned here, published to
+    the work queue, and run by ``python main.py worker`` processes; this job then only
+    follows the ledger (B3). A synchronous request is always run here: its caller is
+    holding a connection open for the answer.
     """
     if job is not None:
         job.progress = max(job.progress, 7)
         job.message = "Planning scan partitions"
         config.cancel_check = lambda: job.cancel_requested
-    data = run_partitioned_scan(
-        principal.tenant_id,
-        config,
-        # The validated request is what lets the scan be continued after a restart;
-        # the store keeps it without secrets.
+    # The validated request is what lets the scan be continued after a restart, or run
+    # by a worker at all; the store keeps it without secrets.
+    started = dict(
         request=payload.model_dump(mode="json") if isinstance(payload, BaseModel) else None,
         requested_by=str(getattr(principal, "subject", "") or ""),
         scan_label=str(getattr(payload, "scan_label", "") or ""),
         compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
         compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
-        job=job,
     )
+    data = None
+    if job is not None and queued_execution():
+        record = start_partitioned_scan(principal.tenant_id, config, job=job, **started)
+        if record is not None:
+            data = _queued_partitioned_scan(record, config, principal, job)
+    else:
+        data = run_partitioned_scan(principal.tenant_id, config, job=job, **started)
     if data is None:
+        # Not worth partitioning - one partition's worth of files, or the demo dataset.
         if job is not None:
             from backend.jobs import _run_scan_job
 
@@ -2845,6 +2863,33 @@ def _run_partitioned_scan_payload(config: ScanConfig, payload: ScanRequest, prin
         _persist_compliance_scan(data, payload, principal)
         return data
     return _finish_partitioned_scan_payload(data, payload, principal)
+
+
+def _queued_partitioned_scan(record: dict, config: ScanConfig, principal: Principal, job) -> dict:
+    """Publish a planned scan to the work queue and follow it; run it here if the queue is unreachable.
+
+    The plan is already in the ledger when this is called, so a queue that cannot be
+    reached costs the scan nothing: it is run in this process instead, exactly as it
+    would have been with execution inline, and the audit trail says which happened.
+    """
+    from scripts.logger import get_logger
+
+    scan_id = record["scan_id"]
+    try:
+        published = enqueue_partitioned_scan(record)
+    except Exception as exc:
+        get_logger("backend.app").warning(
+            "Work queue unavailable for scan %s (%s); running it here", scan_id, type(exc).__name__,
+        )
+        with suppress(Exception):
+            audit(principal.tenant_id, principal.subject, "scan.queue_unavailable",
+                  {"scan_id": scan_id, "error": type(exc).__name__})
+        return continue_partitioned_scan(principal.tenant_id, scan_id, config, job=job)
+    with suppress(Exception):
+        audit(principal.tenant_id, principal.subject, "scan.published",
+              {"scan_id": scan_id, "partitions": published})
+    job.message = f"Queued {published} partitions for the workers"
+    return follow_partitioned_scan(principal.tenant_id, scan_id, job=job)
 
 
 def _continue_partitioned_scan_payload(scan_id: str, config: ScanConfig, payload: ScanRequest,

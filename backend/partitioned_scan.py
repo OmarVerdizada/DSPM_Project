@@ -226,6 +226,31 @@ def finalize_stale_seconds() -> int:
     return max(12 * partition_lease_seconds(), 3600)
 
 
+def queued_execution() -> bool:
+    """Whether a scan the console starts is handed to workers (``DSPM_SCAN_EXECUTION=queue``).
+
+    Inline by default: the process that takes the request runs the partitions itself, as
+    it has since B2.2b. Set to ``queue``, it plans the scan, publishes its partitions and
+    then only follows the ledger - the work is done by ``python main.py worker``
+    processes (B3). The queue is chosen separately, by ``DSPM_WORK_QUEUE``.
+    """
+    return os.getenv("DSPM_SCAN_EXECUTION", "inline").strip().lower() == "queue"
+
+
+def queue_wait_seconds() -> int:
+    """How long a queued scan's job waits for workers to finish it (``DSPM_SCAN_QUEUE_MAX_SECONDS``).
+
+    A scan waiting for a worker is not a scan taking too long, so this is a day by
+    default rather than ``SCAN_MAX_SECONDS``. When it runs out the job says no worker
+    finished the scan, and the scan itself is left exactly as it is: a worker may still
+    be running it, and the ledger remains the truth about that.
+    """
+    try:
+        return max(1, min(int(os.getenv("DSPM_SCAN_QUEUE_MAX_SECONDS", "86400")), 30 * 24 * 3600))
+    except ValueError:
+        return 86_400
+
+
 # ---- running one -------------------------------------------------------------------------------------------
 
 
@@ -756,6 +781,73 @@ def settle_if_finished(record: dict, config: ScanConfig) -> str | None:
             store.mark_partitioned_scan(scan.tenant_id, scan.scan_id, "failed", error=type(exc).__name__)
         raise
     return "finalized"
+
+
+def enqueue_partitioned_scan(record: dict, queue=None) -> int:
+    """Publish a planned scan's queued partitions to the work queue; returns how many (B3).
+
+    The messages carry identifiers only; everything a worker needs it reads from the
+    ledger. Publishing the same partition twice is harmless - the second delivery finds
+    it done, or held by its worker - so a scan may be published again after a restart.
+    """
+    from backend.work_queue import work_queue_from_env
+
+    queue = work_queue_from_env() if queue is None else queue
+    queued = [
+        unit["partition_id"]
+        for unit in store.list_scan_partitions(record["tenant_id"], record["scan_id"])
+        if unit["status"] == "queued"
+    ]
+    return queue.publish(record["tenant_id"], record["scan_id"], queued)
+
+
+def follow_partitioned_scan(
+    tenant_id: str,
+    scan_id: str,
+    *,
+    job=None,
+    poll_seconds: float = 2.0,
+    wait_seconds: int | None = None,
+) -> dict:
+    """Watch a scan that workers are running until it ends; returns its compact report (B3).
+
+    This is the console's job when execution is queued: it runs no partition itself, it
+    reports what the ledger says, and it ends when the scan does. Cancelling the job
+    marks the scan failed, which is what stops the workers - each of them reads the
+    scan's status before it runs anything.
+
+    Raises :class:`ScanStopped` if the scan failed, or if no worker finished it within
+    ``DSPM_SCAN_QUEUE_MAX_SECONDS``. In that last case the scan is left as it is: the
+    job has waited long enough, but the work may still be going on.
+    """
+    deadline = time.monotonic() + (queue_wait_seconds() if wait_seconds is None else max(1, int(wait_seconds)))
+    total = max(1, len(store.list_scan_partitions(tenant_id, scan_id)))
+    while True:
+        record = store.read_partitioned_scan(tenant_id, scan_id)
+        if record is None:
+            raise LookupError(f"partitioned scan {scan_id} is not recorded")
+        if record["status"] == "done":
+            report = store.read_scan_report_compact(tenant_id, scan_id)
+            if report is None:
+                raise ScanStopped(f"scan {scan_id} finished, but its report is gone")
+            return report
+        if record["status"] == "failed":
+            raise ScanStopped(record["error"] or f"scan {scan_id} failed")
+        if job is not None and job.cancel_requested:
+            # The workers read the status before every partition, so this stops them.
+            store.mark_partitioned_scan(tenant_id, scan_id, "failed", error="Scan cancelled")
+            raise ScanStopped("Scan cancelled")
+        if time.monotonic() > deadline:
+            raise ScanStopped(f"no worker finished scan {scan_id} within the queue wait")
+        if job is not None:
+            state = store.scan_partition_summary(tenant_id, scan_id)
+            done = int(state.get("done") or 0)
+            job.progress = max(job.progress, min(94, 8 + int(86 * done / total)))
+            job.message = (
+                "Finalizing report" if state.get("complete")
+                else f"A worker is scanning partition {min(done + 1, total)} of {total}"
+            )
+        time.sleep(poll_seconds)
 
 
 def run_partitioned_scan(
