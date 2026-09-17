@@ -56,6 +56,14 @@ def pytest_configure(config: pytest.Config) -> None:
         "DSPM_SCAN_CACHE_DIR",
         str(pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-scan-cache-")).resolve()),
     )
+    # B3.1: the shared cache is keyed by tenant, and the suite reuses tenant names, so
+    # an inherited DSPM_REDIS_URL would let one test answer another's aggregate from
+    # Memurai. The tests that want the real server (tests/test_memurai_live.py) set it
+    # themselves, for themselves.
+    if os.getenv("DSPM_MEMURAI_LIVE") != "1":
+        os.environ.pop("DSPM_REDIS_URL", None)
+        os.environ["DSPM_LIVE_CACHE"] = "0"
+
     if db.is_postgres() and os.getenv("DSPM_PG_TEST_RESET") != "1":
         pytest.exit(
             "DSPM_DB_URL selects PostgreSQL, but this suite RESETS (truncates) the "

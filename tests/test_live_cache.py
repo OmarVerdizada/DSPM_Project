@@ -78,7 +78,12 @@ class _FakeRedis:
 class _CacheTest(unittest.TestCase):
     def setUp(self) -> None:
         self.fake = _FakeRedis()
-        self._env = mock.patch.dict(os.environ, {"DSPM_REDIS_URL": "redis://127.0.0.1:6379/0"})
+        # The suite runs with the shared cache OFF (tests/conftest.py), so these tests
+        # turn it on for themselves - and never touch a real server: `client` is faked.
+        self._env = mock.patch.dict(os.environ, {
+            "DSPM_REDIS_URL": "redis://127.0.0.1:6379/0",
+            "DSPM_LIVE_CACHE": "1",
+        })
         self._env.start()
         live_cache.reset_for_tests()
         self._client = mock.patch.object(live_cache, "client", return_value=self.fake)
@@ -157,7 +162,7 @@ class WhatTheCacheMayNeverDoTest(_CacheTest):
 
     def test_with_no_url_configured_it_is_exactly_the_database_read(self) -> None:
         self._client.stop()
-        with mock.patch.dict(os.environ, {"DSPM_REDIS_URL": ""}):
+        with mock.patch.dict(os.environ, {"DSPM_REDIS_URL": "", "DSPM_LIVE_CACHE": "1"}):
             live_cache.reset_for_tests()
             calls = []
             value = live_cache.cached_json("t1", "x", None, lambda: calls.append(1) or {"assets": 2})

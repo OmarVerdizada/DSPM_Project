@@ -47,6 +47,11 @@ def publish_progress(job: "ScanJob", *, force: bool = False) -> None:
         now = time.monotonic()
         if not force and now - _published_at.get(job.id, 0.0) < PROGRESS_PUBLISH_INTERVAL_SECONDS:
             return
+        if len(_published_at) > 512:
+            # A job that never reaches a terminal state would otherwise leave its entry
+            # here forever; the oldest are the ones nothing is publishing about.
+            for stale in sorted(_published_at, key=_published_at.get)[:256]:
+                _published_at.pop(stale, None)
         _published_at[job.id] = now
         live_cache.publish_progress(job.tenant_id, job.id, {
             "id": job.id,

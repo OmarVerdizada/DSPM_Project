@@ -467,7 +467,12 @@ def run_gate(*, files: int = 400, quick: bool = False) -> dict:
     # Under the repo's gitignored tmp/, because an estate under the session temp
     # directory is skipped by the collector and would scan as nothing (see _corpus).
     (ROOT / "tmp").mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="scale-gate-", dir=str(ROOT / "tmp")) as temp:
+    # ignore_cleanup_errors: Windows will not delete a file whose handle is still open,
+    # and a scan leaves the reuse index and the database open until the engine is
+    # collected. Without this the gate raises at the end of a passing run, and leaves the
+    # directory behind either way - which is how tmp/ fills up with scale-gate-*.
+    with tempfile.TemporaryDirectory(prefix="scale-gate-", dir=str(ROOT / "tmp"),
+                                     ignore_cleanup_errors=True) as temp:
         base = Path(temp)
         estate = base / "estate"
         _corpus(estate, files)
