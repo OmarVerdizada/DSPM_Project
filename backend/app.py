@@ -87,6 +87,11 @@ from backend.store import (
     save_scan_profile,
     list_scan_profiles,
     delete_scan_profile,
+    create_scan_schedule,
+    list_scan_schedules,
+    update_scan_schedule,
+    delete_scan_schedule,
+    scan_request_is_resumable,
     tenant_exists,
     get_finding,
     get_finding_history,
@@ -239,6 +244,11 @@ async def app_lifespan(_: FastAPI):
         from backend.scan_resumer import start_scan_resumer
 
         start_scan_resumer(_resume_partitioned_scan)
+    # B3: the scans nobody starts - schedules that have fallen due.
+    with suppress(Exception):
+        from backend.scan_scheduler import start_scan_scheduler
+
+        start_scan_scheduler(_start_scheduled_scan)
     with suppress(Exception):
         from backend.search import start_search_reconciler
 
@@ -279,6 +289,10 @@ async def app_lifespan(_: FastAPI):
             from backend.scan_resumer import stop_scan_resumer
 
             stop_scan_resumer()
+        with suppress(Exception):
+            from backend.scan_scheduler import stop_scan_scheduler
+
+            stop_scan_scheduler()
         with suppress(Exception):
             from backend.search import stop_search_reconciler
 
@@ -1784,6 +1798,105 @@ def scan_profiles_delete(profile_id: str, principal: Principal = Depends(require
     return {"deleted": removed}
 
 
+class ScheduleRequest(BaseModel):
+    """A scan to run unattended: what to scan, how often, and when it first falls due."""
+
+    name: str = Field(default="", max_length=120)
+    interval_seconds: int = Field(default=86400, ge=300, le=366 * 24 * 3600)
+    enabled: bool = True
+    first_run_at: str = Field(default="", max_length=40)
+    scan: ScanRequest
+
+
+class ScheduleUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    interval_seconds: int | None = Field(default=None, ge=300, le=366 * 24 * 3600)
+    enabled: bool | None = None
+    scan: ScanRequest | None = None
+
+
+def _schedule_first_run(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="first_run_at must be an ISO 8601 time") from exc
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _schedulable(request: dict) -> dict:
+    """A schedule must be able to run with nobody there, so its credential must be one
+    the vault holds: a typed password is never stored, and a schedule that needed one
+    would fail every night at the same point."""
+    if not scan_request_is_resumable(request):
+        raise HTTPException(
+            status_code=422,
+            detail="A scheduled scan needs a saved credential: a typed password is never stored.",
+        )
+    return request
+
+
+@app.get("/api/scan-schedules")
+def scan_schedules_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
+    return {
+        "tenant_id": principal.tenant_id,
+        "schedules": list_scan_schedules(principal.tenant_id),
+    }
+
+
+@app.post("/api/scan-schedules")
+def scan_schedules_create(payload: ScheduleRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    schedule = create_scan_schedule(
+        principal.tenant_id,
+        name=payload.name,
+        request=_schedulable(payload.scan.model_dump(mode="json")),
+        interval_seconds=payload.interval_seconds,
+        first_run_at=_schedule_first_run(payload.first_run_at),
+        enabled=payload.enabled,
+        created_by=principal.subject,
+    )
+    audit(principal.tenant_id, principal.subject, "schedule.created",
+          {"schedule_id": schedule["schedule_id"], "interval_seconds": schedule["interval_seconds"]})
+    return schedule
+
+
+@app.patch("/api/scan-schedules/{schedule_id}")
+def scan_schedules_update(schedule_id: str, payload: ScheduleUpdateRequest,
+                          principal: Principal = Depends(require_role("analyst"))) -> dict:
+    request = _schedulable(payload.scan.model_dump(mode="json")) if payload.scan is not None else None
+    schedule = update_scan_schedule(
+        principal.tenant_id, schedule_id,
+        name=payload.name, request=request,
+        interval_seconds=payload.interval_seconds, enabled=payload.enabled,
+    )
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Scan schedule not found")
+    audit(principal.tenant_id, principal.subject, "schedule.updated", {"schedule_id": schedule_id})
+    return schedule
+
+
+@app.delete("/api/scan-schedules/{schedule_id}")
+def scan_schedules_delete(schedule_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    removed = delete_scan_schedule(principal.tenant_id, schedule_id)
+    if removed:
+        audit(principal.tenant_id, principal.subject, "schedule.deleted", {"schedule_id": schedule_id})
+    return {"deleted": removed}
+
+
+@app.post("/api/scan-schedules/{schedule_id}/run")
+def scan_schedules_run_now(schedule_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+    """Make a schedule due now; the scheduler starts it on its next sweep."""
+    schedule = update_scan_schedule(
+        principal.tenant_id, schedule_id, enabled=True, next_run_at=datetime.now(timezone.utc),
+    )
+    if schedule is None:
+        raise HTTPException(status_code=404, detail="Scan schedule not found")
+    audit(principal.tenant_id, principal.subject, "schedule.updated", {"schedule_id": schedule_id, "run_now": True})
+    return schedule
+
+
 @app.post("/api/test-connection")
 def test_connection(payload: ConnectionRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
     if not _is_local_endpoint_host(payload.server):
@@ -2944,6 +3057,51 @@ def _resume_partitioned_scan(record: dict) -> None:
         raise ResumeLater(str(exc)) from exc
     bind_partitioned_scan_job(tenant_id, scan_id, job.id)
     audit(tenant_id, "system:scan-resumer", "scan.resumed", {"scan_id": scan_id, "job_id": job.id})
+
+
+def _start_scheduled_scan(schedule: dict) -> None:
+    """Start the scan a schedule is due for, as the console would have started it (B3).
+
+    The stored request goes through the same validation and vault resolution a request
+    from the console gets, and the scan runs as an ordinary asynchronous job:
+    partitioned when the flag is on, published to the workers when execution is queued.
+    What became of the run is written back to the schedule, so a week of unattended
+    nights can be read afterwards.
+    """
+    tenant_id = schedule["tenant_id"]
+    payload = ScanRequest.model_validate({**(schedule.get("request") or {}), "async_scan": True})
+    config = _to_config(payload, tenant_id)
+    principal = Principal(
+        subject=f"system:scheduler:{schedule['schedule_id']}",
+        role="analyst",
+        tenant_id=tenant_id,
+        auth_type="system",
+    )
+    job = create_job(tenant_id, lambda job: _scheduled_scan_payload(schedule, config, payload, principal, job))
+    audit(tenant_id, "system:scheduler", "scan.scheduled",
+          {"schedule_id": schedule["schedule_id"], "job_id": job.id, "name": schedule.get("name", "")})
+
+
+def _scheduled_scan_payload(schedule: dict, config: ScanConfig, payload: ScanRequest,
+                            principal: Principal, job) -> dict:
+    """The job a schedule starts, and the note it leaves on the schedule either way."""
+    from backend.store import record_schedule_run
+
+    tenant_id, schedule_id = schedule["tenant_id"], schedule["schedule_id"]
+    try:
+        if partitioned_scans_enabled():
+            data = _run_partitioned_scan_payload(config, payload, principal, job)
+        else:
+            from backend.jobs import _run_scan_job
+
+            data = _run_scan_job(job, config, lambda report: _persist_compliance_scan(report, payload, principal))
+    except BaseException as exc:
+        with suppress(Exception):
+            record_schedule_run(tenant_id, schedule_id, status="failed", error=type(exc).__name__)
+        raise
+    with suppress(Exception):
+        record_schedule_run(tenant_id, schedule_id, scan_id=str(data.get("scan_id") or ""), status="completed")
+    return data
 
 
 def _finish_partitioned_scan_payload(data: dict, payload, principal: Principal) -> dict:

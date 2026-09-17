@@ -642,6 +642,44 @@ def add_partitioned_scan_ledger(conn) -> None:
     add_tenant_rls(conn)
 
 
+def add_scan_schedules(conn) -> None:
+    """Revision 0015: the scans a backend runs unattended (B3).
+
+    A pilot's value is the scan nobody has to start: ``scan_schedules`` holds the scan
+    request - through the same secret filter scan profiles use, so a typed password
+    never reaches the database - how often it runs, and when it is next due. The
+    scheduler claims a due schedule by compare-and-set on that due time, so several
+    backends sharing one database start it exactly once.
+
+    Revisions 0003 and 0004 enumerate tenant tables when they run, so both are re-run
+    here to give the new table its tenant foreign key and row-level security.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS scan_schedules (
+            tenant_id TEXT NOT NULL,
+            schedule_id TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            request_json TEXT NOT NULL DEFAULT '{}',
+            interval_seconds INTEGER NOT NULL DEFAULT 86400,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            next_run_at TEXT NOT NULL,
+            last_run_at TEXT NOT NULL DEFAULT '',
+            last_scan_id TEXT NOT NULL DEFAULT '',
+            last_status TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            runs INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, schedule_id)
+        );""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scan_schedules_due "
+        "ON scan_schedules (enabled, next_run_at)"
+    )
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1294,6 +1332,27 @@ def apply_baseline_schema(conn) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_partitioned_scans_status
             ON partitioned_scans (status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS scan_schedules (
+            tenant_id TEXT NOT NULL,
+            schedule_id TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            request_json TEXT NOT NULL DEFAULT '{}',
+            interval_seconds INTEGER NOT NULL DEFAULT 86400,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            next_run_at TEXT NOT NULL,
+            last_run_at TEXT NOT NULL DEFAULT '',
+            last_scan_id TEXT NOT NULL DEFAULT '',
+            last_status TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            runs INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, schedule_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_scan_schedules_due
+            ON scan_schedules (enabled, next_run_at);
 
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -3106,6 +3165,215 @@ def recover_interrupted_jobs(*, resuming: bool = True) -> int:
                 (RESUMING_JOB_ERROR if resuming else INTERRUPTED_JOB_ERROR, INTERRUPTED_JOB_ERROR, now, now),
             )
             return cursor.rowcount
+
+
+# --- B3: scans that run unattended -------------------------------------------
+
+# A schedule is a scan, not a cron tick: anything under five minutes is a mistake
+# nobody meant to make, and the floor says so rather than letting scans pile up.
+SCHEDULE_MIN_INTERVAL_SECONDS = 300
+SCHEDULE_MAX_INTERVAL_SECONDS = 366 * 24 * 3600
+_SCHEDULE_COLUMNS = (
+    "tenant_id, schedule_id, name, request_json, interval_seconds, enabled, next_run_at, "
+    "last_run_at, last_scan_id, last_status, last_error, runs, created_by, created_at, updated_at"
+)
+
+
+def _schedule_interval(seconds) -> int:
+    try:
+        wanted = int(seconds)
+    except (TypeError, ValueError):
+        wanted = 86_400
+    return max(SCHEDULE_MIN_INTERVAL_SECONDS, min(wanted, SCHEDULE_MAX_INTERVAL_SECONDS))
+
+
+def _schedule_row(row) -> dict:
+    try:
+        request = json.loads(row["request_json"] or "{}")
+    except (TypeError, ValueError):
+        request = {}
+    return {
+        "tenant_id": str(row["tenant_id"]),
+        "schedule_id": str(row["schedule_id"]),
+        "name": str(row["name"] or ""),
+        "request": request if isinstance(request, dict) else {},
+        "interval_seconds": int(row["interval_seconds"] or 0),
+        "enabled": bool(row["enabled"]),
+        "next_run_at": str(row["next_run_at"] or ""),
+        "last_run_at": str(row["last_run_at"] or ""),
+        "last_scan_id": str(row["last_scan_id"] or ""),
+        "last_status": str(row["last_status"] or ""),
+        "last_error": str(row["last_error"] or ""),
+        "runs": int(row["runs"] or 0),
+        "created_by": str(row["created_by"] or ""),
+        "created_at": str(row["created_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+@_tenant_scoped
+def create_scan_schedule(
+    tenant_id: str,
+    *,
+    name: str,
+    request: dict,
+    interval_seconds: int = 86_400,
+    first_run_at: datetime | None = None,
+    enabled: bool = True,
+    created_by: str = "",
+) -> dict:
+    """Record a scan to run unattended; returns the stored schedule (B3).
+
+    The request goes through the same secret filter scan profiles and partitioned scans
+    use, so a typed password is never stored - and a schedule that needs one could not
+    run unattended anyway. The first run is due immediately unless a time is given.
+    """
+    interval = _schedule_interval(interval_seconds)
+    now = datetime.now(timezone.utc)
+    due = (first_run_at or now).astimezone(timezone.utc).isoformat()
+    cleaned = _sanitize_scan_profile_config(request if isinstance(request, dict) else {})
+    schedule_id = f"sch_{secrets.token_urlsafe(9)}"
+    stamp = now.isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT INTO scan_schedules (tenant_id, schedule_id, name, request_json, interval_seconds, "
+                "enabled, next_run_at, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    tenant_id, schedule_id, str(name or "")[:120],
+                    json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"), default=str),
+                    interval, 1 if enabled else 0, due, str(created_by or "")[:160], stamp, stamp,
+                ),
+            )
+            row = conn.execute(
+                f"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? AND schedule_id = ?",
+                (tenant_id, schedule_id),
+            ).fetchone()
+    return _schedule_row(row)
+
+
+@_tenant_scoped
+def list_scan_schedules(tenant_id: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? ORDER BY created_at, schedule_id",
+            (tenant_id,),
+        ).fetchall()
+    return [_schedule_row(row) for row in rows]
+
+
+@_tenant_scoped
+def read_scan_schedule(tenant_id: str, schedule_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? AND schedule_id = ?",
+            (tenant_id, str(schedule_id)),
+        ).fetchone()
+    return _schedule_row(row) if row is not None else None
+
+
+@_tenant_scoped
+def update_scan_schedule(
+    tenant_id: str,
+    schedule_id: str,
+    *,
+    name: str | None = None,
+    request: dict | None = None,
+    interval_seconds: int | None = None,
+    enabled: bool | None = None,
+    next_run_at: datetime | None = None,
+) -> dict | None:
+    """Change a schedule; returns it as stored, or ``None`` if there is no such schedule."""
+    sets = ["updated_at = ?"]
+    params: list = [datetime.now(timezone.utc).isoformat()]
+    if name is not None:
+        sets.append("name = ?")
+        params.append(str(name)[:120])
+    if request is not None:
+        sets.append("request_json = ?")
+        params.append(json.dumps(
+            _sanitize_scan_profile_config(request if isinstance(request, dict) else {}),
+            ensure_ascii=False, separators=(",", ":"), default=str,
+        ))
+    if interval_seconds is not None:
+        sets.append("interval_seconds = ?")
+        params.append(_schedule_interval(interval_seconds))
+    if enabled is not None:
+        sets.append("enabled = ?")
+        params.append(1 if enabled else 0)
+    if next_run_at is not None:
+        sets.append("next_run_at = ?")
+        params.append(next_run_at.astimezone(timezone.utc).isoformat())
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                f"UPDATE scan_schedules SET {', '.join(sets)} WHERE tenant_id = ? AND schedule_id = ?",
+                (*params, tenant_id, str(schedule_id)),
+            )
+            row = conn.execute(
+                f"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? AND schedule_id = ?",
+                (tenant_id, str(schedule_id)),
+            ).fetchone()
+    return _schedule_row(row) if row is not None else None
+
+
+@_tenant_scoped
+def delete_scan_schedule(tenant_id: str, schedule_id: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "DELETE FROM scan_schedules WHERE tenant_id = ? AND schedule_id = ?",
+                (tenant_id, str(schedule_id)),
+            ).rowcount or 0) == 1
+
+
+def claim_due_schedules(*, now: datetime | None = None, limit: int = 10) -> list[dict]:
+    """Take the schedules that are due, across tenants; returns the ones this caller claimed.
+
+    The claim is a compare-and-set on the due time the row was read with, so two
+    backends sharing a database start a schedule exactly once. The next run is counted
+    from now, not from the due time that passed: a backend that was off for a week owes
+    one scan, not a week of them.
+    """
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    stamp = moment.isoformat()
+    claimed: list[dict] = []
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                f"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules "
+                "WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at LIMIT ?",
+                (stamp, max(1, int(limit))),
+            ).fetchall()
+            for row in rows:
+                schedule = _schedule_row(row)
+                due = (moment + timedelta(seconds=schedule["interval_seconds"])).isoformat()
+                taken = conn.execute(
+                    "UPDATE scan_schedules SET next_run_at = ?, last_run_at = ?, last_status = 'started', "
+                    "last_error = '', runs = runs + 1, updated_at = ? "
+                    "WHERE tenant_id = ? AND schedule_id = ? AND enabled = 1 AND next_run_at = ?",
+                    (due, stamp, stamp, schedule["tenant_id"], schedule["schedule_id"], schedule["next_run_at"]),
+                )
+                if int(taken.rowcount or 0) == 1:
+                    schedule.update(next_run_at=due, last_run_at=stamp, last_status="started",
+                                    last_error="", runs=schedule["runs"] + 1)
+                    claimed.append(schedule)
+    return claimed
+
+
+@_tenant_scoped
+def record_schedule_run(tenant_id: str, schedule_id: str, *, scan_id: str = "", status: str = "",
+                        error: str = "") -> bool:
+    """What became of a scheduled run - the scan it started, and how it ended."""
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE scan_schedules SET last_scan_id = ?, last_status = ?, last_error = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND schedule_id = ?",
+                (str(scan_id or ""), str(status or "")[:40], str(error or "")[:500],
+                 datetime.now(timezone.utc).isoformat(), tenant_id, str(schedule_id)),
+            ).rowcount or 0) == 1
 
 
 # --- B2: resumable scans ------------------------------------------------------
@@ -7142,6 +7410,7 @@ def delete_tenant(tenant_id: str) -> bool:
 
 _TENANT_ERASURE_TABLES = (
     "registration_invites",
+    "scan_schedules",
     "api_keys",
     # Saved scan configurations reference vaulted credentials; leaving them
     # behind after erasure kept a dead tenant's connection settings alive
