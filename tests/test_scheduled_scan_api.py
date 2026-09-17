@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from backend import app as app_module, store
+from backend import app as app_module, scan_scheduler, store
 from backend.app import app
 from backend.security import create_token, hash_password
 
@@ -175,6 +175,19 @@ class TheJobASchedulStartsTest(unittest.TestCase):
 
         stored = store.read_scan_schedule(self.tenant, self.schedule["schedule_id"])
         self.assertEqual((stored["last_status"], stored["last_scan_id"]), ("completed", "20260917010203"))
+
+    def test_a_schedule_whose_folder_is_gone_fails_that_run_and_no_more(self) -> None:
+        gone = store.create_scan_schedule(
+            self.tenant, name="gone", request={"local_path": "no-such-folder-here"},
+            interval_seconds=86400, first_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+        self.addCleanup(store.delete_scan_schedule, self.tenant, gone["schedule_id"])
+        self.assertEqual(scan_scheduler.run_due_schedules(app_module._start_scheduled_scan), [])
+        stored = store.read_scan_schedule(self.tenant, gone["schedule_id"])
+        self.assertEqual(stored["last_status"], "failed")
+        self.assertIn("FileNotFoundError", stored["last_error"])
+        self.assertGreater(stored["next_run_at"], datetime.now(timezone.utc).isoformat(),
+                           "the schedule lost its place because one run could not start")
 
     def test_a_scan_that_fails_is_written_back_to_the_schedule(self) -> None:
         with mock.patch.object(app_module, "create_job", return_value=MagicMock(id="job-sched")) as create_job:

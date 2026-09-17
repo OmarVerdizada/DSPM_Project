@@ -3070,6 +3070,10 @@ def _start_scheduled_scan(schedule: dict) -> None:
     """
     tenant_id = schedule["tenant_id"]
     payload = ScanRequest.model_validate({**(schedule.get("request") or {}), "async_scan": True})
+    # The same preparation a scan from the console gets: the bundled demo dataset is
+    # generated if it is missing, and a custom path that does not exist fails here,
+    # where the failure is recorded on the schedule.
+    _prepare_local_scan_data(payload)
     config = _to_config(payload, tenant_id)
     principal = Principal(
         subject=f"system:scheduler:{schedule['schedule_id']}",
