@@ -176,6 +176,64 @@ TRUSTED_HOSTS = [
     if host.strip()
 ]
 ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE = 256
+# A file whose text is larger than this is read up to here and marked truncated. The
+# collector's own default is the local one - a hundred megabytes - which one file can
+# spend on its own, and every byte of it crosses WinRM and is held on both sides (B4).
+ENDPOINT_DEFAULT_MAX_FILE_TEXT_BYTES = 5 * 1024 * 1024
+# What one fetch command may ask for. A response is held whole on both sides, so this,
+# not the file count, is the bound that matters.
+ENDPOINT_DEFAULT_FETCH_BATCH_BYTES = 32 * 1024 * 1024
+
+
+def endpoint_max_file_text_bytes() -> int:
+    """How much text an endpoint scan reads from one file (``DSPM_ENDPOINT_MAX_FILE_TEXT_BYTES``).
+
+    Enough for the detectors to classify a file; the record says when it was truncated,
+    and reports it as a partial scan of that file rather than a complete one.
+    """
+    try:
+        wanted = int(os.getenv("DSPM_ENDPOINT_MAX_FILE_TEXT_BYTES", str(ENDPOINT_DEFAULT_MAX_FILE_TEXT_BYTES)))
+    except ValueError:
+        wanted = ENDPOINT_DEFAULT_MAX_FILE_TEXT_BYTES
+    return max(64 * 1024, min(wanted, 100 * 1024 * 1024))
+
+
+def endpoint_fetch_batch_bytes() -> int:
+    """How many bytes of file content one endpoint fetch may ask for (``DSPM_ENDPOINT_FETCH_BATCH_BYTES``)."""
+    try:
+        wanted = int(os.getenv("DSPM_ENDPOINT_FETCH_BATCH_BYTES", str(ENDPOINT_DEFAULT_FETCH_BATCH_BYTES)))
+    except ValueError:
+        wanted = ENDPOINT_DEFAULT_FETCH_BATCH_BYTES
+    return max(1024 * 1024, min(wanted, 512 * 1024 * 1024))
+
+
+def _endpoint_fetch_batches(paths: list[str], sizes: dict[str, int]) -> list[list[str]]:
+    """Cut the paths to fetch into batches bounded by count and by bytes (B4).
+
+    Two hundred and fifty-six files of a megabyte each is a quarter-gigabyte response,
+    held whole on the endpoint and again here, so the byte budget decides where a batch
+    ends. Each file is capped at what the scan will actually read, and a file that fills
+    the budget on its own is a batch of its own rather than a reason to refuse it.
+    """
+    per_file_cap = endpoint_max_file_text_bytes()
+    budget = endpoint_fetch_batch_bytes()
+    batches: list[list[str]] = []
+    current: list[str] = []
+    carried = 0
+    for path in paths:
+        if not path:
+            continue
+        size = min(max(0, int(sizes.get(path.casefold(), 0) or 0)), per_file_cap)
+        if current and (len(current) >= ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE or carried + size > budget):
+            batches.append(current)
+            current, carried = [], 0
+        current.append(path)
+        carried += size
+    if current:
+        batches.append(current)
+    return batches
+
+
 ENDPOINT_REUSED_SCANNER_DIAGNOSTIC_FIELDS = (
     "session_reused",
     "session_reuse_count",
@@ -3158,8 +3216,24 @@ def _finish_partitioned_scan_payload(data: dict, payload, principal: Principal) 
     return data
 
 
-def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], job=None, floor: int = 70) -> list[dict]:
-    """Analyze endpoint records with the same adaptive pool as file scans."""
+def _analyze_endpoint_records(
+    report: DSPMDiscoveryEngine,
+    records: list[dict],
+    job=None,
+    floor: int = 70,
+    ceiling: int = 90,
+    close_index: bool = True,
+) -> list[dict]:
+    """Analyze endpoint records with the same adaptive pool as file scans.
+
+    ``floor``/``ceiling`` bound the job progress this call may report: a content
+    batch is analyzed while collection is still running (B4), and its progress
+    belongs in the collection band rather than at the end of the scan.
+
+    ``close_index`` releases the engine's reuse index when the analysis finishes.
+    A per-batch call passes False - the index serves every batch and is closed
+    once, by the last analysis or by the caller's outer ``finally``.
+    """
     # Keep the helper's small duck-typed contract for tests and integrations
     # that supply only _analyze_record. Real discovery engines take the adaptive
     # branch below.
@@ -3171,7 +3245,7 @@ def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], 
                 raise RuntimeError("Scan cancelled")
             analyzed.append(report._analyze_record(record))
             if job and (index % 10 == 0 or index == len(records)):
-                job.progress = max(job.progress, min(90, floor + int((index / total) * (90 - floor))))
+                job.progress = max(job.progress, min(ceiling, floor + int((index / total) * (ceiling - floor))))
                 job.message = f"Analyzing endpoint files {index}/{len(records)}"
         return analyzed
 
@@ -3186,7 +3260,7 @@ def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], 
                 return
             total_n = max(int(total or 0), 1)
             completed_n = max(0, min(int(completed or 0), total_n))
-            job.progress = max(job.progress, min(90, floor + int((completed_n / total_n) * (90 - floor))))
+            job.progress = max(job.progress, min(ceiling, floor + int((completed_n / total_n) * (ceiling - floor))))
             job.message = f"Analyzing endpoint files {completed_n}/{len(records)}"
 
         report.config.progress_callback = update_progress
@@ -3199,9 +3273,136 @@ def _analyze_endpoint_records(report: DSPMDiscoveryEngine, records: list[dict], 
         # Endpoint analysis drives the engine without run(), so nothing else would
         # ever write its reuse entries or release the index file. Before this, an
         # endpoint scan built its whole L1 index in memory and then discarded it.
-        close_meta_index = getattr(report, "close_meta_index", None)
+        close_meta_index = getattr(report, "close_meta_index", None) if close_index else None
         if callable(close_meta_index):
             close_meta_index()
+
+
+def _fetch_endpoint_content_in_batches(
+    scanner,
+    config: WinRMEndpointConfig,
+    report: DSPMDiscoveryEngine,
+    job,
+    host_key: str,
+    wanted_paths: list[str],
+    sizes_by_path: dict[str, int],
+    *,
+    message: str,
+    scan_overrides: dict | None = None,
+) -> tuple[dict[str, dict], list[dict], int, list[str], dict]:
+    """Read the content of ``wanted_paths`` in bounded commands, analyzing each batch (B4).
+
+    One command is one WinRM response, held whole on the endpoint and again here, so a
+    batch is bounded by bytes as well as by count. Each batch is analyzed as it arrives
+    and only the analyzed records are kept - findings, risk and metadata, no file text -
+    so what an endpoint scan holds follows the batch, not the size of the profile.
+
+    Returns the analyzed records by path key, the analyzed archive children, how many
+    commands it took, what went wrong, and the scanner diagnostics worth carrying over.
+    """
+    analyzed_by_path: dict[str, dict] = {}
+    analyzed_archive_records: list[dict] = []
+    fetch_errors: list[str] = []
+    scanner_fields: dict = {}
+    fetch_commands = 0
+    fetched = 0
+    total = max(len(wanted_paths), 1)
+    for chunk in _endpoint_fetch_batches(wanted_paths, sizes_by_path):
+        if job and job.cancel_requested:
+            raise RuntimeError("Scan cancelled")
+        fetch_commands += 1
+        fetched += len(chunk)
+        if job:
+            job.progress = max(job.progress, min(60, 46 + int((fetched / total) * 14)))
+            job.message = f"{message} {fetched}/{len(wanted_paths)}"
+        scanner.config = replace(config, paths=chunk, max_depth=1, **(scan_overrides or {}))
+        try:
+            with collection_heartbeat(job, ceiling=65):
+                batch = scanner.scan()
+        except Exception as exc:
+            fetch_errors.append(type(exc).__name__)
+            continue
+        batch_diagnostics = dict(scanner.last_scan_diagnostics or {})
+        for field in ENDPOINT_REUSED_SCANNER_DIAGNOSTIC_FIELDS:
+            if field in batch_diagnostics:
+                scanner_fields[field] = batch_diagnostics[field]
+        for marker in (
+            "scan_truncated",
+            "record_limit_reached",
+            "unreadable_dirs",
+            "missing_roots",
+            "worker_errors",
+            "archive_errors",
+        ):
+            if batch_diagnostics.get(marker):
+                fetch_errors.append(marker)
+        for record in batch:
+            record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
+        # Analyzed here rather than with the rest of the scan: analysis is what turns a
+        # file's text into findings, and until it runs that text is held. The index is
+        # not closed between batches - it serves all of them.
+        for record in _analyze_endpoint_records(report, batch, job, floor=60, ceiling=68, close_index=False):
+            record_path = str(record.get("path") or "")
+            if "::" in record_path:
+                analyzed_archive_records.append(record)
+            else:
+                analyzed_by_path[record_path.casefold()] = record
+        batch = None
+    scanner.config = config
+    return analyzed_by_path, analyzed_archive_records, fetch_commands, fetch_errors, scanner_fields
+
+
+def _assembled_endpoint_records(
+    report: DSPMDiscoveryEngine,
+    job,
+    metadata_records: list[dict],
+    host_key: str,
+    *,
+    analyzed_by_path: dict[str, dict],
+    reused_by_path: dict[str, dict],
+    reused_archive_records: list[dict],
+    analyzed_archive_records: list[dict],
+    unreadable_note: str,
+) -> tuple[list[dict], list[str]]:
+    """Put the scan back in walk order, with every record analyzed exactly once (B4).
+
+    By now a path is one of three things: it arrived in a content batch and was
+    analyzed there, it was reused from the baseline, or it could not be read. The
+    first is done; the other two are analyzed together here, which costs little
+    because neither carries file text. Walk order is the metadata pass's order,
+    because the sections of a report follow it (B2.2).
+    """
+    order: list[str] = []
+    by_key: dict[str, dict] = {}
+    pending: list[dict] = []
+    missing: list[str] = []
+    for metadata in metadata_records:
+        path = str(metadata.get("path") or "")
+        key = path.casefold()
+        order.append(key)
+        analyzed = analyzed_by_path.get(key)
+        if analyzed is not None:
+            by_key[key] = analyzed
+            continue
+        record = reused_by_path.get(key)
+        if record is None:
+            record = dict(metadata)
+            record["scan_error"] = record.get("scan_error") or unreadable_note
+            record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, path)
+            missing.append(path)
+        pending.append(record)
+    for record in reused_archive_records:
+        order.append(str(record.get("path") or "").casefold())
+        pending.append(record)
+    if pending:
+        # Matched back by path rather than by position: a cancelled analysis returns
+        # fewer records than it was given, and a record under the wrong path is worse
+        # than a record missing from the report.
+        for record in _analyze_endpoint_records(report, pending, job):
+            by_key[str(record.get("path") or "").casefold()] = record
+    records = [by_key[key] for key in order if key in by_key]
+    records.extend(analyzed_archive_records)
+    return records, missing
 
 
 @contextmanager
@@ -3256,21 +3457,23 @@ def _collect_and_persist_remote_endpoint(
 ) -> dict:
     if job:
         job.progress = 8
-        job.message = (
-            "Enumerating remote endpoint metadata"
-            if incremental_baseline_available
-            else "Reading remote endpoint files"
-        )
+        # Every endpoint scan now starts the same way: enumerate, then read what
+        # needs reading (B4). A scan that reads nothing is the enumeration alone.
+        job.message = "Enumerating remote endpoint metadata"
     scanner = WinRMEndpointScanner(config)
     collection_diagnostics: dict = {}
-    if payload.incremental_enabled and config.read_content and incremental_baseline_available:
+    analyzed: list[dict] | None = None
+    if config.read_content:
         # WinRM cannot callback into the server for each file while its
         # PowerShell walk is running. Enumerate size/mtime without content,
-        # owner/ACL or hashing, resolve the baseline locally, then fetch only
-        # new/changed paths in bounded commands.
+        # owner/ACL or hashing, resolve the baseline locally, then read what is
+        # left in bounded commands.
         # P4: keep one job-local scanner so the working WinRM host, transport,
         # and pywinrm Session survive from metadata enumeration into every
         # content batch. Only scan-script options change between invocations.
+        # B4: a first scan is read this way too. It costs one extra round-trip,
+        # and it is what stops a five-gigabyte profile from arriving as a single
+        # response, held whole on the endpoint and again here.
         scanner.config = replace(
             config,
             read_content=False,
@@ -3282,21 +3485,25 @@ def _collect_and_persist_remote_endpoint(
         with collection_heartbeat(job, ceiling=45):
             metadata_records = scanner.scan()
         collection_diagnostics = dict(scanner.last_scan_diagnostics or {})
-        records_by_path: dict[str, dict] = {}
-        reused_archive_records: list[dict] = []
-        fetched_archive_records: list[dict] = []
-        changed_paths: list[str] = []
+        report.last_scan_diagnostics = collection_diagnostics
         host_key = config.host or scanner.last_connection_host
+        reused_by_path: dict[str, dict] = {}
+        reused_archive_records: list[dict] = []
+        wanted_paths: list[str] = []
         for record in metadata_records:
-            object_key = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
-            snapshot = report._reuse_probe(
-                object_key,
-                int(record.get("size") or 0),
-                str(record.get("modified_at") or ""),
+            path = str(record.get("path") or "")
+            object_key = qualified_object_key("endpoint-winrm", host_key, path)
+            snapshot = (
+                report._reuse_probe(
+                    object_key,
+                    int(record.get("size") or 0),
+                    str(record.get("modified_at") or ""),
+                )
+                if incremental_baseline_available
+                else None
             )
-            path_key = str(record.get("path") or "").casefold()
             if isinstance(snapshot, dict):
-                records_by_path[path_key] = apply_reuse_snapshot(record, snapshot, object_key)
+                reused_by_path[path.casefold()] = apply_reuse_snapshot(record, snapshot, object_key)
                 for prior in snapshot.get("archive_records") or []:
                     if not isinstance(prior, dict):
                         continue
@@ -3307,123 +3514,94 @@ def _collect_and_persist_remote_endpoint(
                         apply_reuse_snapshot(prior, reuse_snapshot_from_result(prior), child_key)
                     )
             else:
-                changed_paths.append(str(record.get("path") or ""))
+                wanted_paths.append(path)
 
-        fetch_errors: list[str] = []
-        fetch_commands = 0
-        for offset in range(0, len(changed_paths), ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE):
-            if job and job.cancel_requested:
-                raise RuntimeError("Scan cancelled")
-            chunk = [
-                path
-                for path in changed_paths[offset : offset + ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE]
-                if path
-            ]
-            if not chunk:
-                continue
-            fetch_commands += 1
-            if job:
-                job.progress = max(job.progress, min(65, 46 + int((offset / max(len(changed_paths), 1)) * 19)))
-                job.message = f"Reading changed endpoint files {min(offset + len(chunk), len(changed_paths))}/{len(changed_paths)}"
-            scanner.config = replace(
-                config,
-                paths=chunk,
-                max_depth=1,
-                hash_files=True,
-                read_owner=True,
-            )
-            try:
-                with collection_heartbeat(job, ceiling=65):
-                    changed_records = scanner.scan()
-            except Exception as exc:
-                fetch_errors.append(type(exc).__name__)
-                continue
-            changed_diagnostics = dict(scanner.last_scan_diagnostics or {})
-            for field in ENDPOINT_REUSED_SCANNER_DIAGNOSTIC_FIELDS:
-                if field in changed_diagnostics:
-                    collection_diagnostics[field] = changed_diagnostics[field]
-            for marker in (
-                "scan_truncated",
-                "record_limit_reached",
-                "unreadable_dirs",
-                "missing_roots",
-                "worker_errors",
-                "archive_errors",
-            ):
-                if changed_diagnostics.get(marker):
-                    fetch_errors.append(marker)
-            for record in changed_records:
-                record_path = str(record.get("path") or "")
-                path_key = record_path.casefold()
-                record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, record_path)
-                if "::" in record_path:
-                    fetched_archive_records.append(record)
-                else:
-                    records_by_path[path_key] = record
-
-        scanner.config = config
-
-        records = []
-        changed_path_keys = {path.casefold() for path in changed_paths if path}
-        missing_changed_paths: list[str] = []
-        for metadata in metadata_records:
-            path_key = str(metadata.get("path") or "").casefold()
-            record = records_by_path.get(path_key)
-            if record is None:
-                record = dict(metadata)
-                record["scan_error"] = record.get("scan_error") or "Changed file could not be fetched during incremental scan"
-                record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
-                if path_key in changed_path_keys:
-                    missing_changed_paths.append(str(record.get("path") or ""))
-            records.append(record)
-        if missing_changed_paths:
-            fetch_errors.append("MissingChangedRecords")
-        records.extend(fetched_archive_records)
-        records.extend(reused_archive_records)
+        sizes_by_path = {
+            str(record.get("path") or "").casefold(): int(record.get("size") or 0)
+            for record in metadata_records
+        }
+        (
+            analyzed_by_path,
+            analyzed_archive_records,
+            fetch_commands,
+            fetch_errors,
+            scanner_fields,
+        ) = _fetch_endpoint_content_in_batches(
+            scanner,
+            config,
+            report,
+            job,
+            host_key,
+            wanted_paths,
+            sizes_by_path,
+            message="Reading changed endpoint files" if incremental_baseline_available else "Reading endpoint files",
+            # A reused record is compared against a stored hash and owner, so a
+            # warm scan reads both whatever the request asked for. A first scan
+            # has nothing to compare against and keeps the request's own answer.
+            scan_overrides={"hash_files": True, "read_owner": True} if incremental_baseline_available else None,
+        )
+        records, missing_paths = _assembled_endpoint_records(
+            report,
+            job,
+            metadata_records,
+            host_key,
+            analyzed_by_path=analyzed_by_path,
+            reused_by_path=reused_by_path,
+            reused_archive_records=reused_archive_records,
+            analyzed_archive_records=analyzed_archive_records,
+            unreadable_note=(
+                "Changed file could not be fetched during incremental scan"
+                if incremental_baseline_available
+                else "File could not be read during the scan"
+            ),
+        )
+        analyzed = records
+        if missing_paths:
+            fetch_errors.append("MissingChangedRecords" if incremental_baseline_available else "MissingRecords")
+        # Analysis rebinds the engine's diagnostics to a copy of its own, so the
+        # collection facts are re-applied over what analysis left behind.
+        collection_diagnostics = {
+            **dict(report.last_scan_diagnostics or {}),
+            **collection_diagnostics,
+            **scanner_fields,
+        }
         collection_diagnostics.update(
             {
                 "incremental_metadata_pass": True,
-                "incremental_first_scan_single_pass": False,
-                "incremental_changed_paths": len(changed_paths),
+                "incremental_first_scan_single_pass": not incremental_baseline_available and fetch_commands <= 1,
+                "incremental_changed_paths": len(wanted_paths),
                 "incremental_content_fetch_commands": fetch_commands,
                 "incremental_fetch_batch_size": ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE,
+                "incremental_fetch_batch_bytes": endpoint_fetch_batch_bytes(),
+                "endpoint_max_file_text_bytes": endpoint_max_file_text_bytes(),
                 "incremental_fetch_errors": fetch_errors[:20],
-                "incremental_missing_changed_paths": missing_changed_paths[:20],
+                "incremental_missing_changed_paths": missing_paths[:20],
             }
         )
     else:
-        # Explicit full scans and cold incremental scans both need every byte.
-        # On a cold incremental scan the metadata pre-pass cannot reuse anything,
-        # so one normal full-content invocation is both faster and equivalent.
+        # Nothing to read: the walk is the scan, and a metadata record is small.
         with collection_heartbeat(job, ceiling=60):
             records = scanner.scan()
         collection_diagnostics = dict(scanner.last_scan_diagnostics or {})
         host_key = config.host or scanner.last_connection_host
         for record in records:
             record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
-        if payload.incremental_enabled and config.read_content and not incremental_baseline_available:
-            collection_diagnostics.update(
-                {
-                    "incremental_metadata_pass": False,
-                    "incremental_first_scan_single_pass": True,
-                    "incremental_changed_paths": len(records),
-                    "incremental_content_fetch_commands": 1,
-                    "incremental_fetch_batch_size": ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE,
-                    "incremental_fetch_errors": [],
-                    "incremental_missing_changed_paths": [],
-                }
-            )
     if job:
         if job.cancel_requested:
             raise RuntimeError("Scan cancelled")
         job.progress = max(job.progress, 70)
-        job.message = f"Analyzing {len(records)} endpoint files"
+        job.message = (
+            f"Analyzed {len(records)} endpoint files"
+            if analyzed is not None
+            else f"Analyzing {len(records)} endpoint files"
+        )
     report.last_scan_diagnostics = collection_diagnostics
-    analyzed = _analyze_endpoint_records(report, records, job)
+    if analyzed is None:
+        analyzed = _analyze_endpoint_records(report, records, job)
     report._finalize_incremental_diagnostics(analyzed)
     if payload.incremental_enabled and config.read_content and not incremental_baseline_available:
-        # No probes are necessary on a cold baseline, so classify the one-pass
-        # results explicitly instead of leaving them as unclassified fresh work.
+        # A cold baseline has nothing to probe against, so every file read is new
+        # work - classify it explicitly instead of leaving it unclassified.
         incremental = report.last_scan_diagnostics.get("incremental") or {}
         incremental["new_objects"] = len(analyzed)
         incremental["changed_objects"] = 0
@@ -3991,6 +4169,8 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         paths=[item.strip() for item in payload.paths if item.strip()] or ["desktop", "documents", "downloads"],
         max_depth=payload.max_depth,
         read_content=payload.read_content,
+        # B4: one file may not spend a hundred megabytes of WinRM response on its own.
+        max_read_bytes=endpoint_max_file_text_bytes(),
         allowed_extensions=allowed_extensions,
         extension_filter_enabled=extension_filter_enabled,
         include_hidden=payload.include_hidden,

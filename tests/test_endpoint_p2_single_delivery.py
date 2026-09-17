@@ -91,7 +91,8 @@ class EndpointP2SingleDeliveryTests(unittest.TestCase):
         with mock.patch("backend.app.incremental_baseline_exists", return_value=baseline) as baseline_check, \
              mock.patch("backend.app._endpoint_analysis_engine", return_value=report) as engine_factory, \
              mock.patch("backend.app.WinRMEndpointScanner", side_effect=scanner_factory), \
-             mock.patch("backend.app._analyze_endpoint_records", side_effect=lambda _report, records, _job=None: records), \
+             mock.patch("backend.app._analyze_endpoint_records",
+                        side_effect=lambda _report, records, _job=None, **_bounds: records), \
              mock.patch("backend.app._apply_compliance"), \
              mock.patch("backend.app._persist_scan"):
             result = _run_endpoint_scan_payload(self.config, self.payload, self.principal)
@@ -99,7 +100,16 @@ class EndpointP2SingleDeliveryTests(unittest.TestCase):
         self.assertIs(engine_factory.call_args.kwargs["baseline_available"], baseline)
         return result
 
-    def test_cold_incremental_scan_skips_metadata_and_reads_everything_once(self) -> None:
+    def test_a_first_scan_is_read_in_bounded_commands_too(self) -> None:
+        """B4 reverses P2's single delivery for a first scan, deliberately.
+
+        P2 read a cold scan in one full-content command because the metadata pass
+        has nothing to reuse and the extra round-trip buys nothing. It buys
+        something else: the response to that single command is the whole scope,
+        base64 and gzip, held on the endpoint and again here, and a profile is
+        measured in gigabytes. The metadata pass now runs whatever the baseline
+        says, and the content follows it in batches bounded by bytes.
+        """
         scan_configs: list[WinRMEndpointConfig] = []
 
         class Scanner:
@@ -114,12 +124,15 @@ class EndpointP2SingleDeliveryTests(unittest.TestCase):
 
         result = self._run(baseline=False, scanner_factory=Scanner)
 
-        self.assertEqual(len(scan_configs), 1)
-        self.assertTrue(scan_configs[0].read_content)
-        self.assertTrue(scan_configs[0].hash_files)
+        self.assertEqual(len(scan_configs), 2, "metadata, then content")
+        self.assertFalse(scan_configs[0].read_content, "the metadata pass reads no file")
+        self.assertFalse(scan_configs[0].hash_files)
+        self.assertTrue(scan_configs[1].read_content)
+        self.assertEqual(scan_configs[1].max_depth, 1, "the content pass asks for named files")
+        self.assertTrue(scan_configs[1].hash_files, "a first scan keeps what the request asked for")
         diagnostics = result["scan_diagnostics"]
-        self.assertFalse(diagnostics["incremental_metadata_pass"])
-        self.assertTrue(diagnostics["incremental_first_scan_single_pass"])
+        self.assertTrue(diagnostics["incremental_metadata_pass"])
+        self.assertTrue(diagnostics["incremental_first_scan_single_pass"], "two small files are one batch")
         self.assertEqual(diagnostics["incremental_content_fetch_commands"], 1)
         self.assertEqual(diagnostics["incremental"]["new_objects"], 2)
         self.assertEqual(diagnostics["incremental"]["unclassified_fresh_objects"], 0)
