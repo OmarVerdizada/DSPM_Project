@@ -1,4 +1,4 @@
-name: Performance gate (nightly)
+name: Performance and scale gates (nightly)
 
 # Track P-F: "fastest" stays measured and defended. The same gate runs in the
 # normal test job (tests/test_perf_gate.py) on every PR — its failure conditions
@@ -37,3 +37,11 @@ jobs:
 
       - name: Run performance gate (parity + regression ratios, absolute report)
         run: python scripts/perf_gate.py --json
+
+      # B8: the Phase B envelopes - the estate write's slope, a partitioned scan holding
+      # one partition and agreeing with a single one, a redelivered partition running
+      # nothing twice, an endpoint scan following its batch budget, one value being one
+      # finding. The test job runs the same gate on a smaller corpus; this one runs it at
+      # the size where the memory ratio can actually discriminate.
+      - name: Run scale gate (Phase B envelopes)
+        run: python scripts/scale_gate.py --files 400 --json
