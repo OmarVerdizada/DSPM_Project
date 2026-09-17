@@ -329,7 +329,8 @@ def worker_kill_check(store, estate: Path, base: Path) -> dict:
 def _estate_fingerprint(store, tenant: str) -> str:
     digest = hashlib.sha256()
     with store._connect() as conn:
-        for table in ("assets", "findings", "finding_occurrences", "finding_index", "scan_partition_records"):
+        # A partition's records live on its ledger row, not in a table of their own.
+        for table in ("assets", "findings", "finding_occurrences", "finding_index", "scan_partitions"):
             try:
                 rows = conn.execute(f"SELECT * FROM {table} WHERE tenant_id = ?", (tenant,)).fetchall()
             except Exception:

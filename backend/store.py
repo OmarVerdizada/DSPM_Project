@@ -2033,6 +2033,13 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
         logger.warning("Dedicated search indexing deferred for scan %s: %s", scan_id, exc)
     except Exception as exc:  # pragma: no cover - optional projection guard
         logger.warning("Dedicated search indexing skipped for scan %s: %s", scan_id, type(exc).__name__)
+    # B3.1: what the console shows about the estate has just changed, so the shared
+    # cache's generation moves and every backend answers from the new one rather than
+    # from whatever it cached before the scan.
+    with suppress(Exception):
+        from backend import live_cache
+
+        live_cache.bump(tenant_id)
     return scan_id
 
 
@@ -5532,6 +5539,18 @@ def _remediation_framework_metric_rows(conn, tenant_id: str, scope_where: list[s
 
 
 def posture_inputs(tenant_id: str) -> dict:
+    """The posture measurements, shared between backends when Memurai is configured (B3.1).
+
+    This is the read the case for Redis was built on: three O(estate) aggregates that
+    every console refresh asks for, on every backend, while a scan is writing. With no
+    `DSPM_REDIS_URL` it is exactly the database read it always was.
+    """
+    from backend import live_cache
+
+    return live_cache.cached_json(tenant_id, "posture_inputs", None, lambda: _posture_inputs(tenant_id))
+
+
+def _posture_inputs(tenant_id: str) -> dict:
     """The four measurements the posture score is made of, from the estate.
 
     Three aggregates, all index-served. They come from the normalized tables
@@ -6985,6 +7004,20 @@ def _cache_inventory_facets(cache_key: tuple, facets: dict) -> dict:
 
 @_tenant_scoped
 def inventory_facets(tenant_id: str, source: str = "") -> dict:
+    """Inventory facets, shared between backends when Memurai is configured (B3.1).
+
+    The per-process cache below stays: it answers the same process in microseconds. This
+    layer is what stops a second backend - or a worker - paying for the aggregate again.
+    """
+    from backend import live_cache
+
+    return live_cache.cached_json(
+        tenant_id, "inventory_facets", {"source": str(source or "")},
+        lambda: _inventory_facets(tenant_id, source),
+    )
+
+
+def _inventory_facets(tenant_id: str, source: str = "") -> dict:
     """Aggregate inventory filters without transferring asset rows to the browser.
 
     With a configured scan name, facets describe that scan's newest persisted
