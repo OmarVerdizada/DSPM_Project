@@ -109,21 +109,31 @@ def _canonical_occurrences(finding: dict, file_obj: dict, finding_id: str, locat
             redacted_sample,
             str(item.get("occurrence_index") or index + 1),
         )
-        rows.append(
-            {
-                "occurrence_id": occurrence_id,
-                "finding_id": finding_id,
-                "file_id": file_id,
-                "location_id": item.get("location_id") or location_id,
-                "page": item.get("page"),
-                "row": item.get("row"),
-                "column": item.get("column") or item.get("JSONPath") or item.get("XPath") or "",
-                "offset_start": int(item.get("offset_start") or 0),
-                "offset_end": int(item.get("offset_end") or 0),
-                "secure_fingerprint": secure_fingerprint,
-                "redacted_sample": redacted_sample,
-            }
-        )
+        # B1.4 diet: an occurrence used to repeat its parent's finding_id, file_id and
+        # location_id on every row, and to carry page/row/column as nulls for every text
+        # file - eleven keys of which five said nothing. It now carries what is true of
+        # THIS occurrence; the finding above it carries the rest.
+        row: dict = {"occurrence_id": occurrence_id}
+        if secure_fingerprint:
+            row["secure_fingerprint"] = secure_fingerprint
+        if redacted_sample:
+            row["redacted_sample"] = redacted_sample
+        start = int(item.get("offset_start") or 0)
+        end = int(item.get("offset_end") or 0)
+        if start or end:
+            row["offset_start"] = start
+            row["offset_end"] = end
+        for positional in ("page", "row"):
+            if item.get(positional) not in (None, "", 0):
+                row[positional] = item[positional]
+        column = item.get("column") or item.get("JSONPath") or item.get("XPath") or ""
+        if column:
+            row["column"] = column
+        location = item.get("location_id")
+        if location and location != location_id:
+            # Only when this occurrence is somewhere else than the finding says.
+            row["location_id"] = location
+        rows.append(row)
     return rows
 
 

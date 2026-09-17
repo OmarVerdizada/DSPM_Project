@@ -646,7 +646,9 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
         self.assertEqual(email["unique_value_count"], 1)
         occurrence = email["occurrences"][0]
         self.assertTrue(occurrence["occurrence_id"].startswith("occurrence_"))
-        self.assertEqual(occurrence["finding_id"], email["finding_id"])
+        # B1.4: an occurrence no longer repeats its parent's ids - the finding above
+        # it carries them, and every row that said them again was one row of waste.
+        self.assertNotIn("finding_id", occurrence)
         self.assertEqual(occurrence["offset_start"], 16)
         self.assertEqual(occurrence["redacted_sample"], "oma***om")
 

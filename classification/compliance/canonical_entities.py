@@ -63,6 +63,11 @@ ENTITY_TYPE_BY_FINDING = {
 }
 
 
+# How many ids an entity indexes before it stops collecting them (B1.4). The entity is a
+# way in to the findings, and the findings hold the full picture.
+ENTITY_ID_CAP = 10
+
+
 def canonical_entity_fingerprint(entity_type: str, value: str, tenant_id: str = "default") -> str:
     secret = evidence_hmac_key()
     normalized = _normalize_entity_value(entity_type, value)
@@ -161,9 +166,14 @@ def _merge_entity_from_finding(entity: dict, finding: dict) -> None:
         ("asset_ids", finding.get("asset_id")),
         ("location_ids", finding.get("location_id")),
     ):
-        if value and value not in entity[field]:
+        if value and value not in entity[field] and len(entity[field]) < ENTITY_ID_CAP:
             entity[field].append(value)
     for occurrence in finding.get("occurrences") or []:
+        # B1.4: an index, not a ledger. The findings carry their own evidence ids, and an
+        # entity naming every occurrence of a value grew without bound on a file that
+        # held a thousand of them.
+        if len(entity["occurrence_ids"]) >= ENTITY_ID_CAP:
+            break
         occurrence_id = occurrence.get("occurrence_id")
         if occurrence_id and occurrence_id not in entity["occurrence_ids"]:
             entity["occurrence_ids"].append(occurrence_id)
@@ -213,14 +223,14 @@ def _entity_framework_mapping_details(entity_type: str, finding: dict) -> list[d
 
 
 def _mapping(framework: str, data_class: str, title: str) -> dict:
-    return {
-        "framework": framework,
-        "data_class": data_class,
-        "title": title,
-        "mapping_type": "entity_projection",
-        "mapping_confidence": "high",
-        "source": "canonical_entity_registry",
-    }
+    """One framework's view of an entity.
+
+    B1.4: the three keys this used to carry beside them - ``mapping_type``,
+    ``mapping_confidence`` and ``source`` - were the same three constants on every
+    mapping of every entity of every file, and nothing read them. What a mapping is and
+    where it came from is what this function is.
+    """
+    return {"framework": framework, "data_class": data_class, "title": title}
 
 
 def _entity_fingerprints(finding: dict) -> list[str]:
