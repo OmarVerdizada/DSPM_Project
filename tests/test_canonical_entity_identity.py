@@ -127,9 +127,22 @@ class OneValueIsOneEntityTest(unittest.TestCase):
             "the same value registered twice under two names",
         )
 
-    def test_the_detectors_that_found_the_same_email_point_at_the_same_entity(self) -> None:
-        findings = self._analyzed()["findings"]
+    def test_the_detectors_that_found_the_same_value_point_at_the_same_entity(self) -> None:
+        """Asked of the detectors' own output, because B7b then merges them into one finding."""
+        from classification.compliance import classify_gdpr_content, classify_pci_content
+        from classification.compliance.canonical_entities import apply_canonical_entity_registry
+        from classification.regex_classifier import classify_content
+
+        file_obj = {"path": r"C:\Data\customers.csv", "name": "customers.csv",
+                    "source": "local", "tenant_id": "tenant-b7"}
+        findings = [
+            *classify_content(CONTENT, tenant_id="tenant-b7"),
+            *classify_gdpr_content(CONTENT, file_obj, []),
+            *classify_pci_content(CONTENT, file_obj, []),
+        ]
+        apply_canonical_entity_registry(findings, file_obj)
         by_type = {finding["type"]: finding for finding in findings}
+
         self.assertEqual(
             by_type["email"]["canonical_entity_id"],
             by_type["gdpr_email_address"]["canonical_entity_id"],

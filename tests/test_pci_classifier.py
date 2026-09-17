@@ -591,7 +591,11 @@ class PCIClassifierTests(unittest.TestCase):
         enabled = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["pci_dss"]))._analyze_record(dict(record))
         enabled_types = {finding["type"] for finding in enabled["findings"]}
         self.assertIn("pci_chd_pan", enabled_types)
-        self.assertIn("credit_card", enabled_types)
+        # B7: one card is one finding. The generic rule found it too, and says so,
+        # rather than standing beside the PCI one as a second card.
+        pan = next(finding for finding in enabled["findings"] if finding["type"] == "pci_chd_pan")
+        self.assertIn("credit_card", pan["detected_by"])
+        self.assertNotIn("credit_card", enabled_types)
         self.assertIn("411111******1111", "\n".join(enabled["preview"]["lines"]))
         self.assertNotIn("4111 1111 1111 1111", "\n".join(enabled["preview"]["lines"]))
 

@@ -1,6 +1,16 @@
 from __future__ import annotations
 
 
+def categories_for_finding(finding: dict) -> set[str]:
+    """Every compliance category this finding maps to, across the rules that found it (B7)."""
+    from backend.finding_contracts import finding_detected_types
+
+    categories: set[str] = set()
+    for name in finding_detected_types(finding):
+        categories.update(FINDING_CATEGORY_MAP.get(name, []))
+    return categories
+
+
 FINDING_CATEGORY_MAP: dict[str, list[str]] = {
     "email": ["pii"],
     "phone_number": ["pii"],

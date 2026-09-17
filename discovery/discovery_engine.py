@@ -38,6 +38,7 @@ from scripts.logger import get_logger
 
 logger = get_logger(__name__)
 GENERIC_DETECTOR_VERSION = "generic-regex-v4"  # B7: findings carry the canonical entity type and its fingerprints
+FINDING_MODEL_VERSION = "finding-merge-v1"  # B7: one finding per value, whatever found it
 PCI_DETECTOR_VERSION = "pci-detector-v3"  # A2: one PAN validator, issuer-gated
 # Bumped v2 -> v3 for SC-1: previews and the classification cache are now
 # produced by the universal evidence sanitizer, so every pre-existing findings
@@ -1957,7 +1958,9 @@ def _sanitize_evidence_cached(content: str) -> str:
 
 
 def _detector_version(framework_ids: set[str]) -> str:
-    parts = [GENERIC_DETECTOR_VERSION]
+    # B7: how the detectors' output is assembled is part of what a scan found, so the
+    # merge has its own version and a change to it invalidates cached analysis.
+    parts = [GENERIC_DETECTOR_VERSION, FINDING_MODEL_VERSION]
     if "gdpr" in framework_ids:
         parts.append(GDPR_DETECTOR_VERSION)
     if "pci_dss" in framework_ids:

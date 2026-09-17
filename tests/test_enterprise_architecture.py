@@ -31,12 +31,15 @@ class EnterpriseArchitectureTests(unittest.TestCase):
         self.assertIn("PCI DSS", person["framework_mappings"])
         self.assertTrue(person["detected_once_mapped_many"])
 
-        gdpr_name = next(finding for finding in analyzed["findings"] if finding["type"] == "gdpr_full_name")
-        pci_name = next(finding for finding in analyzed["findings"] if finding["type"] == "pci_chd_cardholder_name")
-        self.assertEqual(gdpr_name["canonical_entity_id"], person["entity_id"])
-        self.assertEqual(pci_name["canonical_entity_id"], person["entity_id"])
-        self.assertIn("GDPR", pci_name["framework_mappings"])
-        self.assertIn("PCI DSS", gdpr_name["framework_mappings"])
+        # B7: the name GDPR and PCI both found is ONE finding now. It points at that one
+        # entity and carries both frameworks, which is what "mapped many" was always for,
+        # and it names the two rules that found it.
+        name = next(finding for finding in analyzed["findings"]
+                    if person["entity_id"] in (finding.get("canonical_entity_ids") or []))
+        self.assertEqual(name["canonical_entity_id"], person["entity_id"])
+        self.assertEqual(sorted(name["detected_by"]), ["gdpr_full_name", "pci_chd_cardholder_name"])
+        self.assertIn("GDPR", name["framework_mappings"])
+        self.assertIn("PCI DSS", name["framework_mappings"])
 
         pan = next(finding for finding in analyzed["findings"] if finding["type"] == "pci_chd_pan")
         pan_entity = next(entity for entity in analyzed["canonical_entities"] if entity["entity_id"] == pan["canonical_entity_id"])

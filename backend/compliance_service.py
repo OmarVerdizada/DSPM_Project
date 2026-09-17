@@ -7,7 +7,12 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Iterable
 
-from backend.compliance_rules import CRITICALITY_WEIGHTS, FINDING_CATEGORY_MAP, PATH_CATEGORY_KEYWORDS
+from backend.compliance_rules import (
+    CRITICALITY_WEIGHTS,
+    FINDING_CATEGORY_MAP,
+    PATH_CATEGORY_KEYWORDS,
+    categories_for_finding,
+)
 from backend.finding_contracts import get_finding_display_name
 from classification.compliance.nist_catalog import nist_catalog_status
 from classification.compliance.nist_mappings import nist_data_categories_for_finding, nist_framework_mapping_row
@@ -279,8 +284,7 @@ def infer_data_categories(file_obj: dict) -> set[str]:
     for finding in file_obj.get("findings") or []:
         if str(finding.get("framework") or "").lower() == "nist_sp800_60_enterprise":
             categories.update(nist_data_categories_for_finding(finding))
-        categories.update(FINDING_CATEGORY_MAP.get(str(finding.get("type") or "").lower(), []))
-        categories.update(FINDING_CATEGORY_MAP.get(str(finding.get("label") or "").lower(), []))
+        categories.update(categories_for_finding(finding))
         if finding.get("category"):
             categories.update(_categories_from_finding_category(str(finding.get("category") or "")))
     path_blob = " ".join(str(file_obj.get(key) or "").lower() for key in ("name", "path", "share", "extension"))
@@ -726,7 +730,7 @@ def _compliance_findings_for_file(file_obj: dict, profile_ids: set[str]) -> list
     for finding in file_obj.get("findings") or []:
         framework = str(finding.get("framework") or "").lower()
         finding_type = str(finding.get("type") or "").lower()
-        categories = set(FINDING_CATEGORY_MAP.get(finding_type, []))
+        categories = categories_for_finding(finding)
         if finding.get("category"):
             categories.update(_categories_from_finding_category(str(finding.get("category") or "")))
         is_match = False
@@ -822,9 +826,7 @@ def _is_gdpr_finding(finding: dict) -> bool:
     framework = str(finding.get("framework") or "").lower()
     if framework == "gdpr":
         return True
-    categories = set()
-    finding_type = str(finding.get("type") or "").lower()
-    categories.update(FINDING_CATEGORY_MAP.get(finding_type, []))
+    categories = categories_for_finding(finding)
     if finding.get("category"):
         categories.update(_categories_from_finding_category(str(finding.get("category") or "")))
     return bool(categories & {"pii", "personal_data", "government_ids", "health_data", "biometric_data", "genetic_data", "financial_records", "customer_data", "hr_documents", "online_identifiers", "location_data", "behavioral_data"})
@@ -897,7 +899,7 @@ def _finding_weight(file_obj: dict, matched_categories: list[str]) -> int:
     score = 0
     relevant = set(matched_categories)
     for finding in file_obj.get("findings") or []:
-        finding_categories = set(FINDING_CATEGORY_MAP.get(str(finding.get("type") or "").lower(), []))
+        finding_categories = categories_for_finding(finding)
         if finding.get("category"):
             finding_categories.update(_categories_from_finding_category(str(finding.get("category") or "")))
         if relevant and not (finding_categories & relevant):
@@ -950,7 +952,7 @@ def _finding_evidence(file_obj: dict) -> list[dict]:
     evidence: list[dict] = []
     for finding in file_obj.get("findings") or []:
         finding_type = str(finding.get("type") or finding.get("label") or "finding")
-        categories = FINDING_CATEGORY_MAP.get(finding_type.lower(), [])
+        categories = sorted(categories_for_finding(finding))
         if finding.get("category"):
             categories = _dedupe([*categories, *_categories_from_finding_category(str(finding.get("category") or ""))])
         evidence.append(

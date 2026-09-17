@@ -66,10 +66,18 @@ def _severity_counts(files: list[dict]) -> dict[str, int]:
 
 
 def _file_risk_types(file_obj: Mapping[str, Any]) -> list[str]:
+    """Every rule name the file's findings stand for.
+
+    B7 merges a card found by three detectors into one finding that keeps the strongest
+    one's type, so reading `type` alone would have lost `credit_card` - and with it the
+    financial remediation steps this file needs.
+    """
+    from backend.finding_contracts import finding_detected_types
+
     types: list[str] = []
     for finding in file_obj.get("findings") or []:
-        if isinstance(finding, dict) and finding.get("type"):
-            types.append(str(finding.get("type")))
+        if isinstance(finding, dict):
+            types.extend(finding_detected_types(finding))
     return types
 
 

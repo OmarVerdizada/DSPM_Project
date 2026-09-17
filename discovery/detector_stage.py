@@ -21,6 +21,7 @@ from typing import Any, Callable
 from classification.compliance import classify_gdpr_content, classify_nist_content, classify_pci_content
 from classification.compliance.nist_models import NIST_FRAMEWORK_ID
 from classification.regex_classifier import classify_content
+from discovery.finding_merge import merge_findings
 
 
 def timed_detector(name: str, detector: Callable[[], list[dict]], timeout_seconds: float) -> tuple[list[dict], dict]:
@@ -123,7 +124,10 @@ def run_detector_stage(payload: dict[str, Any]) -> dict[str, Any]:
                     findings.append(finding)
                     existing_keys.add(dedupe_key)
 
-    return {"findings": findings, "detector_rows": detector_rows, "record": record}
+    # B7: three detectors reading one file found one card three times. What they
+    # found is merged here, where every detector's output is in one list and
+    # nothing downstream has looked at it yet.
+    return {"findings": merge_findings(findings), "detector_rows": detector_rows, "record": record}
 
 
 def warm_up() -> bool:

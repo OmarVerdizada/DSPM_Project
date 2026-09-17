@@ -53,6 +53,22 @@ NIST_RULE_NAME_TAXONOMY_AZ = {
 }
 
 
+def finding_detected_types(finding: dict[str, Any]) -> list[str]:
+    """Every rule name this finding stands for, lowercased and deduplicated.
+
+    A merged finding (B7) is one value that several detectors found, and it keeps the
+    strongest one's type. Everything keyed on a rule name - compliance categories, the
+    remediation policy's type sets - asks this instead of reading `type`, so a merge
+    cannot quietly drop a key that used to resolve.
+    """
+    names: list[str] = []
+    for value in (finding.get("type"), finding.get("label"), *(finding.get("detected_by") or ())):
+        name = str(value or "").strip().lower()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def normalize_framework_id(value: Any) -> str:
     raw = str(value or "").strip().lower().replace("-", "_")
     squashed = re.sub(r"[^a-z0-9_ ]+", " ", raw).strip()
