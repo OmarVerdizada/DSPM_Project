@@ -738,8 +738,8 @@ def run_queued_partition(record: dict, config: ScanConfig, partition_id: str, *,
     attempt, and the scan is marked failed. ``dropped`` - the scan has no such partition.
     ``elsewhere`` - a local scan planned on another host, which this host must not run.
 
-    The claim is the ledger's compare-and-set, so a duplicate delivery - a message
-    reclaimed from a worker that died after its commit - finds the partition done and
+    The claim is the ledger's compare-and-set, so a duplicate delivery - the same
+    partition handed to two workers, or handed out again after a commit - finds it done and
     runs nothing twice.
     """
     if not runs_here(record):
@@ -797,11 +797,12 @@ def settle_if_finished(record: dict, config: ScanConfig) -> str | None:
 
 
 def enqueue_partitioned_scan(record: dict, queue=None) -> int:
-    """Publish a planned scan's queued partitions to the work queue; returns how many (B3).
+    """Hand a planned scan's queued partitions to the workers; returns how many (B3).
 
-    The messages carry identifiers only; everything a worker needs it reads from the
-    ledger. Publishing the same partition twice is harmless - the second delivery finds
-    it done, or held by its worker - so a scan may be published again after a restart.
+    On the ledger queue the partitions are already where workers look, so this counts
+    them for the console and the audit trail. A delivery carries identifiers only;
+    everything a worker needs it reads from the ledger. Publishing the same partition
+    twice is harmless - the second delivery finds it done, or held by its worker.
     """
     from backend.work_queue import work_queue_from_env
 

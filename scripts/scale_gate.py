@@ -8,8 +8,8 @@ and a quiet regression:
 - **B0** the estate write costs a fixed number of statements, not one per file;
 - **B1/B2** a partitioned scan holds one partition at a time, and reports what one scan
   reports;
-- **B3** a partition written but never acknowledged is re-run without writing anything
-  twice - the worker-kill gate, against the ledger queue;
+- **B3** a partition handed out again after its worker committed it runs nothing twice -
+  the worker-kill gate, against the ledger queue the workers use;
 - **B4** an endpoint scan's memory follows its batch budget, not the size of the profile;
 - **B7** one value found by three detectors is one finding, and a record is not padded
   with what its parent already says.
@@ -18,7 +18,7 @@ Every bound here is either a RATIO (host-independent: a slow CI runner and a fas
 workstation agree on it) or a marginal cost per file. Absolute numbers are reported for
 tracking, never gated across hosts.
 
-    python scripts/scale_gate.py [--files 400] [--quick] [--json] [--strict]
+    python scripts/scale_gate.py [--files 400] [--quick] [--json]
 
 Exit code 1 on any failed check. Uses throwaway databases and temporary directories, and
 never touches operator data.
@@ -37,6 +37,7 @@ import time
 import tracemalloc
 import uuid
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -345,7 +346,6 @@ def _estate_fingerprint(store, tenant: str) -> str:
 
 def endpoint_paging_check(files: int, file_bytes: int = MB) -> dict:
     """B4: what an endpoint scan holds follows its batch budget, not the size of the scope."""
-    from unittest import mock
 
     from backend.app import EndpointScanRequest, _run_endpoint_scan_payload
     from backend.security import Principal
@@ -471,14 +471,21 @@ def run_gate(*, files: int = 400, quick: bool = False) -> dict:
     # and a scan leaves the reuse index and the database open until the engine is
     # collected. Without this the gate raises at the end of a passing run, and leaves the
     # directory behind either way - which is how tmp/ fills up with scale-gate-*.
+    #
+    # The environment is the gate's only for the length of the run. Set and left behind,
+    # it pointed every later caller in the same process - every test after
+    # test_scale_gate - at a directory this block had already deleted, and they wrote
+    # their artifacts into it, re-creating it under tmp/ on every suite run.
     with tempfile.TemporaryDirectory(prefix="scale-gate-", dir=str(ROOT / "tmp"),
-                                     ignore_cleanup_errors=True) as temp:
+                                     ignore_cleanup_errors=True) as temp, \
+            mock.patch.dict(os.environ, {
+                "DSPM_DB_PATH": str(Path(temp) / "gate.sqlite"),
+                "DSPM_ARTIFACT_DIR": str(Path(temp) / "artifacts"),
+                "DSPM_SCAN_CACHE_DIR": str(Path(temp) / "scan-cache"),
+            }):
         base = Path(temp)
         estate = base / "estate"
         _corpus(estate, files)
-        os.environ["DSPM_DB_PATH"] = str(base / "gate.sqlite")
-        os.environ["DSPM_ARTIFACT_DIR"] = str(base / "artifacts")
-        os.environ["DSPM_SCAN_CACHE_DIR"] = str(base / "scan-cache")
 
         from backend import store
 

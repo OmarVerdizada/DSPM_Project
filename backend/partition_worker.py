@@ -1,17 +1,18 @@
-"""B3 fundamentals: a worker process that runs scan partitions from a work queue.
+"""B3: a worker process that runs the scan partitions queued in the ledger.
 
 ``python main.py worker`` runs :func:`run_worker`. A worker holds no scan of its own. It
-takes a partition identifier from the queue, reads that partition's scan from the ledger,
-rebuilds the engine from the recorded request - the same validation and credential
-resolution a scan started from the console gets - runs the partition under a lease,
-commits it, and only then acknowledges the queue. When nothing is left to run for a scan,
-it finalizes the scan unless someone else already is.
+takes a partition from the queue - the ledger itself: the first queued partition of the
+oldest running scan this host can run - reads that partition's scan, rebuilds the engine
+from the recorded request - the same validation and credential resolution a scan started
+from the console gets - claims the partition under a lease, runs it and commits it. When
+nothing is left to run for a scan, it finalizes the scan unless someone else already is.
 
-Every decision is the ledger's: a partition already done, or held by a live worker, is
-not run again, and a message for a scan that finished or failed is acknowledged and
-dropped. A crash anywhere leaves an unacknowledged message, which is reclaimed once idle,
-a partition whose lease runs out, or a scan with nothing left to run - and a worker's
-maintenance pass picks up all three.
+Every decision is the ledger's. Two workers can be handed the same partition; the claim
+is a compare-and-set, so one runs it and the other finds it held or done. A partition of
+a scan that finished or failed is dropped. A crash anywhere leaves a partition whose
+lease runs out, or a scan with nothing left to run, and a worker's maintenance pass picks
+up both. ``ack`` and ``reclaim`` belong to the :class:`PartitionQueue` seam and have
+nothing to do on the ledger, where the commit is the acknowledgement.
 
 What only concerns this worker never touches the scan: a scan it cannot rebuild - a
 credential missing from this worker's vault - or a local scan planned on another host is
@@ -33,7 +34,7 @@ from backend.work_queue import Delivery, PartitionQueue
 
 logger = logging.getLogger(__name__)
 
-# Outcomes that leave the message unacknowledged, for another worker or a later pass.
+# Outcomes that leave the partition queued, for another worker or a later pass.
 _LEFT_PENDING = frozenset({"held", "elsewhere", "unbuildable"})
 
 
@@ -45,11 +46,11 @@ def handle_delivery(queue: PartitionQueue, delivery: Delivery, rebuild: Callable
                     worker_id: str) -> str:
     """Run one delivered partition; returns what happened.
 
-    ``written``, ``finished``, ``retry``, ``stopped`` and ``dropped`` acknowledge the
-    message - ``retry`` only after queuing the partition again. ``held`` (a live worker
+    ``written``, ``finished``, ``retry``, ``stopped`` and ``dropped`` are done with the
+    delivery - ``retry`` only after the partition is queued again. ``held`` (a live worker
     holds it), ``elsewhere`` (a local scan of another host) and ``unbuildable`` (this
-    worker cannot rebuild the scan) leave it pending, so another worker - or the
-    console's own runner - can have it.
+    worker cannot rebuild the scan) leave it queued, so another worker - or the console's
+    own runner - can have it.
     """
     record = store.read_partitioned_scan(delivery.tenant_id, delivery.scan_id)
     if record is None or record["status"] in ("done", "failed") or not record["resumable"]:
@@ -70,16 +71,18 @@ def handle_delivery(queue: PartitionQueue, delivery: Delivery, rebuild: Callable
         queue.publish(delivery.tenant_id, delivery.scan_id, [delivery.partition_id])
     queue.ack(delivery)
     if outcome in ("written", "finished"):
-        partitioned_scan.settle_if_finished(record, config)
+        settled = partitioned_scan.settle_if_finished(record, config)
+        if settled:
+            logger.info("Scan %s %s by worker %s", delivery.scan_id, settled, worker_id)
     return outcome
 
 
 def _maintain(queue: PartitionQueue, rebuild: Callable[[dict], object], worker_id: str, lease: int) -> list[Delivery]:
-    """Pick up what dead workers left, for any kind of queue; returns reclaimed messages.
+    """Pick up what dead workers left; returns any deliveries the queue hands back.
 
     Partitions whose lease ran out go back in the ledger's queue - or fail, on their
-    last attempt. Scans with nothing left to run are finalized or failed. Messages
-    never acknowledged come back to this worker.
+    last attempt. Scans with nothing left to run are finalized or failed. The ledger
+    queue hands nothing back: what a dead worker held is queued again by the first step.
     """
     store.requeue_expired_partitions(max_attempts=partitioned_scan.partition_max_attempts())
     for record in store.list_unfinished_partitioned_scans(resumable_only=True):
@@ -133,6 +136,7 @@ def run_worker(
             stop.wait(idle_seconds)
             continue
         for delivery in deliveries:
+            started = time.monotonic()
             try:
                 outcome = handle_delivery(queue, delivery, rebuild, worker_id=worker_id)
             except Exception as exc:
@@ -142,6 +146,14 @@ def run_worker(
                 )
                 outcome = "unbuildable"
             handled += 1
+            # The worker's log is where an operator sees what the workers are doing. A
+            # partition another worker already holds or finished is the ledger queue's
+            # ordinary race, and would drown the rest at INFO.
+            logger.log(
+                logging.DEBUG if outcome in ("held", "finished") else logging.INFO,
+                "Partition %s of scan %s: %s in %.1f s",
+                delivery.partition_id, delivery.scan_id, outcome, time.monotonic() - started,
+            )
             # A partition another worker holds is an ordinary race: take the next one. A
             # scan this worker cannot run is not asked for again at once - a local scan
             # of another host for a lease, one it could not rebuild for a minute.

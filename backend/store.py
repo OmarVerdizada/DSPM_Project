@@ -3426,8 +3426,13 @@ def derived_store(tenant_id: str, cache_key: str, generation: int, value_json: s
     An answer computed at an older generation never replaces one computed at a newer
     one - two backends that raced across a write leave the newer answer standing.
 
-    One statement, so it takes no store lock: readers call this, and a reader may be
-    running under a caller that already holds it.
+    It takes no store lock: readers call this, and a reader may be running under a caller
+    that already holds it.
+
+    The tenant's expired answers go in the same transaction. Keys are not a closed set -
+    the inventory's facets are asked for by scan name, and any viewer can ask for any
+    name - so without it the table would keep one row for every name ever asked for.
+    With it, a tenant holds at most what was asked for within one TTL.
     """
     if generation < 0:
         return
@@ -3442,6 +3447,10 @@ def derived_store(tenant_id: str, cache_key: str, generation: int, value_json: s
             "expires_at = excluded.expires_at, updated_at = excluded.updated_at "
             "WHERE excluded.generation >= derived_cache.generation",
             (tenant_id, cache_key, int(generation), value_json, expires, now.isoformat()),
+        )
+        conn.execute(
+            "DELETE FROM derived_cache WHERE tenant_id = ? AND expires_at <= ?",
+            (tenant_id, _lease_time(now)),
         )
 
 
@@ -7156,14 +7165,17 @@ def _cache_inventory_facets(cache_key: tuple, facets: dict) -> dict:
 def inventory_facets(tenant_id: str, source: str = "") -> dict:
     """Inventory facets, shared between backends (B3.1).
 
-    The per-process cache below stays: it answers the same process in microseconds. The
-    shared layer is what stops a second backend - or a worker - paying for the aggregate
-    again; it lives in `derived_cache`, invalidated by the estate generation.
+    The shared answer is asked first, although the per-process cache below is faster:
+    only the estate generation sees a write another process made - a partition a
+    `python main.py worker` wrote, or a scan saved on another backend - and a process
+    that trusted its own cache first would show the estate from before it for the
+    length of its TTL. The per-process cache serves when `DSPM_LIVE_CACHE=0`.
     """
     from backend import live_cache
 
     return live_cache.cached_json(
-        tenant_id, "inventory_facets", {"source": str(source or "")},
+        tenant_id, "inventory_facets",
+        {"source": str(source or ""), "normalized": os.getenv("DSPM_INVENTORY_FROM_NORMALIZED", "1")},
         lambda: _inventory_facets(tenant_id, source),
     )
 

@@ -209,6 +209,19 @@ class WhatTheCacheMayNeverDoTest(_DatabaseTest):
         self.assertEqual([json.loads(row["value_json"]) for row in rows], [{"assets": 5, "sensitive_assets": 2}],
                          "only counts belong here - never content, previews or samples")
 
+    def test_names_nobody_asks_for_again_do_not_pile_up(self) -> None:
+        # A viewer can ask for the facets of any scan name; each one is a key.
+        for index in range(40):
+            store.inventory_facets(self.tenant, source=f"no-such-scan-{index}")
+        with store._connect() as conn:
+            conn.execute("UPDATE derived_cache SET expires_at = ? WHERE tenant_id = ?",
+                         ("2000-01-01T00:00:00.000000+00:00", self.tenant))
+        store.posture_inputs(self.tenant)
+        with store._connect() as conn:
+            left = conn.execute("SELECT cache_key FROM derived_cache WHERE tenant_id = ?", (self.tenant,)).fetchall()
+        self.assertEqual([row["cache_key"].split(":")[0] for row in left], ["posture_inputs"],
+                         "every name ever asked for kept its row")
+
     def test_turned_off_it_is_exactly_the_database_read(self) -> None:
         with mock.patch.dict(os.environ, {"DSPM_LIVE_CACHE": "0"}):
             calls = []

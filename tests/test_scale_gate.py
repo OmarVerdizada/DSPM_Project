@@ -17,6 +17,7 @@ of the peak at that size. A bound that cannot discriminate is worse than no boun
 
 from __future__ import annotations
 
+import os
 import unittest
 
 from backend import store
@@ -27,7 +28,9 @@ class TheScaleGateHoldsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls._db_path = store.DB_PATH
+        cls._environment = dict(os.environ)
         cls.metrics = run_gate(quick=True)
+        cls._environment_after = dict(os.environ)
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -35,6 +38,13 @@ class TheScaleGateHoldsTest(unittest.TestCase):
 
     def _named(self, fragment: str) -> dict:
         return next(check for check in self.metrics["checks"] if fragment in check["name"])
+
+    def test_it_leaves_the_environment_as_it_found_it(self) -> None:
+        # It used to leave DSPM_ARTIFACT_DIR pointing at its deleted temp directory, and
+        # every later test wrote its artifacts there - re-creating it under tmp/.
+        changed = sorted(key for key in set(self._environment) | set(self._environment_after)
+                         if self._environment.get(key) != self._environment_after.get(key))
+        self.assertEqual(changed, [], "the gate left its settings behind for whatever runs next")
 
     def test_every_envelope_holds(self) -> None:
         self.assertEqual(self.metrics["failures"], [], f"a Phase B envelope regressed: {self.metrics['failures']}")
