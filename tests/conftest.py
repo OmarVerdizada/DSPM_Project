@@ -35,6 +35,10 @@ import pytest
 
 from backend import db
 
+# The database backend.store opened when this session first imported it. pytest_configure
+# records it, and tests/test_suite_isolation.py checks it was never the developer's own.
+STORE_IMPORTED_WITH: pathlib.Path | None = None
+
 
 def pytest_configure(config: pytest.Config) -> None:
     """Isolate the findings cache, then fail fast rather than reset a possibly-
@@ -77,16 +81,24 @@ def pytest_configure(config: pytest.Config) -> None:
         # here would make them locals for the WHOLE function and break the cache
         # isolation above with UnboundLocalError.
         from pathlib import Path as _Path
-        from backend import store as _store
-        from backend import security as _security
         _session_root = _Path(tempfile.mkdtemp(prefix="sentro-test-session-"))
         _session_db = _session_root / "suite.sqlite"
+        # All of this BEFORE the store is imported. Importing backend.store
+        # reads DSPM_DB_PATH and converges that database's schema on the spot
+        # (ensure_schema_ready), so an import that came first migrated the
+        # developer's real data/dspm.sqlite on every run - and a backend left
+        # running on the older code then found its database at a revision it
+        # did not know, and stopped serving the Remediation page.
         os.environ["DSPM_DB_PATH"] = str(_session_db)
         # Phase 5: scan saves now write report bodies to the artifact store.
         # Without this the suite writes real objects into data/artifacts/ -
         # the same leak the session database above fixes, one tier down.
         os.environ.setdefault("DSPM_ARTIFACT_DIR", str(_session_root / "artifacts"))
         os.environ.setdefault("DSPM_LOCAL_ARTIFACT_KEY_PATH", str(_session_root / "artifact_key"))
+        from backend import store as _store
+        from backend import security as _security
+        global STORE_IMPORTED_WITH
+        STORE_IMPORTED_WITH = _store.DB_PATH
         _store.DB_PATH = _session_db
         # Build through the versioned runner (not legacy init_db) so the suite
         # database carries recorded revisions exactly like a real install -

@@ -8455,11 +8455,22 @@ function remediationPaginationMarkup() {
   </nav>`;
 }
 
+// The server's own words when it gave a reason ("503: ..."), so a failure that is not
+// worth retrying - a backend that is not ready - does not read as one that is.
+function remediationErrorReason(message = "") {
+  const answered = /^(\d{3}): (.+)$/s.exec(String(message || "").trim());
+  return answered ? `The server answered ${answered[1]}: ${answered[2]}` : "Please try again.";
+}
+
 function renderRemediationWorkspace() {
   if (deferWhileHidden("tab-risk", "workspace", renderRemediationWorkspace)) return;
   if (!remediationWorkflow) return;
   renderRemediationLoad();
-  if (remediationError) remediationError.hidden = !remediationLoadError;
+  if (remediationError) {
+    remediationError.hidden = !remediationLoadError;
+    const reason = remediationError.querySelector("[data-remediation-error-reason]");
+    if (reason) reason.textContent = remediationErrorReason(remediationLoadError);
+  }
   if (remediationLoading && !remediationLoaded) {
     remediationWorkflow.innerHTML = remediationLoadingMarkup();
     if (remediationResultCount) remediationResultCount.textContent = "Loading findings…";
@@ -8563,6 +8574,7 @@ async function loadRemediationFindings({ showLoading = true, resetPage = false }
     remediationLoading = false;
     remediationWorkflow?.classList.remove("is-refreshing");
     remediationLoadError = error.message || "Unable to load findings";
+    console.error("Remediation findings could not be loaded", error);
     renderRemediationWorkspace();
   }
 }

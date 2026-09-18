@@ -820,7 +820,7 @@
 
                 <div id="remediation-error" class="alert alert-error alert-soft remediation-error" role="alert" hidden>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
-                  <div><strong>Unable to load remediation findings.</strong><span>Please try again.</span></div>
+                  <div><strong>Unable to load remediation findings.</strong><span data-remediation-error-reason>Please try again.</span></div>
                   <button type="button" class="secondary-btn mini-btn" data-remediation-retry>Retry</button>
                 </div>
 
@@ -1719,7 +1719,7 @@
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
-    <script src="/static/app.js?v=232"></script>
+    <script src="/static/app.js?v=233"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
