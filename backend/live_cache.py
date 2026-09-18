@@ -1,29 +1,29 @@
-"""B3.1: the derived state several backends may share, and what Memurai is allowed to hold.
+"""B3.1: the derived state several backends share, kept in the database the product already owns.
 
-The case for Redis was never the queue. It was **aggregate reads hitting the database
-while a scan is running**: one dashboard refresh is four O(estate) aggregates, measured at
-7.31 ms against 1,369 assets on this host's PostgreSQL, which extrapolates to 5.34 s per
-refresh at a million - so a 3.9-hour scan spends about 6.95 hours of database time
-answering the console (§2 of the plan). A per-process, thirty-second TTL cache does not
-help: every backend and every worker keeps its own copy, and each one pays the aggregate
-again.
+The problem this solves was measured before any of it was written: one dashboard refresh
+is four O(estate) aggregates - 7.31 ms against 1,369 assets on this host's PostgreSQL,
+5.34 s per refresh extrapolated to a million - so a 3.9-hour scan spends about 6.95 hours
+of database time answering the console (§2 of the plan). A per-process, thirty-second
+cache does not help: every backend and every worker keeps its own copy, and each one
+pays the aggregate again.
 
-This is that cache, shared:
+This cache first lived in Memurai. The product owner removed Memurai on 2026-09-18, and
+what it was doing here needs no second server: the answers live in ``derived_cache``
+(revision 0017), keyed per tenant and stamped with the estate generation they describe.
 
-- **only derived state.** Counts, facets, posture inputs, a job's progress. Never file
-  content, previews, credentials or PAN/PII samples - Phase A spent its effort removing
-  plaintext at rest, and a cache is a new place for it to accumulate. Everything here is
-  reconstructible from PostgreSQL after a total loss of Memurai, which is the boundary
-  the plan draws;
-- **every key expires.** Memurai runs `noeviction` (evicting an unacknowledged job would
-  be data loss), so a key without a TTL would live forever;
-- **invalidation without `KEYS`.** A tenant's cached values carry a version segment, and
-  a write bumps the version - the old keys become unreachable and expire on their own.
-  The product's Redis user is not allowed to run `KEYS`, `SCAN` or `FLUSHDB`, and this is
-  why it does not need them;
-- **absent by default.** With no `DSPM_REDIS_URL` every call here is a no-op and the
-  product behaves exactly as it did before. Memurai is an accelerator, never a
-  dependency: if it is down, the reads fall through to the database.
+- **only derived state.** Counts, facets, posture inputs. Never file content, previews,
+  credentials or PAN/PII samples - Phase A spent its effort removing plaintext at rest,
+  and a cache is a new place for it to accumulate. Every row is rebuilt from the tables
+  it summarises, so deleting the whole table loses nothing;
+- **a write makes the old answers unservable at once.** ``tenants.estate_generation``
+  moves on every authoritative estate write (``store._invalidate_inventory_query_cache``
+  is the single hook), and an answer is served only for the generation it was computed
+  at. Nothing is ever scanned for or deleted to invalidate;
+- **every answer expires.** A TTL bounds how long an answer can be served even if a
+  write path were ever to miss the hook;
+- **it never changes an answer, only who computes it.** Any failure here - a missing
+  table on an unmigrated database, a lock, a value that does not round-trip as JSON -
+  is exactly the database read it always was. ``DSPM_LIVE_CACHE=0`` turns it off.
 """
 
 from __future__ import annotations
@@ -32,53 +32,24 @@ import hashlib
 import json
 import os
 import threading
-import time
 from typing import Any, Callable
 
-KEY_PREFIX = "dspm:"
-DEFAULT_TTL_SECONDS = 60
-PROGRESS_TTL_SECONDS = 600
-# One connection per process, rebuilt if the server went away.
-_client_lock = threading.Lock()
-_client: Any = None
-_client_url: str = ""
-_client_failed_at: float = 0.0
-# How long to leave a broken connection alone before trying again, so a Memurai that is
-# down costs one failed connection per interval rather than one per request.
-_RETRY_AFTER_SECONDS = 30.0
+DEFAULT_TTL_SECONDS = 30
 
 _counters = {"hits": 0, "misses": 0, "errors": 0, "writes": 0}
 _counter_lock = threading.Lock()
 
 
-def configured() -> bool:
-    return bool(os.getenv("DSPM_REDIS_URL", "").strip()) and os.getenv("DSPM_LIVE_CACHE", "1") != "0"
+def enabled() -> bool:
+    return os.getenv("DSPM_LIVE_CACHE", "1").strip() != "0"
 
 
-def client():
-    """The shared client, or None when Redis is not configured or not reachable."""
-    global _client, _client_url, _client_failed_at
-    if not configured():
-        return None
-    url = os.getenv("DSPM_REDIS_URL", "").strip()
-    with _client_lock:
-        if _client is not None and _client_url == url:
-            return _client
-        if time.monotonic() - _client_failed_at < _RETRY_AFTER_SECONDS and _client_url == url:
-            return None
-        try:
-            import redis  # type: ignore[import-not-found]
-
-            candidate = redis.Redis.from_url(
-                url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
-            )
-            candidate.ping()
-        except Exception:
-            _client, _client_url, _client_failed_at = None, url, time.monotonic()
-            _note("errors")
-            return None
-        _client, _client_url, _client_failed_at = candidate, url, 0.0
-        return _client
+def answer_ttl_seconds() -> int:
+    """How long an answer may be served; a write ends it sooner."""
+    try:
+        return max(1, min(3600, int(os.getenv("DSPM_LIVE_CACHE_SECONDS", str(DEFAULT_TTL_SECONDS)))))
+    except ValueError:
+        return DEFAULT_TTL_SECONDS
 
 
 def _note(name: str) -> None:
@@ -90,58 +61,35 @@ def diagnostics() -> dict:
     """What the cache did, for the scan diagnostics and the health endpoint."""
     with _counter_lock:
         counts = dict(_counters)
-    return {"enabled": configured(), "connected": client() is not None, **counts}
+    return {"enabled": enabled(), "backend": "database", "ttl_seconds": answer_ttl_seconds(), **counts}
 
 
 def reset_for_tests() -> None:
-    global _client, _client_url, _client_failed_at
-    with _client_lock:
-        _client, _client_url, _client_failed_at = None, "", 0.0
     with _counter_lock:
         for key in _counters:
             _counters[key] = 0
 
 
-def _version_key(tenant_id: str) -> str:
-    return f"{KEY_PREFIX}ver:{tenant_id}"
+def bump(tenant_id: str | None) -> None:
+    """The estate changed: nothing cached about it is served again.
 
-
-def version(tenant_id: str) -> str:
-    """The tenant's cache generation. Unknown - or unreachable - reads as generation 0."""
-    connection = client()
-    if connection is None:
-        return "0"
-    try:
-        return str(connection.get(_version_key(tenant_id)) or "0")
-    except Exception:
-        _note("errors")
-        return "0"
-
-
-def bump(tenant_id: str) -> None:
-    """Make everything cached for this tenant unreachable; the old keys expire on their own.
-
-    Called after a write that changes what an aggregate would answer - a saved scan, a
-    finalized partitioned scan - so the console shows the new estate at once rather than
-    at the end of a TTL.
+    ``store`` does this itself after every authoritative write; this is for a caller
+    that changes what an aggregate would answer by some other route.
     """
-    connection = client()
-    if connection is None:
-        return
+    from backend import store
+
     try:
-        connection.incr(_version_key(tenant_id))
-        # The version itself is derived state; a fortnight is longer than any scan.
-        connection.expire(_version_key(tenant_id), 14 * 24 * 3600)
+        store.bump_estate_generation(tenant_id)
         _note("writes")
     except Exception:
         _note("errors")
 
 
-def _cache_key(tenant_id: str, name: str, params: Any) -> str:
+def cache_key(name: str, params: Any) -> str:
     digest = hashlib.sha256(
         json.dumps(params, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
     ).hexdigest()[:16]
-    return f"{KEY_PREFIX}agg:{tenant_id}:{version(tenant_id)}:{name}:{digest}"
+    return f"{name}:{digest}"
 
 
 def cached_json(
@@ -150,76 +98,46 @@ def cached_json(
     params: Any,
     builder: Callable[[], Any],
     *,
-    ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    ttl_seconds: int | None = None,
 ):
-    """Answer from Memurai when it can, otherwise build it and share the answer.
+    """Answer from ``derived_cache`` when a current answer is there, otherwise build and share it.
 
-    `builder` is the database read. When Redis is absent, unreachable, or the value does
-    not round-trip as JSON, this is exactly `builder()` - the cache can never change what
-    an answer IS, only who has to compute it.
+    `builder` is the database read. The generation is read BEFORE the builder runs, and
+    the answer is stored under it: a write that lands while the builder is reading moves
+    the generation past it, so that answer is kept but never served.
     """
-    connection = client()
-    if connection is None:
+    if not enabled():
         return builder()
-    key = _cache_key(tenant_id, name, params)
+    from backend import store
+
+    key = cache_key(name, params)
     try:
-        stored = connection.get(key)
-        if stored is not None:
-            _note("hits")
-            return json.loads(stored)
+        stored, generation = store.derived_lookup(tenant_id, key)
     except Exception:
         _note("errors")
         return builder()
+    if stored is not None:
+        try:
+            value = json.loads(stored)
+        except (TypeError, ValueError):
+            _note("errors")
+        else:
+            _note("hits")
+            return value
 
     _note("misses")
     value = builder()
     try:
-        connection.set(key, json.dumps(value, default=str, ensure_ascii=False), ex=max(1, int(ttl_seconds)))
-        _note("writes")
-    except Exception:
-        _note("errors")
-    return value
-
-
-def progress_key(tenant_id: str, job_id: str) -> str:
-    return f"{KEY_PREFIX}progress:{tenant_id}:{job_id}"
-
-
-def publish_progress(tenant_id: str, job_id: str, payload: dict) -> None:
-    """What a scan is doing, where every backend can see it.
-
-    A queued scan runs in a worker process; the console polling a different backend has
-    no other way to see its progress without asking the database on every poll. Progress
-    is derived state with a short life, so it expires rather than being cleaned up.
-    """
-    connection = client()
-    if connection is None or not job_id:
-        return
-    try:
-        connection.set(
-            progress_key(tenant_id, job_id),
-            json.dumps(payload, default=str, ensure_ascii=False),
-            ex=PROGRESS_TTL_SECONDS,
+        encoded = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
+        store.derived_store(
+            tenant_id, key, generation, encoded,
+            ttl_seconds if ttl_seconds is not None else answer_ttl_seconds(),
         )
         _note("writes")
     except Exception:
         _note("errors")
-
-
-def read_progress(tenant_id: str, job_id: str) -> dict | None:
-    connection = client()
-    if connection is None or not job_id:
-        return None
-    try:
-        stored = connection.get(progress_key(tenant_id, job_id))
-    except Exception:
-        _note("errors")
-        return None
-    if stored is None:
-        return None
-    try:
-        value = json.loads(stored)
-    except (TypeError, ValueError):
-        return None
-    _note("hits")
-    return value if isinstance(value, dict) else None
+        return value
+    # The reader that computed the answer gets it in the shape every later reader will:
+    # a tuple or a date that JSON turns into a list or a string must not differ between
+    # the first refresh and the second.
+    return json.loads(encoded)

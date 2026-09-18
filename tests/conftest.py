@@ -56,13 +56,6 @@ def pytest_configure(config: pytest.Config) -> None:
         "DSPM_SCAN_CACHE_DIR",
         str(pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-scan-cache-")).resolve()),
     )
-    # B3.1: the shared cache is keyed by tenant, and the suite reuses tenant names, so
-    # an inherited DSPM_REDIS_URL would let one test answer another's aggregate from
-    # Memurai. The tests that want the real server (tests/test_memurai_live.py) set it
-    # themselves, for themselves.
-    if os.getenv("DSPM_MEMURAI_LIVE") != "1":
-        os.environ.pop("DSPM_REDIS_URL", None)
-        os.environ["DSPM_LIVE_CACHE"] = "0"
 
     if db.is_postgres() and os.getenv("DSPM_PG_TEST_RESET") != "1":
         pytest.exit(
@@ -112,7 +105,7 @@ def pytest_configure(config: pytest.Config) -> None:
 # sequences so per-test id-ordering assertions are deterministic.
 _APP_TABLES = (
     "finding_index", "finding_occurrences", "findings", "asset_versions",
-    "scan_object_baselines", "assets", "scan_runs", "scan_partitions", "partitioned_scans", "scan_schedules", "suppression_rules", "scan_jobs", "alert_events", "audit_events",
+    "scan_object_baselines", "assets", "scan_runs", "scan_partitions", "partitioned_scans", "scan_schedules", "suppression_rules", "derived_cache", "scan_jobs", "alert_events", "audit_events",
     "secrets", "scan_reports", "scan_profiles", "registration_invites", "api_keys",
     "login_failures", "revoked_tokens", "users", "tenants",
 )

@@ -59,6 +59,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (14, "partitioned_scan_ledger", store.add_partitioned_scan_ledger),
         (15, "scan_schedules", store.add_scan_schedules),
         (16, "finding_suppression_rules", store.add_suppression_rules),
+        (17, "derived_cache", store.add_derived_cache),
     ]
 
 

@@ -25,25 +25,22 @@ def _persist(job: "ScanJob") -> None:
     publish_progress(job, force=True)
 
 
-# When each job last had its progress published, so a scan reporting every record does
-# not write to Memurai every record.
+# When each job last had its progress written, so a scan reporting every record does
+# not write the database every record.
 _published_at: dict[str, float] = {}
 PROGRESS_PUBLISH_INTERVAL_SECONDS = 1.0
 
 
 def publish_progress(job: "ScanJob", *, force: bool = False) -> None:
-    """Share what this job is doing, so a console on another backend can watch it (B3.1).
+    """Write what this job is doing where a console on another backend can see it (B3.1).
 
-    A queued scan runs in a worker process, and the console polling a different backend
-    sees only what the database knows - the job record, written at its milestones rather
-    than at every step. With Memurai configured the progress is in one place every
-    backend can read; with none, this is a no-op and nothing changes.
+    A queued scan runs in a worker process, and a console polling a different backend
+    sees only what the database knows. The job record used to move only at milestones,
+    so a scan looked frozen from anywhere but the process running it; its progress and
+    message now reach the record at most once a second. `force` is the milestone write,
+    which `_persist` has just made in full.
     """
     try:
-        from backend import live_cache
-
-        if not live_cache.configured():
-            return
         now = time.monotonic()
         if not force and now - _published_at.get(job.id, 0.0) < PROGRESS_PUBLISH_INTERVAL_SECONDS:
             return
@@ -53,15 +50,11 @@ def publish_progress(job: "ScanJob", *, force: bool = False) -> None:
             for stale in sorted(_published_at, key=_published_at.get)[:256]:
                 _published_at.pop(stale, None)
         _published_at[job.id] = now
-        live_cache.publish_progress(job.tenant_id, job.id, {
-            "id": job.id,
-            "status": job.status,
-            "progress": job.progress,
-            "message": job.message,
-            "finished_at": job.finished_at,
-        })
         if job.status in _TERMINAL_STATES:
             _published_at.pop(job.id, None)
+            return
+        if not force:
+            store.record_job_progress(job.tenant_id, job.id, job.progress, job.message)
     except Exception:
         pass
 
@@ -360,7 +353,11 @@ def _run_scan_job(job: ScanJob, config: ScanConfig, on_complete: Callable[[dict]
 
 
 def _update_scan_job_progress(job: ScanJob, stage: str, completed: int, total: int) -> None:
+    _advance_scan_job_progress(job, stage, completed, total)
     publish_progress(job)
+
+
+def _advance_scan_job_progress(job: ScanJob, stage: str, completed: int, total: int) -> None:
     completed_raw = max(0, int(completed or 0))
     if stage == "collecting":
         # Real collection progress: completed = files discovered, total = files

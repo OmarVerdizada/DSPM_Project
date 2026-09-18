@@ -97,9 +97,9 @@ def serve(args: argparse.Namespace) -> None:
 def work(args: argparse.Namespace) -> None:
     """Run scan partitions from the work queue until interrupted (B3).
 
-    ``DSPM_WORK_QUEUE`` picks the queue: the ledger itself by default, or a Memurai
-    (Redis Streams) consumer group. Any number of workers can share the scans the
-    console starts; the ledger's leases decide who runs what.
+    Workers take partitions straight from the ledger, so they need nothing but the
+    database. Any number of them can share the scans the console starts; the ledger's
+    leases decide who runs what.
     """
     from backend.app import rebuild_scan_config
     from backend.partition_worker import default_worker_id, run_worker
@@ -147,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.set_defaults(func=serve)
 
     worker_parser = subparsers.add_parser(
-        "worker", help="Run scan partitions from the work queue (DSPM_WORK_QUEUE: ledger or redis).",
+        "worker", help="Run scan partitions queued in the database ledger.",
     )
     worker_parser.add_argument(
         "--worker-id", default="", help="The name leases and the queue know this worker by; defaults to host:pid.",

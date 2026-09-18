@@ -25,10 +25,9 @@ from unittest import mock
 from unittest.mock import MagicMock
 
 from backend import app as app_module, partition_worker, partitioned_scan, store, work_queue
-from backend.work_queue import RedisStreamQueue
+from backend.work_queue import Delivery, LedgerQueue
 from discovery.discovery_engine import ScanConfig
 from tests.test_partitioned_local_scan import TENANT, _LocalTest
-from tests.test_work_queue import FakeRedis
 
 REQUEST_PATH = "enterprise_test_data"
 
@@ -76,8 +75,7 @@ class TheConsoleHandsTheScanToWorkersTest(_QueuedTest):
 
     def test_a_queued_scan_is_published_and_a_worker_finishes_it(self) -> None:
         self._use_database("queued")
-        redis = FakeRedis()
-        queue = RedisStreamQueue(redis)
+        queue = LedgerQueue()
         job = self._job()
         answered: list[dict] = []
         failed: list[BaseException] = []
@@ -99,10 +97,9 @@ class TheConsoleHandsTheScanToWorkersTest(_QueuedTest):
         thread.start()
         try:
             deadline = time.monotonic() + 120
-            while not redis.streams.get("dspm:partitions") and thread.is_alive() and time.monotonic() < deadline:
+            while queue.take("probe") is None and thread.is_alive() and time.monotonic() < deadline:
                 time.sleep(0.05)
-            published = list(redis.streams.get("dspm:partitions") or [])
-            self.assertTrue(published, f"nothing was published: {failed}")
+            self.assertIsNotNone(queue.take("probe"), f"nothing was queued for the workers: {failed}")
             # The console is following the ledger, not scanning: the work is the worker's.
             partition_worker.run_worker(queue, self._rebuild("queued"), worker_id="worker-a", stop_when_idle=True)
         finally:
@@ -114,13 +111,10 @@ class TheConsoleHandsTheScanToWorkersTest(_QueuedTest):
         scan_id = report["scan_id"]
         self.assertEqual(store.read_partitioned_scan(TENANT, scan_id)["status"], "done")
         self.assertEqual({unit["status"] for unit in store.list_scan_partitions(TENANT, scan_id)}, {"done"})
-        self.assertEqual(len(published), len(store.list_scan_partitions(TENANT, scan_id)))
         walked, _ = self._single_walk(self._scan_config("queued"))
         self.assertEqual([f["path"] for f in store.read_scan_report(TENANT, scan_id)["files"]], walked)
         self.assertEqual(report["file_count"], len(walked))
         self.assertGreater(job.progress, 7)
-        for _entry_id, fields in published:
-            self.assertEqual(set(fields), {"tenant_id", "scan_id", "partition_id"})
 
     def test_a_queue_it_cannot_reach_runs_the_scan_here(self) -> None:
         self._use_database("unreachable-queue")
@@ -128,7 +122,7 @@ class TheConsoleHandsTheScanToWorkersTest(_QueuedTest):
         with mock.patch.dict(os.environ, {"DSPM_SCAN_EXECUTION": "queue"}), \
                 mock.patch.object(partitioned_scan, "partition_max_files", return_value=3), \
                 mock.patch.object(work_queue, "work_queue_from_env",
-                                  side_effect=RuntimeError("DSPM_WORK_QUEUE=redis needs DSPM_REDIS_URL")), \
+                                  side_effect=RuntimeError("DSPM_WORK_QUEUE must be ledger, not 'kafka'")), \
                 mock.patch.object(app_module, "evaluate_alerts", return_value=[]):
             report = app_module._run_partitioned_scan_payload(
                 self._scan_config("unreachable-queue"), self._payload(), self._principal(), job)
@@ -167,10 +161,10 @@ class FollowingTheLedgerTest(_QueuedTest):
         stored = store.read_partitioned_scan(TENANT, record["scan_id"])
         self.assertEqual((stored["status"], stored["error"]), ("failed", "Scan cancelled"))
 
-        queue = RedisStreamQueue(FakeRedis())
+        queue = LedgerQueue()
+        self.assertIsNone(queue.take("worker-a"), "a cancelled scan was still handed to the workers")
         unit = store.list_scan_partitions(TENANT, record["scan_id"])[0]
-        queue.publish(TENANT, record["scan_id"], [unit["partition_id"]])
-        delivery = queue.take("worker-a")
+        delivery = Delivery(tenant_id=TENANT, scan_id=record["scan_id"], partition_id=unit["partition_id"])
         self.assertEqual(partition_worker.handle_delivery(queue, delivery, self._rebuild("cancelled"),
                                                           worker_id="worker-a"), "dropped")
         self.assertEqual({u["status"] for u in store.list_scan_partitions(TENANT, record["scan_id"])}, {"queued"})

@@ -550,6 +550,7 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
                 done += 1
                 if job is not None:
                     job.progress = max(job.progress, min(94, 8 + int(86 * done / total)))
+                    _share_progress(job)
             continue
         if store.requeue_failed_partitions(scan.tenant_id, scan.scan_id, max_attempts=max_attempts):
             continue
@@ -688,6 +689,18 @@ def _finalize(scan: _Scan) -> dict:
     except Exception as exc:
         logger.warning("Scan %s finalized, but could not be marked done: %s", scan.scan_id, type(exc).__name__)
     return report
+
+
+def _share_progress(job) -> None:
+    """Put the job's progress where a console on another backend reads it (B3.1).
+
+    Throttled by `jobs.publish_progress`, so a scan with thousands of small partitions
+    writes the job record at most once a second.
+    """
+    with suppress(Exception):
+        from backend import jobs
+
+        jobs.publish_progress(job)
 
 
 def _finalize_when_claimed(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> dict:
@@ -847,6 +860,7 @@ def follow_partitioned_scan(
                 "Finalizing report" if state.get("complete")
                 else f"A worker is scanning partition {min(done + 1, total)} of {total}"
             )
+            _share_progress(job)
         time.sleep(poll_seconds)
 
 

@@ -721,6 +721,38 @@ def add_suppression_rules(conn) -> None:
     add_tenant_rls(conn)
 
 
+def add_derived_cache(conn) -> None:
+    """Revision 0017: the console's derived state, shared between backends through the database.
+
+    Memurai was removed on 2026-09-18 at the product owner's decision, and with it the
+    shared cache B3.1 kept there. What that cache was FOR still stands: the estate
+    aggregates the console asks for on every refresh used to be paid for by every
+    backend and every worker separately, because the only cache was per-process.
+
+    ``derived_cache`` holds those answers - derived numbers only, never content - keyed
+    per tenant, and ``tenants.estate_generation`` says which estate they describe. Every
+    authoritative write moves the generation, and a cached answer is served only while
+    its generation is the tenant's current one. A second backend then answers a refresh
+    with one primary-key lookup instead of the aggregates, with nothing to install.
+
+    Revisions 0003 and 0004 enumerate tenant tables when they run, so both are re-run
+    here to give the new table its tenant foreign key and row-level security.
+    """
+    if "estate_generation" not in db.table_columns(conn, "tenants"):
+        conn.execute("ALTER TABLE tenants ADD COLUMN estate_generation INTEGER NOT NULL DEFAULT 0")
+    conn.execute("""CREATE TABLE IF NOT EXISTS derived_cache (
+            tenant_id TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            generation INTEGER NOT NULL DEFAULT 0,
+            value_json TEXT NOT NULL DEFAULT '{}',
+            expires_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, cache_key)
+        );""")
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1052,6 +1084,7 @@ def apply_baseline_schema(conn) -> None:
             legal_hold INTEGER NOT NULL DEFAULT 0,
             legal_hold_reason TEXT NOT NULL DEFAULT '',
             legal_hold_set_at TEXT NOT NULL DEFAULT '',
+            estate_generation INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -1414,6 +1447,16 @@ def apply_baseline_schema(conn) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_suppression_rules_active
             ON suppression_rules (tenant_id, active);
+
+        CREATE TABLE IF NOT EXISTS derived_cache (
+            tenant_id TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            generation INTEGER NOT NULL DEFAULT 0,
+            value_json TEXT NOT NULL DEFAULT '{}',
+            expires_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, cache_key)
+        );
 
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
@@ -2033,13 +2076,6 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
         logger.warning("Dedicated search indexing deferred for scan %s: %s", scan_id, exc)
     except Exception as exc:  # pragma: no cover - optional projection guard
         logger.warning("Dedicated search indexing skipped for scan %s: %s", scan_id, type(exc).__name__)
-    # B3.1: what the console shows about the estate has just changed, so the shared
-    # cache's generation moves and every backend answers from the new one rather than
-    # from whatever it cached before the scan.
-    with suppress(Exception):
-        from backend import live_cache
-
-        live_cache.bump(tenant_id)
     return scan_id
 
 
@@ -3164,6 +3200,28 @@ def record_job(job: dict) -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
+# How long a progress write may wait for SQLite's write lock. Progress is written from
+# the thread running the scan, and the next write a second later carries it anyway.
+_PROGRESS_BUSY_TIMEOUT_MS = 250
+
+
+def record_job_progress(tenant_id: str, job_id: str, progress: int, message: str | None) -> None:
+    """Move a running job's progress and message, and nothing else (B3.1).
+
+    Status is `record_job`'s alone: a progress write snapshotted before the job finished
+    and landing after it must not put a completed job back to "running", so this never
+    names the status, and it touches no job that has already reached a terminal state.
+    """
+    with _connect() as conn:
+        if db.is_sqlite():
+            conn.execute(f"PRAGMA busy_timeout = {_PROGRESS_BUSY_TIMEOUT_MS}")
+        conn.execute(
+            "UPDATE scan_jobs SET progress = ?, message = ?, updated_at = ? "
+            "WHERE id = ? AND tenant_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
+            (int(progress or 0), message, datetime.now(timezone.utc).isoformat(), str(job_id), str(tenant_id)),
+        )
+
+
 def read_job(tenant_id: str, job_id: str) -> dict | None:
     """Persisted job record, shaped like ScanJob.to_dict() (no result payload)."""
     with _connect() as conn:
@@ -3323,6 +3381,89 @@ def claim_housekeeping_run(name: str, *, interval_seconds: int, now: datetime | 
 # nobody meant to make, and the floor says so rather than letting scans pile up.
 SCHEDULE_MIN_INTERVAL_SECONDS = 300
 SCHEDULE_MAX_INTERVAL_SECONDS = 366 * 24 * 3600
+
+
+# B3.1: the console's derived state, shared between backends (revision 0017). The policy -
+# what is cached, for how long, and when it is on - lives in backend/live_cache.py; these
+# are its three statements.
+@_tenant_scoped
+def derived_lookup(tenant_id: str, cache_key: str) -> tuple[str | None, int]:
+    """A cached answer, if one is current, and the tenant's generation either way.
+
+    One indexed read: the tenant row for its generation, and the cache row for the
+    answer. The answer is returned only if it was computed at that generation and has
+    not expired - a write since then, or its TTL, makes it absent. The generation comes
+    back regardless, because whoever computes a fresh answer must store it under the
+    generation it read BEFORE computing: a write that lands meanwhile then leaves that
+    answer stale by generation, and it is never served.
+    """
+    now = _lease_time(datetime.now(timezone.utc))
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT t.estate_generation AS generation, c.generation AS cached_generation, "
+            "c.value_json AS value_json, c.expires_at AS expires_at "
+            "FROM tenants AS t LEFT JOIN derived_cache AS c "
+            "ON c.tenant_id = t.tenant_id AND c.cache_key = ? "
+            "WHERE t.tenant_id = ?",
+            (cache_key, tenant_id),
+        ).fetchone()
+    if row is None:
+        return None, -1
+    generation = int(row["generation"] or 0)
+    if (
+        row["value_json"] is not None
+        and int(row["cached_generation"] or 0) == generation
+        and str(row["expires_at"] or "") > now
+    ):
+        return str(row["value_json"]), generation
+    return None, generation
+
+
+@_tenant_scoped
+def derived_store(tenant_id: str, cache_key: str, generation: int, value_json: str, ttl_seconds: int) -> None:
+    """Keep an answer for the generation it was computed at.
+
+    An answer computed at an older generation never replaces one computed at a newer
+    one - two backends that raced across a write leave the newer answer standing.
+
+    One statement, so it takes no store lock: readers call this, and a reader may be
+    running under a caller that already holds it.
+    """
+    if generation < 0:
+        return
+    now = datetime.now(timezone.utc)
+    expires = _lease_time(now + timedelta(seconds=max(1, int(ttl_seconds))))
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO derived_cache (tenant_id, cache_key, generation, value_json, expires_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (tenant_id, cache_key) DO UPDATE SET "
+            "generation = excluded.generation, value_json = excluded.value_json, "
+            "expires_at = excluded.expires_at, updated_at = excluded.updated_at "
+            "WHERE excluded.generation >= derived_cache.generation",
+            (tenant_id, cache_key, int(generation), value_json, expires, now.isoformat()),
+        )
+
+
+def bump_estate_generation(tenant_id: str | None = None) -> None:
+    """The estate changed: every cached answer about it stops being served.
+
+    Its own short transaction, after the write that changed the estate has committed.
+    Inside the write it would hold the tenant row for the length of it, and parallel
+    partition writers would queue behind one another on that row. The cost of running
+    after the commit is a moment in which a reader sees the new estate and caches it
+    under the old generation - an answer that is then never served, not a wrong one.
+    """
+    with _connect() as conn:
+        if tenant_id is None:
+            conn.execute("UPDATE tenants SET estate_generation = estate_generation + 1")
+        else:
+            conn.execute(
+                "UPDATE tenants SET estate_generation = estate_generation + 1 WHERE tenant_id = ?",
+                (tenant_id,),
+            )
+
+
 _SUPPRESSION_COLUMNS = (
     "tenant_id, rule_id, finding_type, source, path_pattern, fingerprint, reason, active, "
     "expires_at, source_finding_id, source_scan_id, created_by, created_at, updated_at"
@@ -5539,11 +5680,12 @@ def _remediation_framework_metric_rows(conn, tenant_id: str, scope_where: list[s
 
 
 def posture_inputs(tenant_id: str) -> dict:
-    """The posture measurements, shared between backends when Memurai is configured (B3.1).
+    """The posture measurements, shared between backends (B3.1).
 
-    This is the read the case for Redis was built on: three O(estate) aggregates that
-    every console refresh asks for, on every backend, while a scan is writing. With no
-    `DSPM_REDIS_URL` it is exactly the database read it always was.
+    Three O(estate) aggregates that every console refresh asks for, on every backend,
+    while a scan is writing. The answer is kept in `derived_cache` for the estate
+    generation it describes, so a second backend reads one row instead of running them.
+    `DSPM_LIVE_CACHE=0` makes it the plain database read it always was.
     """
     from backend import live_cache
 
@@ -5901,7 +6043,15 @@ class InventoryReadUnavailable(RuntimeError):
 
 
 def _invalidate_inventory_query_cache(tenant_id: str | None = None) -> None:
-    """Invalidate short-lived inventory aggregates after an authoritative write."""
+    """Invalidate short-lived inventory aggregates after an authoritative write.
+
+    Every authoritative estate write already calls this - a saved scan (and the finding
+    lifecycle updates that re-save one), each partition and the finalize of a
+    partitioned scan, a backfill, a tenant's deletion or reset - so the shared cache's
+    generation moves here too, and it cannot drift from the per-process caches below.
+    """
+    with suppress(Exception):
+        bump_estate_generation(tenant_id)
     _forget_readiness(tenant_id)
     _forget_scan_report_rows(tenant_id)
     with _inventory_query_cache_lock:
@@ -7004,10 +7154,11 @@ def _cache_inventory_facets(cache_key: tuple, facets: dict) -> dict:
 
 @_tenant_scoped
 def inventory_facets(tenant_id: str, source: str = "") -> dict:
-    """Inventory facets, shared between backends when Memurai is configured (B3.1).
+    """Inventory facets, shared between backends (B3.1).
 
-    The per-process cache below stays: it answers the same process in microseconds. This
-    layer is what stops a second backend - or a worker - paying for the aggregate again.
+    The per-process cache below stays: it answers the same process in microseconds. The
+    shared layer is what stops a second backend - or a worker - paying for the aggregate
+    again; it lives in `derived_cache`, invalidated by the estate generation.
     """
     from backend import live_cache
 
@@ -7798,6 +7949,7 @@ _TENANT_ERASURE_TABLES = (
     "registration_invites",
     "scan_schedules",
     "suppression_rules",
+    "derived_cache",
     "api_keys",
     # Saved scan configurations reference vaulted credentials; leaving them
     # behind after erasure kept a dead tenant's connection settings alive

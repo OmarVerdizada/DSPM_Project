@@ -38,7 +38,6 @@ from backend.partitioned_scan import (
 from backend.reporting.router import router as reporting_router
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
-from backend import live_cache
 from backend.jobs import cancel_job, cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
 from backend.inventory_export import inventory_export_response_metadata, inventory_export_stream
 from backend.security import (
@@ -2233,18 +2232,13 @@ def scan_job(job_id: str, principal: Principal = Depends(require_role("viewer"))
     job = get_job(job_id)
     if job is not None and job.tenant_id == principal.tenant_id:
         return job.to_dict()
-    # B3.1: a scan the workers are running belongs to no backend in particular, so ask
-    # the operational plane before the database - it carries every step, while the job
-    # record only moves at milestones.
-    live = live_cache.read_progress(principal.tenant_id, job_id)
     # ARCH-003: fall back to the durable record so a job that outlived its
     # in-memory entry (retention cleanup, or a backend restart) is still visible.
+    # B3.1: it is also how a console on this backend watches a scan running on another
+    # one, which is why a running job's progress reaches the record once a second.
     record = read_job(principal.tenant_id, job_id)
     if record is not None:
-        return {**record, **{key: value for key, value in (live or {}).items() if value is not None}} \
-            if live else record
-    if live:
-        return {"id": job_id, "tenant_id": principal.tenant_id, "result": None, "error": None, **live}
+        return record
     raise HTTPException(status_code=404, detail="Scan job not found")
 
 

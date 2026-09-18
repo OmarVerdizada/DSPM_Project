@@ -6,21 +6,16 @@ workers on it. A work queue only tells a worker which partition to look at; whet
 partition still needs doing, and who holds it, is always read from the ledger, and the
 result is committed there before the queue hears that the partition is done.
 
-Two queues keep the same contract:
+:class:`LedgerQueue` is the queue: it reads queued partitions straight from the ledger,
+so it needs nothing but the database, and several ``python main.py worker`` processes
+share scans through it - claims are compare-and-set, and leases take back a dead
+worker's partition. A Memurai (Redis Streams) delivery queue sat beside it until the
+product owner removed Memurai on 2026-09-18; the ledger never depended on it.
 
-- :class:`LedgerQueue` reads queued partitions straight from the ledger. It needs
-  nothing but the database, so several ``python main.py worker`` processes can share
-  scans today: claims are compare-and-set, and leases take back a dead worker's partition.
-- :class:`RedisStreamQueue` is Memurai delivery (plan §2): one stream entry per
-  partition, one consumer group, ``XACK`` after the database commit and never before,
-  and ``XAUTOCLAIM`` for entries a dead worker never acknowledged. It is written against
-  a client object and tested against a fake; the ``redis`` package is imported only when
-  a real connection is asked for.
-
-What may travel through a queue is fixed here rather than left to callers: three
-identifiers. Memurai must never hold raw content, previews, credentials or samples
-(plan §2) - a queue persisted to disk is one more place data at rest could collect - so
-:func:`partition_payload` refuses anything else before it is sent, and
+:class:`PartitionQueue` stays the seam a delivery transport would plug into, and what
+may travel through one is fixed here rather than left to callers: three identifiers. A
+queue persisted outside the database would be one more place data at rest could
+collect, so :func:`partition_payload` refuses anything else before it is sent, and
 :func:`read_payload` refuses it again on the way back.
 """
 
@@ -38,8 +33,6 @@ from backend import store
 logger = logging.getLogger(__name__)
 
 PAYLOAD_FIELDS = ("tenant_id", "scan_id", "partition_id")
-DEFAULT_STREAM = "dspm:partitions"
-DEFAULT_GROUP = "dspm-workers"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,199}")
 
 
@@ -124,7 +117,9 @@ class LedgerQueue:
         self._passed: dict[tuple[str, str], float] = {}
 
     def publish(self, tenant_id: str, scan_id: str, partition_ids: Iterable[str]) -> int:
-        return 0
+        # Nothing to send: they are queued in the ledger already, and this says how many
+        # the workers can now take - which is what the console reports and audits.
+        return sum(1 for _ in partition_ids)
 
     def take(self, worker_id: str, *, block_seconds: float = 0.0) -> Delivery | None:
         from backend.partitioned_scan import runs_here
@@ -149,109 +144,17 @@ class LedgerQueue:
         self._passed[(delivery.tenant_id, delivery.scan_id)] = time.monotonic() + max(0.0, seconds)
 
 
-class RedisStreamQueue:
-    """Memurai (Redis Streams) delivery of partition identifiers; the ledger decides everything else.
-
-    One stream entry per partition, read through one consumer group. A worker
-    acknowledges an entry only after its database commit, so a worker that dies in
-    between leaves the entry pending, and :meth:`reclaim` hands it to another worker once
-    it has been idle long enough - whose claim then finds the partition done and simply
-    acknowledges it. An entry a worker passes over stays pending, and comes back to
-    someone once it has been idle. The stream is never trimmed: an unacknowledged entry
-    is work, and Memurai runs ``noeviction`` (plan §4).
-    """
-
-    def __init__(self, client, *, stream: str = DEFAULT_STREAM, group: str = DEFAULT_GROUP) -> None:
-        self.client = client
-        self.stream = stream
-        self.group = group
-        self._group_ready = False
-
-    @classmethod
-    def from_url(cls, url: str, **kwargs) -> "RedisStreamQueue":
-        try:
-            import redis  # type: ignore[import-not-found]
-        except ImportError as exc:
-            raise RuntimeError(
-                "DSPM_WORK_QUEUE=redis needs the redis Python package, which is not installed"
-            ) from exc
-        return cls(redis.Redis.from_url(url, decode_responses=True), **kwargs)
-
-    def _ensure_group(self) -> None:
-        if self._group_ready:
-            return
-        try:
-            self.client.xgroup_create(self.stream, self.group, id="0", mkstream=True)
-        except Exception as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
-        self._group_ready = True
-
-    def publish(self, tenant_id: str, scan_id: str, partition_ids: Iterable[str]) -> int:
-        self._ensure_group()
-        published = 0
-        for partition_id in partition_ids:
-            self.client.xadd(self.stream, partition_payload(tenant_id, scan_id, partition_id))
-            published += 1
-        return published
-
-    def _delivery(self, entry_id, fields) -> Delivery | None:
-        receipt = _text(entry_id)
-        try:
-            payload = read_payload(fields)
-        except PayloadRefused as exc:
-            # Something other than a partition message reached the stream. It is
-            # acknowledged so it cannot circulate, and never handed to a worker.
-            logger.warning("Dropped work queue entry %s: %s", receipt, exc)
-            self.client.xack(self.stream, self.group, receipt)
-            return None
-        return Delivery(receipt=receipt, **payload)
-
-    def take(self, worker_id: str, *, block_seconds: float = 0.0) -> Delivery | None:
-        self._ensure_group()
-        response = self.client.xreadgroup(
-            self.group, worker_id, {self.stream: ">"}, count=1,
-            block=int(block_seconds * 1000) if block_seconds > 0 else None,
-        )
-        for _stream, entries in response or []:
-            for entry_id, fields in entries:
-                return self._delivery(entry_id, fields)
-        return None
-
-    def ack(self, delivery: Delivery) -> None:
-        self.client.xack(self.stream, self.group, delivery.receipt)
-
-    def reclaim(self, worker_id: str, *, idle_seconds: float) -> list[Delivery]:
-        self._ensure_group()
-        response = self.client.xautoclaim(
-            self.stream, self.group, worker_id, int(max(0.0, idle_seconds) * 1000), start_id="0-0", count=100,
-        )
-        entries = response[1] if isinstance(response, (list, tuple)) and len(response) > 1 else []
-        deliveries = []
-        for entry_id, fields in entries:
-            if fields is None:
-                continue
-            delivery = self._delivery(entry_id, fields)
-            if delivery is not None:
-                deliveries.append(delivery)
-        return deliveries
-
-    def pass_over(self, delivery: Delivery, *, seconds: float) -> None:
-        return None
-
-
 def work_queue_from_env() -> PartitionQueue:
-    """The queue ``DSPM_WORK_QUEUE`` names: ``ledger`` (the default) or ``redis``."""
+    """The queue ``DSPM_WORK_QUEUE`` names. ``ledger`` is the only one.
+
+    ``redis`` named the Memurai queue. An install whose environment still says so gets
+    the ledger and a warning rather than a worker that will not start: the ledger was
+    always the truth, and the stream only ever carried a copy of what it says.
+    """
     kind = os.getenv("DSPM_WORK_QUEUE", "ledger").strip().lower() or "ledger"
     if kind == "ledger":
         return LedgerQueue()
     if kind == "redis":
-        url = os.getenv("DSPM_REDIS_URL", "").strip()
-        if not url:
-            raise RuntimeError("DSPM_WORK_QUEUE=redis needs DSPM_REDIS_URL")
-        return RedisStreamQueue.from_url(
-            url,
-            stream=os.getenv("DSPM_REDIS_STREAM", DEFAULT_STREAM).strip() or DEFAULT_STREAM,
-            group=os.getenv("DSPM_REDIS_GROUP", DEFAULT_GROUP).strip() or DEFAULT_GROUP,
-        )
-    raise RuntimeError(f"DSPM_WORK_QUEUE must be ledger or redis, not {kind!r}")
+        logger.warning("DSPM_WORK_QUEUE=redis: Memurai was removed, so workers take partitions from the ledger")
+        return LedgerQueue()
+    raise RuntimeError(f"DSPM_WORK_QUEUE must be ledger, not {kind!r}")
