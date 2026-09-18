@@ -8103,6 +8103,16 @@ function buildFindingStats(limit = 6) {
   return shown;
 }
 
+// Phase A (3e7a69e) deleted these two with the dead posture-trend code above them, and
+// every Remediation load that drew a row has thrown a ReferenceError since - which the
+// page reports as "Unable to load remediation findings".
+const REMEDIATION_LIFECYCLE_STATUSES = [
+  "NEW", "OPEN", "UNDER_REVIEW", "CONFIRMED", "ASSIGNED", "IN_PROGRESS",
+  "PENDING_VALIDATION", "RESOLVED", "RISK_ACCEPTED", "FALSE_POSITIVE", "SUPPRESSED", "REOPENED",
+];
+
+const REMEDIATION_TERMINAL_STATUSES = new Set(["RESOLVED", "RISK_ACCEPTED", "FALSE_POSITIVE", "SUPPRESSED"]);
+
 function remediationStatus(finding = {}) {
   const value = String(finding.status || finding.review_status || finding.workflow_status || "OPEN").trim().toUpperCase();
   if (value === "UNREVIEWED") return "NEW";
