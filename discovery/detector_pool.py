@@ -108,20 +108,38 @@ class DetectorPool:
     def _warmed(self, future) -> None:
         try:
             future.result()
-        except Exception as exc:  # pragma: no cover - worker died warming up
-            self._disable(f"worker failed to warm: {type(exc).__name__}")
+        except Exception as exc:
+            # This runs on the executor's OWN manager thread when the pool breaks:
+            # CPython fails every pending future from inside `terminate_broken`, which
+            # holds the executor's `_shutdown_lock` while it calls these callbacks. Asking
+            # the executor to shut down from here takes that same non-reentrant lock on the
+            # thread already holding it, and the process can then never exit - a service
+            # that finishes its work and hangs on stop. So record the failure and nothing
+            # else; the scan's `finally` closes the pool, and `run` closes it sooner.
+            self._record_failure(f"worker failed to warm: {type(exc).__name__}")
             return
         with self._lock:
             self._warm += 1
 
-    def _disable(self, reason: str) -> None:
+    def _record_failure(self, reason: str) -> bool:
+        """Mark the pool unusable. True when this call is the one that disabled it.
+
+        Safe from any thread, including the executor's: it touches nothing but this
+        object's own state.
+        """
         with self._lock:
             if self._disabled:
-                return
+                return False
             self._disabled = True
             self._reason = reason
         logger.warning("Detector process pool disabled (%s); classifying in-process", reason)
-        self.shutdown()
+        return True
+
+    def _disable(self, reason: str) -> None:
+        """Record the failure and close the pool. Only from a thread that owns neither
+        the executor's manager loop nor its lock - `start` and `run`, never a callback."""
+        if self._record_failure(reason):
+            self.shutdown()
 
     def run(self, payload: dict) -> dict | None:
         """The stage's result from a worker, or None to run it in-process."""
