@@ -754,6 +754,38 @@ def add_derived_cache(conn) -> None:
     add_tenant_rls(conn)
 
 
+def add_user_sessions(conn) -> None:
+    """Revision 0018: a session is a row, not a fact one process happens to remember (C1).
+
+    The idle timeout lived in a per-process dictionary. That was a deliberate trade -
+    a per-request database write is exactly what the performance work removed from the
+    authenticated path - but it has two consequences a security review will not accept:
+    a restart admits every session once more, because the process that had been watching
+    them forgot, and with several workers each one only knows what it has seen itself.
+
+    The row is the durable half. Writes are still throttled (see security._touch_session),
+    so the authenticated path does not pay for one per request; what the row buys is that
+    the FIRST sight of a session in any process reads when it was really last used, and
+    that a password change can end every session a user has rather than only the ones
+    this process knows about.
+
+    Deliberately NOT tenant-scoped: it is authentication infrastructure, keyed by the
+    account. Revisions 0003 and 0004 enumerate tables by their `tenant_id` column, so a
+    tenant column here would put session lookups behind row-level security - on a path
+    that runs before any tenant scope exists, and which C10 will tighten to deny.
+    """
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS user_sessions (
+            jti TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL
+        );""")
+    conn.execute("CREATE INDEX IF NOT EXISTS user_sessions_owner ON user_sessions (username, last_seen_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS user_sessions_expiry ON user_sessions (expires_at)")
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1066,6 +1098,17 @@ def apply_baseline_schema(conn) -> None:
             revoked_at TEXT NOT NULL
         );
 
+        -- C1 (revision 0018). Deliberately without a tenant_id: revisions 0003/0004
+        -- enumerate tenant tables by that column, and session lookups run before any
+        -- tenant scope exists. See add_user_sessions.
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            jti TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
@@ -1126,6 +1169,9 @@ def apply_baseline_schema(conn) -> None:
             revoked INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
+
+        CREATE INDEX IF NOT EXISTS user_sessions_owner ON user_sessions (username, last_seen_at);
+        CREATE INDEX IF NOT EXISTS user_sessions_expiry ON user_sessions (expires_at);
 
         CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created
             ON scan_reports (tenant_id, created_at);
@@ -8476,6 +8522,124 @@ def clear_login_failures(rate_key: str) -> None:
     with _lock:
         with _connect() as conn:
             conn.execute("DELETE FROM login_failures WHERE rate_key = ?", (rate_key,))
+
+
+def _max_sessions_per_user() -> int:
+    """How many live sessions one account may hold. 0 disables the cap."""
+    try:
+        return max(0, int(os.getenv("DSPM_MAX_SESSIONS_PER_USER", "16")))
+    except ValueError:
+        return 16
+
+
+def record_session(jti: str, username: str, issued_at: int, expires_at: int) -> None:
+    """Remember a token that was just issued, and hold the account to its cap.
+
+    The cap is what stops a stolen credential quietly accumulating sessions, and what
+    bounds this table. The oldest sessions past it are revoked rather than deleted, so a
+    token that is still in someone's hands stops working instead of being forgotten.
+    """
+
+    if not jti or not username:
+        return
+    now = int(time.time())
+    cap = _max_sessions_per_user()
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM user_sessions WHERE expires_at < ?", (now,))
+            conn.execute(
+                "INSERT OR REPLACE INTO user_sessions (jti, username, issued_at, expires_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (jti, username, int(issued_at), int(expires_at), now),
+            )
+            surplus = []
+            if cap:
+                surplus = [
+                    (str(row["jti"]), int(row["expires_at"]))
+                    for row in conn.execute(
+                        "SELECT jti, expires_at FROM user_sessions WHERE username = ? "
+                        "ORDER BY last_seen_at DESC, issued_at DESC LIMIT -1 OFFSET ?",
+                        (username, cap),
+                    ).fetchall()
+                ]
+            revoked_at = datetime.now(timezone.utc).isoformat()
+            for old_jti, old_exp in surplus:
+                conn.execute(
+                    "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
+                    (old_jti, old_exp, revoked_at),
+                )
+                conn.execute("DELETE FROM user_sessions WHERE jti = ?", (old_jti,))
+    if surplus:
+        _forget_revocation()
+
+
+def session_last_seen(jti: str) -> int | None:
+    """When this session was last used, as the database knows it; None if unknown."""
+    if not jti:
+        return None
+    with _connect() as conn:
+        row = conn.execute("SELECT last_seen_at FROM user_sessions WHERE jti = ?", (jti,)).fetchone()
+    return int(row["last_seen_at"]) if row else None
+
+
+def touch_session(jti: str, seen_at: int | None = None) -> None:
+    if not jti:
+        return
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE user_sessions SET last_seen_at = ? WHERE jti = ?",
+                (int(seen_at if seen_at is not None else time.time()), jti),
+            )
+
+
+def forget_session(jti: str) -> None:
+    """Drop a session row whose token has been revoked; the revocation itself stands."""
+    if not jti:
+        return
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM user_sessions WHERE jti = ?", (jti,))
+
+
+def revoke_sessions_for_user(username: str, *, keep_jti: str = "") -> int:
+    """End every session this account holds. Returns how many were ended.
+
+    Called when the password changes: the point of changing a password after a
+    compromise is that whoever had the old one is signed out, everywhere, including
+    from the processes that never saw them sign in.
+    """
+
+    if not username:
+        return 0
+    revoked_at = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT jti, expires_at FROM user_sessions WHERE username = ?", (username,)
+            ).fetchall()
+            ended = 0
+            for row in rows:
+                jti = str(row["jti"])
+                if keep_jti and jti == keep_jti:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
+                    (jti, int(row["expires_at"]), revoked_at),
+                )
+                conn.execute("DELETE FROM user_sessions WHERE jti = ?", (jti,))
+                ended += 1
+    if ended:
+        _forget_revocation()
+    return ended
+
+
+def count_sessions_for_user(username: str) -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM user_sessions WHERE username = ?", (username,)
+        ).fetchone()
+    return int(row["n"] if row else 0)
 
 
 def revoke_token_jti(jti: str, expires_at: int) -> None:

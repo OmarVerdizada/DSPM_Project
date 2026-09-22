@@ -20,6 +20,19 @@ import backend.security as security
 from backend.security import create_token, verify_token
 from backend.store import read_audit_log
 
+def _age_session(jti: str) -> None:
+    """Make a session look untouched for longer than the idle window.
+
+    C1 moved last-seen into `user_sessions`, so the row is what a process reads the
+    first time it sees a session - ageing the row and dropping the in-process record
+    is what a restart into an abandoned session actually looks like.
+    """
+    from backend import store
+
+    store.touch_session(jti, int(time.time() - (security.SESSION_IDLE_SECONDS + 60)))
+    security._session_last_seen.pop(jti, None)
+
+
 FRONTEND = Path("frontend")
 APP_JS = (FRONTEND / "app.js").read_text(encoding="utf-8")
 INDEX = (FRONTEND / "index.html").read_text(encoding="utf-8")
@@ -130,7 +143,7 @@ class S4IdleSessionTests(unittest.TestCase):
         token = create_token("admin", "admin", "default")
         verify_token(token)
         jti = json.loads(security._b64url_decode(token.split(".")[1]))["jti"]
-        security._session_last_seen[jti] = time.time() - (security.SESSION_IDLE_SECONDS + 60)
+        _age_session(jti)
         with self.assertRaises(HTTPException) as refused:
             verify_token(token)
         self.assertEqual(refused.exception.status_code, 401)
@@ -142,7 +155,7 @@ class S4IdleSessionTests(unittest.TestCase):
         token = create_token("admin", "admin", "default")
         verify_token(token)
         jti = json.loads(security._b64url_decode(token.split(".")[1]))["jti"]
-        security._session_last_seen[jti] = time.time() - (security.SESSION_IDLE_SECONDS + 60)
+        _age_session(jti)
         with self.assertRaises(HTTPException) as refused:
             verify_token(token)
         self.assertEqual(refused.exception.status_code, 401)

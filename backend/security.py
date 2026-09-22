@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import json
@@ -19,13 +20,17 @@ from pathlib import Path
 
 from backend.store import (
     create_user,
+    forget_session,
     get_active_api_key,
     get_user,
     is_token_revoked,
     mark_user_login,
+    record_session,
     revoke_token_jti,
+    session_last_seen,
     tenant_exists,
     touch_api_key,
+    touch_session,
     update_user_password,
     update_user_role,
 )
@@ -87,7 +92,8 @@ TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "28800"))
 # local: an expired session is revoked in the database, so it dies everywhere.
 # 0 disables the check.
 SESSION_IDLE_SECONDS = int(os.getenv("DSPM_SESSION_IDLE_SECONDS", "3600"))
-_session_last_seen: dict[str, float] = {}
+# jti -> (last seen in this process, when the durable row was last written)
+_session_last_seen: dict[str, tuple[float, float]] = {}
 API_KEYS = {
     item.split(":", 1)[0]: item.split(":", 1)[1]
     for item in os.getenv("DSPM_API_KEYS", "").split(",")
@@ -221,21 +227,22 @@ def _sign(message: str) -> str:
 
 def create_token(subject: str, role: str, tenant_id: str) -> str:
     now = int(time.time())
+    claims = {
+        "sub": subject,
+        "role": role,
+        "tenant": tenant_id,
+        "iat": now,
+        "exp": now + TOKEN_TTL_SECONDS,
+        "jti": secrets.token_hex(8),
+    }
     header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
-    payload = _b64url(
-        json.dumps(
-            {
-                "sub": subject,
-                "role": role,
-                "tenant": tenant_id,
-                "iat": now,
-                "exp": now + TOKEN_TTL_SECONDS,
-                "jti": secrets.token_hex(8),
-            },
-            separators=(",", ":"),
-        ).encode()
-    )
+    payload = _b64url(json.dumps(claims, separators=(",", ":")).encode())
     message = f"{header}.{payload}"
+    # C1: every issued token is a session row, so the idle timeout survives a restart,
+    # a password change can end all of them, and the per-account cap has something to
+    # count. The token itself is unchanged - an install upgrading mid-session keeps
+    # working, and its sessions become rows the first time they are used.
+    record_session(claims["jti"], subject, now, claims["exp"])
     return f"{message}.{_sign(message)}"
 
 
@@ -273,26 +280,54 @@ def verify_token(token: str) -> Principal:
 def _touch_session(jti: str, exp: int) -> bool:
     """Mark a session used. False when it had already gone idle.
 
-    A session this process has never seen is admitted and recorded - that is
-    what keeps tokens issued before a restart working. Going idle REVOKES the
-    token rather than just refusing it here, so the decision outlives the
-    process that made it.
+    C1 made this durable. It used to be a per-process dictionary and nothing else,
+    which meant a restart admitted every session once more - the process that had been
+    watching them had simply forgotten - and with several workers each knew only what
+    it had seen itself. The row in `user_sessions` is now the authority the FIRST time
+    a process sees a session; after that the in-process record answers, and the row is
+    written at most once per SESSION_TOUCH_INTERVAL_SECONDS.
+
+    That throttle is the point: a per-request write to the authenticated path is what
+    the performance work removed, and correctness here does not need one. The cost of
+    the throttle is that a session idle in one worker can be seen as active by another
+    for up to the interval, which is a fraction of an idle timeout measured in hours.
+
+    A session with no row at all is admitted and recorded - that is what keeps tokens
+    issued before this release working. Going idle REVOKES the token rather than just
+    refusing it here, so the decision outlives the process that made it.
     """
 
     if SESSION_IDLE_SECONDS <= 0 or not jti:
         return True
     now = time.time()
-    previous = _session_last_seen.get(jti)
+    previous, written = _session_last_seen.get(jti, (None, 0.0))
+    if previous is None:
+        stored = session_last_seen(jti)
+        previous = float(stored) if stored is not None else None
     if previous is not None and now - previous > SESSION_IDLE_SECONDS:
         _session_last_seen.pop(jti, None)
         revoke_token_jti(jti, exp)
+        forget_session(jti)
         return False
-    _session_last_seen[jti] = now
+    if now - written > _session_touch_interval():
+        touch_session(jti, int(now))
+        written = now
+    _session_last_seen[jti] = (now, written)
     if len(_session_last_seen) > 4096:
         cutoff = now - max(SESSION_IDLE_SECONDS, TOKEN_TTL_SECONDS)
-        for stale in [key for key, seen in _session_last_seen.items() if seen < cutoff]:
+        for stale in [key for key, (seen, _) in _session_last_seen.items() if seen < cutoff]:
             _session_last_seen.pop(stale, None)
     return True
+
+
+def _session_touch_interval() -> float:
+    """How rarely the durable last-seen may be written. Never more than a quarter of
+    the idle window, so a short idle timeout cannot be defeated by the throttle."""
+    try:
+        configured = float(os.getenv("DSPM_SESSION_TOUCH_SECONDS", "60"))
+    except ValueError:
+        configured = 60.0
+    return max(0.0, min(configured, SESSION_IDLE_SECONDS / 4 if SESSION_IDLE_SECONDS > 0 else configured))
 
 
 def revoke_token(token: str) -> None:
@@ -301,14 +336,36 @@ def revoke_token(token: str) -> None:
         if len(parts) != 3:
             return
         claims = json.loads(_b64url_decode(parts[1]))
-        revoke_token_jti(str(claims.get("jti") or ""), int(claims.get("exp", 0)))
+        jti = str(claims.get("jti") or "")
+        revoke_token_jti(jti, int(claims.get("exp", 0)))
+        # The revocation is what refuses the token; the row is the session's
+        # bookkeeping, and leaving it behind would make the account look busier
+        # than it is to the per-account cap.
+        _session_last_seen.pop(jti, None)
+        forget_session(jti)
     except Exception:
         return
+
+
+@functools.lru_cache(maxsize=1)
+def _dummy_password_hash() -> str:
+    """A real hash of a password nobody has, at this install's work factor.
+
+    C1: an unknown account used to return before any hashing happened, so a sign-in
+    attempt for a name that exists came back measurably later than one for a name that
+    does not - which is an account enumeration oracle that needs no failed-login audit
+    entry and trips no throttle. Verifying against this hash spends the same work on
+    both, and it is computed once because the point of PBKDF2 is that it is slow.
+    """
+
+    return hash_password(f"absent-account-{secrets.token_hex(16)}1")
 
 
 def authenticate_user(username: str, password: str) -> Principal | None:
     user = get_user(sanitize_username(username))
     if not user or not user["is_active"]:
+        # Deliberately not `return None` before hashing - see _dummy_password_hash.
+        verify_password(password or "", _dummy_password_hash())
         return None
     if not verify_password(password, user["password_hash"]):
         return None

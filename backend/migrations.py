@@ -60,6 +60,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (15, "scan_schedules", store.add_scan_schedules),
         (16, "finding_suppression_rules", store.add_suppression_rules),
         (17, "derived_cache", store.add_derived_cache),
+        (18, "durable_user_sessions", store.add_user_sessions),
     ]
 
 

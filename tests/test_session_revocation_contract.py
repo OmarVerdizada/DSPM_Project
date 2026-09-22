@@ -164,7 +164,10 @@ class TheIdleTimeoutTest(_SessionCase):
         jti = self._jti(token)
         with mock.patch.object(security, "SESSION_IDLE_SECONDS", 60):
             security.verify_token(token)
-            security._session_last_seen[jti] = time.time() - 120
+            # C1: the durable row is the authority a process reads on first sight,
+            # so ageing it is how a session goes idle - not editing a dictionary.
+            store.touch_session(jti, int(time.time() - 120))
+            security._session_last_seen.pop(jti, None)
             self.assertRefused(token)
             # The decision is written to the database, so it holds for every worker
             # and survives a restart - not just for the process that noticed.
@@ -183,7 +186,8 @@ class TheIdleTimeoutTest(_SessionCase):
         token = self._token()
         jti = self._jti(token)
         with mock.patch.object(security, "SESSION_IDLE_SECONDS", 0):
-            security._session_last_seen[jti] = time.time() - 100_000
+            store.touch_session(jti, int(time.time() - 100_000))
+            security._session_last_seen.pop(jti, None)
             self.assertEqual(security.verify_token(token).subject, self.user)
         self.assertFalse(store.is_token_revoked(jti))
 

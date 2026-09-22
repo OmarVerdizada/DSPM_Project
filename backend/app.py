@@ -111,6 +111,7 @@ from backend.store import (
     list_remediation_findings,
     list_inventory,
     probe_incremental_object,
+    revoke_sessions_for_user,
     update_finding_lifecycle,
     update_finding_workflow,
     update_user_password,
@@ -1562,8 +1563,12 @@ def change_password(payload: PasswordChangeRequest, principal: Principal = Depen
     if authenticated is None:
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     update_user_password(principal.subject, hash_password(payload.new_password))
-    audit(principal.tenant_id, principal.subject, "user.password_changed")
-    return {"status": "updated"}
+    # C1: changing a password after a compromise is only worth doing if it signs
+    # out whoever had the old one - everywhere, including this caller's own
+    # session and any this process never saw.
+    ended = revoke_sessions_for_user(principal.subject)
+    audit(principal.tenant_id, principal.subject, "user.password_changed", {"sessions_ended": ended})
+    return {"status": "updated", "sessions_ended": ended, "reauthenticate": True}
 
 
 @app.get("/api/profile")
@@ -1710,8 +1715,11 @@ def admin_reset_password(username: str, payload: PasswordResetRequest, principal
     user = update_user_password(target, hash_password(payload.password))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    audit(principal.tenant_id, principal.subject, "user.password_reset", {"username": target})
-    return {"status": "updated", "user": _public_user(user)}
+    # C1: an administrator resetting a password is usually doing it because the
+    # account is suspect. Leaving its sessions alive would defeat the reset.
+    ended = revoke_sessions_for_user(target)
+    audit(principal.tenant_id, principal.subject, "user.password_reset", {"username": target, "sessions_ended": ended})
+    return {"status": "updated", "user": _public_user(user), "sessions_ended": ended}
 
 
 @app.put("/api/users/{username}/active")

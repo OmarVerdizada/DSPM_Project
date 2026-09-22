@@ -42,7 +42,7 @@ class FreshDatabaseUpgrade(_TempStore):
         final = migrations.upgrade()
         self.assertEqual(final, migrations.expected_revision())
         rows = self._recorded()
-        self.assertEqual([r["revision"] for r in rows], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+        self.assertEqual([r["revision"] for r in rows], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
         self.assertEqual(rows[0]["name"], "baseline_convergent_schema")
         self.assertEqual(rows[1]["name"], "saved_scan_labels")
         self.assertEqual(rows[2]["name"], "tenant_referential_integrity")
@@ -69,12 +69,12 @@ class FreshDatabaseUpgrade(_TempStore):
         migrations.upgrade()
         again = migrations.upgrade()
         self.assertEqual(again, migrations.expected_revision())
-        self.assertEqual(len(self._recorded()), 17)
+        self.assertEqual(len(self._recorded()), 18)
 
     def test_status_reports_pending_then_clean(self) -> None:
         before = migrations.status()
         self.assertEqual(before["applied_revision"], 0)
-        self.assertEqual([p["revision"] for p in before["pending"]], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+        self.assertEqual([p["revision"] for p in before["pending"]], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
         migrations.upgrade()
         after = migrations.status()
         self.assertEqual(after["applied_revision"], after["expected_revision"])
@@ -123,7 +123,7 @@ class AdoptExistingDatabase(_TempStore):
         self.assertEqual(migrations.status()["applied_revision"], 0)
         migrations.stamp(migrations.expected_revision())
         rows = self._recorded()
-        self.assertEqual([r["revision"] for r in rows], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+        self.assertEqual([r["revision"] for r in rows], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18])
         self.assertIn("(stamped)", rows[0]["name"])
         migrations.verify_or_raise()  # adopted DB now passes the gate
 
