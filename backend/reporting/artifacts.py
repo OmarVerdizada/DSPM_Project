@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from backend.reporting.report_model import build_report_model
+from backend.reporting.report_model import build_report_model, report_title
 from backend.reporting.report_pdf import REPORT_TEMPLATE_ID, render_visual_report_pdf
 from backend.security import Principal, create_artifact_download_token
 from backend.store import DATA_DIR, read_scan_history, read_scan_report
@@ -225,7 +225,9 @@ def create_report_artifact(
     pdf_path = root / f"{artifact_id}.pdf"
     html_path = root / f"{artifact_id}.html"
     metadata_path = root / f"{artifact_id}.json"
-    title = f"DSPM Assessment Report — {normalized_scope.get('label', 'Full scan')}"
+    # The model composes the title from the same normalized scope, so the name in
+    # the metadata, in the HTML head and in the PDF is one string, not three.
+    title = str(model.get("title") or report_title(normalized_scope))
     html_path.write_text(_render_report_html(model), encoding="utf-8")
     pdf_info = render_visual_report_pdf(pdf_path, model)
     if not pdf_path.exists():
@@ -246,6 +248,7 @@ def create_report_artifact(
         "filter_severity": filter_severity_meta,
         "scope": normalized_scope,
         "scope_label": normalized_scope.get("label", "Full scan"),
+        "title": title,
         "media_type": "application/pdf",
         "storage_filename": pdf_path.name,
         "html_storage_filename": html_path.name,

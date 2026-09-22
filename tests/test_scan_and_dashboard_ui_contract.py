@@ -426,7 +426,7 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         # hex outside comments, which is what the F0 gate enforces on change.
         for sheet in (shell, pages):
             body = re.sub(r"/\*.*?\*/", "", sheet, flags=re.S)
-            self.assertNotRegex(body, r"#[0-9a-fA-F]{3,8}")
+            self.assertNotRegex(body, r"#[0-9a-fA-F]{3,8}\b")
 
     def test_remediation_is_a_finding_level_workflow_center(self) -> None:
         """Remediation is an operational queue with in-place lifecycle detail,

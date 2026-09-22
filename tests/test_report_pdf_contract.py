@@ -25,7 +25,12 @@ from pypdf import PdfReader
 
 from backend import store
 from backend.reporting import artifacts
-from backend.reporting.report_pdf import REPORT_TEMPLATE_ID
+from backend.reporting.report_model import report_title
+from backend.reporting.report_pdf import (
+    HEADLINE_WIDTH,
+    REPORT_TEMPLATE_ID,
+    _fitted_headline,
+)
 from backend.security import Principal, verify_artifact_download_token
 
 PAN = "4111111111111111"
@@ -170,6 +175,61 @@ class AnExportedReportTest(_ExportCase):
         self.assertEqual(self.artifact["included_line_count"], 3)
         self.assertEqual(self.artifact["filename"], f"dspm_report_{SCAN_ID}.pdf")
         self.assertRegex(self.artifact["filename"], r"^[A-Za-z0-9_.-]+$")
+
+
+class TheDocumentIsNamedTest(_ExportCase):
+    """M0/Q5: the title the code composes reaches the document.
+
+    It used to be built in `create_report_artifact` and dropped on the floor: the
+    model hard-coded an unscoped title, the PDF hard-coded the same string on its
+    cover, and the file itself carried no title at all - so a reader showed the
+    32-character storage id, and so did anything that indexed the file.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.artifact = self._export()
+        self.pdf, self.html, _ = self._files(self.artifact["artifact_id"])
+
+    def test_the_metadata_carries_the_title(self) -> None:
+        self.assertEqual(self.artifact["title"], report_title(self.artifact["scope"]))
+        self.assertEqual(self.artifact["title"], "DSPM Assessment Report")
+
+    def test_the_pdf_says_what_it_is_in_its_own_information_dictionary(self) -> None:
+        reader = PdfReader(str(self.pdf))
+        self.assertEqual(reader.metadata.title, self.artifact["title"])
+        self.assertEqual(reader.metadata.author, "SENTRO DSPM")
+        self.assertIn(SCAN_ID, reader.metadata.subject)
+        self.assertIn(REPORT_TEMPLATE_ID, reader.metadata.creator)
+
+    def test_the_cover_prints_the_same_title(self) -> None:
+        self.assertIn(self.artifact["title"], self._pdf_text(self.pdf))
+
+    def test_the_html_head_and_heading_carry_it_too(self) -> None:
+        html = self.html.read_text(encoding="utf-8")
+        self.assertIn(f"<title>{self.artifact['title']}</title>", html)
+        self.assertIn(f"<h1>{self.artifact['title']}</h1>", html)
+
+    def test_a_scoped_export_is_a_differently_named_document(self) -> None:
+        scoped = self._export(filter_severity="CRITICAL")
+        self.assertNotEqual(scoped["title"], self.artifact["title"])
+        self.assertIn(scoped["scope_label"], scoped["title"])
+        pdf, html, _ = self._files(scoped["artifact_id"])
+        self.assertEqual(PdfReader(str(pdf)).metadata.title, scoped["title"])
+        self.assertIn(f"<title>{scoped['title']}</title>", html.read_text(encoding="utf-8"))
+
+    def test_a_long_scope_name_does_not_run_into_the_scan_id(self) -> None:
+        # The cover headline shrinks to fit its band rather than wrapping into the
+        # line below it or colliding with the block on the right, and a title too
+        # long even at the smallest size is cut rather than allowed to overlap.
+        for label in ("Full scan", "Critical severity", "A" * 70):
+            with self.subTest(label=label):
+                title = report_title({"label": label})
+                headline, size = _fitted_headline(title, HEADLINE_WIDTH, 25, 14)
+                self.assertLessEqual(len(headline) * size * 0.52, HEADLINE_WIDTH + 0.01)
+                self.assertGreaterEqual(size, 14)
+                self.assertTrue(title.startswith(headline.rstrip('.')),
+                                "the headline must be the title, not a different string")
 
 
 class TheDownloadCredentialTest(_ExportCase):

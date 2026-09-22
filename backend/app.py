@@ -264,6 +264,9 @@ LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
 # (IP,username) counter trips. Higher than the per-user cap to tolerate a shared
 # NAT/office IP with a few users and the odd typo.
 LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_IP_MAX_ATTEMPTS", "30"))
+# How many scan runs the executive dashboard's posture trend plots, and therefore
+# how many history rows that endpoint needs to read.
+DASHBOARD_TREND_POINTS = 14
 ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
 IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
 # Phase 0 (DB-01): one database authority. Production refuses SQLite, and a
@@ -2873,16 +2876,18 @@ def audit_log(
 
 @app.get("/api/executive-dashboard")
 def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) -> dict:
-    history = read_scan_history(principal.tenant_id, limit=200)
+    # The trend is the last 14 runs and `latest` is the newest of them, so this
+    # is every row the response can use. It read 200 and threw 186 away on the
+    # console's most-requested call.
+    history = read_scan_history(principal.tenant_id, limit=DASHBOARD_TREND_POINTS)
     latest = history[-1] if history else {"summary": {}}
-    summary = latest.get("summary", {})
     # Posture is a statement about the ESTATE, measured from the normalized
     # tables - not about the last scan. Scoring the last scan is what let the
     # number be improved by pointing the scanner at a smaller folder.
     posture = compute_posture(PostureInputs(**posture_inputs(principal.tenant_id)))
     trend = [
         {**entry, "posture_score": posture_from_summary(entry.get("summary") or {}).total_score}
-        for entry in history[-14:]
+        for entry in history[-DASHBOARD_TREND_POINTS:]
     ]
     return {
         "tenant_id": principal.tenant_id,

@@ -11,10 +11,6 @@ import unittest
 from backend.reporting.report_model import build_report_model
 
 
-def _run(awaitable):
-    return asyncio.run(awaitable)
-
-
 def _file(name: str, extension: str, score: int, level: str, finding_type: str) -> dict:
     return {
         "name": name,

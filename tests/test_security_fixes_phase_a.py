@@ -14,6 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from fastapi import HTTPException
+
 import backend.security as security
 from backend.security import create_token, verify_token
 from backend.store import read_audit_log
@@ -129,8 +131,9 @@ class S4IdleSessionTests(unittest.TestCase):
         verify_token(token)
         jti = json.loads(security._b64url_decode(token.split(".")[1]))["jti"]
         security._session_last_seen[jti] = time.time() - (security.SESSION_IDLE_SECONDS + 60)
-        with self.assertRaises(Exception):
+        with self.assertRaises(HTTPException) as refused:
             verify_token(token)
+        self.assertEqual(refused.exception.status_code, 401)
 
     def test_going_idle_revokes_the_token_rather_than_just_refusing_it(self) -> None:
         """Detection is per process; the CONSEQUENCE must not be."""
@@ -140,8 +143,9 @@ class S4IdleSessionTests(unittest.TestCase):
         verify_token(token)
         jti = json.loads(security._b64url_decode(token.split(".")[1]))["jti"]
         security._session_last_seen[jti] = time.time() - (security.SESSION_IDLE_SECONDS + 60)
-        with self.assertRaises(Exception):
+        with self.assertRaises(HTTPException) as refused:
             verify_token(token)
+        self.assertEqual(refused.exception.status_code, 401)
         self.assertTrue(is_token_revoked(jti))
 
     def test_a_token_this_process_has_never_seen_is_admitted_once(self) -> None:

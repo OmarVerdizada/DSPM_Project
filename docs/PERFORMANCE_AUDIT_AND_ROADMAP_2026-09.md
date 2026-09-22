@@ -586,7 +586,7 @@ card needs, versus three racing ones, is the right trade.
 
 **A deletion that a call-shaped grep could not see.** `buildScanComparison`
 formatted a scan-comparison panel the refit had removed from the page; my
-"no callers" check (`buildScanComparison(`) found nothing and the removal
+"no callers" check (`\bbuildScanComparison(`) found nothing and the removal
 guard agreed. Both were blind to `setPanelHtml(scanComparison,
 buildScanComparison)` — the builder passed **by reference**, no paren — inside
 `renderExecutiveExperience`. `setPanelHtml` null-guards its target, but the

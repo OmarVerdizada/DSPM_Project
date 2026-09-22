@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -10,8 +11,16 @@ PAGE_WIDTH = 842.0
 PAGE_HEIGHT = 595.0
 MARGIN = 32.0
 CONTENT_WIDTH = PAGE_WIDTH - (MARGIN * 2)
+# The cover headline's band: the scan id and generation stamp start 290pt from the
+# right edge, and the title must stop before them.
+HEADLINE_WIDTH = PAGE_WIDTH - 290 - MARGIN - 14
 
 REPORT_TEMPLATE_ID = "sentro-dspm-unified-v1"
+
+# The model composes the document title (it knows the scope); this stands in only
+# when a caller builds a model without one. This module stays dependency-free, so it
+# does not import the model to borrow the constant.
+FALLBACK_TITLE = "DSPM Assessment Report"
 
 INK = (0.059, 0.090, 0.165)
 MUTED = (0.392, 0.455, 0.545)
@@ -147,6 +156,24 @@ def _scope_label(model: dict) -> str:
     return _clean(scope.get("label") or "Full scan", 120)
 
 
+def _document_title(model: dict) -> str:
+    return _clean(model.get("title") or FALLBACK_TITLE, 120)
+
+
+def _fitted_headline(text: str, available: float, largest: float, smallest: float) -> tuple[str, float]:
+    """One line of ``text`` that fits ``available``, with the size it fits at.
+
+    The cover headline sits in a fixed band beside the scan id, so a scoped title
+    shrinks rather than wrapping into the line below it; a title too long even at
+    the smallest size is then truncated, because running into the neighbouring
+    block is worse than an ellipsis. Character width is estimated as _wrap does.
+    """
+    size = largest
+    while size > smallest and len(text) * size * 0.52 > available:
+        size -= 0.5
+    return _wrap(text, available, size, max_lines=1)[0], size
+
+
 def _page_header(page: _Page, model: dict, section: str, page_number: int) -> None:
     page.rect(0, 0, PAGE_WIDTH, 50, SENTRO_NAVY)
     page.text(MARGIN, 16, "SENTRO", 13, bold=True, color=WHITE)
@@ -180,7 +207,8 @@ def _bar(page: _Page, x: float, top: float, width: float, label: str, count: int
 def _summary_page(model: dict, page_number: int) -> _Page:
     page = _Page()
     page.rect(0, 0, PAGE_WIDTH, 92, SENTRO_NAVY)
-    page.text(MARGIN, 20, "DSPM Assessment Report", 25, bold=True, color=WHITE)
+    headline, headline_size = _fitted_headline(_document_title(model), HEADLINE_WIDTH, 25, 14)
+    page.text(MARGIN, 20, headline, headline_size, bold=True, color=WHITE)
     page.text(MARGIN, 55, f"Scope: {_scope_label(model)}", 10, bold=True, color=(0.820, 0.875, 1.000))
     page.text(PAGE_WIDTH - 290, 24, f"Scan {_clean(model.get('scan_id'), 90)}", 9, color=(0.820, 0.875, 1.000))
     page.text(PAGE_WIDTH - 290, 44, f"Generated {_clean(model.get('timestamp'), 90)}", 8, color=(0.820, 0.875, 1.000))
@@ -326,7 +354,32 @@ def _evidence_pages(model: dict, first_page_number: int) -> list[_Page]:
     return pages
 
 
-def _build_pdf(pages: Iterable[_Page]) -> bytes:
+def _pdf_text_object(value: str) -> bytes:
+    return b"(" + _pdf_escape(_clean(value, 240)).encode("latin-1", "replace") + b")"
+
+
+def _info_object(model: dict) -> bytes:
+    """The document information dictionary.
+
+    Without it a reader has no name for the file and shows the storage filename -
+    a 32-character hex id. This is where a report's title actually reaches the
+    document: the window title, the properties pane, and what a print-to-file or
+    a document management system indexes.
+    """
+    stamp = datetime.now(timezone.utc).strftime("D:%Y%m%d%H%M%SZ")
+    fields = [
+        (b"/Title", _pdf_text_object(_document_title(model))),
+        (b"/Author", _pdf_text_object("SENTRO DSPM")),
+        (b"/Subject", _pdf_text_object(f"Scan {model.get('scan_id', '')} - scope: {_scope_label(model)}")),
+        (b"/Creator", _pdf_text_object(f"SENTRO DSPM ({REPORT_TEMPLATE_ID})")),
+        (b"/Producer", _pdf_text_object("SENTRO DSPM report renderer")),
+        (b"/CreationDate", b"(" + stamp.encode("ascii") + b")"),
+        (b"/ModDate", b"(" + stamp.encode("ascii") + b")"),
+    ]
+    return b"<< " + b" ".join(key + b" " + value for key, value in fields) + b" >>"
+
+
+def _build_pdf(pages: Iterable[_Page], model: dict | None = None) -> bytes:
     page_list = list(pages)
     page_numbers = [5 + (index * 2) for index in range(len(page_list))]
     objects: list[bytes] = [
@@ -344,6 +397,11 @@ def _build_pdf(pages: Iterable[_Page]) -> bytes:
         )
         objects.append(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
 
+    # Appended last so the fixed object numbers above (and the page arithmetic
+    # that depends on them) stay exactly where they are.
+    objects.append(_info_object(model or {}))
+    info_number = len(objects)
+
     payload = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     offsets: list[int] = [0]
     for number, obj in enumerate(objects, start=1):
@@ -357,7 +415,8 @@ def _build_pdf(pages: Iterable[_Page]) -> bytes:
     for offset in offsets[1:]:
         payload.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
     payload.extend(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R /Info {info_number} 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
     )
     return bytes(payload)
 
@@ -366,7 +425,7 @@ def render_visual_report_pdf(path: Path, model: dict) -> dict:
     """Render a Composer-aligned, scoped report and return artifact metadata."""
     pages: list[_Page] = [_summary_page(model, 1), _operations_page(model, 2)]
     pages.extend(_evidence_pages(model, 3))
-    path.write_bytes(_build_pdf(pages))
+    path.write_bytes(_build_pdf(pages, model))
     evidence_count = len(model.get("evidence_register") or [])
     return {
         "render_style": "visual_composer",

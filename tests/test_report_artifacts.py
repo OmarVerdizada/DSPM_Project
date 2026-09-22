@@ -15,6 +15,7 @@ reference. These tests pin the properties that make that safe to do:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
@@ -197,6 +198,83 @@ class BackupCoversTheArtifactTier(_ArtifactSandbox):
         captured = backup.capture_artifacts(Path(self._tmp.name) / "empty.artifacts.tar")
         self.assertEqual(captured["objects"], 0)
         self.assertIsNone(captured["file"])
+
+
+class RestoreRefusesAnArchiveItDidNotWrite(_ArtifactSandbox):
+    """M0/Q5: capture_artifacts writes regular files and nothing else.
+
+    A member of any other kind means the archive was built by something else, and
+    restore runs as the service account into the artifact directory. The check used
+    to `continue` past such a member - keeping it out of the inventory while
+    extraction still wrote it - and on Python 3.10/3.11 the `filter="data"` fallback
+    was not there to catch it either. It is now refused outright, before anything is
+    unpacked. (The floor is 3.12, so the filter is always available as well.)
+    """
+
+    def _archive(self, build) -> Path:
+        import tarfile
+
+        plain = Path(self._tmp.name) / "crafted.tar"
+        with tarfile.open(plain, "w") as tar:
+            build(tar, tarfile)
+        encrypted = Path(self._tmp.name) / "crafted.tar.enc"
+        backup.encrypt_file(plain, encrypted)
+        plain.unlink()
+        return encrypted
+
+    def _refused(self, build, expected: str) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            destination = Path(scratch)
+            with self.assertRaises(ValueError) as refused:
+                backup.restore_artifacts(self._archive(build), destination)
+            self.assertIn(expected, str(refused.exception))
+            leftovers = [p.name for p in destination.iterdir() if p.suffix != ".tmp"]
+            self.assertEqual(leftovers, [], "nothing may be unpacked from a refused archive")
+
+    def test_a_symlink_member_is_refused(self) -> None:
+        def build(tar, tarfile):
+            link = tarfile.TarInfo("tenant/escape.enc")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../../../etc/passwd"
+            tar.addfile(link)
+        self._refused(build, "non-file archive member")
+
+    def test_a_hard_link_member_is_refused(self) -> None:
+        def build(tar, tarfile):
+            link = tarfile.TarInfo("tenant/hard.enc")
+            link.type = tarfile.LNKTYPE
+            link.linkname = "tenant/real.enc"
+            tar.addfile(link)
+        self._refused(build, "non-file archive member")
+
+    def test_a_device_member_is_refused(self) -> None:
+        def build(tar, tarfile):
+            node = tarfile.TarInfo("tenant/null.enc")
+            node.type = tarfile.CHRTYPE
+            node.devmajor, node.devminor = 1, 3
+            tar.addfile(node)
+        self._refused(build, "non-file archive member")
+
+    def test_a_traversing_path_is_still_refused(self) -> None:
+        def build(tar, tarfile):
+            payload = b"x" * 16
+            member = tarfile.TarInfo("../../outside.enc")
+            member.size = len(payload)
+            tar.addfile(member, io.BytesIO(payload))
+        self._refused(build, "unsafe archive member")
+
+    def test_one_bad_member_refuses_the_whole_archive(self) -> None:
+        # A mixed archive must not be half-restored: the refusal comes before
+        # extraction, so the good member is not written either.
+        def build(tar, tarfile):
+            payload = b"y" * 16
+            good = tarfile.TarInfo("tenant/good.enc")
+            good.size = len(payload)
+            tar.addfile(good, io.BytesIO(payload))
+            directory = tarfile.TarInfo("tenant/subdir")
+            directory.type = tarfile.DIRTYPE
+            tar.addfile(directory)
+        self._refused(build, "non-file archive member")
 
 
 if __name__ == "__main__":

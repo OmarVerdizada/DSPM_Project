@@ -248,20 +248,21 @@ def restore_artifacts(archive: Path, destination: Path) -> dict:
         inventory: list[str] = []
         with tarfile.open(plain, "r") as tar:
             for member in tar.getmembers():
+                # capture_artifacts writes regular files and nothing else, so a
+                # symlink, device or directory member means this archive is not
+                # one of ours. Skipping such a member only kept it out of the
+                # inventory - extraction still wrote it - so it is refused.
                 if not member.isfile():
-                    continue
+                    raise ValueError(f"Refusing non-file archive member: {member.name!r}")
                 name = member.name.replace("\\", "/")
                 if name.startswith("/") or ".." in name.split("/"):
                     raise ValueError(f"Refusing unsafe archive member: {member.name!r}")
                 inventory.append(name.rsplit(".", 1)[0])
-            try:
-                # Belt and braces: members were validated above, and the "data"
-                # filter refuses absolute paths, traversal and special files at
-                # extraction time. The filter argument does not exist before
-                # Python 3.12, where the manual check above stands alone.
-                tar.extractall(destination, filter="data")
-            except TypeError:
-                tar.extractall(destination)
+            # Belt and braces: every member was validated above, and the "data"
+            # filter refuses absolute paths, traversal and special files again at
+            # extraction time. It is always available - the supported floor is
+            # Python 3.12 (main.MINIMUM_PYTHON).
+            tar.extractall(destination, filter="data")
     finally:
         plain.unlink(missing_ok=True)
     digest = hashlib.sha256("\n".join(sorted(inventory)).encode("utf-8")).hexdigest()

@@ -856,6 +856,20 @@ def get_risk_rules() -> list[dict]:
     return RISK_RULE_DESCRIPTIONS
 
 
+def display_ticket(seed: object) -> str:
+    """The file's stable display identity, shown beside its remediation.
+
+    The same path gets the same ticket on every scan and in every install, whatever
+    its score does - that is the whole point of printing one. It used to be a SHA-1
+    folded into 100,000 numbers, which at even odds hands two unrelated files the
+    same ticket once an estate passes ~370 files, in a product whose job is telling
+    files apart. 48 bits of a SHA-256 keeps the determinism and gives the namespace
+    room for an estate of any size.
+    """
+    digest = hashlib.sha256(str(seed).encode("utf-8", errors="ignore")).hexdigest()
+    return f"DSPM-{digest[:12].upper()}"
+
+
 def _build_remediation(level: str, score: int, file_obj: dict, findings: list[dict], acl_assessment: dict) -> dict:
     finding_types = {str(finding.get("type", "")).lower() for finding in findings}
     finding_categories = {str(finding.get("category", "")).lower().replace("-", "_").replace(" ", "_") for finding in findings if finding.get("category")}
@@ -900,14 +914,11 @@ def _build_remediation(level: str, score: int, file_obj: dict, findings: list[di
     if not actions:
         actions.append("Monitor movement and validate business ownership")
 
-    ticket_seed = str(file_obj.get("path") or file_obj.get("name") or score).encode("utf-8", errors="ignore")
-    ticket_id = int(hashlib.sha1(ticket_seed).hexdigest()[:8], 16) % 100000
-
     return {
         "status": status,
         "owner": owner,
         "sla": sla,
-        "ticket": f"DSPM-{ticket_id:05d}",
+        "ticket": display_ticket(file_obj.get("path") or file_obj.get("name") or score),
         "actions": _dedupe(actions),
     }
 

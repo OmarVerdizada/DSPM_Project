@@ -253,6 +253,22 @@ def _status_text(score: int, critical_high: int) -> str:
     return "Immediate remediation recommended."
 
 
+REPORT_TITLE = "DSPM Assessment Report"
+
+
+def report_title(scope: Mapping[str, Any] | None = None) -> str:
+    """The document's name, composed once and used everywhere it appears.
+
+    A scoped export is a different document from the full one - it was built to be
+    sent to someone about that scope - so the scope belongs in the title, which is
+    what a browser tab, a saved file and a PDF reader's properties pane all show.
+    """
+    label = str((scope or {}).get("label") or "").strip()
+    if not label or label.lower() in {"full scan", "full"}:
+        return REPORT_TITLE
+    return f"{REPORT_TITLE} - {label}"
+
+
 def build_report_model(
     report: Mapping[str, Any],
     scope: Mapping[str, Any] | None = None,
@@ -290,7 +306,7 @@ def build_report_model(
     remediation_steps = build_remediation_steps_for_types(risk_types, "en") if scoped else []
 
     return {
-        "title": "DSPM Assessment Report",
+        "title": report_title(norm_scope),
         "scan_id": str(report.get("scan_id") or "latest"),
         "timestamp": str(report.get("timestamp") or ""),
         "source": str(report.get("source") or ""),
