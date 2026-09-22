@@ -1170,11 +1170,49 @@ function readEndpointPayload() {
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
     system_filter_enabled: selectedExtensions.includes("__system__"),
     save_report: true,
+    ...readEndpointTransport(),
     asset_overrides: assetRules,
     compliance_enabled: selectedComplianceFrameworks.length > 0,
     compliance_frameworks: selectedComplianceFrameworks,
     scan_label: activeScanLabel || "",
   };
+}
+
+// C0.1: the transport block the API now accepts. Preflight and the scan send the
+// same one, so "test connection" proves the transport the scan will actually use.
+function readEndpointTransport() {
+  const useSsl = (document.querySelector("#endpoint-transport")?.value || "http") === "https";
+  const trust = useSsl ? (document.querySelector("#endpoint-cert-trust")?.value || "system") : "system";
+  const port = parseInt(document.querySelector("#endpoint-port")?.value || "", 10);
+  return {
+    use_ssl: useSsl,
+    port: Number.isFinite(port) && port > 0 ? port : null,
+    cert_trust: trust,
+    ca_bundle: trust === "ca_bundle" ? (document.querySelector("#endpoint-ca-bundle")?.value || "").trim() : "",
+    cert_thumbprint: trust === "thumbprint" ? (document.querySelector("#endpoint-cert-thumbprint")?.value || "").trim() : "",
+    kerberos: document.querySelector("#endpoint-kerberos")?.value || "",
+  };
+}
+
+function syncEndpointTransportFields() {
+  const transport = document.querySelector("#endpoint-transport");
+  const trust = document.querySelector("#endpoint-cert-trust");
+  if (!transport || !trust) {
+    return;
+  }
+  const useSsl = transport.value === "https";
+  trust.disabled = !useSsl;
+  // The API refuses a certificate trust choice on a connection that is not TLS,
+  // so the form cannot offer one that would come back as a validation error.
+  if (!useSsl) {
+    trust.value = "system";
+  }
+  document.querySelector("#endpoint-ca-bundle-field")?.classList.toggle("hidden", !useSsl || trust.value !== "ca_bundle");
+  document.querySelector("#endpoint-thumbprint-field")?.classList.toggle("hidden", !useSsl || trust.value !== "thumbprint");
+  const port = document.querySelector("#endpoint-port");
+  if (port) {
+    port.placeholder = useSsl ? "5986" : "5985";
+  }
 }
 
 function readEndpointConnectionPayload() {
@@ -1198,6 +1236,7 @@ function readEndpointConnectionPayload() {
     hidden_filter_enabled: false,
     system_filter_enabled: false,
     save_report: false,
+    ...readEndpointTransport(),
     asset_overrides: [],
   };
 }
@@ -10687,6 +10726,10 @@ endpointPathScope.addEventListener("change", () => {
   tuneEndpointScanDefaults();
 });
 
+document.querySelector("#endpoint-transport")?.addEventListener("change", syncEndpointTransportFields);
+document.querySelector("#endpoint-cert-trust")?.addEventListener("change", syncEndpointTransportFields);
+syncEndpointTransportFields();
+
 endpointCustomPaths?.addEventListener("input", () => {
   tuneEndpointScopeExtensionPolicy();
   tuneEndpointScanDefaults();
@@ -12364,6 +12407,13 @@ function applyEndpointProfile(profile) {
   document.querySelector("#endpoint-inspect-archives").checked = Boolean(config.inspect_archives);
   document.querySelector("#endpoint-async-scan").checked = config.async_scan ?? true;
   document.querySelector("#endpoint-incremental-enabled").checked = config.incremental_enabled ?? true;
+  document.querySelector("#endpoint-transport").value = config.use_ssl ? "https" : "http";
+  document.querySelector("#endpoint-port").value = config.port || "";
+  document.querySelector("#endpoint-cert-trust").value = config.cert_trust || "system";
+  document.querySelector("#endpoint-ca-bundle").value = config.ca_bundle || "";
+  document.querySelector("#endpoint-cert-thumbprint").value = config.cert_thumbprint || "";
+  document.querySelector("#endpoint-kerberos").value = config.kerberos || "";
+  syncEndpointTransportFields();
   applyExtensionUiState("endpoint", profile ? ui : { ext_preset: "all" });
   applyComplianceState("endpoint", config.compliance_enabled, config.compliance_frameworks);
 }

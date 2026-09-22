@@ -1281,6 +1281,57 @@
                     </label>
                   </div>
                 </section>
+
+                <!-- C0.1: the collector has always been able to speak TLS; until
+                     these controls existed the console could only ask for cleartext
+                     HTTP on 5985, so an install that requires TLS could not scan at
+                     all. The certificate choice is here rather than in a settings
+                     page because it belongs to the endpoint, not to the install. -->
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Transport">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-lock"/></svg></span>Transport</h4>
+                    <span>How Sentro reaches this machine, and how it trusts it</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label>
+                      Connection
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="endpoint-transport">
+                        <option value="http">HTTP (port 5985)</option>
+                        <option value="https">HTTPS / TLS (port 5986)</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Port override
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-server"/></svg><input id="endpoint-port" type="number" min="1" max="65535" placeholder="Default for the connection" /></span>
+                    </label>
+                    <label>
+                      Certificate trust
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="endpoint-cert-trust" disabled>
+                        <option value="system">This machine's trust store</option>
+                        <option value="ca_bundle">CA bundle file</option>
+                        <option value="thumbprint">Pinned certificate thumbprint</option>
+                        <option value="insecure">Do not check (lab only)</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Authentication
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user"/></svg><select id="endpoint-kerberos">
+                        <option value="">Install default</option>
+                        <option value="off">NTLM</option>
+                        <option value="prefer">Kerberos, NTLM if unavailable</option>
+                        <option value="require">Kerberos only</option>
+                      </select></span>
+                    </label>
+                    <label class="scan-form-wide hidden" id="endpoint-ca-bundle-field">
+                      CA bundle path (on the Sentro machine)
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><input id="endpoint-ca-bundle" placeholder="C:\Sentro\trust\internal-root.pem" /></span>
+                    </label>
+                    <label class="scan-form-wide hidden" id="endpoint-thumbprint-field">
+                      Certificate thumbprint
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="endpoint-cert-thumbprint" placeholder="Get-ChildItem Cert:\LocalMachine\My on the endpoint" maxlength="200" /></span>
+                    </label>
+                  </div>
+                </section>
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="2">
@@ -1308,7 +1359,7 @@
                     </label>
                     <label>
                       Custom paths
-                      <span class="field-shell field-shell-top"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><textarea id="endpoint-custom-paths" rows="2" placeholder="C:\\Users\\j.doe\\Desktop; C:\\Temp; \\\\server\\share" disabled></textarea></span>
+                      <span class="field-shell field-shell-top"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><textarea id="endpoint-custom-paths" rows="2" placeholder="C:\Users\j.doe\Desktop; C:\Temp; \\server\share" disabled></textarea></span>
                     </label>
                     <label>
                       Max folder depth
@@ -1719,7 +1770,7 @@
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
-    <script src="/static/app.js?v=234"></script>
+    <script src="/static/app.js?v=235"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

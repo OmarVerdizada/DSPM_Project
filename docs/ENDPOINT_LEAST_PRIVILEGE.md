@@ -121,9 +121,41 @@ Over HTTPS (5986) the channel is TLS and encryption is left to it rather than
 paying for a second wrapping. Set `DSPM_WINRM_ACTIVATION_HTTPS=1` to have
 activation provision an HTTPS listener.
 
-`DSPM_WINRM_SSL_SKIP_CA_CHECK=1` disables certificate validation for the
-self-signed certificate an HTTPS activation creates. It still encrypts, but it
-drops MITM protection — prefer a trusted or pinned certificate in production.
+### Choosing TLS, per scan
+
+The endpoint wizard's **Transport** step carries the choice, and the same block
+goes to *Test connection* as to the scan, so what a preflight proves is the
+transport the scan will use.
+
+| Choice | What it does |
+| --- | --- |
+| **Connection** | HTTP (5985) or HTTPS/TLS. Choosing TLS defaults the port to **5986**; the port override is there for a non-standard listener. |
+| **Certificate trust** | Only for TLS. *This machine's trust store* validates normally. *CA bundle file* points at a PEM on the Sentro host, for an internal PKI the host does not otherwise trust. *Pinned certificate thumbprint* trusts exactly one certificate, which is the right answer for the self-signed certificate an HTTPS activation creates, because there is no CA to trust. *Do not check* is a lab option and is **refused in production**. |
+| **Authentication** | The install default, NTLM, Kerberos-preferred, or Kerberos-only for this scan. See below. |
+
+Get the thumbprint on the endpoint:
+
+```powershell
+Get-ChildItem Cert:\LocalMachine\My | Format-List Subject, Thumbprint
+```
+
+Paste it however Windows prints it (spaced, colon-separated or run together) and
+either SHA-1 (40 hex) or SHA-256 (64 hex). Anything else is refused rather than
+becoming a pin that can never match.
+
+An install that requires TLS (`DSPM_REQUIRE_WINRM_SSL=1`, which is the default
+when `DSPM_ENV=production`) refuses a cleartext scan **when it is submitted**,
+naming the port to use, rather than failing part-way through it.
+
+`DSPM_WINRM_SSL_SKIP_CA_CHECK=1` is the install-wide version of *Do not check*.
+It still encrypts, but it drops MITM protection entirely, and it is refused in
+production from either direction: the environment variable and the per-scan
+choice. Pin the thumbprint or trust a CA bundle instead.
+
+How a scan was carried is recorded with it. `transport` on the preflight
+response, and in the saved scan's diagnostics, gives the scheme, the port, the
+certificate trust, whether the certificate was validated or pinned, and the
+authentication policy.
 
 ### Kerberos instead of NTLM
 

@@ -587,6 +587,14 @@ class WinRMKerberosUnavailable(RuntimeError):
     """Kerberos was required and this install cannot provide it."""
 
 
+class WinRMTransportRefused(RuntimeError):
+    """The transport this scan asked for is one this install does not permit.
+
+    Separate from a connection failure on purpose: nothing was attempted, and the
+    message says which choice to change (C0.1).
+    """
+
+
 @functools.lru_cache(maxsize=1)
 def _kerberos_transport_available() -> bool:
     """Whether pywinrm can actually negotiate Kerberos here.
@@ -601,6 +609,58 @@ def _kerberos_transport_available() -> bool:
     except Exception:
         return False
     return True
+
+
+def normalize_certificate_thumbprint(value: str) -> str:
+    """A certificate thumbprint as the operator will paste it, in one shape.
+
+    Windows shows a thumbprint spaced (`certutil`), coloured (`Get-ChildItem
+    Cert:\\`) or run together, and an operator will paste any of them. SHA-1 (40
+    hex) is what the Windows certificate tools print; SHA-256 (64 hex) is what a
+    modern tool prints. Anything else is rejected here rather than becoming a pin
+    that silently never matches.
+    """
+
+    cleaned = re.sub(r"[\s:]+", "", str(value or "")).upper()
+    if not cleaned:
+        return ""
+    if not re.fullmatch(r"[0-9A-F]{40}|[0-9A-F]{64}", cleaned):
+        raise ValueError(
+            "A certificate thumbprint must be 40 hex characters (SHA-1) or 64 (SHA-256); "
+            "spaces and colons are ignored."
+        )
+    return cleaned
+
+
+def _fingerprint_for_urllib3(thumbprint: str) -> str:
+    """urllib3 takes the fingerprint as hex, and sizes the algorithm from its length."""
+    return thumbprint.lower()
+
+
+def _pinned_adapter(thumbprint: str):
+    """A requests adapter that trusts exactly one certificate.
+
+    The certificate an HTTPS activation creates is self-signed, so there is no CA
+    to trust and `validate` can only fail. The choices are to stop checking
+    (DSPM_WINRM_SSL_SKIP_CA_CHECK, which drops MITM protection entirely) or to pin
+    the one certificate the operator has seen on the endpoint - which is what this
+    does. urllib3 checks the fingerprint of the presented certificate and refuses
+    the connection when it differs, so a swapped certificate fails closed.
+    """
+
+    from requests.adapters import HTTPAdapter
+
+    fingerprint = _fingerprint_for_urllib3(thumbprint)
+
+    class _PinnedCertificateAdapter(HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            pool_kwargs["assert_fingerprint"] = fingerprint
+            # The pin replaces chain and hostname validation; urllib3 refuses to do
+            # both, and a self-signed certificate has no chain to validate anyway.
+            pool_kwargs["cert_reqs"] = "CERT_NONE"
+            return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    return _PinnedCertificateAdapter()
 
 
 @dataclass(slots=True)
@@ -626,6 +686,13 @@ class WinRMEndpointConfig:
     inspect_archives: bool = False
     hash_files: bool = True
     read_owner: bool = True
+    # C0.1 - how this scan trusts the endpoint's certificate, per scan rather than
+    # per install. Empty means the install default (the system trust store, or the
+    # DSPM_WINRM_* environment settings). See _winrm_cert_validation.
+    ca_bundle: str = ""
+    cert_thumbprint: str = ""
+    kerberos_mode: str = ""
+    insecure_tls: bool = False
 
 
 @dataclass(slots=True)
@@ -1111,7 +1178,10 @@ class WinRMEndpointScanner:
         `connection_transport`.
         """
 
-        mode = os.getenv("DSPM_WINRM_KERBEROS", "0").strip().lower()
+        # C0.1: a scan may choose its own policy; the install-wide variable is the
+        # default for scans that do not. A pilot has one domain-joined host that
+        # must use Kerberos and a workgroup laptop that cannot.
+        mode = (self.config.kerberos_mode or os.getenv("DSPM_WINRM_KERBEROS", "0")).strip().lower()
         if mode in {"", "0", "false", "no", "off"}:
             return ["ntlm"]
         if not _kerberos_transport_available():
@@ -1128,14 +1198,108 @@ class WinRMEndpointScanner:
         return ["kerberos"] if mode in {"1", "true", "yes", "on", "require", "strict"} else ["kerberos", "ntlm"]
 
     def _winrm_cert_validation(self) -> str:
-        # Default 'validate' - no cert-validation bypass. 'ignore' is an explicit,
-        # documented opt-in (DSPM_WINRM_SSL_SKIP_CA_CHECK=1) for the self-signed
-        # cert an HTTPS activation creates on a trusted internal network: it still
-        # encrypts the channel but drops MITM protection, so prefer pinning/CA
-        # trust in production (see the 0.3 runbook).
-        if self.config.use_ssl and os.getenv("DSPM_WINRM_SSL_SKIP_CA_CHECK", "0") == "1":
+        """Whether this connection checks the endpoint's certificate, and how.
+
+        These are pywinrm's own two words, and they do not line up with what an
+        operator chose. 'validate' is the default and covers both the system trust
+        store and a CA bundle. A PINNED thumbprint also returns 'ignore', because
+        urllib3 asserts the fingerprint itself and will not also walk a chain - the
+        certificate is still checked, and transport_summary() reports that as
+        'pinned' so a saved scan never reads as though nothing was checked. The one
+        case where nothing is checked is the explicit opt-in
+        (DSPM_WINRM_SSL_SKIP_CA_CHECK=1, or cert_trust='insecure') for the
+        self-signed certificate an HTTPS activation creates on a trusted internal
+        network: it still encrypts the channel but drops MITM protection entirely.
+
+        C0.1: production refuses that opt-in. An install that has declared itself
+        production has a certificate story - a CA bundle or a pinned thumbprint,
+        both offered per scan - and 'trust anything' is not one of them. Refusing
+        it here rather than at startup catches the operator who exports it later.
+        """
+
+        if not self.config.use_ssl:
+            return "validate"
+        if self.config.cert_thumbprint:
+            # The pin IS the validation; urllib3 checks the fingerprint itself.
+            return "ignore"
+        if self.config.insecure_tls or os.getenv("DSPM_WINRM_SSL_SKIP_CA_CHECK", "0") == "1":
+            if _in_production():
+                raise WinRMTransportRefused(
+                    "Scanning without checking the endpoint's certificate is refused when "
+                    "DSPM_ENV=production (whether asked for by the scan or by "
+                    "DSPM_WINRM_SSL_SKIP_CA_CHECK=1). Pin the endpoint's certificate "
+                    "thumbprint, or point the scan at a CA bundle that signs it."
+                )
             return "ignore"
         return "validate"
+
+    def _winrm_ca_trust_path(self) -> str:
+        """A CA bundle for this scan, if one was chosen.
+
+        pywinrm hands this to requests as `session.verify`, so it replaces the
+        system trust store for this connection only - which is what an internal PKI
+        whose root the scanning host does not trust needs.
+        """
+
+        bundle = str(self.config.ca_bundle or "").strip()
+        if not bundle or not self.config.use_ssl:
+            return ""
+        if not Path(bundle).is_file():
+            raise WinRMTransportRefused(
+                f"The CA bundle for this scan does not exist on the scanning host: {bundle}"
+            )
+        return bundle
+
+    def transport_summary(self) -> dict:
+        """How this scan reaches the endpoint, in the words an operator chose.
+
+        C0.1: preflight and the saved scan both carry it, so 'it scanned' and 'it
+        scanned over TLS with a validated certificate' stop being the same sentence.
+        Never carries a credential - only the transport decisions.
+        """
+
+        try:
+            pywinrm_validation = self._winrm_cert_validation()
+            refused = ""
+        except WinRMTransportRefused as exc:
+            pywinrm_validation, refused = "refused", str(exc)
+        if self.config.cert_thumbprint:
+            trust, validation = "thumbprint", "pinned"
+        elif str(self.config.ca_bundle or "").strip():
+            trust, validation = "ca_bundle", "validate"
+        elif pywinrm_validation == "ignore":
+            # The one case where nothing about the certificate is checked.
+            trust, validation = "insecure", "none"
+        elif pywinrm_validation == "refused":
+            trust, validation = "refused", "refused"
+        else:
+            trust, validation = "system", "validate"
+        summary = {
+            "ssl": bool(self.config.use_ssl),
+            "port": self.config.port or (5986 if self.config.use_ssl else 5985),
+            "scheme": "https" if self.config.use_ssl else "http",
+            "certificate_trust": trust if self.config.use_ssl else "not_applicable",
+            "certificate_validation": validation if self.config.use_ssl else "not_applicable",
+            "certificate_thumbprint": self.config.cert_thumbprint or "",
+            "message_encryption": self._winrm_message_encryption(),
+            "authentication": self._authentication_policy(),
+            "ssl_required": _winrm_ssl_required(),
+        }
+        if refused:
+            summary["refused"] = refused
+        return summary
+
+    def _authentication_policy(self) -> str:
+        """What this scan will accept, before anything is negotiated."""
+        try:
+            offered = self._winrm_transports()
+        except WinRMKerberosUnavailable as exc:
+            return f"unavailable: {exc}"[:200]
+        if offered == ["kerberos"]:
+            return "kerberos_only"
+        if offered[:1] == ["kerberos"]:
+            return "kerberos_preferred"
+        return "ntlm"
 
     def _winrm_message_encryption(self) -> str:
         """Never carry a scan over an unencrypted channel.
@@ -1168,7 +1332,17 @@ class WinRMEndpointScanner:
         }
         if self.config.use_ssl:
             kwargs["server_cert_validation"] = self._winrm_cert_validation()
-        return winrm.Session(self._endpoint_url(connection_host), **kwargs)
+            ca_trust_path = self._winrm_ca_trust_path()
+            if ca_trust_path:
+                kwargs["ca_trust_path"] = ca_trust_path
+        session = winrm.Session(self._endpoint_url(connection_host), **kwargs)
+        if self.config.use_ssl and self.config.cert_thumbprint:
+            # pywinrm has no pinning option, so the pin is mounted on the requests
+            # session underneath it. build_session() is what pywinrm itself calls
+            # before the first request and returns the same session afterwards.
+            underlying = session.protocol.transport.build_session()
+            underlying.mount("https://", _pinned_adapter(self.config.cert_thumbprint))
+        return session
 
     def _session_identity(self) -> tuple[object, ...]:
         """Network/auth fields that determine whether a session is reusable.
@@ -1186,6 +1360,9 @@ class WinRMEndpointScanner:
             bool(self.config.use_ssl),
             self.config.port or (5986 if self.config.use_ssl else 5985),
             self._winrm_cert_validation(),
+            str(self.config.ca_bundle or "").strip(),
+            self.config.cert_thumbprint or "",
+            bool(self.config.insecure_tls),
             self._winrm_message_encryption(),
             tuple(self._winrm_transports()),
         )
@@ -1198,6 +1375,9 @@ class WinRMEndpointScanner:
             "session_negotiations": int(self._session_negotiations),
             "session_failovers": int(self._session_failovers),
             "connection_transport": self.last_connection_transport,
+            # C0.1: what was asked for, beside what was negotiated. A saved scan can
+            # then answer "was this carried over TLS, and was the certificate checked".
+            "transport": self.transport_summary(),
         }
 
     def _run_with_session(self, operation):
@@ -1252,14 +1432,31 @@ class WinRMEndpointScanner:
             raise last_error
         raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
 
+    def _refuse_a_transport_this_install_forbids(self) -> None:
+        """Check the transport rules once, before the connect loop.
+
+        The loop treats an exception as a failed candidate and tries the next host and
+        transport, so a refusal raised from inside it became one failure per candidate
+        and the operator waited through all of them for a verdict that could not change.
+        """
+
+        if not self.config.use_ssl and _winrm_ssl_required():
+            raise WinRMTransportRefused(
+                "This install requires WinRM over TLS and this scan asked for cleartext HTTP. "
+                "Turn on TLS for the scan (port 5986 by default) and choose how its certificate "
+                "is trusted, or set DSPM_REQUIRE_WINRM_SSL=0 to allow HTTP on a trusted network."
+            )
+        # Raises when the trust choice is not allowed here, or the bundle is gone.
+        self._winrm_cert_validation()
+        self._winrm_ca_trust_path()
+
     def _run_ps(self, script: str):
         try:
             import winrm  # noqa: F401 - dependency presence check
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        if not self.config.use_ssl and _winrm_ssl_required():
-            raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
+        self._refuse_a_transport_this_install_forbids()
         return self._run_with_session(lambda session: session.run_ps(script))
 
     def _run_ps_file(self, script: str):
@@ -1268,8 +1465,7 @@ class WinRMEndpointScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        if not self.config.use_ssl and _winrm_ssl_required():
-            raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
+        self._refuse_a_transport_this_install_forbids()
         return self._run_with_session(
             lambda session: self._run_ps_file_with_session(session, script)
         )

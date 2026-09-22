@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -23,7 +24,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.alerts import evaluate_alerts
 from backend.partitioned_scan import (
@@ -146,8 +147,10 @@ from collectors.winrm_endpoint_scanner import (
     WinRMEndpointConfig,
     WinRMEndpointScanner,
     activate_local_winrm,
+    normalize_certificate_thumbprint,
     normalize_endpoint_target_paths,
 )
+from collectors.winrm_endpoint_scanner import _winrm_ssl_required as winrm_ssl_required
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from discovery.incremental import (
     apply_reuse_snapshot,
@@ -673,6 +676,73 @@ class EndpointScanRequest(BaseModel):
     compliance_enabled: bool = False
     compliance_frameworks: list[str] = Field(default_factory=list, max_length=12)
     incremental_enabled: bool = True
+    # C0.1: how this scan reaches the endpoint. The collector has spoken TLS all
+    # along; until these existed the API could not ask for it, so every scan and
+    # preflight the console started was cleartext HTTP on 5985 - and an install
+    # that requires TLS could only fail, mid-scan.
+    use_ssl: bool = Field(default=False, description="Carry WinRM over TLS (port 5986 by default)")
+    port: int | None = Field(default=None, ge=1, le=65535)
+    cert_trust: Literal["system", "ca_bundle", "thumbprint", "insecure"] = Field(
+        default="system",
+        description="How the endpoint's certificate is trusted: the host's trust store, a CA "
+                    "bundle, a pinned thumbprint, or (non-production only) nothing.",
+    )
+    ca_bundle: str = Field(default="", max_length=400)
+    cert_thumbprint: str = Field(default="", max_length=200)
+    kerberos: Literal["", "off", "prefer", "require"] = Field(
+        default="",
+        description="Authentication policy for this scan; empty uses the install default "
+                    "(DSPM_WINRM_KERBEROS). 'require' never falls back to NTLM.",
+    )
+
+    @field_validator("cert_thumbprint")
+    @classmethod
+    def _validate_thumbprint(cls, value: str) -> str:
+        try:
+            return normalize_certificate_thumbprint(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+    @field_validator("ca_bundle")
+    @classmethod
+    def _validate_ca_bundle(cls, value: str) -> str:
+        cleaned = re.sub(r"[\x00-\x1f\x7f]", "", value or "").strip()
+        if cleaned and not Path(cleaned).is_file():
+            raise ValueError(
+                "The CA bundle must be a file on the machine running Sentro; "
+                f"this path is not: {cleaned}"
+            )
+        return cleaned
+
+    @model_validator(mode="after")
+    def _validate_endpoint_transport(self) -> "EndpointScanRequest":
+        """Refuse a transport combination before anything connects.
+
+        Each of these used to surface either as a mid-scan RuntimeError or - worse -
+        as a scan that quietly did something other than what was asked for.
+        """
+
+        if self.cert_trust != "system" and not self.use_ssl:
+            raise ValueError("A certificate trust choice only applies when the scan uses TLS.")
+        if self.cert_trust == "ca_bundle" and not self.ca_bundle:
+            raise ValueError("Choose the CA bundle file that signs the endpoint's certificate.")
+        if self.cert_trust == "thumbprint" and not self.cert_thumbprint:
+            raise ValueError("Paste the endpoint certificate's thumbprint to pin it.")
+        if self.cert_trust != "thumbprint" and self.cert_thumbprint:
+            raise ValueError("A thumbprint was given but the trust choice is not 'thumbprint'.")
+        if self.cert_trust != "ca_bundle" and self.ca_bundle:
+            raise ValueError("A CA bundle was given but the trust choice is not 'ca_bundle'.")
+        if self.cert_trust == "insecure" and IS_PRODUCTION:
+            raise ValueError(
+                "Scanning without checking the endpoint's certificate is refused in production. "
+                "Pin the certificate's thumbprint, or point the scan at a CA bundle that signs it."
+            )
+        if not self.use_ssl and winrm_ssl_required() and not _is_local_endpoint_host(self.host):
+            raise ValueError(
+                "This install requires WinRM over TLS. Turn on TLS for this scan (port 5986 by "
+                "default) and choose how the endpoint's certificate is trusted."
+            )
+        return self
 
     @field_validator("host", "domain", "username", "credential_ref")
     @classmethod
@@ -2048,8 +2118,22 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
         }
     _validate_scan_target(payload.host)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
-    audit(principal.tenant_id, principal.subject, "endpoint.connection.test", {"host": _safe_target_label(payload.host), "target_username": payload.target_username})
-    return scanner.test_connection()
+    transport = scanner.transport_summary()
+    audit(
+        principal.tenant_id,
+        principal.subject,
+        "endpoint.connection.test",
+        {
+            "host": _safe_target_label(payload.host),
+            "target_username": payload.target_username,
+            # C0.1: the audit trail says how the console proposed to reach the
+            # endpoint, not merely that someone tested it.
+            "transport": f"{transport['scheme']}:{transport['port']}",
+            "certificate_trust": transport["certificate_trust"],
+            "authentication": transport["authentication"],
+        },
+    )
+    return {**scanner.test_connection(), "transport": transport}
 
 
 @app.post("/api/endpoint/check-access")
@@ -2075,14 +2159,20 @@ def endpoint_check_access(payload: EndpointScanRequest, principal: Principal = D
         }
     _validate_scan_target(payload.host)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
+    transport = scanner.transport_summary()
     audit(
         principal.tenant_id,
         principal.subject,
         "endpoint.access.check",
-        {"host": _safe_target_label(payload.host), "target_username": payload.target_username},
+        {
+            "host": _safe_target_label(payload.host),
+            "target_username": payload.target_username,
+            "transport": f"{transport['scheme']}:{transport['port']}",
+            "certificate_trust": transport["certificate_trust"],
+        },
     )
     try:
-        return scanner.check_access()
+        return {**scanner.check_access(), "transport": transport}
     except Exception as exc:
         raise _safe_operation_error("Endpoint access check failed", exc) from exc
 
@@ -4365,6 +4455,13 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         inspect_archives=payload.inspect_archives,
         hash_files=payload.read_content,
         read_owner=True,
+        # C0.1: the transport the operator chose, including the default port for it.
+        use_ssl=payload.use_ssl,
+        port=payload.port or (5986 if payload.use_ssl else None),
+        ca_bundle=payload.ca_bundle if payload.cert_trust == "ca_bundle" else "",
+        cert_thumbprint=payload.cert_thumbprint if payload.cert_trust == "thumbprint" else "",
+        insecure_tls=payload.cert_trust == "insecure",
+        kerberos_mode=payload.kerberos,
     )
 
 
