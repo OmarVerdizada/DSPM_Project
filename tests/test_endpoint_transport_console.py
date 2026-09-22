@@ -135,6 +135,41 @@ class TheWizardSendsWhatTheApiAcceptsTest(unittest.TestCase):
         EndpointScanRequest(host="10.10.10.25", **report["payload"])  # accepted
 
 
+class ThePreflightSaysHowItConnectedTest(unittest.TestCase):
+    """C0.1 asks for the effective transport to be surfaced in preflight.
+
+    The API returns it; this is the sentence the operator actually reads. "Connected"
+    reads identically whether the channel was TLS with a checked certificate or
+    cleartext, which is exactly the thing they just chose.
+    """
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_each_transport_is_described_in_words(self) -> None:
+        cases = {
+            "http": {"ssl": False, "scheme": "http", "port": 5985},
+            "system": {"ssl": True, "scheme": "https", "port": 5986, "certificate_trust": "system"},
+            "bundle": {"ssl": True, "scheme": "https", "port": 5986, "certificate_trust": "ca_bundle"},
+            "pinned": {"ssl": True, "scheme": "https", "port": 5986, "certificate_trust": "thumbprint"},
+            "unchecked": {"ssl": True, "scheme": "https", "port": 5986, "certificate_trust": "insecure"},
+        }
+        described = TheWizardSendsWhatTheApiAcceptsTest._transport(self, __describe=cases)["described"]
+        self.assertIn("http:5985", described["http"])
+        self.assertIn("message layer", described["http"], "HTTP is still encrypted, and must say so")
+        self.assertIn("https:5986", described["system"])
+        self.assertIn("checked", described["system"])
+        self.assertIn("pinned", described["pinned"])
+        self.assertIn("CA bundle", described["bundle"])
+        self.assertIn("NOT CHECKED", described["unchecked"],
+                      "the one case where nothing is verified has to be unmissable")
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_a_response_without_a_transport_block_says_nothing_extra(self) -> None:
+        # An older server, or the local-host path, returns no transport: the line
+        # must degrade to what it always said rather than printing "undefined".
+        described = TheWizardSendsWhatTheApiAcceptsTest._transport(self, __describe={"none": None})["described"]
+        self.assertEqual(described["none"], "")
+
+
 class TheWizardHasTheControlsTest(unittest.TestCase):
     """Runs without Node: the markup itself."""
 

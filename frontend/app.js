@@ -1194,6 +1194,26 @@ function readEndpointTransport() {
   };
 }
 
+// How a preflight or a scan was actually carried, for the line an operator reads.
+// "Connected" alone says nothing about whether the channel was TLS or whether the
+// certificate was checked, which is the whole point of the choice they just made.
+function describeEndpointTransport(transport) {
+  if (!transport) {
+    return "";
+  }
+  const where = `${transport.scheme || "http"}:${transport.port || ""}`;
+  if (!transport.ssl) {
+    return `${where}, encrypted at the message layer`;
+  }
+  const trust = {
+    thumbprint: "pinned certificate",
+    ca_bundle: "certificate checked against your CA bundle",
+    system: "certificate checked",
+    insecure: "CERTIFICATE NOT CHECKED",
+  }[transport.certificate_trust] || "certificate checked";
+  return `${where}, ${trust}`;
+}
+
 function syncEndpointTransportFields() {
   const transport = document.querySelector("#endpoint-transport");
   const trust = document.querySelector("#endpoint-cert-trust");
@@ -10610,8 +10630,9 @@ if (endpointTestBtn) endpointTestBtn.addEventListener("click", async () => {
     requireAuth();
     const payload = await ensureEndpointCredential(readEndpointConnectionPayload());
     const result = await api("/api/endpoint/test-connection", payload);
+    const how = describeEndpointTransport(result.transport);
     endpointStatus.textContent = result.connected
-      ? `Connected to ${result.computer || result.host} as ${result.user || "remote user"}.`
+      ? `Connected to ${result.computer || result.host} as ${result.user || "remote user"}${how ? ` over ${how}` : ""}.`
       : `Connection failed: ${result.message}`;
     showToast(result.connected ? "Endpoint connected" : "Endpoint test failed", result.message || result.host, result.connected ? "success" : "danger");
   } catch (error) {

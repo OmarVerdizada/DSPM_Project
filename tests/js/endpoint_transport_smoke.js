@@ -179,7 +179,16 @@ try {
            payload: null, unknown_ids: [...unknownIds], console_errors: consoleErrors }, false);
 }
 
+// What the operator is told after a Test connection, for each transport the API can
+// report back. The wording is the only place the choice becomes visible to them.
+const described = {};
+for (const [name, transport] of Object.entries(fields.__describe || {})) {
+  context.__transport = transport;
+  described[name] = vm.runInContext("describeEndpointTransport(globalThis.__transport)", context, { filename: "describe" });
+}
+
 finish({
+  described,
   payload: JSON.parse(payload),
   trust_disabled: trustDisabled,
   hidden: hiddenFields,
