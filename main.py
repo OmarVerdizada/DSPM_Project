@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -12,6 +13,10 @@ from scripts.logger import get_logger
 from scripts.report import generate_report
 
 logger = get_logger(__name__)
+
+# The supported floor, kept in step with requirements.txt's header and CI's lowest
+# matrix leg by tests/test_supported_python_floor.py.
+MINIMUM_PYTHON = (3, 12)
 
 
 def run_scan(args: argparse.Namespace) -> None:
@@ -158,7 +163,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def require_supported_python(version: tuple[int, int] | None = None) -> None:
+    """Refuse an interpreter below the supported floor, with the reason.
+
+    The floor is where the dependency lock is generated and the suite runs (roadmap
+    M0/Q3). Older interpreters resolve a different tree, so an install that "worked"
+    on one would not be the tree anything was tested against. Said here, once, rather
+    than as an import error three frames deep in a dependency.
+    """
+    running = version or sys.version_info[:2]
+    if running < MINIMUM_PYTHON:
+        floor = ".".join(str(part) for part in MINIMUM_PYTHON)
+        raise SystemExit(
+            f"Sentro needs Python {floor} or newer; this interpreter is "
+            f"{'.'.join(str(part) for part in running)}. Install {floor}+ and reinstall the "
+            f"dependencies with: pip install --require-hashes -r requirements.lock"
+        )
+
+
 def main() -> None:
+    require_supported_python()
     parser = build_parser()
     args = parser.parse_args()
     args.func(args)
