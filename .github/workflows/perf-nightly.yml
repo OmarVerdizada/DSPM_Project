@@ -1,10 +1,11 @@
 name: Performance and scale gates (nightly)
 
 # Track P-F: "fastest" stays measured and defended. The same gate runs in the
-# normal test job (tests/test_perf_gate.py) on every PR — its failure conditions
-# are host-independent ratios (parity, incremental delta-ratio, relative
-# speedups). This nightly run additionally records absolute throughput/latency
-# against a per-host baseline for trend tracking.
+# normal test job (tests/test_perf_gate.py) on every PR, where it gates what a
+# loaded machine cannot change: parity and the incremental delta-ratio. This job
+# owns its runner, so it is the one that gates the two WALL-CLOCK speedups (the
+# per-PR job measures and reports them), and it records absolute
+# throughput/latency against a per-host baseline for trend tracking.
 on:
   schedule:
     - cron: "0 3 * * *" # 03:00 UTC daily

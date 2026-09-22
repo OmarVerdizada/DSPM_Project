@@ -43,7 +43,7 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 
 Install dependencies:
 
-Requires Python 3.10 – 3.13.
+Requires Python 3.12 or newer (tested to 3.14).
 
 ```powershell
 python -m venv .venv
@@ -355,7 +355,7 @@ certification procedures are in
 
 ## Dependencies
 
-**Python 3.10 – 3.13 is required.** The codebase uses PEP 604 union syntax (`X | None`) in Pydantic v2 model annotations, which is evaluated at runtime, so Python 3.9 fails at import time rather than at install time.
+**Python 3.12 or newer is required** (tested to 3.14). `main.py` refuses an older interpreter with the command that installs a supported tree, rather than letting it fail as an import error inside a dependency. The floor is where `requirements.lock` is generated and where the lowest CI leg installs from it: an older interpreter resolves a different dependency tree, so an install that appeared to work would not be the tree anything was tested against.
 
 Requirements are split by purpose:
 

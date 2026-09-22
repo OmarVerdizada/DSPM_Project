@@ -36,6 +36,17 @@ class TheSupportedFloorTest(unittest.TestCase):
     def test_the_running_interpreter_is_supported(self) -> None:
         self.assertIsNone(main.require_supported_python(), "the suite is running on an unsupported interpreter")
 
+    def test_the_readme_states_the_same_floor(self) -> None:
+        """The first statement a human reads, and the one the Q3 test did not cover:
+        the README still said 3.10-3.13 after the floor moved (found in the M0 polish)."""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        stated = re.findall(r"Python (\d+)\.(\d+) or newer", readme)
+        self.assertTrue(stated, "README.md no longer states a supported Python floor")
+        for major, minor in stated:
+            self.assertEqual((int(major), int(minor)), main.MINIMUM_PYTHON)
+        self.assertNotRegex(readme, r"Python 3\.1[01]\s*[-–]\s*3\.1\d",
+                            "README.md still advertises a range that predates the floor")
+
     def test_requirements_documents_the_same_floor(self) -> None:
         header = (ROOT / "requirements.txt").read_text(encoding="utf-8")
         stated = re.search(r"Requires Python (\d+)\.(\d+)", header)
@@ -52,7 +63,7 @@ class TheSupportedFloorTest(unittest.TestCase):
                          "CI's lowest leg must be the floor: it is the leg that installs from the lock")
 
         drift = re.search(r"lock must be generated on the FLOOR Python.*?python-version: \"(\d+\.\d+)\"",
-                          workflow, re.S)
+                          workflow, re.DOTALL)
         self.assertIsNotNone(drift, "the lock-drift job no longer pins a Python version")
         self.assertEqual(tuple(int(part) for part in drift.group(1).split(".")), main.MINIMUM_PYTHON,
                          "the drift gate regenerates the lock on a different version than the floor")
