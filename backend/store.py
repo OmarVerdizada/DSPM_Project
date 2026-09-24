@@ -8911,15 +8911,49 @@ def create_user(username: str, password_hash: str, role: str, tenant_id: str = "
 
 def get_user(username: str) -> dict | None:
     with _connect() as conn:
-        row = conn.execute(
-            """
-            SELECT username, password_hash, role, tenant_id, full_name, is_active,
-                   created_at, updated_at, last_login_at, avatar
-            FROM users
-            WHERE username = ?
-            """,
-            (username,),
-        ).fetchone()
+        return _read_user(conn, username)
+
+
+def token_state(jti: str, username: str) -> tuple[bool, dict | None]:
+    """Whether a token is revoked, and the account it names - in ONE connection (C1).
+
+    verify_token needs both on every request. A token revoked by another backend has to
+    be refused at once, so the revocation cannot come from a per-process memory of "not
+    revoked"; asking the database separately would cost a second connection per request
+    (3.7 ms measured on SQLite, most of it opening the connection). Asked together with
+    the user row verify_token was already reading, it costs one indexed lookup.
+    """
+    if not jti:
+        return True, None
+    ttl = _revocation_cache_seconds()
+    if ttl:
+        with _revocation_cache_lock:
+            cached = _revocation_cache.get(jti)
+            if cached and cached[1] and time.monotonic() - cached[0] <= ttl:
+                return True, None
+    with _connect() as conn:
+        revoked = conn.execute(
+            "SELECT 1 FROM revoked_tokens WHERE jti = ? AND expires_at >= ?", (jti, int(time.time()))
+        ).fetchone() is not None
+        user = None if revoked else _read_user(conn, username)
+    if revoked and ttl:
+        with _revocation_cache_lock:
+            if len(_revocation_cache) >= _REVOCATION_CACHE_MAX:
+                _revocation_cache.clear()
+            _revocation_cache[jti] = (time.monotonic(), True)
+    return revoked, user
+
+
+def _read_user(conn, username: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT username, password_hash, role, tenant_id, full_name, is_active,
+               created_at, updated_at, last_login_at, avatar
+        FROM users
+        WHERE username = ?
+        """,
+        (username,),
+    ).fetchone()
     if row is None:
         return None
     return {
@@ -9396,6 +9430,15 @@ def _forget_revocation(jti: str = "") -> None:
 
 
 def is_token_revoked(jti: str) -> bool:
+    """Whether a token has been revoked - by this backend or any other.
+
+    C1: only a REVOKED answer is remembered. A revocation never comes undone, so caching
+    it is safe; "not revoked" is exactly the answer another backend can make wrong at any
+    moment - a sign-out, a password change - and remembering it kept a revoked token
+    working on every backend but the one that revoked it, for the length of the cache.
+    That is one primary-key lookup per authenticated request, and correctness across
+    backends does not come cheaper.
+    """
     if not jti:
         return True
     ttl = _revocation_cache_seconds()
@@ -9403,8 +9446,8 @@ def is_token_revoked(jti: str) -> bool:
     if ttl:
         with _revocation_cache_lock:
             cached = _revocation_cache.get(jti)
-            if cached and now_mono - cached[0] <= ttl:
-                return cached[1]
+            if cached and cached[1] and now_mono - cached[0] <= ttl:
+                return True
     with _lock:
         with _connect() as conn:
             row = conn.execute(
@@ -9412,11 +9455,11 @@ def is_token_revoked(jti: str) -> bool:
                 (jti, int(time.time())),
             ).fetchone()
     revoked = row is not None
-    if ttl:
+    if ttl and revoked:
         with _revocation_cache_lock:
             if len(_revocation_cache) >= _REVOCATION_CACHE_MAX:
                 _revocation_cache.clear()
-            _revocation_cache[jti] = (now_mono, revoked)
+            _revocation_cache[jti] = (now_mono, True)
     return revoked
 
 

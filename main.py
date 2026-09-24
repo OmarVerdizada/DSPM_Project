@@ -54,13 +54,12 @@ def run_scan(args: argparse.Namespace) -> None:
 
 # Caches that live in one process and are invalidated by that same process.
 # With several workers each keeps its own copy, so a write in one is invisible
-# to the others until the entry expires. Two of these are only a staleness
-# question; the revocation one is a security question, because a token revoked
-# in worker A would still be accepted by worker B for the length of its TTL.
-# Asking for workers therefore turns them off rather than leaving the operator
-# to read a warning.
+# to the others until the entry expires - a staleness question, which asking for
+# workers answers by turning them off rather than leaving the operator to read a
+# warning. Token revocation is no longer among them: since C1 only a "revoked"
+# answer is cached, so no worker - and no separately started server, which this
+# switch never reached - can go on accepting a token another one revoked.
 _PER_PROCESS_CACHE_SETTINGS = (
-    ("DSPM_TOKEN_REVOCATION_CACHE_SECONDS", "a revoked token would outlive its revocation in the other workers"),
     ("DSPM_TENANT_EXISTS_CACHE_SECONDS", "a deleted tenant would keep resolving in the other workers"),
     ("DSPM_READINESS_CACHE_SECONDS", "a completed backfill would not be seen by the other workers"),
     ("DSPM_INVENTORY_COUNT_CACHE_SECONDS", "a saved scan would not clear the other workers' counts"),

@@ -284,6 +284,10 @@ removing the boot fan-out:
 - Token revocation is cached for 30 s in-process and cleared when this process
   revokes. A multi-worker deployment does not share that cache, so set
   `DSPM_TOKEN_REVOCATION_CACHE_SECONDS=0` there.
+  *(Superseded by C1, 2026-09-24: only a "revoked" answer is cached now, and the
+  "not revoked" one is read in the same connection as the account row, so no
+  deployment needs the setting and a request still costs one connection. Two
+  real servers on one database prove it - `tests/test_two_backends.py`.)*
 - `assets.reason_count` / `assets.dlp_count` are new columns, filled for
   existing rows by `scripts/backfill_asset_detail_counts.py` (run: 1,369 rows).
   The blob fallback stays for anything the backfill has not reached.
@@ -541,6 +545,11 @@ hard-coded 30-second TTL and no off-switch; it has one now. `--reload` with
 `--workers` is refused rather than silently ignoring one of them, and asking
 for workers on SQLite says plainly that readers scale while writers still
 serialise across processes.
+
+*(C1, 2026-09-24: the revocation cache has left that list. Turning it off reached
+only the workers of one `serve` - two servers started separately behind a load
+balancer each kept their own, and a token signed out on one went on working on
+the other. Caching only "revoked" closes it everywhere.)*
 
 **3.2 Row virtualisation — declined, and the reason is a number.**
 

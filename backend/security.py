@@ -27,12 +27,12 @@ from backend.store import (
     forget_session,
     get_active_api_key,
     get_user,
-    is_token_revoked,
     mark_user_login,
     record_session,
     revoke_refresh_family,
     revoke_token_jti,
     role_exists,
+    token_state,
     session_last_seen,
     tenant_exists,
     touch_api_key,
@@ -447,12 +447,15 @@ def verify_token(token: str) -> Principal:
         if exp < int(time.time()):
             raise ValueError("expired token")
         jti = str(claims.get("jti") or "")
-        if is_token_revoked(jti):
+        subject = sanitize_username(str(claims.get("sub") or ""))
+        # C1: revocation and the account in one read, from the database every time a
+        # token is not already known to be revoked - so a sign-out or a password change
+        # on another backend is refused here at once (store.token_state).
+        revoked, user = token_state(jti, subject)
+        if revoked:
             raise ValueError("revoked token")
         if not _touch_session(jti, exp):
             raise ValueError("idle session")
-        subject = sanitize_username(str(claims.get("sub") or ""))
-        user = get_user(subject)
         if not user or not user.get("is_active"):
             raise ValueError("inactive user")
         role = str(user.get("role") or claims.get("role") or "viewer")
@@ -707,10 +710,10 @@ def _download_account_still_holds(claims: dict) -> bool:
         # itself; single use and the five-minute life are its bounds.
         return True
     session_id = str(claims.get("sid") or "")
-    if not session_id or is_token_revoked(session_id):
+    if not session_id:
         return False
-    user = get_user(sanitize_username(subject))
-    if not user or not user.get("is_active"):
+    revoked, user = token_state(session_id, sanitize_username(subject))
+    if revoked or not user or not user.get("is_active"):
         return False
     if str(user.get("role") or "") != str(claims.get("role") or ""):
         return False

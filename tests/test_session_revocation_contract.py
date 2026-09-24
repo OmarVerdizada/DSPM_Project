@@ -156,6 +156,36 @@ class SigningOutTest(_SessionCase):
         store._forget_revocation()  # as if another process, or after the cache expired
         self.assertTrue(store.is_token_revoked(self._jti(token)))
 
+    def test_a_revocation_another_backend_made_stops_the_token_here_at_once(self) -> None:
+        # C1: this process accepted the token a moment ago, and the revocation is
+        # written by someone else - straight to the table, so nothing here is told.
+        # Remembering "not revoked" kept such a token working for the length of the
+        # cache (tests/test_two_backends.py runs the same case on two real servers).
+        token = self._token()
+        security.verify_token(token)
+        security.verify_token(token)
+        with store._connect() as conn:
+            conn.execute("INSERT INTO revoked_tokens (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
+                         (self._jti(token), int(time.time()) + 600, "elsewhere"))
+        self.assertRefused(token)
+
+    def test_an_authenticated_request_costs_one_connection(self) -> None:
+        # Asking the database every time is what makes the case above correct; doing
+        # it in the connection that reads the account keeps it at no extra cost. On
+        # SQLite a connection is most of the price - 3.7 ms each, measured.
+        token = self._token()
+        security.verify_token(token)          # first sight reads the session row too
+        opened = []
+        real = store._connect
+
+        def counting():
+            opened.append(1)
+            return real()
+
+        with mock.patch.object(store, "_connect", counting):
+            self.assertEqual(security.verify_token(token).subject, self.user)
+        self.assertEqual(len(opened), 1, "revocation and account in one read")
+
 
 class TheIdleTimeoutTest(_SessionCase):
 

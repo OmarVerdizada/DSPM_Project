@@ -79,6 +79,11 @@ class PerRequestWorkTests(unittest.TestCase):
         self.assertNotIn("DELETE", check)
         # Expiry is a property of the row, so the query says so.
         self.assertIn("expires_at >= ?", check)
+        # C1: verify_token asks through token_state, which is held to the same rule.
+        state = source[source.index("def token_state("):]
+        state = state[:state.index("\ndef ", 10)]
+        self.assertNotIn("DELETE", state)
+        self.assertIn("expires_at >= ?", state)
         # ...and revoking clears what this process has remembered.
         revoke = source[source.index("def revoke_token_jti("):]
         self.assertIn("_forget_revocation()", revoke[:revoke.index("\ndef ", 10)])
@@ -377,8 +382,7 @@ class MultiWorkerSafetyTests(unittest.TestCase):
 
     def test_asking_for_workers_turns_the_per_process_caches_off(self) -> None:
         self.assertIn("_PER_PROCESS_CACHE_SETTINGS", self.MAIN)
-        for setting in ("DSPM_TOKEN_REVOCATION_CACHE_SECONDS",
-                        "DSPM_TENANT_EXISTS_CACHE_SECONDS",
+        for setting in ("DSPM_TENANT_EXISTS_CACHE_SECONDS",
                         "DSPM_READINESS_CACHE_SECONDS",
                         "DSPM_INVENTORY_COUNT_CACHE_SECONDS",
                         "DSPM_INVENTORY_FACETS_CACHE_SECONDS"):
@@ -389,7 +393,7 @@ class MultiWorkerSafetyTests(unittest.TestCase):
         # ...and every one of them has to be honoured by the store, or the
         # switch is decoration.
         store_source = Path("backend/store.py").read_text(encoding="utf-8")
-        for reader in ("_revocation_cache_seconds", "_tenant_exists_cache_seconds",
+        for reader in ("_tenant_exists_cache_seconds",
                        "_readiness_cache_seconds", "_inventory_count_cache_seconds",
                        "_inventory_facets_cache_seconds"):
             self.assertIn("def " + reader + "(", store_source, reader)
