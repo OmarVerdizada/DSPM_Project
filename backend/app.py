@@ -363,6 +363,12 @@ async def app_lifespan(_: FastAPI):
     from backend.vault import validate_vault_key
 
     validate_vault_key()
+    # P4: one idle connection for the life of the server, so a request's own connection
+    # is never the last one to close - which on SQLite checkpointed the WAL every time.
+    with suppress(Exception):
+        from backend import db as _db
+
+        _db.hold_sqlite_open(store_module.DB_PATH)
     # B5: production never writes a plaintext dump of every scanned file. The switch
     # exists for an install with an external reader; enabling it in production is a
     # configuration mistake, and startup says so rather than filling data/ with previews.
@@ -470,11 +476,16 @@ async def app_lifespan(_: FastAPI):
             from backend.search import stop_search_reconciler
 
             stop_search_reconciler()
-        # Close the DB connection pool cleanly on shutdown (no-op on SQLite).
+        # Close the DB connection pool cleanly on shutdown (no-op on SQLite), and the
+        # held SQLite connection last, after optimize and every thread above.
         with suppress(Exception):
             from backend import db
 
             db.close_pool()
+        with suppress(Exception):
+            from backend import db
+
+            db.release_sqlite_anchor()
 
 
 app = FastAPI(

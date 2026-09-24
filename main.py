@@ -109,13 +109,19 @@ def work(args: argparse.Namespace) -> None:
     from backend.partition_worker import default_worker_id, run_worker
     from backend.work_queue import work_queue_from_env
 
+    from backend import db, store
+
     queue = work_queue_from_env()
     worker_id = args.worker_id or default_worker_id()
     logger.info("Partition worker %s is taking work from the %s", worker_id, type(queue).__name__)
+    # P4: a worker polls the ledger all day; see db.hold_sqlite_open.
+    db.hold_sqlite_open(store.DB_PATH)
     try:
         run_worker(queue, rebuild_scan_config, worker_id=worker_id)
     except KeyboardInterrupt:
         logger.info("Partition worker %s stopped", worker_id)
+    finally:
+        db.release_sqlite_anchor()
 
 
 def audit_verify(args: argparse.Namespace) -> None:

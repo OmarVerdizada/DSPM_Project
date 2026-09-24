@@ -561,6 +561,72 @@ def _apply_sqlite_pragmas(conn) -> None:
     mmap_bytes = int(_env_number("DSPM_SQLITE_MMAP_MB", 256, 0, 4096, int)) * 1024 * 1024
     if mmap_bytes:
         conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+    # The WAL is no longer deleted between requests while a server holds the file open
+    # (hold_sqlite_open), so a checkpoint that resets it truncates it back to this -
+    # otherwise it would stay at the size of the largest transaction since startup.
+    wal_limit = int(_env_number("DSPM_SQLITE_WAL_LIMIT_MB", 64, 1, 4096, int)) * 1024 * 1024
+    conn.execute(f"PRAGMA journal_size_limit = {wal_limit}")
+
+
+# One idle connection a server process holds for its whole life (P4, 2026-09-24).
+# Every store call opens its own connection, so without it every close is the LAST
+# connection to a WAL database - and SQLite then checkpoints the WAL and deletes it,
+# and the next open builds the WAL index again. Measured on this host: 10 of the 17 ms
+# an audit write cost was that close, and verify_token went from 3.3 to 1.75 ms with
+# one connection held. The held connection runs no transaction, so it blocks no
+# checkpoint and no writer; it only keeps the file's shared lock, which is what tells
+# a closing connection it is not the last.
+_sqlite_anchor: tuple[str, sqlite3.Connection] | None = None
+_sqlite_anchor_lock = threading.Lock()
+
+
+def _hold_open_enabled() -> bool:
+    return os.getenv("DSPM_SQLITE_HOLD_OPEN", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def hold_sqlite_open(sqlite_path: Path) -> bool:
+    """Hold `sqlite_path` open until release_sqlite_anchor(); True when it is held.
+
+    For a server's lifespan - not at import, so tools and tests that import the store
+    hold nothing. WAL only: under a rollback journal a close does no checkpoint to save.
+    A second call for another path releases the first; the process holds at most one.
+    """
+    global _sqlite_anchor
+    if is_postgres() or not _hold_open_enabled() or _sqlite_journal_mode() != "wal":
+        return False
+    path = str(sqlite_path)
+    with _sqlite_anchor_lock:
+        if _sqlite_anchor is not None and _sqlite_anchor[0] == path:
+            return True
+        _release_sqlite_anchor_locked()
+        try:
+            conn = sqlite3.connect(path, check_same_thread=False)
+            # A connection that has never read the file holds no lock on it.
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        except sqlite3.DatabaseError:
+            return False
+        _sqlite_anchor = (path, conn)
+        return True
+
+
+def held_sqlite_path() -> str | None:
+    return _sqlite_anchor[0] if _sqlite_anchor is not None else None
+
+
+def release_sqlite_anchor() -> None:
+    with _sqlite_anchor_lock:
+        _release_sqlite_anchor_locked()
+
+
+def _release_sqlite_anchor_locked() -> None:
+    global _sqlite_anchor
+    if _sqlite_anchor is not None:
+        _, conn = _sqlite_anchor
+        _sqlite_anchor = None
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
 
 
 def optimize_sqlite(sqlite_path: Path) -> None:
