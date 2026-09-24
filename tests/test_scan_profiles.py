@@ -88,7 +88,7 @@ class ScanProfileApiTests(unittest.TestCase):
         # The principal's tenant comes from the USER RECORD, not the token
         # claim, so isolation needs a real admin in the other tenant.
         other_admin = f"padmin-{uuid4().hex[:6]}"
-        create_user(other_admin, hash_password("x9!Profile"), "admin", tenant)
+        create_user(other_admin, hash_password("x9!Profile-Kestrel"), "admin", tenant)
         self.addCleanup(delete_user, other_admin)
         tenant_headers = {"Authorization": f"Bearer {create_token(other_admin, 'admin', tenant)}"}
         response = self.client.post(

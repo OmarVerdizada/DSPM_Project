@@ -126,7 +126,7 @@ class TenantPivotTests(unittest.TestCase):
         store.create_tenant(home, "Tenant A")
         store.create_tenant(victim, "Victim Tenant")
         uname = f"tadmin{uuid4().hex[:6]}"
-        store.create_user(uname, hash_password("Password123"), "admin", home, "Tenant A Admin")
+        store.create_user(uname, hash_password("Kestrel-Tenant-4821"), "admin", home, "Tenant A Admin")
 
         # a tenant-scoped admin sets X-Tenant-ID to another tenant -> ignored
         principal = require_principal(_creds(create_token(uname, "admin", home)), None, victim)

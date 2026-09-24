@@ -5,6 +5,7 @@ import functools
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -37,8 +38,11 @@ from backend.store import (
     update_user_password,
     update_user_role,
 )
+from backend.breached_passwords import password_is_breached
 from backend.store import issue_refresh_token as store_issue_refresh_token
 
+
+logger = logging.getLogger(__name__)
 
 ROLES = {"admin": 3, "analyst": 2, "viewer": 1}
 ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
@@ -129,32 +133,107 @@ class Principal:
     session_id: str = ""
 
 
-def validate_password_strength(password: str) -> None:
-    if len(password or "") < 8:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters")
+# C8: the policy a NEW password is held to. Existing passwords keep working at sign-in
+# whatever they are; this only decides what may be chosen from now on.
+PASSWORD_MIN_LENGTH_FLOOR = 8
+
+
+def password_min_length() -> int:
+    """Twelve by default. An operator may raise it, and may lower it to eight - never
+    below, which is where it already stood."""
+    try:
+        configured = int(os.getenv("DSPM_PASSWORD_MIN_LENGTH", "12"))
+    except ValueError:
+        configured = 12
+    return max(PASSWORD_MIN_LENGTH_FLOOR, min(configured, 64))
+
+
+def _refuse_password(reason: str) -> None:
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
+
+
+def validate_password_strength(password: str, *, username: str = "") -> None:
+    """Refuse a new password that is short, trivial, personal or known to be bad.
+
+    C8 raised the floor from eight characters to twelve and added the refusals that do
+    the most against real guessing: a password on the common/breached list (see
+    backend.breached_passwords - checked offline), one made mostly of one character,
+    and one that contains the account's own name. The letters-and-digits rule stays,
+    so nothing that was refused before is accepted now.
+    """
+
+    minimum = password_min_length()
+    if len(password or "") < minimum:
+        _refuse_password(f"Password must be at least {minimum} characters")
     if len(password) > 200:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password is too long")
+        _refuse_password("Password is too long")
     if not any(ch.isalpha() for ch in password) or not any(ch.isdigit() for ch in password):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must include letters and numbers")
+        _refuse_password("Password must include letters and numbers")
+    if len(set(password.lower())) < 4:
+        _refuse_password("Password is too repetitive")
+    name = str(username or "").strip().lower()
+    if len(name) >= 3 and name in password.lower():
+        _refuse_password("Password must not contain the username")
+    if password_is_breached(password):
+        _refuse_password("This password is too common or has appeared in a breach. Choose another.")
 
 
-def hash_password(password: str) -> str:
-    validate_password_strength(password)
+def pbkdf2_rounds() -> int:
+    """C8 raised the default work factor from 310,000 to 600,000 (OWASP's current figure
+    for PBKDF2-HMAC-SHA256). Clamped as before: an operator cannot weaken the install
+    below 210,000 or make a sign-in take seconds above 1,200,000."""
+    try:
+        rounds = int(os.getenv("DSPM_PBKDF2_ROUNDS", "600000"))
+    except ValueError:
+        rounds = 600_000
+    return max(210_000, min(rounds, 1_200_000))
+
+
+def _pbkdf2_hash(password: str, rounds: int | None = None) -> str:
     salt = secrets.token_hex(16)
-    rounds = int(os.getenv("DSPM_PBKDF2_ROUNDS", "310000"))
-    rounds = max(210_000, min(rounds, 1_200_000))
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), rounds).hex()
-    return f"pbkdf2_sha256${rounds}${salt}${digest}"
+    work = rounds or pbkdf2_rounds()
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), work).hex()
+    return f"pbkdf2_sha256${work}${salt}${digest}"
+
+
+def hash_password(password: str, *, username: str = "") -> str:
+    validate_password_strength(password, username=username)
+    return _pbkdf2_hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
     if password_hash.startswith("pbkdf2_sha256$"):
-        _, rounds, salt, digest = password_hash.split("$", 3)
-        candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(rounds)).hex()
+        # C8: a stored hash that does not parse - cut short by a bad restore, edited by
+        # hand - used to raise out of the sign-in path as a 500. It is a failed sign-in.
+        try:
+            _, rounds, salt, digest = password_hash.split("$", 3)
+            work = int(rounds)
+            if not salt or not digest or work <= 0:
+                return False
+            candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), work).hex()
+        except (ValueError, OverflowError):
+            logger.warning("A stored password hash could not be parsed; the sign-in is refused")
+            return False
         return hmac.compare_digest(candidate, digest)
     if os.getenv("DSPM_ALLOW_LEGACY_SHA256_PASSWORDS", "0") == "1":
         return hmac.compare_digest(hashlib.sha256(password.encode()).hexdigest(), password_hash)
     return False
+
+
+def password_needs_rehash(password_hash: str) -> bool:
+    """Whether a hash that just verified was made with weaker parameters than now.
+
+    A work-factor increase would otherwise only protect passwords set after it. The
+    moment a user signs in is the only moment the plaintext is available to re-hash, so
+    that is when it happens - silently, and without signing anyone out.
+    """
+
+    if not password_hash.startswith("pbkdf2_sha256$"):
+        return True  # legacy SHA-256, which only verifies at all behind its opt-in
+    try:
+        return int(password_hash.split("$", 3)[1]) < pbkdf2_rounds()
+    except (ValueError, IndexError):
+        return False
 
 
 def sanitize_username(username: str) -> str:
@@ -209,7 +288,7 @@ def ensure_default_admin() -> None:
         password = configured_password or _dev_admin_password()
         create_user(
             username,
-            hash_password(password),
+            _admin_password_hash(password),
             "admin",
             "default",
             "Local Administrator",
@@ -222,7 +301,19 @@ def ensure_default_admin() -> None:
     if user.get("role") != "admin" or user.get("tenant_id") != "default":
         update_user_role(username, "admin", "default")
     if configured_password and not verify_password(configured_password, user["password_hash"]):
-        update_user_password(username, hash_password(configured_password))
+        update_user_password(username, _admin_password_hash(configured_password))
+
+
+def _admin_password_hash(password: str) -> str:
+    """The built-in admin's password is chosen in an environment variable, so a policy
+    refusal surfaces at startup - where an HTTP 400 means nothing. Say what to change."""
+    try:
+        return hash_password(password, username="admin")
+    except HTTPException as exc:
+        raise RuntimeError(
+            f"The built-in admin password (DSPM_ADMIN_PASSWORD or DSPM_DEV_ADMIN_PASSWORD) "
+            f"does not meet the password policy: {exc.detail}."
+        ) from None
 
 
 def _b64url(data: bytes) -> str:
@@ -463,6 +554,13 @@ def authenticate_user(username: str, password: str) -> Principal | None:
         return None
     if not verify_password(password, user["password_hash"]):
         return None
+    if password_needs_rehash(user["password_hash"]):
+        # C8: bring the stored hash up to today's work factor while the plaintext is in
+        # hand. Deliberately no policy check - the user proved they know this password,
+        # and refusing their sign-in because the policy has since tightened would lock
+        # accounts out rather than protect them.
+        update_user_password(user["username"], _pbkdf2_hash(password))
+        logger.info("Password hash upgraded to the current work factor for %s", user["username"])
     mark_user_login(user["username"])
     return Principal(user["username"], user["role"], user["tenant_id"])
 

@@ -486,8 +486,8 @@ passwordForm.addEventListener("submit", async (event) => {
   const currentPassword = String(data.get("current_password") || "");
   const newPassword = String(data.get("new_password") || "");
   const confirmPassword = String(data.get("confirm_password") || "");
-  if (newPassword.length < 8) {
-    setStatus(passwordStatus, "Password must be at least 8 characters.");
+  if (newPassword.length < 12) {
+    setStatus(passwordStatus, "Password must be at least 12 characters.");
     return;
   }
   if (newPassword !== confirmPassword) {

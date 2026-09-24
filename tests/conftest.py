@@ -60,6 +60,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "DSPM_SCAN_CACHE_DIR",
         str(pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-scan-cache-")).resolve()),
     )
+    # C8 raised the production work factor to 600,000 PBKDF2 rounds (~0.34 s a hash on
+    # this host). The suite hashes hundreds of fixture passwords, and none of those
+    # tests is about the work factor, so it runs at the clamp floor - faster than the
+    # suite ran before C8. The tests that ARE about the work factor set it themselves.
+    os.environ.setdefault("DSPM_PBKDF2_ROUNDS", "210000")
 
     if db.is_postgres() and os.getenv("DSPM_PG_TEST_RESET") != "1":
         pytest.exit(

@@ -36,8 +36,8 @@ registerForm.addEventListener("submit", async (event) => {
     setRegisterStatus("Register failed: tenant ID and registration code are required.");
     return;
   }
-  if (password.length < 8) {
-    setRegisterStatus("Register failed: password must be at least 8 characters.");
+  if (password.length < 12) {
+    setRegisterStatus("Register failed: password must be at least 12 characters.");
     return;
   }
   if (password !== confirmPassword) {

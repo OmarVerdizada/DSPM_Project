@@ -224,7 +224,7 @@ class ThroughTheRoutesTest(_SessionCase):
 
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
-        store.create_user("admin-two", security.hash_password("an-admin-1"), "admin", self.tenant)
+        store.create_user("admin-two", security.hash_password("an-admin-kestrel-1"), "admin", self.tenant)
 
     def _auth(self, username: str) -> tuple[dict, str]:
         token = security.create_token(username, "admin", self.tenant)
@@ -237,7 +237,7 @@ class ThroughTheRoutesTest(_SessionCase):
 
         response = self.client.post(
             "/api/auth/change-password",
-            json={"current_password": "an-admin-1", "new_password": "a-new-one-2"},
+            json={"current_password": "an-admin-kestrel-1", "new_password": "a-new-kestrel-2"},
             headers=headers,
         )
 
@@ -248,18 +248,18 @@ class ThroughTheRoutesTest(_SessionCase):
         self._restart()
         self.assertEqual(self.client.get("/api/profile", headers=headers).status_code, 401)
         self.assertTrue(store.is_token_revoked(self._jti(other)), "every session, not only this one")
-        self.assertIsNotNone(security.authenticate_user("admin-two", "a-new-one-2"))
+        self.assertIsNotNone(security.authenticate_user("admin-two", "a-new-kestrel-2"))
 
     def test_a_wrong_current_password_changes_and_ends_nothing(self) -> None:
         headers, _ = self._auth("admin-two")
         response = self.client.post(
             "/api/auth/change-password",
-            json={"current_password": "not-the-one-1", "new_password": "a-new-one-2"},
+            json={"current_password": "not-the-one-1", "new_password": "a-new-kestrel-2"},
             headers=headers,
         )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(self.client.get("/api/profile", headers=headers).status_code, 200)
-        self.assertIsNotNone(security.authenticate_user("admin-two", "an-admin-1"))
+        self.assertIsNotNone(security.authenticate_user("admin-two", "an-admin-kestrel-1"))
 
     def test_an_admin_reset_ends_the_targets_sessions_and_not_their_own(self) -> None:
         headers, _admin_token = self._auth("admin-two")
@@ -285,7 +285,7 @@ class ThroughTheRoutesTest(_SessionCase):
         headers, _ = self._auth("admin-two")
         self.client.post(
             "/api/auth/change-password",
-            json={"current_password": "an-admin-1", "new_password": "a-new-one-2"},
+            json={"current_password": "an-admin-kestrel-1", "new_password": "a-new-kestrel-2"},
             headers=headers,
         )
         events = [e for e in store.read_audit_log(self.tenant, 50) if e["action"] == "user.password_changed"]
@@ -320,7 +320,7 @@ class TheUpgradeReachesAnOlderInstallTest(unittest.TestCase):
                     ).fetchone()["n"]
                     # ... and the upgrade is idempotent, which is what a re-run after a
                     # failed deploy depends on.
-                    store.create_user("after-upgrade", security.hash_password("a-pass-1"), "viewer", "default")
+                    store.create_user("after-upgrade", security.hash_password("a-pass-kestrel-1"), "viewer", "default")
                 migrations.upgrade()
             finally:
                 store.DB_PATH = original

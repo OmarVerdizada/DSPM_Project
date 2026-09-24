@@ -1627,7 +1627,7 @@ def register(payload: RegisterRequest) -> dict:
         raise HTTPException(status_code=409, detail="Registration failed")
     role = invite["role"] if invite else "viewer"
     pending = bool(invite and invite["requires_approval"])
-    create_user(username, hash_password(payload.password), role, tenant_id, payload.full_name.strip())
+    create_user(username, hash_password(payload.password, username=username), role, tenant_id, payload.full_name.strip())
     if pending:
         update_user_active(username, False)  # M5: admin-approval - inactive until an admin activates
     detail = {"role": role, "source": "invite" if invite else "registration_code"}
@@ -1644,7 +1644,7 @@ def change_password(payload: PasswordChangeRequest, principal: Principal = Depen
     authenticated = authenticate_user(principal.subject, payload.current_password)
     if authenticated is None:
         raise HTTPException(status_code=401, detail="Current password is incorrect")
-    update_user_password(principal.subject, hash_password(payload.new_password))
+    update_user_password(principal.subject, hash_password(payload.new_password, username=principal.subject))
     # C1: changing a password after a compromise is only worth doing if it signs
     # out whoever had the old one - everywhere, including this caller's own
     # session and any this process never saw.
@@ -1754,7 +1754,7 @@ def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends
         raise HTTPException(status_code=400, detail="Tenant does not exist")
     if get_user(username):
         raise HTTPException(status_code=409, detail="Username already exists")
-    user = create_user(username, hash_password(payload.password), payload.role, tenant_id, payload.full_name.strip())
+    user = create_user(username, hash_password(payload.password, username=username), payload.role, tenant_id, payload.full_name.strip())
     audit(principal.tenant_id, principal.subject, "user.created", {"username": username, "role": payload.role, "tenant_id": tenant_id})
     return {"user": _public_user(user)}
 
@@ -1794,7 +1794,7 @@ def admin_reset_password(username: str, payload: PasswordResetRequest, principal
         raise HTTPException(status_code=404, detail="User not found")
     if not _can_manage_tenant(principal, current_user["tenant_id"]):
         raise HTTPException(status_code=403, detail="Tenant access denied")
-    user = update_user_password(target, hash_password(payload.password))
+    user = update_user_password(target, hash_password(payload.password, username=target))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     # C1: an administrator resetting a password is usually doing it because the

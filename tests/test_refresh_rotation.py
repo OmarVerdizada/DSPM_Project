@@ -253,7 +253,7 @@ class EndingASessionEndsTheChainTest(_RefreshCase):
         headers = {"Authorization": f"Bearer {body['access_token']}"}
         response = self.client.post(
             "/api/auth/change-password",
-            json={"current_password": PASSWORD, "new_password": "a-new-one-2"},
+            json={"current_password": PASSWORD, "new_password": "a-new-kestrel-2"},
             headers=headers,
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -262,7 +262,7 @@ class EndingASessionEndsTheChainTest(_RefreshCase):
         self.assertEqual(self.client.post("/api/auth/refresh").status_code, 401)
 
     def test_an_admin_reset_stops_it_too(self) -> None:
-        store.create_user("admin-two", security.hash_password("an-admin-1"), "admin", TENANT)
+        store.create_user("admin-two", security.hash_password("an-admin-kestrel-1"), "admin", TENANT)
         victim = self._login()
         admin_headers = {"Authorization": f"Bearer {security.create_token('admin-two', 'admin', TENANT)}"}
 

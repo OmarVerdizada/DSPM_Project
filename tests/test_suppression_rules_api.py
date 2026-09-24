@@ -90,7 +90,7 @@ class TheRuleEndpointsTest(unittest.TestCase):
     def test_a_viewer_reads_and_an_analyst_changes(self) -> None:
         rule = self._create()
         watcher = f"supv-{uuid4().hex[:6]}"
-        store.create_user(watcher, hash_password("x9!Watcher"), "viewer", "default")
+        store.create_user(watcher, hash_password("x9!Watcher-Kestrel"), "viewer", "default")
         self.addCleanup(store.delete_user, watcher)
         viewer = _headers(role="viewer", subject=watcher)
 
@@ -105,7 +105,7 @@ class TheRuleEndpointsTest(unittest.TestCase):
         tenant = f"t{uuid4().hex[:8]}"
         store.create_tenant(tenant, "other")
         admin = f"supa-{uuid4().hex[:6]}"
-        store.create_user(admin, hash_password("x9!Other"), "admin", tenant)
+        store.create_user(admin, hash_password("x9!Other-Kestrel"), "admin", tenant)
         self.addCleanup(store.delete_user, admin)
         rule = self._create()
 

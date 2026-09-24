@@ -12,11 +12,11 @@ class NISTRBACTests(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
         try:
-            create_user("nist_viewer", hash_password("Viewer123"), "viewer", "default", "NIST Viewer")
+            create_user("nist_viewer", hash_password("Kestrel-Viewer-4821"), "viewer", "default", "NIST Viewer")
         except Exception:
             pass
         try:
-            create_user("nist_analyst", hash_password("Analyst123"), "analyst", "default", "NIST Analyst")
+            create_user("nist_analyst", hash_password("Kestrel-Analyst-4821"), "analyst", "default", "NIST Analyst")
         except Exception:
             pass
         self.viewer_headers = {"Authorization": f"Bearer {create_token('nist_viewer', 'viewer', 'default')}"}
@@ -35,7 +35,7 @@ class NISTRBACTests(unittest.TestCase):
         # tenant-scoped admin (admin role, but NOT the built-in admin/default
         # platform admin) must not import/activate/rollback it.
         try:
-            create_user("nist_tenant_admin", hash_password("Admin123"), "admin", "default", "Tenant Admin")
+            create_user("nist_tenant_admin", hash_password("Kestrel-Admin-4821"), "admin", "default", "Tenant Admin")
         except Exception:
             pass
         headers = {"Authorization": f"Bearer {create_token('nist_tenant_admin', 'admin', 'default')}"}
