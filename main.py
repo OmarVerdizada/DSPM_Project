@@ -119,6 +119,38 @@ def work(args: argparse.Namespace) -> None:
         logger.info("Partition worker %s stopped", worker_id)
 
 
+def audit_verify(args: argparse.Namespace) -> None:
+    """Check the audit trail's hash chains (C4); exit 1 if any tenant's chain is broken.
+
+    Reads the database this install is configured for (DSPM_DB_URL / DSPM_DB_PATH), and
+    changes nothing in it. A broken chain names the rows: a changed row no longer matches
+    its hash, a deleted one leaves a gap, and cut-off newest rows leave the chain shorter
+    than its head. Rows written before revision 0022 are sealed as of the upgrade, and the
+    report says so - nothing proves they were untouched before it.
+    """
+    import json
+
+    from backend.store import verify_audit_chain
+
+    results = verify_audit_chain(args.tenant or None)
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        for result in results:
+            notes = []
+            if result["sealed_through_seq"]:
+                notes.append(f"rows 1-{result['sealed_through_seq']} sealed at upgrade {result['sealed_at'][:19]}")
+            if result["pruned_through_seq"]:
+                notes.append(f"rows up to {result['pruned_through_seq']} removed by retention")
+            suffix = f" ({'; '.join(notes)})" if notes else ""
+            print(f"{'OK    ' if result['ok'] else 'BROKEN'} {result['tenant_id']}: {result['rows']} rows{suffix}")
+            for problem in result["problems"][:25]:
+                print(f"         seq {problem['seq']}: {problem['problem']}")
+            if len(result["problems"]) > 25:
+                print(f"         ... and {len(result['problems']) - 25} more")
+    raise SystemExit(0 if all(result["ok"] for result in results) else 1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DSPM scanner for AD file-server data discovery.")
     subparsers = parser.add_subparsers(dest="command")
@@ -158,6 +190,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--worker-id", default="", help="The name leases and the queue know this worker by; defaults to host:pid.",
     )
     worker_parser.set_defaults(func=work)
+
+    audit_parser = subparsers.add_parser("audit", help="Audit trail tools.")
+    audit_commands = audit_parser.add_subparsers(dest="audit_command", required=True)
+    verify_parser = audit_commands.add_parser("verify", help="Check every tenant's audit hash chain.")
+    verify_parser.add_argument("--tenant", default="", help="Check one tenant only.")
+    verify_parser.add_argument("--json", action="store_true", help="Print the full result as JSON.")
+    verify_parser.set_defaults(func=audit_verify)
 
     parser.set_defaults(func=serve)
     return parser

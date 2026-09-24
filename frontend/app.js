@@ -6399,6 +6399,19 @@ function reportDetailWorkbookHtml(block) {
   </table><br/>`;
 }
 
+// C4: a Word or Excel report is built here from data the page already holds, so the
+// server never sees the file. It is told first - which records the export and refuses a
+// role without report.create - and nothing is built if it says no.
+async function buildBrowserReport(format, build) {
+  await api("/api/audit/browser-export", {
+    format,
+    report_type: reportType().label || "",
+    rows: activeReportFileCount(),
+    scan_id: latestReport?.scan_id || "",
+  }, "POST");
+  build();
+}
+
 async function generateReport(event) {
   event?.preventDefault?.();
   if (!can("report.create")) {
@@ -6426,10 +6439,10 @@ async function generateReport(event) {
       await loadReportRows({ complete: true });
     }
     if (format === "word") {
-      downloadFile(`${reportFileStem()}.doc`, buildReportDocumentHtml(), "application/msword;charset=utf-8");
+      await buildBrowserReport("word", () => downloadFile(`${reportFileStem()}.doc`, buildReportDocumentHtml(), "application/msword;charset=utf-8"));
       showToast("Report generated", `${reportType().label} saved as Word.`, "success");
     } else if (format === "excel") {
-      downloadFile(`${reportFileStem()}.xls`, buildReportWorkbookHtml(), "application/vnd.ms-excel;charset=utf-8");
+      await buildBrowserReport("excel", () => downloadFile(`${reportFileStem()}.xls`, buildReportWorkbookHtml(), "application/vnd.ms-excel;charset=utf-8"));
       showToast("Report generated", `${reportType().label} saved as Excel.`, "success");
     } else {
       await exportPdf();
@@ -10257,6 +10270,11 @@ const AUDIT_ACTIONS = {
   "user.password_changed": "Changed a password",
   "user.password_change_refused": "Password change refused - wrong current password",
   "role.created": "Created a custom role",
+  "report.created": "Filed a report",
+  "report.downloaded": "Downloaded a report",
+  "report.exported_in_browser": "Built a Word or Excel report",
+  "scan_report.viewed": "Fetched a full scan report",
+  "dlp_policy.exported": "Exported a DLP policy",
   "role.updated": "Changed a custom role",
   "role.deleted": "Deleted a custom role",
   "user.password_reset": "Reset a password",

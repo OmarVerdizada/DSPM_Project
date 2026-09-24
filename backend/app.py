@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.alerts import evaluate_alerts
+from backend.client_address import request_address
 from backend.errors import client_message, new_reference
 from backend.evidence import without_evidence
 from backend.permissions import (
@@ -500,7 +501,9 @@ app.include_router(reporting_router)
 async def secure_response_headers(request: Request, call_next):
     # Before the handler runs, so anything it audits carries the origin.
     set_request_origin(
-        getattr(request.client, "host", "") or "",
+        # C4: the client, not the reverse proxy - X-Forwarded-For is believed only from a
+        # peer named in DSPM_TRUSTED_PROXIES (backend.client_address).
+        request_address(request),
         request.headers.get("user-agent", ""),
     )
     response = await call_next(request)
@@ -1629,18 +1632,27 @@ def login(payload: LoginRequest, request: Request) -> dict:
     # M4: trip on EITHER the per-(IP,username) cap OR the aggregate per-IP cap, so a
     # username-spray from one IP is throttled even though no single username does.
     # A trail that records only successful sign-ins cannot show an attempt to
-    # break in - which is the thing it is most often asked for. The tenant is
-    # unknown at this point (the credential did not resolve to one), so these
-    # rows land in "default" and name the account that was tried.
+    # break in - which is the thing it is most often asked for. C4: the row goes to the
+    # tenant the attempted name belongs to, so that tenant's administrator sees attacks
+    # on their own users; a name that belongs to nobody is recorded in "default".
     attempted = sanitize_username(payload.username)
-    if _too_many_login_failures(login_key) or _too_many_ip_login_failures(ip_key):
-        audit("default", attempted or "unknown", "auth.login_blocked", {"username": attempted})
+    known = get_user(attempted) if attempted else None
+    attempt_tenant = str(known["tenant_id"]) if known else "default"
+    user_blocked = _too_many_login_failures(login_key)
+    if user_blocked or _too_many_ip_login_failures(ip_key):
+        # C4: one row per order of magnitude, not one per attempt. A thousand blocked
+        # attempts write four rows (the 1st, 10th, 100th and 1000th), each saying how
+        # many there have been; a spray across usernames counts against the address.
+        blocked = _record_blocked_attempt(login_key if user_blocked else ip_key)
+        if _is_power_of_ten(blocked):
+            audit(attempt_tenant, attempted or "unknown", "auth.login_blocked",
+                  {"username": attempted, "blocked_attempts": blocked, "window_seconds": LOGIN_WINDOW_SECONDS})
         raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
     principal = authenticate_user(payload.username, payload.password)
     if principal is None:
         _record_login_failure(login_key)
         _record_login_failure(ip_key)
-        audit("default", attempted or "unknown", "auth.login_failed", {"username": attempted})
+        audit(attempt_tenant, attempted or "unknown", "auth.login_failed", {"username": attempted})
         raise HTTPException(status_code=401, detail="Invalid username or password")
     # Clear this user's counter; the per-IP aggregate is NOT cleared by one success
     # (a sprayer who guesses one valid credential must not reset the IP's history).
@@ -2705,6 +2717,8 @@ def latest_scan_report(
     report = read_scan_report(principal.tenant_id)
     if report is None:
         raise HTTPException(status_code=404, detail="No saved scan report found")
+    if include_files:
+        _audit_full_report(principal, report)
     return {"report": report if include_files else _compact_scan_report(report)}
 
 
@@ -2721,7 +2735,21 @@ def saved_scan_report(
         report = read_scan_report_compact(principal.tenant_id, scan_id)
     if report is None:
         raise HTTPException(status_code=404, detail="Saved scan report not found")
+    if include_files:
+        _audit_full_report(principal, report)
     return {"report": report}
+
+
+def _audit_full_report(principal: Principal, report: dict) -> None:
+    """C4: a full scan report is every file record a scan produced; fetching one is an
+    export in all but name, so it is recorded. The console never asks for it - only an
+    API client does - so this is not a row per page view."""
+    files = report.get("files") if isinstance(report, dict) else None
+    audit(principal.tenant_id, principal.subject, "scan_report.viewed", {
+        "scan_id": str(report.get("scan_id") or "") if isinstance(report, dict) else "",
+        "files": len(files) if isinstance(files, list) else 0,
+        "evidence_included": has_permission(principal, "evidence.view"),
+    })
 
 
 @app.get("/api/findings")
@@ -3345,11 +3373,13 @@ def executive_dashboard(principal: Principal = Depends(require_permission("inven
 
 
 def _client_host(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    # C4: behind a trusted proxy, the client it names - so a per-address throttle counts
+    # the attacker, not every user who shares the proxy.
+    return request_address(request) or "unknown"
 
 
 def _login_rate_key(username: str, request: Request) -> str:
-    client = request.client.host if request.client else "unknown"
+    client = _client_host(request)
     safe_user = sanitize_username(username) or "unknown"
     return f"{client}:{safe_user}"
 
@@ -3357,8 +3387,20 @@ def _login_rate_key(username: str, request: Request) -> str:
 def _login_ip_rate_key(request: Request) -> str:
     # M4: distinct namespace ("ip:") so the per-IP aggregate cannot collide with a
     # per-(IP,username) key.
-    client = request.client.host if request.client else "unknown"
-    return f"ip:{client}"
+    return f"ip:{_client_host(request)}"
+
+
+def _record_blocked_attempt(key: str) -> int:
+    """Count one more refused sign-in against `key`; returns how many this window."""
+    blocked_key = f"blocked:{key}"
+    record_login_failure(blocked_key, LOGIN_WINDOW_SECONDS)
+    return count_login_failures(blocked_key, LOGIN_WINDOW_SECONDS)
+
+
+def _is_power_of_ten(value: int) -> bool:
+    while value >= 10 and value % 10 == 0:
+        value //= 10
+    return value == 1
 
 
 def _too_many_login_failures(key: str) -> bool:
@@ -3592,8 +3634,26 @@ def _scan_extension_settings(extensions: list[str], enabled: bool) -> tuple[list
     return normalized, True
 
 
+class BrowserExportRequest(BaseModel):
+    format: str = Field(pattern="^(word|excel)$")
+    report_type: str = Field(default="", max_length=60)
+    rows: int = Field(default=0, ge=0, le=10_000_000)
+    scan_id: str = Field(default="", max_length=160)
+
+
+@app.post("/api/audit/browser-export")
+def record_browser_export(payload: BrowserExportRequest,
+                          principal: Principal = Depends(require_permission("report.create"))) -> dict:
+    """C4: Word and Excel reports are built in the browser from data it already holds, so
+    the server never sees the file. The console asks here first - and builds nothing if
+    this refuses - so the export is recorded, and permitted, where the trail is kept."""
+    audit(principal.tenant_id, principal.subject, "report.exported_in_browser", payload.model_dump())
+    return {"recorded": True}
+
+
 @app.post("/api/dlp-policy")
 def export_dlp_policy(payload: ScanRequest, principal: Principal = Depends(require_permission("export"))) -> dict:
+    audit(principal.tenant_id, principal.subject, "dlp_policy.exported", {"rules": len(payload.asset_overrides)})
     return {
         "format": "generic-json",
         "tenant_id": principal.tenant_id,

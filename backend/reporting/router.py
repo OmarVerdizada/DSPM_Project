@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from backend.errors import client_message
 from backend.reporting.artifacts import ArtifactError, artifact_file, create_report_artifact
 from backend.security import Principal, require_artifact_download, require_permission
+from backend.store import audit
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 
@@ -37,9 +38,15 @@ async def create_report(
     wanted = [level for level in (payload.severities or []) if str(level).upper() in SEVERITY_LEVELS]
     scope = {"kind": "severity", "severities": [str(level).upper() for level in wanted]} if wanted else {"kind": "full"}
     try:
-        return create_report_artifact(principal, {}, scan_id=payload.scan_id, scope=scope)
+        artifact = create_report_artifact(principal, {}, scan_id=payload.scan_id, scope=scope)
     except ArtifactError as exc:
         raise HTTPException(status_code=404, detail=client_message(exc, "The report could not be created")) from exc
+    # C4: filing a report is an export of the scan's findings; recorded with its scope.
+    audit(principal.tenant_id, principal.subject, "report.created", {
+        "artifact_id": artifact.get("artifact_id"), "scan_id": artifact.get("scan_id") or payload.scan_id or "",
+        "scope": scope.get("kind"), "severities": scope.get("severities", []),
+    })
+    return artifact
 
 
 @router.get("/artifacts/{artifact_id}")
@@ -62,6 +69,10 @@ async def download_artifact(
     filename = str(metadata.get("filename") or "sentro_report.pdf")
     if format == "html":
         filename = filename.replace(".pdf", ".html")
+    audit(principal.tenant_id, principal.subject, "report.downloaded", {
+        "artifact_id": artifact_id, "format": format, "inline": bool(inline),
+        "via": "download_token" if principal.auth_type == "artifact_dl_token" else principal.auth_type or "session",
+    })
     return FileResponse(
         path,
         media_type=media_type,

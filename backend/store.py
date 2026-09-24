@@ -860,6 +860,71 @@ def add_custom_roles(conn) -> None:
     add_tenant_rls(conn)
 
 
+_AUDIT_CHAIN_HEADS_DDL = """CREATE TABLE IF NOT EXISTS audit_chain_heads (
+            tenant_id TEXT PRIMARY KEY,
+            last_seq INTEGER NOT NULL DEFAULT 0,
+            last_hash TEXT NOT NULL DEFAULT '',
+            pruned_through_seq INTEGER NOT NULL DEFAULT 0,
+            pruned_through_hash TEXT NOT NULL DEFAULT '',
+            sealed_through_seq INTEGER NOT NULL DEFAULT 0,
+            sealed_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        );"""
+
+
+def add_audit_chain(conn) -> None:
+    """Revision 0022: each tenant's audit rows become a hash chain (C4).
+
+    Adds `seq`, `prev_hash` and `row_hash` to `audit_events` and a head per tenant.
+    Existing rows are SEALED: chained in the order they were written, with the head
+    recording how far the seal reaches and when. Nothing can prove those rows were not
+    edited before today - the seal only makes any edit from now on visible - and
+    `audit verify` says so rather than implying more (backend.audit_chain).
+
+    `audit_chain_heads` has a tenant column, so revisions 0003 and 0004 are re-run to
+    give it its tenant foreign key and row-level security.
+    """
+    from backend import audit_chain
+
+    columns = db.table_columns(conn, "audit_events")
+    if "seq" not in columns:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN seq INTEGER")
+    if "prev_hash" not in columns:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''")
+    if "row_hash" not in columns:
+        conn.execute("ALTER TABLE audit_events ADD COLUMN row_hash TEXT NOT NULL DEFAULT ''")
+    conn.execute(_AUDIT_CHAIN_HEADS_DDL)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_chain ON audit_events (tenant_id, seq)")
+
+    sealed_at = datetime.now(timezone.utc).isoformat()
+    tenants = [str(row["tenant_id"]) for row in conn.execute(
+        "SELECT DISTINCT tenant_id FROM audit_events WHERE seq IS NULL").fetchall()]
+    for tenant_id in tenants:
+        head = conn.execute("SELECT last_seq, last_hash FROM audit_chain_heads WHERE tenant_id = ?",
+                            (tenant_id,)).fetchone()
+        seq = int(head["last_seq"]) if head else 0
+        prev = str(head["last_hash"]) if head else ""
+        rows = conn.execute(
+            "SELECT id, timestamp, actor, action, detail_json FROM audit_events "
+            "WHERE tenant_id = ? AND seq IS NULL ORDER BY id", (tenant_id,)).fetchall()
+        for row in rows:
+            seq += 1
+            digest = audit_chain.row_hash(prev, tenant_id, seq, row["timestamp"], row["actor"], row["action"],
+                                          row["detail_json"] or "")
+            conn.execute("UPDATE audit_events SET seq = ?, prev_hash = ?, row_hash = ? WHERE id = ?",
+                         (seq, prev, digest, row["id"]))
+            prev = digest
+        conn.execute(
+            "INSERT INTO audit_chain_heads (tenant_id, last_seq, last_hash, sealed_through_seq, sealed_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (tenant_id) DO UPDATE SET last_seq = excluded.last_seq, "
+            "last_hash = excluded.last_hash, sealed_through_seq = excluded.sealed_through_seq, "
+            "sealed_at = excluded.sealed_at, updated_at = excluded.updated_at",
+            (tenant_id, seq, prev, seq, sealed_at, sealed_at),
+        )
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def add_refresh_tokens(conn) -> None:
     """Revision 0019: the rotating half of a bounded session (C1).
 
@@ -1165,7 +1230,22 @@ def apply_baseline_schema(conn) -> None:
             timestamp TEXT NOT NULL,
             actor TEXT NOT NULL,
             action TEXT NOT NULL,
-            detail_json TEXT NOT NULL DEFAULT '{}'
+            detail_json TEXT NOT NULL DEFAULT '{}',
+            seq INTEGER,
+            prev_hash TEXT NOT NULL DEFAULT '',
+            row_hash TEXT NOT NULL DEFAULT ''
+        );
+
+        -- C4 (revision 0022): the head of each tenant's audit chain.
+        CREATE TABLE IF NOT EXISTS audit_chain_heads (
+            tenant_id TEXT PRIMARY KEY,
+            last_seq INTEGER NOT NULL DEFAULT 0,
+            last_hash TEXT NOT NULL DEFAULT '',
+            pruned_through_seq INTEGER NOT NULL DEFAULT 0,
+            pruned_through_hash TEXT NOT NULL DEFAULT '',
+            sealed_through_seq INTEGER NOT NULL DEFAULT 0,
+            sealed_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS secrets (
@@ -2061,13 +2141,68 @@ def audit(tenant_id: str, actor: str, action: str, detail: dict | None = None) -
     detail = {**(detail or {}), **{k: v for k, v in _request_origin.get().items() if v}}
     with _lock:
         with _connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO audit_events (tenant_id, timestamp, actor, action, detail_json)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (tenant_id, timestamp, actor, action, json.dumps(detail, ensure_ascii=False)),
-            )
+            _append_audit(conn, tenant_id, timestamp, actor, action, json.dumps(detail, ensure_ascii=False))
+
+
+def _append_audit(conn, tenant_id: str, timestamp: str, actor: str, action: str, detail_json: str) -> tuple[int, str]:
+    """Append one row to its tenant's chain (C4, backend.audit_chain).
+
+    The first statement WRITES the tenant's head row, so on SQLite this transaction holds
+    the database's write lock before it reads the head - two processes cannot both read
+    the same last hash and fork the chain. PostgreSQL gets the same from FOR UPDATE.
+    """
+    from backend import audit_chain
+
+    conn.execute(
+        "INSERT INTO audit_chain_heads (tenant_id, updated_at) VALUES (?, ?) ON CONFLICT (tenant_id) DO NOTHING",
+        (tenant_id, timestamp),
+    )
+    lock = " FOR UPDATE" if db.is_postgres() else ""
+    head = conn.execute(
+        f"SELECT last_seq, last_hash FROM audit_chain_heads WHERE tenant_id = ?{lock}", (tenant_id,)
+    ).fetchone()
+    seq = int(head["last_seq"] or 0) + 1
+    prev = str(head["last_hash"] or "")
+    digest = audit_chain.row_hash(prev, tenant_id, seq, timestamp, actor, action, detail_json)
+    conn.execute(
+        "INSERT INTO audit_events (tenant_id, timestamp, actor, action, detail_json, seq, prev_hash, row_hash) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (tenant_id, timestamp, actor, action, detail_json, seq, prev, digest),
+    )
+    conn.execute(
+        "UPDATE audit_chain_heads SET last_seq = ?, last_hash = ?, updated_at = ? WHERE tenant_id = ?",
+        (seq, digest, timestamp, tenant_id),
+    )
+    return seq, digest
+
+
+def verify_audit_chain(tenant_id: str | None = None) -> list[dict]:
+    """Check every tenant's audit chain (or one tenant's); see backend.audit_chain.verify_chain."""
+    from backend import audit_chain
+
+    with _connect() as conn:
+        if tenant_id is None:
+            tenants = sorted({str(row["tenant_id"]) for row in conn.execute(
+                "SELECT tenant_id FROM audit_chain_heads UNION SELECT DISTINCT tenant_id FROM audit_events"
+            ).fetchall()})
+        else:
+            tenants = [tenant_id]
+        results = []
+        for tenant in tenants:
+            head_row = conn.execute(
+                "SELECT last_seq, last_hash, pruned_through_seq, pruned_through_hash, sealed_through_seq, sealed_at "
+                "FROM audit_chain_heads WHERE tenant_id = ?", (tenant,)).fetchone()
+            rows = [dict(row) for row in conn.execute(
+                "SELECT id, seq, timestamp, actor, action, detail_json, prev_hash, row_hash FROM audit_events "
+                "WHERE tenant_id = ? ORDER BY seq, id", (tenant,)).fetchall()]
+            head = dict(head_row) if head_row is not None else None
+            result = audit_chain.verify_chain(tenant, rows, head)
+            if head is None and rows:
+                # A head can be deleted to hide a truncated chain: its absence is itself a finding.
+                result["problems"].insert(0, {"seq": None, "problem": "the tenant has audit rows but no chain head"})
+                result["ok"] = False
+            results.append(result)
+    return results
 
 
 def report_artifacts_enabled() -> bool:
@@ -3488,6 +3623,48 @@ RETENTION_POLICIES = (
 )
 
 
+def _prune_audit_chains(cutoff: str, held: list[str], *, apply: bool) -> int:
+    """Retention for the audit trail without breaking its chains (C4).
+
+    Only a PREFIX of a tenant's chain is removed - everything up to the newest row older
+    than the cutoff - and the head keeps that row's seq and hash, so what remains still
+    starts from a known point and verifies. Deleting by timestamp alone could take a
+    row out of the middle if clocks ever stepped back, which would read as tampering.
+    """
+    removed = 0
+    with _lock:
+        with _connect() as conn:
+            # Rows in no chain (written around audit(), which nothing should do) have no
+            # chain to keep whole; they age out by timestamp as every row used to.
+            held_clause = f" AND tenant_id NOT IN ({', '.join('?' for _ in held)})" if held else ""
+            unchained = int(conn.execute(
+                f"SELECT COUNT(*) AS n FROM audit_events WHERE seq IS NULL AND timestamp < ?{held_clause}",
+                (cutoff, *held)).fetchone()["n"] or 0)
+            removed += unchained
+            if apply and unchained:
+                conn.execute(f"DELETE FROM audit_events WHERE seq IS NULL AND timestamp < ?{held_clause}", (cutoff, *held))
+            rows = conn.execute(
+                "SELECT tenant_id, MAX(seq) AS through FROM audit_events WHERE timestamp < ? AND seq IS NOT NULL "
+                "GROUP BY tenant_id", (cutoff,)).fetchall()
+            for row in rows:
+                tenant_id, through = str(row["tenant_id"]), int(row["through"] or 0)
+                if tenant_id in held or not through:
+                    continue
+                count = int(conn.execute("SELECT COUNT(*) AS n FROM audit_events WHERE tenant_id = ? AND seq <= ?",
+                                         (tenant_id, through)).fetchone()["n"] or 0)
+                removed += count
+                if not apply:
+                    continue
+                last = conn.execute("SELECT row_hash FROM audit_events WHERE tenant_id = ? AND seq = ?",
+                                    (tenant_id, through)).fetchone()
+                conn.execute("DELETE FROM audit_events WHERE tenant_id = ? AND seq <= ?", (tenant_id, through))
+                conn.execute(
+                    "UPDATE audit_chain_heads SET pruned_through_seq = ?, pruned_through_hash = ? WHERE tenant_id = ?",
+                    (through, str(last["row_hash"]) if last else "", tenant_id),
+                )
+    return removed
+
+
 def prune_event_tables(*, now: datetime | None = None, apply: bool = False,
                        overrides: dict | None = None) -> list[dict]:
     """Count - and with ``apply``, delete - event rows past their retention window.
@@ -3508,6 +3685,11 @@ def prune_event_tables(*, now: datetime | None = None, apply: bool = False,
             days = default_days
         days = max(1, days)
         cutoff = (moment - timedelta(days=days)).isoformat()
+        if table == "audit_events":
+            stale = _prune_audit_chains(cutoff, held, apply=apply)
+            results.append({"data_class": table, "retention_days": days, "eligible_rows": stale,
+                            "removed_rows": stale if apply else 0, "held_tenants": len(held)})
+            continue
         clause = f"{column} < ?"
         params: tuple = (cutoff,)
         if held:
@@ -8141,6 +8323,7 @@ def delete_tenant(tenant_id: str) -> bool:
 
 _TENANT_ERASURE_TABLES = (
     "registration_invites",
+    "audit_chain_heads",
     "custom_roles",
     "scan_schedules",
     "suppression_rules",

@@ -198,7 +198,8 @@ async function main() {
     const values = {};
     for (const [name, expression] of Object.entries(scenario.evaluate || {})) {
       try {
-        values[name] = vm.runInContext(expression, context, { filename: name });
+        // An expression may be async; its settled value is what is reported.
+        values[name] = await Promise.resolve(vm.runInContext(expression, context, { filename: name }));
       } catch (error) {
         values[name] = `threw: ${String(error).slice(0, 160)}`;
       }
