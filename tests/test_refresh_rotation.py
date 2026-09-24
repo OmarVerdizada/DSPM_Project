@@ -418,7 +418,10 @@ class TheUpgradeCarriesExistingSessionsTest(_RefreshCase):
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(refresh_tokens)")}
         self.assertEqual(columns, {"token_hash", "family_id", "username", "session_jti",
                                    "issued_at", "expires_at", "used_at"})
-        self.assertEqual(migrations.expected_revision(), 19)
+        # Revision 19 is recorded; later revisions (C3's 20) are not this test's concern.
+        with store._connect() as conn:
+            recorded = {int(row["revision"]) for row in conn.execute("SELECT revision FROM schema_migrations")}
+        self.assertIn(19, recorded)
 
 
 if __name__ == "__main__":

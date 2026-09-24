@@ -39,6 +39,20 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - `Risk Logic`: severity ranges, scoring formula, detection signals, customer asset context.
 - `Endpoint Scan`: prepares the management host when needed, verifies target workstation WinRM with the entered local-admin credential, and scans profile paths, one drive, or all fixed drives.
 
+## Roles and permissions
+
+Every API route names the permission it needs (`backend/permissions.py`; the full route matrix is `tests/test_route_permissions.py`), and a role is a set of permissions:
+
+| Role | May |
+|---|---|
+| `viewer` | read dashboards, the inventory and findings |
+| `auditor` | what a viewer may, plus read the audit trail and file reports |
+| `scan_operator` | read, plus configure, schedule and run scans (and vault the credentials a scan uses) |
+| `analyst` | read evidence, triage findings, manage rules, scan, export and file reports |
+| `admin` | everything in its tenant, including users, roles, invites and API keys |
+
+Operating the installation itself (tenants, legal holds, the shared NIST catalogue, install-wide settings such as OCR, and database diagnostics) belongs to the built-in `admin` account of the `default` tenant, and no role grants it. Invites and API keys may carry any role except `admin`. `GET /api/roles` lists the roles and what each allows; sign-in, session renewal and `GET /api/profile` return the caller's `permissions`, which the console uses to decide what to show.
+
 ## Quick Start
 
 Install dependencies:
@@ -425,7 +439,7 @@ python scripts/generate_enterprise_test_data.py --output enterprise_test_data --
 - Jira, ServiceNow, Slack, and Teams remediation integrations.
 - SharePoint, OneDrive, Google Drive, S3, Azure Blob, SQL Server, and PostgreSQL connectors.
 - Persisted remediation state with assignment and closure workflow.
-- Fine-grained RBAC for MSSP analysts and customer viewers.
+- Custom roles on top of the built-in ones (see Roles and permissions), and evidence masked for roles that may not read it.
 - Scheduled scans and posture drift alerts.
 - Docker packaging and production deployment profile.
 

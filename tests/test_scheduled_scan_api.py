@@ -128,13 +128,16 @@ class ScanScheduleApiTests(unittest.TestCase):
                                             headers=_headers()).json(), {"deleted": False})
         self.assertIsNotNone(store.read_scan_schedule(tenant, mine["schedule_id"]))
 
-    def test_a_viewer_reads_and_an_analyst_changes(self) -> None:
+    def test_a_viewer_neither_reads_nor_changes(self) -> None:
+        # C3: a schedule is scan configuration - targets, paths, credential references -
+        # and belongs to whoever may run scans (`scan.run`). It used to be readable by
+        # every viewer.
         schedule = self._create()
         watcher = f"swatch-{uuid4().hex[:6]}"
         store.create_user(watcher, hash_password("x9!Watcher-Kestrel"), "viewer", "default")
         self.addCleanup(store.delete_user, watcher)
         viewer = _headers(role="viewer", subject=watcher)
-        self.assertEqual(self.client.get("/api/scan-schedules", headers=viewer).status_code, 200)
+        self.assertEqual(self.client.get("/api/scan-schedules", headers=viewer).status_code, 403)
         refused = self.client.post(
             "/api/scan-schedules",
             json={"name": "no", "first_run_at": LATER, "scan": {"local_path": "enterprise_test_data"}},

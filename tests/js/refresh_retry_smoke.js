@@ -6,7 +6,9 @@
 // scenario: {"calls": 5, "refreshSucceeds": true, "script": "app.js", "drive": "api"}
 //   script: "app.js" (the console, default) or "profile.js" (the settings page)
 //   drive:  "api" (default: `calls` concurrent api() calls), "logout" (sign out), or
-//           "password_changed" (profile.js: what the page does after a password change)
+//           "password_changed" (profile.js: what the page does after a password change), or
+//           "evaluate" (app.js: setPermissions(scenario.permissions), then each expression
+//           in scenario.evaluate, reported under its name in "values")
 // Prints one JSON line: {"refreshCalls", "apiCalls", "resolved", "rejected", "redirected",
 // "logoutCalls", "logoutAccepted"}.
 //
@@ -183,11 +185,26 @@ async function main() {
   const drives = {
     logout: "globalThis.__result = Promise.allSettled([logout()]);",
     password_changed: "globalThis.__result = Promise.allSettled([Promise.resolve(afterPasswordChange({ status: 'updated', reauthenticate: true }))]);",
+    evaluate: "globalThis.__result = Promise.resolve([]);",
   };
   const drive = drives[scenario.drive] || `globalThis.__result = Promise.allSettled(
          Array.from({length: globalThis.__calls}, (_unused, index) => api("/api/thing" + index, null, "GET"))
        );`;
   vm.runInContext(drive, context, { filename: "drive" });
+
+  if (scenario.drive === "evaluate") {
+    context.__permissions = Array.isArray(scenario.permissions) ? scenario.permissions : [];
+    vm.runInContext("setPermissions(globalThis.__permissions);", context, { filename: "permissions" });
+    const values = {};
+    for (const [name, expression] of Object.entries(scenario.evaluate || {})) {
+      try {
+        values[name] = vm.runInContext(expression, context, { filename: name });
+      } catch (error) {
+        values[name] = `threw: ${String(error).slice(0, 160)}`;
+      }
+    }
+    finish({ values }, true);
+  }
 
   const settled = await context.__result;
   if (scenario.drive === "password_changed") {

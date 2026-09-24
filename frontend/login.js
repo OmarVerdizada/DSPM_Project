@@ -57,6 +57,8 @@ loginForm.addEventListener("submit", async (event) => {
     sessionSet("dspm-access-token", result.access_token);
     sessionSet("dspm-tenant-id", result.tenant_id || "default");
     sessionSet("dspm-role", result.role || "viewer");
+    // C3: the console gates on what the account may do, as the server states it.
+    sessionSet("dspm-permissions", JSON.stringify(Array.isArray(result.permissions) ? result.permissions : []));
     sessionSet("dspm-user", data.get("username") || "user");
     setLoginStatus("Success. Opening dashboard...");
     window.location.replace("/");

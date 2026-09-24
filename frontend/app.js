@@ -400,6 +400,39 @@ let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
 let tenantContextVersion = 0;
 let currentUser = safeSessionGet("dspm-user") || "admin";
 let currentRole = safeSessionGet("dspm-role") || "admin";
+// C3: what this account may do, as the server states it at sign-in, on every session
+// renewal and on every page load. The console hides what it cannot do and does not ask
+// for what it may not read; the server refuses either way.
+let currentPermissions = readStoredPermissions();
+
+function readStoredPermissions() {
+  try {
+    const stored = JSON.parse(safeSessionGet("dspm-permissions") || "[]");
+    return new Set(Array.isArray(stored) ? stored.map(String) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function can(permission) {
+  return currentPermissions.has(permission);
+}
+
+function setPermissions(list) {
+  const next = new Set(Array.isArray(list) ? list.map(String) : []);
+  const changed = next.size !== currentPermissions.size || [...next].some((name) => !currentPermissions.has(name));
+  currentPermissions = next;
+  safeSessionSet("dspm-permissions", JSON.stringify([...next]));
+  applyRoleVisibility();
+  syncAuditVisibility();
+  if (changed && accessToken) {
+    // A session from before C3 has no stored permissions, and a role can change while
+    // signed in: the panels that were skipped for want of one load now.
+    loadTenants().catch(() => {});
+    loadAudit().catch(() => {});
+    loadScanProfiles().catch(() => {});
+  }
+}
 let customExtensions = loadCustomExtensions();
 // Panels that owe a render because they were hidden when their data changed.
 const pendingPanelRenders = new Map();
@@ -780,6 +813,12 @@ async function refreshAccessToken() {
         }
         accessToken = data.access_token;
         safeSessionSet("dspm-access-token", accessToken);
+        // Every renewal re-reads the account, so a changed role arrives here.
+        if (data.role) {
+          currentRole = data.role;
+          safeSessionSet("dspm-role", data.role);
+        }
+        if (Array.isArray(data.permissions)) setPermissions(data.permissions);
         return true;
       } catch {
         return false;   // offline, or the endpoint is not there: treat as signed out
@@ -1773,8 +1812,13 @@ function setAuthState(isAuthenticated) {
 const ADMIN_ONLY_TABS = new Set(["security", "admin"]);
 
 function isAdminRole() {
-  return currentRole === "admin";
+  // C3: "admin" is a permission now, not a name - a custom role may hold it.
+  return can("tenant.admin");
 }
+
+// Tabs that need more than reading. An admin tab falls back to Asset rules, as it
+// always has; a scan tab to the overview.
+const TAB_PERMISSIONS = { "file-servers": "scan.run", endpoint: "scan.run" };
 
 function applyRoleVisibility() {
   const isAdmin = isAdminRole();
@@ -1782,6 +1826,14 @@ function applyRoleVisibility() {
   document.querySelectorAll("[data-admin-only]").forEach((element) => {
     element.setAttribute("aria-hidden", String(!isAdmin));
     if (element.matches("button, input, select, textarea")) element.tabIndex = isAdmin ? 0 : -1;
+  });
+  // data-requires="scan.run": shown only to an account that holds it (styles.css hides
+  // [data-denied]). Several names separated by spaces mean any one of them.
+  document.querySelectorAll("[data-requires]").forEach((element) => {
+    const allowed = element.dataset.requires.split(/\s+/).filter(Boolean).some(can);
+    element.toggleAttribute("data-denied", !allowed);
+    element.setAttribute("aria-hidden", String(!allowed));
+    if (element.matches("button, input, select, textarea")) element.tabIndex = allowed ? 0 : -1;
   });
   syncNavGroups();
 }
@@ -1812,6 +1864,8 @@ async function logout() {
   safeSessionSet("dspm-access-token", "");
   safeSessionSet("dspm-tenant-id", "default");
   safeSessionSet("dspm-role", "");
+  safeSessionSet("dspm-permissions", "");
+  currentPermissions = new Set();
   safeSessionSet("dspm-user", "");
   setAuthState(false);
 }
@@ -2836,6 +2890,9 @@ function inventoryExportQuery(format) {
 
 async function streamInventoryExport(format) {
   requireAuth();
+  if (!can("export")) {
+    throw new Error("Your role does not export the inventory.");
+  }
   if (typeof window.showSaveFilePicker !== "function" || typeof WritableStream === "undefined") {
     throw new Error("This browser can't save a streaming download. Open Sentro in Chrome or Edge to export from here.");
   }
@@ -3645,7 +3702,9 @@ function resolveTabName(tabName) {
 
 function permittedTabName(tabName) {
   const resolved = resolveTabName(tabName);
-  return !isAdminRole() && ADMIN_ONLY_TABS.has(resolved) ? "settings" : resolved;
+  if (!isAdminRole() && ADMIN_ONLY_TABS.has(resolved)) return "settings";
+  const needed = TAB_PERMISSIONS[resolved];
+  return needed && !can(needed) ? "overview" : resolved;
 }
 
 // Redesign P3: the sidebar shows 6 destinations while the tab panels keep their
@@ -4935,10 +4994,10 @@ function renderComplianceKeywordLibraryPanel(item) {
         </label>
       </div>
       <div class="keyword-library-buttons">
-        <button type="button" class="secondary-btn mini-btn" data-keyword-action="validate">Preview import</button>
-        <button type="button" class="secondary-btn mini-btn" data-keyword-action="import">Import keywords</button>
-        <button type="button" class="secondary-btn mini-btn" data-keyword-action="export-json">Export JSON</button>
-        <button type="button" class="secondary-btn mini-btn" data-keyword-action="export-csv">Export CSV</button>
+        ${can("rules.manage") ? `<button type="button" class="secondary-btn mini-btn" data-keyword-action="validate">Preview import</button>
+        <button type="button" class="secondary-btn mini-btn" data-keyword-action="import">Import keywords</button>` : ""}
+        ${can("export") ? `<button type="button" class="secondary-btn mini-btn" data-keyword-action="export-json">Export JSON</button>
+        <button type="button" class="secondary-btn mini-btn" data-keyword-action="export-csv">Export CSV</button>` : ""}
         <button type="button" class="secondary-btn mini-btn" data-keyword-action="template">Download template</button>
       </div>
       <div class="keyword-import-status" data-keyword-import-status>${library.framework ? "Ready for import/export." : "Keyword library will load after sign-in."}</div>
@@ -6332,6 +6391,10 @@ function reportDetailWorkbookHtml(block) {
 
 async function generateReport(event) {
   event?.preventDefault?.();
+  if (!can("report.create")) {
+    showToast("Not available", "Your role does not file reports.", "warning");
+    return;
+  }
   if (!activeReportFileCount()) {
     showToast("Nothing to report on", "Run a scan first.", "warning");
     return;
@@ -8822,7 +8885,7 @@ function remediationValidationMarkup(finding = {}) {
 }
 
 function remediationCanManage(finding = null) {
-  return (currentRole === "admin" || currentRole === "analyst") && finding?.scope !== "historical";
+  return can("findings.triage") && finding?.scope !== "historical";
 }
 
 function remediationDrawerActions(finding = {}) {
@@ -9746,7 +9809,7 @@ function activeCompactReportCount(report = {}) {
 }
 
 async function loadTenants() {
-  if (!accessToken || currentRole !== "admin") {
+  if (!accessToken || !isAdminRole()) {
     tenantSwitcher.classList.add("hidden");
     tenantPortfolio = [{ tenant_id: currentTenant, scan_count: latestDashboard?.trend?.length || 0, latest: latestDashboard?.latest || { summary: {} } }];
     renderTenantOptions();
@@ -9787,7 +9850,7 @@ function tenantLabel(tenant = {}) {
 }
 
 function renderTenantsTable(tenants) {
-  if (!accessToken || currentRole !== "admin") {
+  if (!accessToken || !isAdminRole()) {
     tenantsBody.innerHTML = '<tr><td colspan="6" class="empty">Admin role is required to manage tenants.</td></tr>';
     tenantManagementStatus.textContent = "Admin role is required.";
     return;
@@ -9835,8 +9898,8 @@ function publishTenantDashboardAnalytics() {
     tenantId: currentTenant,
     tenantVersion: tenantContextVersion,
     history: [...latestHistoryItems],
-    audit: isAdminRole() ? [...latestAuditEvents] : [],
-    auditAvailable: isAdminRole(),
+    audit: can("audit.view") ? [...latestAuditEvents] : [],
+    auditAvailable: can("audit.view"),
   };
   window.__sentroTenantDashboard = snapshot;
   window.dispatchEvent(new CustomEvent("sentro:tenant-dashboard", { detail: snapshot }));
@@ -10113,7 +10176,7 @@ historyHead?.addEventListener("click", (event) => {
 });
 
 async function loadAudit() {
-  if (!accessToken || !isAdminRole()) {
+  if (!accessToken || !can("audit.view")) {
     return;
   }
   const context = captureTenantContext();
@@ -10300,7 +10363,7 @@ auditHead?.addEventListener("click", (event) => {
 // not there rather than being shown a table that will never fill.
 function syncAuditVisibility() {
   if (!auditSection) return;
-  auditSection.hidden = !isAdminRole();
+  auditSection.hidden = !can("audit.view");
 }
 
 function filterTimedItems(items, rangeSelect, fromInput, toInput) {
@@ -10350,14 +10413,42 @@ function updateAuditFilterControls() {
 }
 
 async function loadUsers() {
-  if (!accessToken || currentRole !== "admin") {
+  if (!accessToken || !isAdminRole()) {
     usersBody.innerHTML = '<tr><td colspan="6" class="empty">Admin role is required to manage users.</td></tr>';
     userManagementStatus.textContent = "Admin role is required.";
     return;
   }
+  if (!roleCatalogue.length) {
+    try {
+      const catalogue = await api("/api/roles", null, "GET");
+      roleCatalogue = Array.isArray(catalogue.roles) ? catalogue.roles : [];
+      renderRoleOptions(newUserRole, newUserRole?.value || "viewer");
+    } catch {
+      /* the built-in list in the markup still works */
+    }
+  }
   const data = await api("/api/users", null, "GET");
   renderUsers(data.users || []);
   userManagementStatus.textContent = "Users loaded from SQLite.";
+}
+
+// C3: the roles an administrator can give, from /api/roles. Until it loads, the five
+// built-in names; a role the list does not know (a user's current one) is kept visible.
+const BUILTIN_ROLE_NAMES = ["viewer", "auditor", "scan_operator", "analyst", "admin"];
+let roleCatalogue = [];
+
+function roleOptionsHtml(selected) {
+  const roles = roleCatalogue.length
+    ? roleCatalogue.map((role) => ({ name: role.name, label: role.label || role.name, description: role.description || "" }))
+    : BUILTIN_ROLE_NAMES.map((name) => ({ name, label: name, description: "" }));
+  if (selected && !roles.some((role) => role.name === selected)) roles.push({ name: selected, label: selected, description: "" });
+  return roles
+    .map((role) => `<option value="${escapeHtml(role.name)}" title="${escapeHtml(role.description)}" ${role.name === selected ? "selected" : ""}>${escapeHtml(role.label)}</option>`)
+    .join("");
+}
+
+function renderRoleOptions(select, selected) {
+  if (select) select.innerHTML = roleOptionsHtml(selected);
 }
 
 function renderUsers(users) {
@@ -10378,9 +10469,7 @@ function renderUsers(users) {
           <td><input class="table-input" data-user-tenant="${escapeHtml(user.username)}" value="${escapeHtml(user.tenant_id || "default")}" /></td>
           <td>
             <select class="table-input" data-user-role="${escapeHtml(user.username)}">
-              ${["viewer", "analyst", "admin"]
-                .map((role) => `<option value="${role}" ${user.role === role ? "selected" : ""}>${role}</option>`)
-                .join("")}
+              ${roleOptionsHtml(user.role)}
             </select>
           </td>
           <td>${escapeHtml(user.last_login_at || "Never")}</td>
@@ -11917,6 +12006,7 @@ renderProfile();
     const response = await fetch("/api/profile", { headers: authHeaders() });
     if (!response.ok) return;
     const data = await response.json();
+    if (Array.isArray(data.permissions)) setPermissions(data.permissions);
     const serverAvatar = String(data.avatar || "");
     const key = profileAvatarStorageKey();
     if (serverAvatar) safeStorageSet(key, serverAvatar);
@@ -12039,7 +12129,8 @@ function wizardEl(kind, key) {
 }
 
 async function loadScanProfiles(context = captureTenantContext()) {
-  if (!accessToken) return;
+  // Scan configuration belongs to whoever may run scans (C3); anyone else is not sent it.
+  if (!accessToken || !can("scan.run")) return;
   try {
     const data = await api("/api/scan-profiles", null, "GET");
     if (!isCurrentTenantContext(context, data)) return;

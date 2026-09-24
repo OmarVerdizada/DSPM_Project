@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.alerts import evaluate_alerts
 from backend.errors import client_message, new_reference
+from backend.permissions import AUTHENTICATED, DELEGABLE_ROLES, is_known_role, permission_catalogue, role_catalogue, role_permissions
 from backend.partitioned_scan import (
     continue_partitioned_scan,
     enqueue_partitioned_scan,
@@ -50,11 +51,13 @@ from backend.security import (
     authenticate_user,
     create_token,
     generate_api_key,
+    has_permission,
     hash_password,
     is_platform_admin,
     issue_refresh_token,
+    principal_permissions,
     require_principal,
-    require_role,
+    require_permission,
     revoke_token,
     rotate_refresh_token,
     sanitize_username,
@@ -1008,8 +1011,20 @@ class RegisterRequest(BaseModel):
     registration_code: str = Field(default="", max_length=200)
 
 
+def _known_role(value: str) -> str:
+    role = str(value or "").strip().lower()
+    if not is_known_role(role):
+        raise ValueError("Unknown role")
+    return role
+
+
 class UserCreateRequest(RegisterRequest):
-    role: str = Field(default="viewer", pattern="^(admin|analyst|viewer)$")
+    role: str = Field(default="viewer", max_length=40)
+
+    @field_validator("role")
+    @classmethod
+    def _role_is_known(cls, value: str) -> str:
+        return _known_role(value)
 
 
 class TenantRequest(BaseModel):
@@ -1018,8 +1033,13 @@ class TenantRequest(BaseModel):
 
 
 class UserRoleRequest(BaseModel):
-    role: str = Field(pattern="^(admin|analyst|viewer)$")
+    role: str = Field(max_length=40)
     tenant_id: str = Field(default="", max_length=80)
+
+    @field_validator("role")
+    @classmethod
+    def _role_is_known(cls, value: str) -> str:
+        return _known_role(value)
 
 
 class PasswordResetRequest(BaseModel):
@@ -1197,7 +1217,7 @@ def readiness() -> "JSONResponse":
 
 
 @app.get("/api/admin/db-metrics")
-def database_metrics(principal: Principal = Depends(require_role("admin"))) -> dict:
+def database_metrics(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     """Operational metrics for the database tier (Phase 6, DB-09).
 
     Admin-only: pool saturation, storage headroom, backup age, WAL archive
@@ -1212,7 +1232,7 @@ def database_metrics(principal: Principal = Depends(require_role("admin"))) -> d
 
 @app.get("/api/admin/db-slow-queries")
 def database_slow_queries(
-    principal: Principal = Depends(require_role("admin")),
+    principal: Principal = Depends(require_permission("platform.admin")),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     """Top statements by total execution time (Phase 6, DB-12).
@@ -1230,7 +1250,7 @@ def database_slow_queries(
 
 
 @app.get("/api/admin/db-activity")
-def database_activity(principal: Principal = Depends(require_role("admin"))) -> dict:
+def database_activity(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     """Privacy-bounded database activity monitoring for regulated tiers.
 
     The payload is aggregate-only: it never returns statement text, client
@@ -1270,7 +1290,7 @@ def _backup_age_or_none():
 
 
 @app.get("/api/risk-rules")
-def risk_rules(_: Principal = Depends(require_role("viewer"))) -> dict:
+def risk_rules(_: Principal = Depends(require_permission("inventory.view"))) -> dict:
     return {"rules": get_risk_rules()}
 
 
@@ -1280,18 +1300,18 @@ def compliance_keywords(
     language: str = Query(default="", max_length=32),
     category: str = Query(default="", max_length=80),
     source: str = Query(default="all", max_length=20),
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
 ) -> dict:
     return list_keyword_groups(principal.tenant_id, framework, language=language, category=category, source=source)
 
 
 @app.post("/api/compliance-keywords/validate")
-def compliance_keywords_validate(payload: ComplianceKeywordImportRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def compliance_keywords_validate(payload: ComplianceKeywordImportRequest, principal: Principal = Depends(require_permission("rules.manage"))) -> dict:
     return validate_keyword_import(principal.tenant_id, payload.model_dump())
 
 
 @app.post("/api/compliance-keywords/import")
-def compliance_keywords_import(payload: ComplianceKeywordImportRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def compliance_keywords_import(payload: ComplianceKeywordImportRequest, principal: Principal = Depends(require_permission("rules.manage"))) -> dict:
     try:
         result = import_keyword_groups(principal.tenant_id, payload.model_dump())
     except ValueError as exc:
@@ -1316,7 +1336,7 @@ def compliance_keywords_export(
     language: str = Query(default="", max_length=32),
     source: str = Query(default="all", max_length=20),
     format: str = Query(default="json", max_length=10),
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("export")),
 ) -> Response:
     filename, media_type, content = export_keyword_groups(principal.tenant_id, framework, language=language, source=source, fmt=format)
     audit(
@@ -1332,7 +1352,7 @@ def compliance_keywords_export(
 def compliance_keywords_template(
     framework: str = Query(default="gdpr", max_length=40),
     language: str = Query(default="ru", max_length=32),
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
 ) -> dict:
     _ = principal
     normalized_framework = framework.strip().lower().replace("-", "_")
@@ -1458,7 +1478,7 @@ def compliance_keywords_template(
 
 
 @app.get("/api/nist/catalog/status")
-def nist_catalog_status_endpoint(_: Principal = Depends(require_role("viewer"))) -> dict:
+def nist_catalog_status_endpoint(_: Principal = Depends(require_permission("inventory.view"))) -> dict:
     return nist_catalog_status()
 
 
@@ -1474,7 +1494,7 @@ def nist_catalog_endpoint(
     include_keywords: bool = Query(default=False),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
 ) -> dict:
     _ = principal
     return list_nist_rules(
@@ -1492,7 +1512,7 @@ def nist_catalog_endpoint(
 
 
 @app.get("/api/nist/catalog/rules/{rule_id}")
-def nist_catalog_rule(rule_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def nist_catalog_rule(rule_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     _ = principal
     rule = get_nist_rule(rule_id)
     if not rule:
@@ -1501,14 +1521,14 @@ def nist_catalog_rule(rule_id: str, principal: Principal = Depends(require_role(
 
 
 @app.post("/api/nist/catalog/validate")
-def nist_catalog_validate(payload: NISTCatalogPayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def nist_catalog_validate(payload: NISTCatalogPayload, principal: Principal = Depends(require_permission("rules.manage"))) -> dict:
     result = validate_nist_catalog(payload.catalog)
     audit(principal.tenant_id, principal.subject, "nist.catalog.validated", {"valid": result.get("valid"), "catalog_hash": result.get("catalog_hash")})
     return result
 
 
 @app.post("/api/nist/catalog/import")
-def nist_catalog_import(payload: NISTCatalogPayload, principal: Principal = Depends(require_role("admin"))) -> dict:
+def nist_catalog_import(payload: NISTCatalogPayload, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     # H3: the NIST catalog is a platform-global, vendor-maintained baseline shared
     # by every tenant's classifier. Only the platform admin may mutate it - a
     # tenant-scoped admin must not be able to change detection for other tenants.
@@ -1522,7 +1542,7 @@ def nist_catalog_import(payload: NISTCatalogPayload, principal: Principal = Depe
 
 
 @app.post("/api/nist/catalog/activate")
-def nist_catalog_activate(payload: NISTCatalogActivationPayload, principal: Principal = Depends(require_role("admin"))) -> dict:
+def nist_catalog_activate(payload: NISTCatalogActivationPayload, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     _require_platform_admin(principal)  # H3: platform-global resource (see import)
     try:
         result = activate_nist_catalog(payload.catalog_hash, actor=principal.subject)
@@ -1533,7 +1553,7 @@ def nist_catalog_activate(payload: NISTCatalogActivationPayload, principal: Prin
 
 
 @app.post("/api/nist/catalog/rollback")
-def nist_catalog_rollback(principal: Principal = Depends(require_role("admin"))) -> dict:
+def nist_catalog_rollback(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     _require_platform_admin(principal)  # H3: platform-global resource (see import)
     try:
         result = rollback_nist_catalog(actor=principal.subject)
@@ -1544,7 +1564,7 @@ def nist_catalog_rollback(principal: Principal = Depends(require_role("admin")))
 
 
 @app.get("/api/nist/catalog/export")
-def nist_catalog_export(principal: Principal = Depends(require_role("viewer"))) -> Response:
+def nist_catalog_export(principal: Principal = Depends(require_permission("export"))) -> Response:
     filename, media_type, content = export_nist_catalog()
     audit(principal.tenant_id, principal.subject, "nist.catalog.exported", {"bytes": len(content or "")})
     return Response(content=content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
@@ -1583,6 +1603,7 @@ def login(payload: LoginRequest, request: Request) -> dict:
         "access_token": access,
         "token_type": "bearer",
         "role": principal.role,
+        "permissions": sorted(principal_permissions(principal)),
         "tenant_id": principal.tenant_id,
         "expires_in": TOKEN_TTL_SECONDS,
     }
@@ -1652,6 +1673,7 @@ def refresh_session(request: Request) -> Response:
         "access_token": result["access_token"],
         "token_type": "bearer",
         "role": principal.role,
+        "permissions": sorted(principal_permissions(principal)),
         "tenant_id": principal.tenant_id,
         "expires_in": TOKEN_TTL_SECONDS,
     }
@@ -1663,7 +1685,7 @@ def refresh_session(request: Request) -> Response:
 def logout(
     request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission(AUTHENTICATED)),
 ) -> Response:
     if authorization and authorization.lower().startswith("bearer "):
         revoke_token(authorization.split(" ", 1)[1].strip())
@@ -1707,7 +1729,7 @@ def register(payload: RegisterRequest, request: Request) -> dict:
 
 
 @app.post("/api/auth/change-password")
-def change_password(payload: PasswordChangeRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def change_password(payload: PasswordChangeRequest, principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
     if principal.subject in PROTECTED_USERS:
         raise HTTPException(status_code=403, detail="Built-in admin account is protected")
     if PASSWORD_CHANGE_THROTTLE.exhausted(principal.subject):
@@ -1731,15 +1753,22 @@ def change_password(payload: PasswordChangeRequest, principal: Principal = Depen
 
 
 @app.get("/api/profile")
-def profile(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def profile(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
     user = get_user(principal.subject)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"user": _public_user(user), "protected": principal.subject in PROTECTED_USERS, "avatar": user.get("avatar", "")}
+    return {
+        "user": _public_user(user),
+        "protected": principal.subject in PROTECTED_USERS,
+        "avatar": user.get("avatar", ""),
+        # C3: what this account may do, read fresh - the console gates on this, and a
+        # role changed since sign-in shows here on the next page load.
+        "permissions": sorted(principal_permissions(principal)),
+    }
 
 
 @app.put("/api/profile")
-def update_profile(payload: ProfileUpdateRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def update_profile(payload: ProfileUpdateRequest, principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
     if principal.subject in PROTECTED_USERS:
         raise HTTPException(status_code=403, detail="Built-in admin account is protected")
     user = update_user_profile(principal.subject, payload.full_name.strip())
@@ -1753,7 +1782,7 @@ _AVATAR_DATA_PREFIXES = ("data:image/png;base64,", "data:image/jpeg;base64,", "d
 
 
 @app.put("/api/profile/avatar")
-def update_profile_avatar(payload: AvatarUpdateRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def update_profile_avatar(payload: AvatarUpdateRequest, principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
     """Set or clear the account's profile photo. Allowed for every account,
     including the protected built-in admin - the photo is cosmetic and cannot
     change identity, role, or credentials."""
@@ -1795,19 +1824,20 @@ def _feature_settings_payload(principal: Principal) -> dict:
                 "enabled": status["enabled"],
                 "dependency_installed": status["dependency_installed"],
                 "state": status["state"],
-                "editable": principal.role == "admin",
+                # Install-wide: turning OCR on changes every tenant's scans.
+                "editable": has_permission(principal, "platform.admin"),
             }
         }
     }
 
 
 @app.get("/api/settings/features")
-def get_feature_settings(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def get_feature_settings(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
     return _feature_settings_payload(principal)
 
 
 @app.put("/api/settings/features")
-def update_feature_settings(payload: FeatureSettingsRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def update_feature_settings(payload: FeatureSettingsRequest, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     value = "1" if payload.ocr_enabled else "0"
     set_app_setting(_FEATURE_OCR_SETTING, value)
     os.environ["DSPM_OCR_ENABLED"] = value
@@ -1815,14 +1845,21 @@ def update_feature_settings(payload: FeatureSettingsRequest, principal: Principa
     return _feature_settings_payload(principal)
 
 
+@app.get("/api/roles")
+def roles_index(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    """C3: the roles an administrator can give, and what each one allows."""
+    return {"roles": role_catalogue(), "permissions": permission_catalogue(),
+            "delegable": list(DELEGABLE_ROLES)}
+
+
 @app.get("/api/users")
-def users(principal: Principal = Depends(require_role("admin"))) -> dict:
+def users(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     tenant_id = None if _is_platform_admin(principal) else principal.tenant_id
     return {"users": [_public_user(user) for user in list_users(tenant_id)]}
 
 
 @app.post("/api/users")
-def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     username = sanitize_username(payload.username)
     tenant_id = _safe_tenant(payload.tenant_id)
     if not _can_manage_tenant(principal, tenant_id):
@@ -1837,7 +1874,7 @@ def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends
 
 
 @app.put("/api/users/{username}/role")
-def admin_update_user_role(username: str, payload: UserRoleRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_update_user_role(username: str, payload: UserRoleRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = sanitize_username(username)
     if target in PROTECTED_USERS:
         raise HTTPException(status_code=403, detail="Built-in admin account is protected")
@@ -1850,8 +1887,9 @@ def admin_update_user_role(username: str, payload: UserRoleRequest, principal: P
         raise HTTPException(status_code=403, detail="Tenant access denied")
     if tenant_id and not tenant_exists(tenant_id):
         raise HTTPException(status_code=400, detail="Tenant does not exist")
-    if target == principal.subject and payload.role != "admin":
-        admins = [user for user in list_users(current_user["tenant_id"]) if user["role"] == "admin" and user["is_active"]]
+    if target == principal.subject and "tenant.admin" not in role_permissions(payload.role):
+        admins = [user for user in list_users(current_user["tenant_id"])
+                  if "tenant.admin" in role_permissions(user["role"]) and user["is_active"]]
         if len(admins) <= 1:
             raise HTTPException(status_code=400, detail="At least one active admin must remain")
     user = update_user_role(target, payload.role, tenant_id)
@@ -1862,7 +1900,7 @@ def admin_update_user_role(username: str, payload: UserRoleRequest, principal: P
 
 
 @app.post("/api/users/{username}/reset-password")
-def admin_reset_password(username: str, payload: PasswordResetRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_reset_password(username: str, payload: PasswordResetRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = sanitize_username(username)
     if target in PROTECTED_USERS:
         raise HTTPException(status_code=403, detail="Built-in admin account is protected")
@@ -1882,7 +1920,7 @@ def admin_reset_password(username: str, payload: PasswordResetRequest, principal
 
 
 @app.put("/api/users/{username}/active")
-def admin_update_user_active(username: str, payload: UserActiveRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_update_user_active(username: str, payload: UserActiveRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = sanitize_username(username)
     if target in PROTECTED_USERS:
         raise HTTPException(status_code=403, detail="Built-in admin account is protected")
@@ -1906,7 +1944,7 @@ def admin_update_user_active(username: str, payload: UserActiveRequest, principa
 
 @app.post("/api/users/{username}/delete")
 @app.delete("/api/users/{username}")
-def admin_delete_user(username: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_delete_user(username: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = sanitize_username(username)
     if target in PROTECTED_USERS:
         raise HTTPException(status_code=403, detail="Built-in admin account is protected")
@@ -1929,13 +1967,13 @@ def admin_delete_user(username: str, principal: Principal = Depends(require_role
 
 
 @app.get("/api/users/activity")
-def user_activity(principal: Principal = Depends(require_role("admin"))) -> dict:
+def user_activity(principal: Principal = Depends(require_permission("audit.view"))) -> dict:
     events = [event for event in read_audit_log(principal.tenant_id, 500) if str(event.get("action", "")).startswith(("auth.", "user."))]
     return {"events": events}
 
 
 @app.post("/api/tenants")
-def admin_create_tenant(payload: TenantRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_create_tenant(payload: TenantRequest, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     _require_platform_admin(principal)
     tenant_id = _safe_tenant(payload.tenant_id)
     if tenant_exists(tenant_id):
@@ -1947,7 +1985,7 @@ def admin_create_tenant(payload: TenantRequest, principal: Principal = Depends(r
 
 @app.post("/api/tenants/{tenant_id}/regenerate-registration-code")
 @app.post("/api/tenants/{tenant_id}/registration-code")
-def admin_rotate_tenant_registration_code(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_rotate_tenant_registration_code(tenant_id: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = _safe_tenant(tenant_id)
     if not _can_manage_tenant(principal, target):
         raise HTTPException(status_code=403, detail="Tenant access denied")
@@ -1969,16 +2007,16 @@ class InviteCreateRequest(BaseModel):
 
 
 @app.post("/api/tenants/{tenant_id}/invites")
-def admin_create_invite(tenant_id: str, payload: InviteCreateRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_create_invite(tenant_id: str, payload: InviteCreateRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = _safe_tenant(tenant_id)
     if not _can_manage_tenant(principal, target):
         raise HTTPException(status_code=403, detail="Tenant access denied")
     if not tenant_exists(target):
         raise HTTPException(status_code=404, detail="Tenant not found")
     role = payload.role.strip().lower()
-    if role not in {"viewer", "analyst"}:
+    if role not in DELEGABLE_ROLES:
         # Self-registration invites never mint admins - create admins via /api/users.
-        raise HTTPException(status_code=400, detail="Invite role must be 'viewer' or 'analyst'")
+        raise HTTPException(status_code=400, detail=f"Invite role must be one of: {', '.join(DELEGABLE_ROLES)}")
     token = f"inv_{secrets.token_urlsafe(24)}"
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=payload.ttl_hours)).isoformat()
     invite_id = create_registration_invite(
@@ -1996,7 +2034,7 @@ def admin_create_invite(tenant_id: str, payload: InviteCreateRequest, principal:
 
 
 @app.get("/api/tenants/{tenant_id}/invites")
-def admin_list_invites(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_list_invites(tenant_id: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = _safe_tenant(tenant_id)
     if not _can_manage_tenant(principal, target):
         raise HTTPException(status_code=403, detail="Tenant access denied")
@@ -2004,7 +2042,7 @@ def admin_list_invites(tenant_id: str, principal: Principal = Depends(require_ro
 
 
 @app.post("/api/tenants/{tenant_id}/invites/{invite_id}/revoke")
-def admin_revoke_invite(tenant_id: str, invite_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_revoke_invite(tenant_id: str, invite_id: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     target = _safe_tenant(tenant_id)
     if not _can_manage_tenant(principal, target):
         raise HTTPException(status_code=403, detail="Tenant access denied")
@@ -2015,7 +2053,7 @@ def admin_revoke_invite(tenant_id: str, invite_id: str, principal: Principal = D
 
 
 @app.delete("/api/tenants/{tenant_id}")
-def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     _require_platform_admin(principal)
     target = _safe_tenant(tenant_id)
     if target == "default":
@@ -2038,7 +2076,7 @@ class LegalHoldRequest(BaseModel):
 
 
 @app.get("/api/tenants/{tenant_id}/legal-hold")
-def read_legal_hold(tenant_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+def read_legal_hold(tenant_id: str, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
     _require_platform_admin(principal)
     target = _safe_tenant(tenant_id)
     if not tenant_exists(target):
@@ -2050,7 +2088,7 @@ def read_legal_hold(tenant_id: str, principal: Principal = Depends(require_role(
 def write_legal_hold(
     tenant_id: str,
     payload: LegalHoldRequest,
-    principal: Principal = Depends(require_role("admin")),
+    principal: Principal = Depends(require_permission("platform.admin")),
 ) -> dict:
     """Place or lift a legal hold (Phase 6, DB-11).
 
@@ -2074,11 +2112,11 @@ def write_legal_hold(
 
 
 @app.post("/api/api-keys")
-def create_api_key(payload: ApiKeyRequest, principal: Principal = Depends(require_role("admin"))) -> dict:
+def create_api_key(payload: ApiKeyRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     role = payload.role.strip().lower()
-    if role not in {"viewer", "analyst"}:
+    if role not in DELEGABLE_ROLES:
         # Machine keys never carry admin - create admins via /api/users.
-        raise HTTPException(status_code=400, detail="API key role must be 'viewer' or 'analyst'")
+        raise HTTPException(status_code=400, detail=f"API key role must be one of: {', '.join(DELEGABLE_ROLES)}")
     raw, key_hash = generate_api_key()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=payload.ttl_days)).isoformat()
     key_id = create_api_key_record(principal.tenant_id, key_hash, payload.label, role, principal.subject, expires_at)
@@ -2094,12 +2132,12 @@ def create_api_key(payload: ApiKeyRequest, principal: Principal = Depends(requir
 
 
 @app.get("/api/api-keys")
-def list_api_keys_route(principal: Principal = Depends(require_role("admin"))) -> dict:
+def list_api_keys_route(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     return {"api_keys": list_api_keys(principal.tenant_id)}
 
 
 @app.post("/api/api-keys/{key_id}/revoke")
-def revoke_api_key_route(key_id: str, principal: Principal = Depends(require_role("admin"))) -> dict:
+def revoke_api_key_route(key_id: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     if not revoke_api_key(principal.tenant_id, key_id):
         raise HTTPException(status_code=404, detail="API key not found or already revoked")
     audit(principal.tenant_id, principal.subject, "api_key.revoked", {"key_id": key_id})
@@ -2107,7 +2145,7 @@ def revoke_api_key_route(key_id: str, principal: Principal = Depends(require_rol
 
 
 @app.post("/api/credentials")
-def store_credentials(payload: CredentialRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def store_credentials(payload: CredentialRequest, principal: Principal = Depends(require_permission("scan.run", "credential.manage"))) -> dict:
     secret_ref = vault.store(
         principal.tenant_id,
         payload.username.strip(),
@@ -2126,7 +2164,7 @@ class ScanProfileRequest(BaseModel):
 
 
 @app.get("/api/scan-profiles")
-def scan_profiles_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def scan_profiles_index(principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     return {
         "tenant_id": principal.tenant_id,
         "profiles": list_scan_profiles(principal.tenant_id),
@@ -2134,7 +2172,7 @@ def scan_profiles_index(principal: Principal = Depends(require_role("viewer"))) 
 
 
 @app.post("/api/scan-profiles")
-def scan_profiles_save(payload: ScanProfileRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def scan_profiles_save(payload: ScanProfileRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         profile = save_scan_profile(
             principal.tenant_id,
@@ -2150,7 +2188,7 @@ def scan_profiles_save(payload: ScanProfileRequest, principal: Principal = Depen
 
 
 @app.delete("/api/scan-profiles/{profile_id}")
-def scan_profiles_delete(profile_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def scan_profiles_delete(profile_id: str, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     removed = delete_scan_profile(principal.tenant_id, profile_id)
     if removed:
         audit(principal.tenant_id, principal.subject, "scan_profile.deleted", {"profile_id": profile_id})
@@ -2198,7 +2236,7 @@ def _schedulable(request: dict) -> dict:
 
 
 @app.get("/api/scan-schedules")
-def scan_schedules_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def scan_schedules_index(principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     return {
         "tenant_id": principal.tenant_id,
         "schedules": list_scan_schedules(principal.tenant_id),
@@ -2206,7 +2244,7 @@ def scan_schedules_index(principal: Principal = Depends(require_role("viewer")))
 
 
 @app.post("/api/scan-schedules")
-def scan_schedules_create(payload: ScheduleRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def scan_schedules_create(payload: ScheduleRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     schedule = create_scan_schedule(
         principal.tenant_id,
         name=payload.name,
@@ -2223,7 +2261,7 @@ def scan_schedules_create(payload: ScheduleRequest, principal: Principal = Depen
 
 @app.patch("/api/scan-schedules/{schedule_id}")
 def scan_schedules_update(schedule_id: str, payload: ScheduleUpdateRequest,
-                          principal: Principal = Depends(require_role("analyst"))) -> dict:
+                          principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     request = _schedulable(payload.scan.model_dump(mode="json")) if payload.scan is not None else None
     schedule = update_scan_schedule(
         principal.tenant_id, schedule_id,
@@ -2237,7 +2275,7 @@ def scan_schedules_update(schedule_id: str, payload: ScheduleUpdateRequest,
 
 
 @app.delete("/api/scan-schedules/{schedule_id}")
-def scan_schedules_delete(schedule_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def scan_schedules_delete(schedule_id: str, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     removed = delete_scan_schedule(principal.tenant_id, schedule_id)
     if removed:
         audit(principal.tenant_id, principal.subject, "schedule.deleted", {"schedule_id": schedule_id})
@@ -2245,7 +2283,7 @@ def scan_schedules_delete(schedule_id: str, principal: Principal = Depends(requi
 
 
 @app.post("/api/scan-schedules/{schedule_id}/run")
-def scan_schedules_run_now(schedule_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def scan_schedules_run_now(schedule_id: str, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     """Make a schedule due now; the scheduler starts it on its next sweep."""
     schedule = update_scan_schedule(
         principal.tenant_id, schedule_id, enabled=True, next_run_at=datetime.now(timezone.utc),
@@ -2257,7 +2295,7 @@ def scan_schedules_run_now(schedule_id: str, principal: Principal = Depends(requ
 
 
 @app.post("/api/test-connection")
-def test_connection(payload: ConnectionRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def test_connection(payload: ConnectionRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     if not _is_local_endpoint_host(payload.server):
         _validate_scan_target(payload.server)
     engine = DSPMDiscoveryEngine(_to_config(payload, principal.tenant_id))
@@ -2266,7 +2304,7 @@ def test_connection(payload: ConnectionRequest, principal: Principal = Depends(r
 
 
 @app.post("/api/endpoint/test-connection")
-def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     if _is_local_endpoint_host(payload.host):
         if platform.system().lower() != "windows":
             return {
@@ -2304,7 +2342,7 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
 
 
 @app.post("/api/endpoint/check-access")
-def endpoint_check_access(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def endpoint_check_access(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     """What the supplied credential can actually reach on the target.
 
     An endpoint scan needs no administrator - it reads, and stages one file in
@@ -2345,7 +2383,7 @@ def endpoint_check_access(payload: EndpointScanRequest, principal: Principal = D
 
 
 @app.post("/api/endpoint/activate-local-winrm")
-def endpoint_activate_local_winrm(payload: LocalWinRMActivationRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def endpoint_activate_local_winrm(payload: LocalWinRMActivationRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         result = activate_local_winrm(payload.username, payload.password, payload.domain)
     except Exception as exc:
@@ -2360,7 +2398,7 @@ def endpoint_activate_local_winrm(payload: LocalWinRMActivationRequest, principa
 
 
 @app.post("/api/endpoint/activate-winrm")
-def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     if _is_local_endpoint_host(payload.host):
         return endpoint_activate_local_winrm(
             LocalWinRMActivationRequest(domain=payload.domain, username=payload.username, password=payload.password),
@@ -2382,7 +2420,7 @@ def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal =
 
 
 @app.post("/api/endpoint/repair-winrm")
-def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     if _is_local_endpoint_host(payload.host):
         return endpoint_activate_local_winrm(
             LocalWinRMActivationRequest(domain=payload.domain, username=payload.username, password=payload.password),
@@ -2408,7 +2446,7 @@ def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = D
 
 
 @app.post("/api/endpoint/scan")
-def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         if not _is_local_endpoint_host(payload.host):
             _validate_scan_target(payload.host)
@@ -2428,7 +2466,7 @@ def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(r
 
 
 @app.post("/api/demo-data/generate")
-def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         output = _safe_demo_output(payload.output)
         generate_enterprise_test_data(output, payload.files_per_share)
@@ -2452,7 +2490,7 @@ def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(
 
 
 @app.post("/api/scan")
-def scan(payload: ScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def scan(payload: ScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         if not _is_local_endpoint_host(payload.server):
             _validate_scan_target(payload.server)
@@ -2487,7 +2525,7 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_role("anal
 
 
 @app.get("/api/scans/{job_id}")
-def scan_job(job_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def scan_job(job_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     cleanup_jobs()
     job = get_job(job_id)
     if job is not None and job.tenant_id == principal.tenant_id:
@@ -2503,7 +2541,7 @@ def scan_job(job_id: str, principal: Principal = Depends(require_role("viewer"))
 
 
 @app.post("/api/scans/{job_id}/cancel")
-def stop_scan(job_id: str, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def stop_scan(job_id: str, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     job = get_job(job_id)
     if job is None or job.tenant_id != principal.tenant_id:
         raise HTTPException(status_code=404, detail="Scan job not found")
@@ -2514,7 +2552,7 @@ def stop_scan(job_id: str, principal: Principal = Depends(require_role("analyst"
 
 @app.get("/api/history")
 def scan_history(
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict:
     return {
@@ -2525,7 +2563,7 @@ def scan_history(
 
 @app.get("/api/history/latest/report")
 def latest_scan_report(
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     include_files: bool = Query(default=True),
 ) -> dict:
     report = read_scan_report(principal.tenant_id)
@@ -2537,7 +2575,7 @@ def latest_scan_report(
 @app.get("/api/history/{scan_id}/report")
 def saved_scan_report(
     scan_id: str,
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     include_files: bool = Query(default=True),
 ) -> dict:
     if include_files:
@@ -2551,7 +2589,7 @@ def saved_scan_report(
 
 @app.get("/api/findings")
 def findings_index(
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     scope: str = Query(default="current", max_length=20),
     status: str = Query(default="active", max_length=200),
     severity: str = Query(default="", max_length=120),
@@ -2596,7 +2634,7 @@ def findings_index(
 
 @app.get("/api/inventory")
 def inventory_index(
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     risk: str = Query(default="", max_length=200),
     source: str = Query(default="", max_length=400),
     framework: str = Query(default="", max_length=400),
@@ -2645,7 +2683,7 @@ def inventory_index(
 
 @app.get("/api/inventory/export")
 def inventory_export(
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("export")),
     format: str = Query(default="csv", pattern="^(csv|ndjson)$"),
     risk: str = Query(default="", max_length=200),
     source: str = Query(default="", max_length=400),
@@ -2691,7 +2729,7 @@ def inventory_export(
 
 @app.get("/api/inventory/facets")
 def inventory_facet_index(
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     source: str = Query(default="", max_length=400),
 ) -> dict:
     return {
@@ -2702,7 +2740,7 @@ def inventory_facet_index(
 
 @app.get("/api/inventory-detail-counts")
 def inventory_detail_counts(
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     ids: str = Query(default="", max_length=20_000),
 ) -> dict:
     """Batch reason/fix counts for specific assets. The row cells must show
@@ -2721,7 +2759,7 @@ def inventory_detail_counts(
 @app.get("/api/inventory/{asset_id}")
 def inventory_asset_detail(
     asset_id: str,
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("inventory.view")),
     scan_id: str = Query(default="", max_length=100),
 ) -> dict:
     asset = get_inventory_asset(principal.tenant_id, asset_id, scan_id=scan_id)
@@ -2731,7 +2769,7 @@ def inventory_asset_detail(
 
 
 @app.get("/api/findings/{finding_id}")
-def finding_detail(finding_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def finding_detail(finding_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     finding = get_finding(principal.tenant_id, finding_id)
     if finding is None:
         raise HTTPException(status_code=404, detail="Finding not found")
@@ -2742,7 +2780,7 @@ def finding_detail(finding_id: str, principal: Principal = Depends(require_role(
 
 
 @app.post("/api/findings/detail")
-def finding_detail_preview(payload: dict, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def finding_detail_preview(payload: dict, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     _ = principal
     finding = payload.get("finding") if isinstance(payload, dict) else {}
     if not isinstance(finding, dict):
@@ -2754,52 +2792,52 @@ def finding_detail_preview(payload: dict, principal: Principal = Depends(require
 
 
 @app.patch("/api/findings/{finding_id}/status")
-def finding_status_update(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_status_update(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "status", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/assign")
-def finding_assign(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_assign(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "assign", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/comment")
-def finding_comment(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_comment(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "comment", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/suppress")
-def finding_suppress(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_suppress(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "suppress", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/false-positive")
-def finding_false_positive(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_false_positive(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "false-positive", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/risk-acceptance")
-def finding_risk_acceptance(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_risk_acceptance(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "risk-acceptance", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/resolve")
-def finding_resolve(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_resolve(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "resolve", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/reopen")
-def finding_reopen(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_reopen(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "reopen", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/validate")
-def finding_validate(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def finding_validate(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "validate", payload, principal)
 
 
 @app.get("/api/findings/{finding_id}/history")
-def finding_history(finding_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def finding_history(finding_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     history = get_finding_history(principal.tenant_id, finding_id)
     if history is None:
         raise HTTPException(status_code=404, detail="Finding not found")
@@ -2807,7 +2845,7 @@ def finding_history(finding_id: str, principal: Principal = Depends(require_role
 
 
 @app.get("/api/findings/{finding_id}/occurrences")
-def finding_occurrences(finding_id: str, principal: Principal = Depends(require_role("viewer"))) -> dict:
+def finding_occurrences(finding_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     occurrences = get_finding_occurrences(principal.tenant_id, finding_id)
     if occurrences is None:
         raise HTTPException(status_code=404, detail="Finding not found")
@@ -2863,7 +2901,7 @@ def _suppression_rule_from_finding(finding: dict, scope: str, reason: str) -> di
 
 
 @app.get("/api/suppression-rules")
-def suppression_rules_index(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def suppression_rules_index(principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     """What this tenant's scans have been told not to report again."""
     return {"rules": list_suppression_rules(principal.tenant_id)}
 
@@ -2871,7 +2909,7 @@ def suppression_rules_index(principal: Principal = Depends(require_role("viewer"
 @app.post("/api/suppression-rules")
 def suppression_rule_create(
     payload: SuppressionRulePayload,
-    principal: Principal = Depends(require_role("analyst")),
+    principal: Principal = Depends(require_permission("rules.manage")),
 ) -> dict:
     try:
         rule = create_suppression_rule(
@@ -2899,7 +2937,7 @@ def suppression_rule_create(
 def suppression_rule_update(
     rule_id: str,
     payload: SuppressionRuleUpdate,
-    principal: Principal = Depends(require_role("analyst")),
+    principal: Principal = Depends(require_permission("rules.manage")),
 ) -> dict:
     update = {key: value for key, value in payload.model_dump().items() if value is not None}
     try:
@@ -2918,7 +2956,7 @@ def suppression_rule_update(
 @app.delete("/api/suppression-rules/{rule_id}")
 def suppression_rule_delete(
     rule_id: str,
-    principal: Principal = Depends(require_role("analyst")),
+    principal: Principal = Depends(require_permission("rules.manage")),
 ) -> dict:
     rule = get_suppression_rule(principal.tenant_id, rule_id)
     if rule is None or not delete_suppression_rule(principal.tenant_id, rule_id):
@@ -2969,7 +3007,7 @@ def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLife
 def finding_workflow_update(
     scan_id: str,
     payload: FindingWorkflowUpdate,
-    principal: Principal = Depends(require_role("analyst")),
+    principal: Principal = Depends(require_permission("findings.triage")),
 ) -> dict:
     try:
         finding = update_finding_workflow(
@@ -3055,7 +3093,7 @@ def _duplicate_hash_paths(report: dict | None) -> list[dict]:
 
 
 @app.get("/api/history/hash-changes")
-def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def scan_hash_changes(principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     history = read_scan_history(principal.tenant_id, limit=2)
     if len(history) < 2:
         latest_report = read_scan_report(principal.tenant_id, history[-1].get("scan_id")) if history else None
@@ -3115,14 +3153,14 @@ def scan_hash_changes(principal: Principal = Depends(require_role("viewer"))) ->
 
 
 @app.get("/api/tenants")
-def tenant_portfolio(principal: Principal = Depends(require_role("admin"))) -> dict:
+def tenant_portfolio(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     tenants = list_tenants() if _is_platform_admin(principal) else list_tenants(principal.tenant_id)
     return {"tenants": [_public_tenant(item) for item in tenants]}
 
 
 @app.get("/api/audit")
 def audit_log(
-    principal: Principal = Depends(require_role("admin")),
+    principal: Principal = Depends(require_permission("audit.view")),
     limit: int = Query(default=200, ge=1, le=1000),
 ) -> dict:
     return {
@@ -3132,7 +3170,7 @@ def audit_log(
 
 
 @app.get("/api/executive-dashboard")
-def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) -> dict:
+def executive_dashboard(principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     # The trend is the last 14 runs and `latest` is the newest of them, so this
     # is every row the response can use. It read 200 and threw 186 away on the
     # console's most-requested call.
@@ -3405,7 +3443,7 @@ def _scan_extension_settings(extensions: list[str], enabled: bool) -> tuple[list
 
 
 @app.post("/api/dlp-policy")
-def export_dlp_policy(payload: ScanRequest, principal: Principal = Depends(require_role("analyst"))) -> dict:
+def export_dlp_policy(payload: ScanRequest, principal: Principal = Depends(require_permission("export"))) -> dict:
     return {
         "format": "generic-json",
         "tenant_id": principal.tenant_id,

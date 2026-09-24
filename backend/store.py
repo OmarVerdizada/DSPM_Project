@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from backend import db
+from backend.permissions import is_known_role
 from discovery.suppression import MAX_SUPPRESSION_RULES
 from risk.risk_engine import finding_recommendation, finding_reason
 from scripts.logger import get_logger
@@ -786,6 +787,53 @@ def add_user_sessions(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS user_sessions_expiry ON user_sessions (expires_at)")
 
 
+def open_role_catalogue(conn) -> None:
+    """Revision 0020: users.role accepts the role catalogue, not three fixed names (C3).
+
+    The baseline pinned the column with CHECK (role IN ('admin', 'analyst', 'viewer')),
+    which made three ranks a property of the schema. C3 names permissions and gives
+    roles sets of them - an auditor, a scan operator - so which names are valid is the
+    application's to say (`backend.permissions`), and the store checks it on every write.
+
+    PostgreSQL drops the constraint in place. SQLite cannot alter a constraint, so the
+    table is rebuilt from its own recorded definition minus the CHECK: every column the
+    install has, every row, and the indexes as they were. An install that is already
+    open is left alone.
+    """
+
+    if db.is_postgres():
+        rows = conn.execute(
+            "SELECT conname, pg_get_constraintdef(oid) AS definition FROM pg_constraint "
+            "WHERE conrelid = to_regclass('users')::oid AND contype = 'c'"
+        ).fetchall()
+        for row in rows:
+            if "role" in str(row["definition"]).lower():
+                conn.execute(f'ALTER TABLE users DROP CONSTRAINT IF EXISTS "{row["conname"]}"')
+        return
+
+    found = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").fetchone()
+    ddl = str(found["sql"] or "") if found else ""
+    constraint = re.compile(r"\s*CHECK\s*\(\s*role\s+IN\s*\([^)]*\)\s*\)", re.IGNORECASE)
+    if not ddl or not constraint.search(ddl):
+        return
+    open_ddl = constraint.sub("", ddl)
+    open_ddl, renamed = re.subn(r'^CREATE TABLE\s+(IF NOT EXISTS\s+)?"?users"?', "CREATE TABLE users_c3_open",
+                                open_ddl, count=1, flags=re.IGNORECASE)
+    if not renamed:
+        raise RuntimeError("Revision 0020 could not read the users table definition")
+    indexes = [str(row["sql"]) for row in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'users' AND sql IS NOT NULL"
+    ).fetchall()]
+    columns = ", ".join(str(row["name"]) for row in conn.execute("PRAGMA table_info(users)").fetchall())
+    conn.execute("DROP TABLE IF EXISTS users_c3_open")
+    conn.execute(open_ddl)
+    conn.execute(f"INSERT INTO users_c3_open ({columns}) SELECT {columns} FROM users")
+    conn.execute("DROP TABLE users")
+    conn.execute("ALTER TABLE users_c3_open RENAME TO users")
+    for statement in indexes:
+        conn.execute(statement)
+
+
 def add_refresh_tokens(conn) -> None:
     """Revision 0019: the rotating half of a bounded session (C1).
 
@@ -1146,7 +1194,7 @@ def apply_baseline_schema(conn) -> None:
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK (role IN ('admin', 'analyst', 'viewer')),
+            role TEXT NOT NULL,
             tenant_id TEXT NOT NULL DEFAULT 'default',
             full_name TEXT NOT NULL DEFAULT '',
             is_active INTEGER NOT NULL DEFAULT 1,
@@ -8379,7 +8427,14 @@ def read_alerts(tenant_id: str, limit: int = 200) -> list[dict]:
     return list(reversed(events))
 
 
+def _require_known_role(role: str) -> None:
+    # C3: revision 0020 took this check out of the schema; it lives here now.
+    if not is_known_role(role):
+        raise ValueError(f"Unknown role: {role!r}")
+
+
 def create_user(username: str, password_hash: str, role: str, tenant_id: str = "default", full_name: str = "") -> dict:
+    _require_known_role(role)
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:
@@ -8456,6 +8511,7 @@ def list_users(tenant_id: str | None = None) -> list[dict]:
 
 
 def update_user_role(username: str, role: str, tenant_id: str | None = None) -> dict | None:
+    _require_known_role(role)
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:

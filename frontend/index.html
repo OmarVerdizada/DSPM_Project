@@ -12,7 +12,7 @@
     />
     <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=10" />
-    <link rel="stylesheet" href="/static/styles.css?v=254" />
+    <link rel="stylesheet" href="/static/styles.css?v=255" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=20" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
@@ -81,12 +81,12 @@
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
             <span>Remediation</span>
           </button>
-          <button type="button" class="tab" data-tab="file-servers" title="File server and endpoint scans">
+          <button type="button" class="tab" data-tab="file-servers" title="File server and endpoint scans" data-requires="scan.run">
             <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
             <span>Scan</span>
             <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
           </button>
-          <div class="nav-sub" data-nav-sub="file-servers" aria-hidden="true">
+          <div class="nav-sub" data-nav-sub="file-servers" aria-hidden="true" data-requires="scan.run">
             <div class="nav-sub-inner">
               <button type="button" class="nav-sub-link" data-tab-jump="file-servers">File server</button>
               <button type="button" class="nav-sub-link" data-tab-jump="endpoint">Endpoint</button>
@@ -152,7 +152,7 @@
           </div>
           <div class="topbar-actions">
             <div class="tb-newscan" id="fx-newscan">
-              <button type="button" id="fx-newscan-btn" class="tb-primary" aria-haspopup="true" aria-expanded="false">
+              <button type="button" id="fx-newscan-btn" class="tb-primary" aria-haspopup="true" aria-expanded="false" data-requires="scan.run">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
                 New Scan
               </button>
@@ -178,7 +178,7 @@
           </div>
         </section>
 
-                <section id="tab-file-servers" class="tab-panel">
+                <section id="tab-file-servers" class="tab-panel" data-requires="scan.run">
           <div class="section-header">
             <div>
               <h2 class="page-title">File server scan</h2>
@@ -647,8 +647,8 @@
                   <input id="filter" placeholder="Search file, path, finding, source, risk..." autocomplete="off" />
                 </div>
                 <div class="inventory-export-actions" aria-label="Stream filtered inventory">
-                  <button type="button" id="inventory-export-csv" class="secondary-btn mini-btn" aria-describedby="inventory-export-status">Stream CSV</button>
-                  <button type="button" id="inventory-export-ndjson" class="secondary-btn mini-btn" aria-describedby="inventory-export-status">Stream NDJSON</button>
+                  <button type="button" id="inventory-export-csv" class="secondary-btn mini-btn" data-requires="export" aria-describedby="inventory-export-status">Stream CSV</button>
+                  <button type="button" id="inventory-export-ndjson" class="secondary-btn mini-btn" data-requires="export" aria-describedby="inventory-export-status">Stream NDJSON</button>
                 </div>
                 <span id="inventory-export-status" class="visually-hidden" role="status" aria-live="polite">Exports stream filtered metadata directly to disk.</span>
                 <span id="inventory-sort-status" class="visually-hidden" role="status" aria-live="polite"></span>
@@ -724,7 +724,7 @@
                         <span class="inventory-empty-icon" aria-hidden="true"></span>
                         <strong>See your sensitive data clearly</strong>
                         <p>Run a file-server or endpoint scan to build a readable inventory of findings, risk reasons, and recommended actions.</p>
-                        <button type="button" class="mc-empty-cta" data-tab-jump="file-servers">Start your first scan</button>
+                        <button type="button" class="mc-empty-cta" data-tab-jump="file-servers" data-requires="scan.run">Start your first scan</button>
                       </div>
                     </td>
                   </tr>
@@ -1071,7 +1071,7 @@
                      nothing else says: what the button is about to produce. -->
                 <p class="report-carrier report-build-line" id="report-build-line" role="status" aria-live="polite"></p>
 
-                <button type="submit" class="facet-apply" id="report-generate"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg><span id="report-generate-label">Generate report</span></button>
+                <button type="submit" class="facet-apply" id="report-generate" data-requires="report.create"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg><span id="report-generate-label">Generate report</span></button>
               </div>
             </form>
 
@@ -1160,7 +1160,7 @@
           </section>
         </section>
 
-                <section id="tab-endpoint" class="tab-panel">
+                <section id="tab-endpoint" class="tab-panel" data-requires="scan.run">
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
             <defs>
               <symbol id="li-radar" viewBox="0 0 24 24"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62a10 10 0 1 0 19.02-1.27"/><path d="M16.24 7.76a6 6 0 1 0-8.01 8.91"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></symbol>
@@ -1572,8 +1572,10 @@
                   Role
                   <select id="new-user-role">
                     <option value="viewer">Viewer</option>
+                    <option value="auditor">Auditor</option>
+                    <option value="scan_operator">Scan operator</option>
                     <option value="analyst">Analyst</option>
-                    <option value="admin">MSSP Admin</option>
+                    <option value="admin">Tenant administrator</option>
                   </select>
                 </label>
                 <label>
@@ -1614,7 +1616,7 @@
                 <span class="panel-badge">Generic JSON</span>
               </div>
               <p class="panel-copy">Exports the current customer asset rules as an import-ready policy skeleton.</p>
-              <button type="button" id="export-dlp-policy-btn" class="secondary-btn">Generate policy</button>
+              <button type="button" id="export-dlp-policy-btn" class="secondary-btn" data-requires="export">Generate policy</button>
               <pre id="dlp-policy-output" class="code-output">No policy generated yet.</pre>
             </section>
           </div>
@@ -1770,7 +1772,7 @@
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
-    <script src="/static/app.js?v=240"></script>
+    <script src="/static/app.js?v=241"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

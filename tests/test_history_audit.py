@@ -38,10 +38,10 @@ class HistoryPageTests(unittest.TestCase):
         self.assertIn("loadAudit()", loader[:loader.index("\n}\n")])
 
     def test_the_trail_is_hidden_from_anyone_who_cannot_read_it(self) -> None:
-        # /api/audit requires admin, so a viewer is shown no table rather than
-        # one that will never fill.
+        # /api/audit requires audit.view (C3), so an account without it is shown no
+        # table rather than one that will never fill.
         self.assertIn("function syncAuditVisibility()", SCRIPT)
-        self.assertIn("isAdminRole()", SCRIPT[SCRIPT.index("function syncAuditVisibility()"):][:220])
+        self.assertIn('can("audit.view")', SCRIPT[SCRIPT.index("function syncAuditVisibility()"):][:220])
         self.assertIn('id="audit-section" hidden', history_panel())
 
     def test_the_four_kpi_tiles_are_gone(self) -> None:

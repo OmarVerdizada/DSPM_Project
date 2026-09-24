@@ -39,12 +39,12 @@ from backend.store import (
     update_user_role,
 )
 from backend.breached_passwords import password_is_breached
+from backend.permissions import AUTHENTICATED, PERMISSIONS, PLATFORM_ONLY, is_known_role, role_permissions
 from backend.store import issue_refresh_token as store_issue_refresh_token
 
 
 logger = logging.getLogger(__name__)
 
-ROLES = {"admin": 3, "analyst": 2, "viewer": 1}
 ENVIRONMENT = os.getenv("DSPM_ENV", "local").strip().lower()
 IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -454,7 +454,7 @@ def verify_token(token: str) -> Principal:
         if not user or not user.get("is_active"):
             raise ValueError("inactive user")
         role = str(user.get("role") or claims.get("role") or "viewer")
-        if role not in ROLES:
+        if not is_known_role(role):
             raise ValueError("invalid role")
         tenant_id = str(user.get("tenant_id") or claims.get("tenant") or "default")
         return Principal(subject, role, tenant_id, session_id=jti)
@@ -683,7 +683,7 @@ def _download_claims(token: str, artifact_id: str) -> dict | None:
     if str(claims.get("aid") or "") != artifact_id or int(claims.get("exp", 0)) < int(time.time()):
         return None
     tenant_id, subject, role = (str(claims.get(key) or "") for key in ("tenant", "sub", "role"))
-    if not tenant_id or not subject or role not in ROLES:
+    if not tenant_id or not subject or not is_known_role(role):
         return None
     return claims
 
@@ -767,14 +767,54 @@ def require_artifact_principal(
     return principal or require_principal(credentials, x_api_key, x_tenant_id)
 
 
-def require_role(*roles: str):
-    min_rank = min(ROLES[role] for role in roles)
+def require_artifact_download(principal: Annotated[Principal, Depends(require_artifact_principal)]) -> Principal:
+    """C3: fetching a filed report is part of filing reports. Checked on the resolved
+    principal, so it holds however the caller authenticated - session, API key or a
+    one-time download token (whose role is re-read when it is spent)."""
+    if not has_permission(principal, "report.create"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Your role does not allow this (it needs report.create)")
+    return principal
+
+
+require_artifact_download.required_permissions = ("report.create",)
+
+
+def principal_permissions(principal: Principal) -> frozenset[str]:
+    """What this caller may do: its role's permissions, and `platform.admin` for the
+    installation's own administrator identity, which no role can grant."""
+    granted = role_permissions(principal.role)
+    if is_platform_admin(principal):
+        granted = granted | PLATFORM_ONLY
+    return granted
+
+
+def has_permission(principal: Principal, permission: str) -> bool:
+    return permission in principal_permissions(principal)
+
+
+def require_permission(*permissions: str):
+    """C3: a route names the capability it needs; any one of `permissions` admits.
+
+    Replaces `require_role`, whose ranks could not say "may run scans but not read what
+    they found". The names are checked here, at import, so a typo fails the application
+    rather than silently admitting nobody; the route matrix test reads
+    `required_permissions` off the dependency to pin every route.
+    """
+
+    unknown = [name for name in permissions if name != AUTHENTICATED and name not in PERMISSIONS]
+    if not permissions or unknown:
+        raise ValueError(f"require_permission needs known permissions, got {permissions!r}")
+    wanted = frozenset(permissions)
 
     def dependency(principal: Annotated[Principal, Depends(require_principal)]) -> Principal:
-        if ROLES.get(principal.role, 0) < min_rank:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role")
-        return principal
+        if AUTHENTICATED in wanted or principal_permissions(principal) & wanted:
+            return principal
+        needed = " or ".join(sorted(wanted))
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail=f"Your role does not allow this (it needs {needed})")
 
+    dependency.required_permissions = tuple(permissions)
     return dependency
 
 

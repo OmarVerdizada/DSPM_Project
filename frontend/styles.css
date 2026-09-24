@@ -2999,6 +2999,7 @@ td, th { border-color: var(--line) !important; }
 /* Administration has mixed access levels.  Keep privileged sub-pages out of
    both the visual tree and keyboard navigation until app.js confirms admin. */
 body:not(.role-admin) [data-admin-only] { display: none !important; } /* token-gate: allow - a control, not styling: this hide must not lose to a later rule */
+[data-requires][data-denied] { display: none !important; } /* token-gate: allow - C3: a control the account's permissions do not include; must not lose to a later rule */
 
 @media (max-width: 1180px) {
   .metrics { grid-template-columns: repeat(3, minmax(0,1fr)); }

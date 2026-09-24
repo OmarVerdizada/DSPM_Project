@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from backend.errors import client_message
 from backend.reporting.artifacts import ArtifactError, artifact_file, create_report_artifact
-from backend.security import Principal, require_artifact_principal, require_role
+from backend.security import Principal, require_artifact_download, require_permission
 
 router = APIRouter(prefix="/api/v1/reports", tags=["reports"])
 
@@ -31,7 +31,7 @@ class ReportArtifactRequest(BaseModel):
 @router.post("")
 async def create_report(
     payload: ReportArtifactRequest,
-    principal: Principal = Depends(require_role("viewer")),
+    principal: Principal = Depends(require_permission("report.create")),
 ) -> dict:
     """Create the filed assessment PDF, for the whole scan or a severity slice."""
     wanted = [level for level in (payload.severities or []) if str(level).upper() in SEVERITY_LEVELS]
@@ -47,7 +47,7 @@ async def download_artifact(
     artifact_id: str,
     format: str = "pdf",
     inline: bool = False,
-    principal: Principal = Depends(require_artifact_principal),
+    principal: Principal = Depends(require_artifact_download),
 ) -> FileResponse:
     if format not in ("pdf", "html"):
         raise HTTPException(status_code=400, detail="Invalid format. Use 'pdf' or 'html'.")

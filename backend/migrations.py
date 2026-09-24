@@ -62,6 +62,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (17, "derived_cache", store.add_derived_cache),
         (18, "durable_user_sessions", store.add_user_sessions),
         (19, "rotating_refresh_tokens", store.add_refresh_tokens),
+        (20, "open_role_catalogue", store.open_role_catalogue),
     ]
 
 
