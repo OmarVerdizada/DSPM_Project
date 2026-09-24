@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import pathlib
 import tempfile
+from contextlib import suppress
 from datetime import datetime, timezone
 
 import pytest
@@ -124,7 +125,7 @@ _APP_TABLES = (
     "finding_index", "finding_occurrences", "findings", "asset_versions",
     "scan_object_baselines", "assets", "scan_runs", "scan_partitions", "partitioned_scans", "scan_schedules", "suppression_rules", "derived_cache", "scan_jobs", "alert_events", "audit_events",
     "secrets", "scan_reports", "scan_profiles", "registration_invites", "api_keys",
-    "login_failures", "revoked_tokens", "users", "tenants",
+    "login_failures", "revoked_tokens", "user_sessions", "refresh_tokens", "users", "tenants",
 )
 
 _admin_hash: str | None = None
@@ -151,6 +152,13 @@ def _isolate_db_state():
         from backend import store
         _saved_db_path = store.DB_PATH
         _saved_db_env = os.environ.get("DSPM_DB_PATH")
+        # C8: the sign-in, registration and refresh throttles key on the client
+        # address, which is "testclient" for every TestClient - so without this, one
+        # test's refused attempts count against the next test in the ambient database.
+        # The PostgreSQL path gets the same clean slate from its TRUNCATE.
+        with suppress(Exception):
+            with store._connect() as conn:
+                conn.execute("DELETE FROM login_failures")
         try:
             yield
         finally:

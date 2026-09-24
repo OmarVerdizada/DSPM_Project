@@ -8088,6 +8088,9 @@ def _delete_tenant_scoped_data(conn, tenant_id: str) -> None:
 class LegalHoldActive(RuntimeError):
     """A destructive operation was refused because the tenant is under hold."""
 
+    # C8: its message is written for the operator; backend.errors may show it.
+    client_safe = True
+
 
 def get_legal_hold(tenant_id: str) -> dict:
     with _connect() as conn:
@@ -8544,11 +8547,29 @@ def mark_user_login(username: str) -> None:
 
 
 
+# Rows older than this are gone whatever throttle wrote them - the longest window any
+# throttle uses, with room to spare - so keys nobody asks about again do not accumulate.
+_THROTTLE_HORIZON_SECONDS = 86_400
+
+
+def _prune_throttle_rows(conn, rate_key: str, cutoff: float) -> None:
+    """C8: prune THIS key by its own window, and everything else only by the horizon.
+
+    Pruning every key by the caller's window was harmless while sign-in was the only
+    throttle and all its keys shared one window. Once throttles with different windows
+    share the table, a ten-minute check would erase the history a one-hour throttle is
+    counting.
+    """
+    conn.execute("DELETE FROM login_failures WHERE rate_key = ? AND timestamp < ?", (rate_key, cutoff))
+    conn.execute("DELETE FROM login_failures WHERE timestamp < ?",
+                 (time.time() - _THROTTLE_HORIZON_SECONDS,))
+
+
 def count_login_failures(rate_key: str, window_seconds: int) -> int:
-    cutoff = __import__("time").time() - max(1, int(window_seconds))
+    cutoff = time.time() - max(1, int(window_seconds))
     with _lock:
         with _connect() as conn:
-            conn.execute("DELETE FROM login_failures WHERE timestamp < ?", (cutoff,))
+            _prune_throttle_rows(conn, rate_key, cutoff)
             return int(
                 conn.execute(
                     "SELECT COUNT(*) FROM login_failures WHERE rate_key = ? AND timestamp >= ?",
@@ -8558,11 +8579,11 @@ def count_login_failures(rate_key: str, window_seconds: int) -> int:
 
 
 def record_login_failure(rate_key: str, window_seconds: int) -> None:
-    now = __import__("time").time()
+    now = time.time()
     cutoff = now - max(1, int(window_seconds))
     with _lock:
         with _connect() as conn:
-            conn.execute("DELETE FROM login_failures WHERE timestamp < ?", (cutoff,))
+            _prune_throttle_rows(conn, rate_key, cutoff)
             conn.execute("INSERT INTO login_failures (rate_key, timestamp) VALUES (?, ?)", (rate_key, now))
 
 

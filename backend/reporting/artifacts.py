@@ -20,6 +20,9 @@ ARTIFACT_ROOT = DATA_DIR / "reports_artifacts"
 class ArtifactError(Exception):
     """Raised when a report artifact cannot be created or served safely."""
 
+    # C8: its message is written for the operator; backend.errors may show it.
+    client_safe = True
+
 
 def _safe(value: str) -> str:
     return "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_"})[:80] or "default"

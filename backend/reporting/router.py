@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from backend.errors import client_message
 from backend.reporting.artifacts import ArtifactError, artifact_file, create_report_artifact
 from backend.security import Principal, require_artifact_principal, require_role
 
@@ -38,7 +39,7 @@ async def create_report(
     try:
         return create_report_artifact(principal, {}, scan_id=payload.scan_id, scope=scope)
     except ArtifactError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=client_message(exc, "The report could not be created")) from exc
 
 
 @router.get("/artifacts/{artifact_id}")

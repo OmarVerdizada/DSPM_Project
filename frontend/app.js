@@ -10173,6 +10173,7 @@ const AUDIT_ACTIONS = {
   "user.role_updated": "Changed a user's role",
   "user.status_updated": "Changed a user's status",
   "user.password_changed": "Changed a password",
+  "user.password_change_refused": "Password change refused - wrong current password",
   "user.password_reset": "Reset a password",
   "user.profile_updated": "Updated a profile",
   "user.avatar_updated": "Updated an avatar",

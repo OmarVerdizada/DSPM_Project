@@ -257,7 +257,9 @@ class ThroughTheRoutesTest(_SessionCase):
             json={"current_password": "not-the-one-1", "new_password": "a-new-kestrel-2"},
             headers=headers,
         )
-        self.assertEqual(response.status_code, 401)
+        # C8: 403, not 401 - the session is sound, the proof offered with it is not, and
+        # a 401 is what the console reads as an expired token (tests/test_route_throttles.py).
+        self.assertEqual(response.status_code, 403)
         self.assertEqual(self.client.get("/api/profile", headers=headers).status_code, 200)
         self.assertIsNotNone(security.authenticate_user("admin-two", "an-admin-kestrel-1"))
 

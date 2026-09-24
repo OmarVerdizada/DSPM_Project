@@ -12,7 +12,7 @@ import secrets
 import socket
 import time
 from contextlib import asynccontextmanager, contextmanager, suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.alerts import evaluate_alerts
+from backend.errors import client_message, new_reference
 from backend.partitioned_scan import (
     continue_partitioned_scan,
     enqueue_partitioned_scan,
@@ -275,6 +276,48 @@ LOGIN_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_MAX_ATTEMPTS", "8"))
 # (IP,username) counter trips. Higher than the per-user cap to tolerate a shared
 # NAT/office IP with a few users and the odd typo.
 LOGIN_IP_MAX_ATTEMPTS = int(os.getenv("DSPM_LOGIN_IP_MAX_ATTEMPTS", "30"))
+
+
+@dataclass(frozen=True)
+class RouteThrottle:
+    """C8: failures on one route, counted per key; refused once `limit` land inside
+    `window_seconds`. Each throttle has its own namespace in the failure table, so a
+    failure on one route never counts against another, and the store keeps each key's
+    history for its own window (up to its 24-hour horizon)."""
+
+    name: str
+    limit: int
+    window_seconds: int
+
+    def _key(self, who: str) -> str:
+        return f"{self.name}:{who}"
+
+    def exhausted(self, who: str) -> bool:
+        return count_login_failures(self._key(who), self.window_seconds) >= self.limit
+
+    def failed(self, who: str) -> None:
+        record_login_failure(self._key(who), self.window_seconds)
+
+    def clear(self, who: str) -> None:
+        clear_login_failures(self._key(who))
+
+
+# Changing a password checks the current one, so a stolen access token would otherwise
+# be an unlimited oracle for the password behind it. Counted per ACCOUNT, wherever the
+# attempts come from; a correct password clears it.
+PASSWORD_CHANGE_THROTTLE = RouteThrottle(
+    "password_change", max(1, int(os.getenv("DSPM_PASSWORD_CHANGE_MAX_FAILURES", "5"))), 900)
+# Registration checks an invite or registration code. It is public, so it is counted
+# per client address - and a success does not clear it: one valid code must not reset
+# the history of an address that has been guessing.
+REGISTER_THROTTLE = RouteThrottle(
+    "register", max(1, int(os.getenv("DSPM_REGISTER_MAX_FAILURES", "10"))), 3600)
+# A refresh cookie cannot be guessed, but it can be REPLAYED, and every replay writes an
+# audit row and ends a family. Per client address, generous enough for a console whose
+# cookie has simply expired in several tabs at once.
+REFRESH_THROTTLE = RouteThrottle(
+    "refresh", max(1, int(os.getenv("DSPM_REFRESH_MAX_FAILURES", "30"))), 300)
+
 # How many scan runs the executive dashboard's posture trend plots, and therefore
 # how many history rows that endpoint needs to read.
 DASHBOARD_TREND_POINTS = 14
@@ -542,6 +585,21 @@ class BodySizeLimitMiddleware:
 
 
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES)
+
+
+@app.exception_handler(Exception)
+async def unexpected_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """C8 / ASVS V7.4.1: an error nobody anticipated gets a generic answer and a
+    reference; the detail - which can name paths, tables and library internals - goes
+    to the log under that reference, where support can find it."""
+    from scripts.logger import get_logger
+
+    reference = new_reference()
+    get_logger("backend.app").exception("Unhandled error, reference %s, on %s %s", reference, request.method, request.url.path)
+    return JSONResponse(
+        {"detail": "The server could not complete this request.", "reference": reference},
+        status_code=500,
+    )
 
 
 @app.exception_handler(RequestValidationError)
@@ -1237,7 +1295,7 @@ def compliance_keywords_import(payload: ComplianceKeywordImportRequest, principa
     try:
         result = import_keyword_groups(principal.tenant_id, payload.model_dump())
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The keyword import could not be processed")) from exc
     audit(
         principal.tenant_id,
         principal.subject,
@@ -1458,7 +1516,7 @@ def nist_catalog_import(payload: NISTCatalogPayload, principal: Principal = Depe
     try:
         result = import_nist_catalog(payload.catalog, dry_run=payload.dry_run, actor=principal.subject)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The NIST catalog could not be imported")) from exc
     audit(principal.tenant_id, principal.subject, "nist.catalog.imported", {"dry_run": payload.dry_run, "catalog_hash": result.get("catalog_hash"), "valid": result.get("valid")})
     return result
 
@@ -1469,7 +1527,7 @@ def nist_catalog_activate(payload: NISTCatalogActivationPayload, principal: Prin
     try:
         result = activate_nist_catalog(payload.catalog_hash, actor=principal.subject)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The NIST catalog could not be activated")) from exc
     audit(principal.tenant_id, principal.subject, "nist.catalog.activated", {"catalog_hash": result.get("catalog_hash")})
     return result
 
@@ -1480,7 +1538,7 @@ def nist_catalog_rollback(principal: Principal = Depends(require_role("admin")))
     try:
         result = rollback_nist_catalog(actor=principal.subject)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The NIST catalog could not be rolled back")) from exc
     audit(principal.tenant_id, principal.subject, "nist.catalog.rollback", {"catalog_hash": result.get("catalog_hash")})
     return result
 
@@ -1573,9 +1631,14 @@ def refresh_session(request: Request) -> Response:
     an unknown token, an expired one and a replayed one.
     """
 
+    client = _client_host(request)
+    if REFRESH_THROTTLE.exhausted(client):
+        # The cookie is left alone: this address is refused, the cookie may be sound.
+        raise HTTPException(status_code=429, detail="Too many session renewals. Try again later.")
     presented = request.cookies.get(REFRESH_COOKIE, "")
     result = rotate_refresh_token(presented)
     if result.get("status") != "ok":
+        REFRESH_THROTTLE.failed(client)
         if result.get("status") == "replayed":
             # The one case worth recording: a refresh token was presented twice, and
             # every session in its family has just been ended.
@@ -1612,18 +1675,24 @@ def logout(
 
 
 @app.post("/api/auth/register")
-def register(payload: RegisterRequest) -> dict:
+def register(payload: RegisterRequest, request: Request) -> dict:
+    client = _client_host(request)
+    if REGISTER_THROTTLE.exhausted(client):
+        raise HTTPException(status_code=429, detail="Too many registration attempts. Try again later.")
     username = sanitize_username(payload.username)
     tenant_id = _safe_tenant(payload.tenant_id)
     if not tenant_exists(tenant_id):
+        REGISTER_THROTTLE.failed(client)
         raise HTTPException(status_code=403, detail="Registration failed")
     code = payload.registration_code.strip()
     # M5: prefer a time-boxed, use-capped invite token (atomically redeemed); fall
     # back to the legacy static per-tenant code for backward compatibility.
     invite = redeem_registration_invite(tenant_id, _hash_invite_token(code)) if code else None
     if invite is None and not _valid_registration_code(tenant_id, code):
+        REGISTER_THROTTLE.failed(client)
         raise HTTPException(status_code=403, detail="Registration failed")
     if get_user(username):
+        REGISTER_THROTTLE.failed(client)
         raise HTTPException(status_code=409, detail="Registration failed")
     role = invite["role"] if invite else "viewer"
     pending = bool(invite and invite["requires_approval"])
@@ -1641,9 +1710,17 @@ def register(payload: RegisterRequest) -> dict:
 def change_password(payload: PasswordChangeRequest, principal: Principal = Depends(require_role("viewer"))) -> dict:
     if principal.subject in PROTECTED_USERS:
         raise HTTPException(status_code=403, detail="Built-in admin account is protected")
+    if PASSWORD_CHANGE_THROTTLE.exhausted(principal.subject):
+        raise HTTPException(status_code=429, detail="Too many incorrect passwords. Try again later.")
     authenticated = authenticate_user(principal.subject, payload.current_password)
     if authenticated is None:
-        raise HTTPException(status_code=401, detail="Current password is incorrect")
+        PASSWORD_CHANGE_THROTTLE.failed(principal.subject)
+        audit(principal.tenant_id, principal.subject, "user.password_change_refused")
+        # 403, not 401: the session is sound, the proof offered with it is not. A 401
+        # is what the console reads as an expired access token - it would renew the
+        # session and send the wrong password again.
+        raise HTTPException(status_code=403, detail="Current password is incorrect")
+    PASSWORD_CHANGE_THROTTLE.clear(principal.subject)
     update_user_password(principal.subject, hash_password(payload.new_password, username=principal.subject))
     # C1: changing a password after a compromise is only worth doing if it signs
     # out whoever had the old one - everywhere, including this caller's own
@@ -1949,7 +2026,7 @@ def admin_delete_tenant(tenant_id: str, principal: Principal = Depends(require_r
         deleted_usage = delete_tenant_with_data(target)
     except store_module.LegalHoldActive as exc:
         # 409: the request is well formed, the state forbids it.
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=client_message(exc, "The tenant could not be removed")) from exc
     audit_tenant = principal.tenant_id if principal.tenant_id != target else "default"
     audit(audit_tenant, principal.subject, "tenant.deleted", {"tenant_id": target, "deleted": deleted_usage})
     return {"deleted": True, "tenant_id": target, "deleted_data": deleted_usage}
@@ -1988,7 +2065,7 @@ def write_legal_hold(
     try:
         hold = store_module.set_legal_hold(target, payload.active, payload.reason)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The legal hold could not be changed")) from exc
     audit_tenant = principal.tenant_id if principal.tenant_id != target else "default"
     audit(audit_tenant, principal.subject,
           "tenant.legal_hold.set" if payload.active else "tenant.legal_hold.lifted",
@@ -2067,7 +2144,7 @@ def scan_profiles_save(payload: ScanProfileRequest, principal: Principal = Depen
             config=payload.config,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=client_message(exc, "The scan profile could not be saved")) from exc
     audit(principal.tenant_id, principal.subject, "scan_profile.saved", {"profile_id": profile["profile_id"], "kind": payload.kind})
     return profile
 
@@ -2808,7 +2885,7 @@ def suppression_rule_create(
             created_by=principal.subject,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The suppression rule could not be created")) from exc
     audit(principal.tenant_id, principal.subject, "suppression.created", {
         "rule_id": rule["rule_id"],
         "finding_type": rule["finding_type"],
@@ -2828,7 +2905,7 @@ def suppression_rule_update(
     try:
         rule = update_suppression_rule(principal.tenant_id, rule_id, update)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The suppression rule could not be updated")) from exc
     if rule is None:
         raise HTTPException(status_code=404, detail="Suppression rule not found")
     audit(principal.tenant_id, principal.subject, "suppression.updated", {
@@ -2857,7 +2934,7 @@ def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLife
     try:
         finding = update_finding_lifecycle(principal.tenant_id, finding_id, action, payload.model_dump(), principal.subject)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The finding could not be updated")) from exc
     if finding is None:
         raise HTTPException(status_code=404, detail="Finding not found")
     response = {"finding": finding}
@@ -2876,7 +2953,7 @@ def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLife
                 source_scan_id=str(stored.get("scan_id") or ""),
             )
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail=client_message(exc, "The suppression rule could not be created")) from exc
         audit(principal.tenant_id, principal.subject, "suppression.created", {
             "rule_id": rule["rule_id"],
             "finding_type": rule["finding_type"],
@@ -2903,7 +2980,7 @@ def finding_workflow_update(
             principal.subject,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=client_message(exc, "The finding could not be updated")) from exc
     if finding is None:
         raise HTTPException(status_code=404, detail="Finding not found in saved scan report")
     return {"finding": finding}
@@ -3077,6 +3154,10 @@ def executive_dashboard(principal: Principal = Depends(require_role("viewer"))) 
         "trend": trend,
         "retention": data_retention_summary(principal.tenant_id),
     }
+
+
+def _client_host(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def _login_rate_key(username: str, request: Request) -> str:
