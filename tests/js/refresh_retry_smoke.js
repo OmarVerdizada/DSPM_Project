@@ -3,8 +3,12 @@
 //
 //   node tests/js/refresh_retry_smoke.js <scenario.json>
 //
-// scenario: {"calls": 5, "refreshSucceeds": true}
-// Prints one JSON line: {"refreshCalls", "apiCalls", "resolved", "rejected", "redirected"}.
+// scenario: {"calls": 5, "refreshSucceeds": true, "script": "app.js", "drive": "api"}
+//   script: "app.js" (the console, default) or "profile.js" (the settings page)
+//   drive:  "api" (default: `calls` concurrent api() calls), "logout" (sign out), or
+//           "password_changed" (profile.js: what the page does after a password change)
+// Prints one JSON line: {"refreshCalls", "apiCalls", "resolved", "rejected", "redirected",
+// "logoutCalls", "logoutAccepted"}.
 //
 // The property that needs a real test rather than a grep: several panels can be
 // rejected at once, and if each exchanged the refresh cookie the second exchange would
@@ -19,8 +23,9 @@ const path = require("path");
 const vm = require("vm");
 
 const ROOT = path.resolve(__dirname, "..", "..");
-const APP = path.join(ROOT, "frontend", "app.js");
 const scenario = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+const SCRIPT = scenario.script === "profile.js" ? "profile.js" : "app.js";
+const APP = path.join(ROOT, "frontend", SCRIPT);
 
 function standIn(label = "node") {
   const own = {};
@@ -53,8 +58,9 @@ function storage() {
   };
 }
 
-const counts = { refreshCalls: 0, apiCalls: 0, redirected: 0 };
+const counts = { refreshCalls: 0, apiCalls: 0, redirected: 0, logoutCalls: 0, logoutAccepted: 0 };
 let tokenIsGood = false;     // the access token starts rejected, as an expired one is
+let booting = false;         // while a page's own start-up calls run, answer them and count nothing
 
 function reply(status, body) {
   return {
@@ -68,6 +74,9 @@ function reply(status, body) {
 
 async function stubFetch(url, options = {}) {
   const target = String(url);
+  if (booting) {
+    return reply(200, {});
+  }
   if (target.includes("/api/auth/refresh")) {
     counts.refreshCalls += 1;
     // A real exchange takes a round trip; without the wait every caller would find
@@ -79,8 +88,17 @@ async function stubFetch(url, options = {}) {
     tokenIsGood = true;
     return reply(200, { access_token: "refreshed-token", role: "admin", tenant_id: "default" });
   }
-  counts.apiCalls += 1;
   const authorized = String(options.headers?.Authorization || "").includes("refreshed-token");
+  if (target.includes("/api/logout")) {
+    // Sign-out is what ends the refresh chain on the server; only an accepted call does.
+    counts.logoutCalls += 1;
+    if (!authorized && !tokenIsGood) {
+      return reply(401, { detail: "Invalid or expired token" });
+    }
+    counts.logoutAccepted += 1;
+    return reply(200, { status: "logged_out" });
+  }
+  counts.apiCalls += 1;
   if (!authorized && !tokenIsGood) {
     return reply(401, { detail: "Invalid or expired token" });
   }
@@ -138,32 +156,54 @@ function finish(result, ok) {
   process.exit(ok ? 0 : 1);
 }
 
-try {
-  vm.runInContext(fs.readFileSync(APP, "utf8"), context, { filename: "app.js" });
-} catch (error) {
-  finish({ error: `app.js did not load: ${String(error && error.stack).split("\n").slice(0, 3).join(" | ")}` }, false);
+async function main() {
+  if (SCRIPT === "profile.js") {
+    // The settings page loads its panels as soon as it runs; let those settle first.
+    booting = true;
+  }
+  try {
+    vm.runInContext(fs.readFileSync(APP, "utf8"), context, { filename: SCRIPT });
+  } catch (error) {
+    finish({ error: `${SCRIPT} did not load: ${String(error && error.stack).split("\n").slice(0, 3).join(" | ")}` }, false);
+  }
+  if (booting) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    booting = false;
+    Object.keys(counts).forEach((key) => { counts[key] = 0; });
+  }
+
+  // A stale access token, exactly as an expired one behaves: the server says 401.
+  const setup = SCRIPT === "app.js"
+    ? 'accessToken = "stale-token"; showToast = () => {};'
+    : 'sessionStorage.setItem("dspm-access-token", "stale-token");';
+  vm.runInContext(setup, context, { filename: "setup" });
+
+  const calls = Math.max(1, Number(scenario.calls) || 1);
+  context.__calls = calls;
+  const drives = {
+    logout: "globalThis.__result = Promise.allSettled([logout()]);",
+    password_changed: "globalThis.__result = Promise.allSettled([Promise.resolve(afterPasswordChange({ status: 'updated', reauthenticate: true }))]);",
+  };
+  const drive = drives[scenario.drive] || `globalThis.__result = Promise.allSettled(
+         Array.from({length: globalThis.__calls}, (_unused, index) => api("/api/thing" + index, null, "GET"))
+       );`;
+  vm.runInContext(drive, context, { filename: "drive" });
+
+  const settled = await context.__result;
+  if (scenario.drive === "password_changed") {
+    // The page tells the operator, then leaves for sign-in a moment later.
+    await new Promise((resolve) => setTimeout(resolve, 1700));
+  }
+  finish({
+    refreshCalls: counts.refreshCalls,
+    apiCalls: counts.apiCalls,
+    redirected: counts.redirected,
+    logoutCalls: counts.logoutCalls,
+    logoutAccepted: counts.logoutAccepted,
+    tokenLeft: context.sessionStorage.getItem("dspm-access-token") || "",
+    resolved: settled.filter((entry) => entry.status === "fulfilled").length,
+    rejected: settled.filter((entry) => entry.status === "rejected").length,
+  }, true);
 }
 
-// A stale access token, exactly as an expired one behaves: the server says 401.
-vm.runInContext('accessToken = "stale-token"; showToast = () => {};', context, { filename: "setup" });
-
-const calls = Math.max(1, Number(scenario.calls) || 1);
-context.__calls = calls;
-vm.runInContext(
-  `globalThis.__result = Promise.allSettled(
-     Array.from({length: globalThis.__calls}, (_unused, index) => api("/api/thing" + index, null, "GET"))
-   );`,
-  context, { filename: "drive" },
-);
-
-context.__result
-  .then((settled) => {
-    finish({
-      refreshCalls: counts.refreshCalls,
-      apiCalls: counts.apiCalls,
-      redirected: counts.redirected,
-      resolved: settled.filter((entry) => entry.status === "fulfilled").length,
-      rejected: settled.filter((entry) => entry.status === "rejected").length,
-    }, true);
-  })
-  .catch((error) => finish({ error: String(error).slice(0, 200) }, false));
+main().catch((error) => finish({ error: String(error).slice(0, 200) }, false));

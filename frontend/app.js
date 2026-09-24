@@ -1786,14 +1786,23 @@ function applyRoleVisibility() {
   syncNavGroups();
 }
 
+// C1: signing out has to end the refresh chain on the server, and the access token it
+// is sent with may already have lapsed - half an hour is short, and people sign out
+// after lunch. A 401 here means exactly that, so renew once and send it again; giving
+// up instead would leave the cookie minting sessions in this browser after the
+// operator believed they had left it.
+async function revokeServerSession() {
+  const send = () => fetch("/api/logout", { method: "POST", headers: authHeaders() });
+  const response = await send();
+  if (response.status === 401 && await refreshAccessToken()) {
+    await send();
+  }
+}
+
 async function logout() {
-  const tokenToRevoke = accessToken;
   try {
-    if (tokenToRevoke) {
-      await fetch("/api/logout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenToRevoke}` },
-      });
+    if (accessToken) {
+      await revokeServerSession();
     }
   } catch {
     // Client-side logout still proceeds; token expiry/revocation is best-effort if the network is unavailable.

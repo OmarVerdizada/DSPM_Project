@@ -334,6 +334,65 @@ class TheConsoleRetriesOnceTest(unittest.TestCase):
         login_js = (ROOT / "frontend" / "login.js").read_text(encoding="utf-8")
         self.assertIn('credentials: "same-origin"', login_js)
 
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_signing_out_with_a_lapsed_access_token_still_ends_the_chain(self) -> None:
+        """Sign-out is what ends the refresh chain on the server. Sent with an access
+        token that has lapsed - half an hour after the last call - it was refused, the
+        page cleared itself anyway, and the cookie stayed in the browser minting
+        sessions for whoever used it next."""
+        report = self._drive(drive="logout", refreshSucceeds=True)
+        self.assertEqual(report["refreshCalls"], 1, "renew once")
+        self.assertEqual(report["logoutCalls"], 2, "then send the sign-out again")
+        self.assertEqual(report["logoutAccepted"], 1, "and the server accepted it")
+        self.assertEqual(report["resolved"], 1)
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_signing_out_when_the_session_is_already_gone_still_signs_out(self) -> None:
+        report = self._drive(drive="logout", refreshSucceeds=False)
+        self.assertEqual(report["logoutCalls"], 1, "nothing to renew, so nothing to resend")
+        self.assertEqual(report["logoutAccepted"], 0)
+        self.assertEqual(report["resolved"], 1, "the page still signs itself out")
+
+
+class TheSettingsPageRenewsTooTest(unittest.TestCase):
+    """The settings page (profile.js) has its own api(). Until this it did not renew:
+    half an hour after sign-in every panel on it failed, and its sign-out had the same
+    lapsed-token gap as the console's."""
+
+    _drive = TheConsoleRetriesOnceTest._drive
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_a_rejected_call_is_refreshed_and_retried(self) -> None:
+        report = self._drive(script="profile.js", calls=3, refreshSucceeds=True)
+        self.assertEqual(report["refreshCalls"], 1, "one exchange for three rejections")
+        self.assertEqual(report["resolved"], 3)
+        self.assertEqual(report["rejected"], 0)
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_a_failed_refresh_is_reported_not_looped(self) -> None:
+        report = self._drive(script="profile.js", calls=2, refreshSucceeds=False)
+        self.assertEqual(report["refreshCalls"], 1)
+        self.assertEqual(report["rejected"], 2)
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_signing_out_with_a_lapsed_access_token_still_ends_the_chain(self) -> None:
+        report = self._drive(script="profile.js", drive="logout", refreshSucceeds=True)
+        self.assertEqual(report["logoutAccepted"], 1)
+        self.assertGreaterEqual(report["redirected"], 1, "and the page goes to sign-in")
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_a_changed_password_sends_the_operator_to_sign_in(self) -> None:
+        """The server ends every session on a password change, this one included. The
+        page used to say "Password changed." and stay, on a session that no longer
+        worked - under a heading promising "You stay signed in on this device"."""
+        report = self._drive(script="profile.js", drive="password_changed", refreshSucceeds=True)
+        self.assertEqual(report["tokenLeft"], "", "the dead token is not kept")
+        self.assertGreaterEqual(report["redirected"], 1)
+
+    def test_the_page_no_longer_promises_the_session_survives(self) -> None:
+        html = (ROOT / "frontend" / "profile.html").read_text(encoding="utf-8")
+        self.assertNotIn("You stay signed in", html)
+
 
 class TheUpgradeCarriesExistingSessionsTest(_RefreshCase):
 

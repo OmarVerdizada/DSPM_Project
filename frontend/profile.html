@@ -129,7 +129,7 @@
           <article class="settings-card">
             <div class="settings-card-copy">
               <h2>Password</h2>
-              <p>Change your local account password. You stay signed in on this device.</p>
+              <p>Change your local account password. This signs you out everywhere, this browser included.</p>
             </div>
             <form id="password-form" class="settings-form-grid">
               <label class="settings-field">
@@ -182,13 +182,13 @@
           <article class="settings-card">
             <div class="settings-card-copy">
               <h2>This session</h2>
-              <p>Signing out revokes this browser&rsquo;s access token.</p>
+              <p>Signing out ends this browser&rsquo;s session, including the renewal that keeps it signed in.</p>
             </div>
             <div class="settings-kv">
               <div><span>Signed in as</span><strong id="session-user">-</strong></div>
               <div><span>Role</span><strong id="session-role">-</strong></div>
               <div><span>Tenant</span><strong id="session-tenant" class="mono">-</strong></div>
-              <div><span>Token expires</span><strong id="session-expires">-</strong></div>
+              <div><span>Access token valid until</span><strong id="session-expires">-</strong></div>
             </div>
             <div class="settings-form-foot">
               <span></span>
@@ -224,6 +224,6 @@
       </div>
     </div>
 
-    <script src="/static/profile.js?v=98"></script>
+    <script src="/static/profile.js?v=100"></script>
   </body>
 </html>

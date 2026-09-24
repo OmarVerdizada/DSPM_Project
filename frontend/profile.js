@@ -109,12 +109,47 @@ async function readErrorMessage(response) {
   }
 }
 
-async function api(path, payload, method = "GET") {
+// C1: the access token lasts half an hour and the session is carried by the refresh
+// cookie, exactly as on the console - so a 401 here is the normal end of an access
+// token, not of the session. One exchange at a time: the page loads several panels at
+// once, and a second exchange would present the token the first had just retired,
+// which the server reads as a replay and answers by ending the session everywhere.
+let refreshInFlight = null;
+
+async function refreshAccessToken() {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const response = await fetch("/api/auth/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+        });
+        if (!response.ok) return false;
+        const data = await response.json();
+        if (!data.access_token) return false;
+        sessionSet("dspm-access-token", data.access_token);
+        renderSessionExpiry();
+        return true;
+      } catch {
+        return false;
+      } finally {
+        window.setTimeout(() => { refreshInFlight = null; }, 0);
+      }
+    })();
+  }
+  return refreshInFlight;
+}
+
+async function api(path, payload, method = "GET", isRetry = false) {
   const response = await fetch(path, {
     method,
     headers: authHeaders(),
     body: payload ? JSON.stringify(payload) : undefined,
   });
+  if (response.status === 401 && !isRetry && await refreshAccessToken()) {
+    return api(path, payload, method, true);
+  }
   if (!response.ok) throw new Error(await readErrorMessage(response));
   return response.json();
 }
@@ -496,13 +531,26 @@ passwordForm.addEventListener("submit", async (event) => {
   }
   setStatus(passwordStatus, "Changing password…");
   try {
-    await api("/api/auth/change-password", { current_password: currentPassword, new_password: newPassword }, "POST");
-    passwordForm.reset();
-    setStatus(passwordStatus, "Password changed.");
+    const result = await api("/api/auth/change-password", { current_password: currentPassword, new_password: newPassword }, "POST");
+    afterPasswordChange(result);
   } catch (error) {
     setStatus(passwordStatus, `Password change failed: ${error.message}`);
   }
 });
+
+// C1: a password change ends every session, this one included, and the server says so
+// with `reauthenticate`. Leaving the page on a session that no longer works would make
+// the next click fail for no visible reason - say what happened and go to sign-in.
+function afterPasswordChange(result) {
+  passwordForm.reset();
+  if (result && result.reauthenticate) {
+    setStatus(passwordStatus, "Password changed. Sign in again with the new password.");
+    clearLocalSession();
+    window.setTimeout(() => window.location.replace("/login"), 1500);
+    return;
+  }
+  setStatus(passwordStatus, "Password changed.");
+}
 
 /* ── Avatar events ────────────────────────────────────────────── */
 chooseAvatarBtn.addEventListener("click", () => avatarFileInput.click());
@@ -585,22 +633,28 @@ avatarCropModal.addEventListener("click", (event) => {
 
 /* ── Session ──────────────────────────────────────────────────── */
 async function logout() {
-  const tokenToRevoke = sessionGet("dspm-access-token");
   try {
-    if (tokenToRevoke) {
-      await fetch("/api/logout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${tokenToRevoke}` },
-      });
+    if (sessionGet("dspm-access-token")) {
+      // C1: the same as the console - a lapsed access token is renewed once, so that
+      // signing out still ends the refresh chain rather than leaving it in the browser.
+      const send = () => fetch("/api/logout", { method: "POST", headers: authHeaders() });
+      const response = await send();
+      if (response.status === 401 && await refreshAccessToken()) {
+        await send();
+      }
     }
   } catch {
     /* local session clearing must still happen */
   }
+  clearLocalSession();
+  window.location.replace("/login");
+}
+
+function clearLocalSession() {
   sessionSet("dspm-access-token", "");
   sessionSet("dspm-tenant-id", "");
   sessionSet("dspm-role", "");
   sessionSet("dspm-user", "");
-  window.location.replace("/login");
 }
 
 logoutBtn.addEventListener("click", logout);
