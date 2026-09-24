@@ -151,6 +151,24 @@ def audit_verify(args: argparse.Namespace) -> None:
     raise SystemExit(0 if all(result["ok"] for result in results) else 1)
 
 
+def audit_forward(args: argparse.Namespace) -> None:
+    """Drain the SIEM outbox once and say what happened (C4); exit 1 if anything failed."""
+    from backend.siem import drain, siem_target
+
+    if siem_target() is None:
+        raise SystemExit("DSPM_SIEM_URL is not set: there is no SIEM to forward to.")
+    total = {"sent": 0, "failed": 0, "pending": 0}
+    while True:
+        result = drain()
+        total["sent"] += result["sent"]
+        total["failed"] += result["failed"]
+        total["pending"] = result["pending"]
+        if result["failed"] or not result["sent"]:
+            break
+    print(f"sent {total['sent']}, failed {total['failed']}, still waiting {total['pending']}")
+    raise SystemExit(1 if total["failed"] else 0)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DSPM scanner for AD file-server data discovery.")
     subparsers = parser.add_subparsers(dest="command")
@@ -197,6 +215,9 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--tenant", default="", help="Check one tenant only.")
     verify_parser.add_argument("--json", action="store_true", help="Print the full result as JSON.")
     verify_parser.set_defaults(func=audit_verify)
+    forward_parser = audit_commands.add_parser(
+        "forward", help="Send the audit events waiting for the SIEM (DSPM_SIEM_URL) now, once.")
+    forward_parser.set_defaults(func=audit_forward)
 
     parser.set_defaults(func=serve)
     return parser

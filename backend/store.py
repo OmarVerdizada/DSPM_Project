@@ -860,6 +860,20 @@ def add_custom_roles(conn) -> None:
     add_tenant_rls(conn)
 
 
+_AUDIT_OUTBOX_DDL = """CREATE TABLE IF NOT EXISTS audit_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL,
+            seq INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at REAL NOT NULL DEFAULT 0,
+            lease_until REAL NOT NULL DEFAULT 0,
+            lease_owner TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT ''
+        );"""
+
+
 _AUDIT_CHAIN_HEADS_DDL = """CREATE TABLE IF NOT EXISTS audit_chain_heads (
             tenant_id TEXT PRIMARY KEY,
             last_seq INTEGER NOT NULL DEFAULT 0,
@@ -921,6 +935,21 @@ def add_audit_chain(conn) -> None:
             "sealed_at = excluded.sealed_at, updated_at = excluded.updated_at",
             (tenant_id, seq, prev, seq, sealed_at, sealed_at),
         )
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
+def add_audit_outbox(conn) -> None:
+    """Revision 0023: the queue between the audit trail and the SIEM (C4, backend.siem).
+
+    A row is written here in the same transaction as the audit row it carries, so an event
+    cannot be recorded without being queued. The forwarder deletes what was delivered and
+    leaves what was not, with the next attempt's time, so an outage costs a delay, not
+    events. It has a tenant column (erasure removes a tenant's undelivered events with the
+    rest of its data), so revisions 0003 and 0004 are re-run for it.
+    """
+    conn.execute(_AUDIT_OUTBOX_DDL)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_outbox_due ON audit_outbox (next_attempt_at, id)")
     add_tenant_integrity(conn)
     add_tenant_rls(conn)
 
@@ -1234,6 +1263,20 @@ def apply_baseline_schema(conn) -> None:
             seq INTEGER,
             prev_hash TEXT NOT NULL DEFAULT '',
             row_hash TEXT NOT NULL DEFAULT ''
+        );
+
+        -- C4 (revision 0023): audit events waiting for the SIEM.
+        CREATE TABLE IF NOT EXISTS audit_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL,
+            seq INTEGER NOT NULL DEFAULT 0,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at REAL NOT NULL DEFAULT 0,
+            lease_until REAL NOT NULL DEFAULT 0,
+            lease_owner TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT ''
         );
 
         -- C4 (revision 0022): the head of each tenant's audit chain.
@@ -2173,7 +2216,77 @@ def _append_audit(conn, tenant_id: str, timestamp: str, actor: str, action: str,
         "UPDATE audit_chain_heads SET last_seq = ?, last_hash = ?, updated_at = ? WHERE tenant_id = ?",
         (seq, digest, timestamp, tenant_id),
     )
+    from backend.siem import forwarding_enabled
+
+    if forwarding_enabled():
+        # Same transaction as the row: an event is never recorded without being queued
+        # for the SIEM, nor queued without being recorded (backend.siem).
+        payload = json.dumps({
+            "tenant_id": tenant_id, "seq": seq, "row_hash": digest, "timestamp": timestamp,
+            "actor": actor, "action": action, "detail": json.loads(detail_json or "{}"),
+        }, ensure_ascii=False)
+        conn.execute(
+            "INSERT INTO audit_outbox (tenant_id, seq, payload, created_at) VALUES (?, ?, ?, ?)",
+            (tenant_id, seq, payload, timestamp),
+        )
     return seq, digest
+
+
+
+
+def claim_audit_outbox(*, limit: int, now: float, lease_seconds: float, owner: str) -> list[dict]:
+    """Take up to `limit` due events, oldest first, leased to `owner` so another backend
+    draining the same outbox does not send them too."""
+    claimed: list[dict] = []
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT id, tenant_id, seq, payload, attempts FROM audit_outbox "
+                "WHERE next_attempt_at <= ? AND lease_until <= ? ORDER BY id LIMIT ?",
+                (now, now, int(limit)),
+            ).fetchall()
+            for row in rows:
+                taken = conn.execute(
+                    "UPDATE audit_outbox SET lease_until = ?, lease_owner = ? WHERE id = ? AND lease_until <= ?",
+                    (now + lease_seconds, owner, row["id"], now),
+                ).rowcount
+                if taken:
+                    claimed.append(dict(row))
+    return claimed
+
+
+def delete_audit_outbox(ids: list[int]) -> None:
+    if not ids:
+        return
+    with _lock:
+        with _connect() as conn:
+            conn.executemany("DELETE FROM audit_outbox WHERE id = ?", [(int(item),) for item in ids])
+
+
+def retry_audit_outbox(outbox_id: int, attempts: int, next_attempt_at: float, error: str) -> None:
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE audit_outbox SET attempts = ?, next_attempt_at = ?, lease_until = 0, lease_owner = '', "
+                "last_error = ? WHERE id = ?",
+                (int(attempts), float(next_attempt_at), str(error)[:200], int(outbox_id)),
+            )
+
+
+def audit_outbox_status() -> dict:
+    """What is waiting for the SIEM: a count and the age of the oldest - never content."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS pending, MIN(created_at) AS oldest, MAX(attempts) AS attempts FROM audit_outbox"
+        ).fetchone()
+    oldest = str(row["oldest"] or "")
+    age = 0.0
+    if oldest:
+        try:
+            age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(oldest)).total_seconds())
+        except ValueError:
+            age = 0.0
+    return {"pending": int(row["pending"] or 0), "oldest_seconds": round(age, 1), "max_attempts": int(row["attempts"] or 0)}
 
 
 def verify_audit_chain(tenant_id: str | None = None) -> list[dict]:
@@ -8324,6 +8437,7 @@ def delete_tenant(tenant_id: str) -> bool:
 _TENANT_ERASURE_TABLES = (
     "registration_invites",
     "audit_chain_heads",
+    "audit_outbox",
     "custom_roles",
     "scan_schedules",
     "suppression_rules",

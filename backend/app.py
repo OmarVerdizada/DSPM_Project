@@ -413,6 +413,11 @@ async def app_lifespan(_: FastAPI):
         from backend.search import start_search_reconciler
 
         start_search_reconciler()
+    with suppress(Exception):
+        from backend.siem import start_siem_forwarder
+
+        # C4: audit events to the SIEM, when DSPM_SIEM_URL names one.
+        start_siem_forwarder()
     # Runtime feature flags: a persisted admin toggle overrides the env default
     # so the setting survives restarts, and flipping it at runtime needs no
     # restart at all (collectors read the env per call).
@@ -457,6 +462,10 @@ async def app_lifespan(_: FastAPI):
             from backend.housekeeping import stop_housekeeping
 
             stop_housekeeping()
+        with suppress(Exception):
+            from backend.siem import stop_siem_forwarder
+
+            stop_siem_forwarder()
         with suppress(Exception):
             from backend.search import stop_search_reconciler
 
@@ -1173,6 +1182,19 @@ def dashboard() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
+def _siem_health() -> dict:
+    from backend.siem import forwarding_enabled
+    from backend.store import audit_outbox_status
+
+    if not forwarding_enabled():
+        return {"enabled": False}
+    try:
+        status = audit_outbox_status()
+    except Exception:  # health must answer even if the outbox cannot be read
+        return {"enabled": True, "pending": None}
+    return {"enabled": True, "pending": status["pending"], "oldest_seconds": status["oldest_seconds"]}
+
+
 @app.get("/api/health")
 def health() -> dict:
     from collectors.ocr import ocr_status
@@ -1183,6 +1205,8 @@ def health() -> dict:
         "service": "dspm-discovery",
         "ocr": ocr_status(),
         "search": search_health(),
+        # C4: whether audit events are reaching the SIEM - a count and an age, never content.
+        "siem": _siem_health(),
         # Operator diagnostics (Phase 0): which database this instance serves.
         # Phase 1: how stale the newest backup is - a backup that stopped
         # happening must be visible before it becomes a recovery incident.

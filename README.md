@@ -209,6 +209,21 @@ This project does not perform full AD inventory collection. It uses AD/Windows a
 - GPO targeting: link these policies only to test, workstation, or file-server OUs that are in scan scope instead of the entire domain.
 - Validation order: first run `Test-NetConnection <host> -Port 445` for file servers and `Test-NetConnection <host> -Port 5985` for endpoints, then use `Test connection` and `Prepare & Test target WinRM` in the UI.
 
+## Audit trail
+
+Every administrative and security-relevant action is written to a per-tenant audit trail, including sign-in attempts (recorded in the tenant the attempted name belongs to), report creation and download, full-report fetches, the DLP policy and reports built in the browser. Blocked sign-in attempts are aggregated, one row per order of magnitude, so a brute force cannot flood the table.
+
+Each tenant's rows form a hash chain. Check it at any time:
+
+```powershell
+python main.py audit verify            # every tenant; exits 1 and names the rows if a chain is broken
+python main.py audit verify --tenant acme --json
+```
+
+A changed, deleted, inserted or reordered row, or cut-off newest rows, is reported. Rows written before the chain existed are sealed at upgrade, and verify says how far the seal reaches.
+
+To forward the trail to a SIEM, set `DSPM_SIEM_URL` (`tcp://`, `udp://` or `tls://host:port`; see `.env.example`). Events leave as CEF (or JSON) in RFC 5424 syslog, queued in the database with the audit row and retried with back-off while the SIEM is down; each carries its chain position, so the SIEM holds an independent copy of every chain. `GET /api/health` reports the backlog, and `python main.py audit forward` drains it on demand. Behind a reverse proxy, set `DSPM_TRUSTED_PROXIES` so audit rows and throttles record the client rather than the proxy.
+
 ## API Overview
 
 Core endpoints:

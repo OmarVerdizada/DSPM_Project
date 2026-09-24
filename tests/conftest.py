@@ -125,7 +125,7 @@ _APP_TABLES = (
     "finding_index", "finding_occurrences", "findings", "asset_versions",
     "scan_object_baselines", "assets", "scan_runs", "scan_partitions", "partitioned_scans", "scan_schedules", "suppression_rules", "derived_cache", "scan_jobs", "alert_events", "audit_events",
     "secrets", "scan_reports", "scan_profiles", "registration_invites", "api_keys",
-    "login_failures", "revoked_tokens", "user_sessions", "refresh_tokens", "custom_roles", "audit_chain_heads", "users", "tenants",
+    "login_failures", "revoked_tokens", "user_sessions", "refresh_tokens", "custom_roles", "audit_chain_heads", "audit_outbox", "users", "tenants",
 )
 
 _admin_hash: str | None = None
