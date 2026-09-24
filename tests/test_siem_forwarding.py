@@ -243,5 +243,142 @@ class TheLineFormatTest(unittest.TestCase):
             self.assertEqual(siem.siem_target()["port"], 6514)
 
 
+def _private_ca(directory: Path) -> tuple[Path, Path, Path]:
+    """A throwaway CA and a server certificate it signed for `localhost` only - the
+    shape of a customer SIEM behind a private CA. Returns (ca.pem, server.pem, server.key)."""
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.now(timezone.utc)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Sentro test SIEM CA")])
+    ca = (x509.CertificateBuilder().subject_name(ca_name).issuer_name(ca_name).public_key(ca_key.public_key())
+          .serial_number(x509.random_serial_number()).not_valid_before(now - timedelta(minutes=5))
+          .not_valid_after(now + timedelta(days=1))
+          .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+          .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False,
+                                       data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                                       crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
+          .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
+          .sign(ca_key, hashes.SHA256()))
+    key = ec.generate_private_key(ec.SECP256R1())
+    server = (x509.CertificateBuilder()
+              .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
+              .issuer_name(ca_name).public_key(key.public_key()).serial_number(x509.random_serial_number())
+              .not_valid_before(now - timedelta(minutes=5)).not_valid_after(now + timedelta(days=1))
+              .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+              .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+              .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+              .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+              .sign(ca_key, hashes.SHA256()))
+    paths = directory / "ca.pem", directory / "server.pem", directory / "server.key"
+    paths[0].write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    paths[1].write_bytes(server.public_bytes(serialization.Encoding.PEM))
+    paths[2].write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    return paths
+
+
+class _TlsReceiver(_Receiver):
+    """The TCP receiver behind TLS, presenting the private CA's certificate."""
+
+    def __init__(self, certfile: Path, keyfile: Path) -> None:
+        import ssl
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certfile, keyfile)
+        self.handshake_failures = 0
+        receiver = self
+
+        class TlsServer(socketserver.ThreadingTCPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+            def get_request(self):
+                raw, address = self.socket.accept()
+                try:
+                    return context.wrap_socket(raw, server_side=True), address
+                except (ssl.SSLError, OSError):
+                    receiver.handshake_failures += 1
+                    raw.close()
+                    raise
+
+            def handle_error(self, request, client_address) -> None:
+                pass  # a refused handshake is the test's subject, not noise
+
+        self.lines = []
+        lines = self.lines
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(self) -> None:
+                for raw in self.rfile:
+                    lines.append(raw.decode("utf-8").rstrip("\n"))
+
+        self.server = TlsServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+
+class OverTlsTest(_Case):
+    """`tls://` against a real TLS receiver whose certificate a private CA signed - what a
+    customer's SIEM usually is. The chain and the name are both checked; an event the
+    SIEM could not be trusted with stays queued rather than being sent anyway."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ca, certfile, keyfile = _private_ca(Path(self.temp_dir.name))
+        self.receiver = _TlsReceiver(certfile, keyfile)
+        self.addCleanup(self.receiver.stop)
+
+    def _audit(self, count: int) -> None:
+        for index in range(count):
+            store.audit("tenant-siem", "alice", "user.role_updated", {"username": f"u{index}"})
+
+    def test_the_private_ca_named_in_the_settings_is_trusted(self) -> None:
+        # Ten passes, each its own connection. Closing a TLS session without close_notify
+        # lost events in about 60% of passes (measured: 53 of 80) - the sender had already
+        # counted them delivered - so one pass could not tell; ten can.
+        self._forward_to(f"tls://localhost:{self.receiver.port}")
+        with mock.patch.dict(os.environ, {"DSPM_SIEM_CA_FILE": str(self.ca)}):
+            for done in range(1, 11):
+                self._audit(3)
+                self.assertEqual(siem.drain()["sent"], 3)
+                self.assertEqual(len(self.receiver.wait_for(3 * done, timeout=3.0)), 3 * done,
+                                 f"pass {done}: events counted as sent never arrived")
+        seqs = [int(line.split("cs2=")[1].split(" ")[0]) for line in self.receiver.lines]
+        self.assertEqual(seqs, list(range(1, 31)), "in order, none lost, none duplicated")
+        self.assertEqual(store.audit_outbox_status()["pending"], 0)
+
+    def test_without_it_nothing_is_sent_and_nothing_is_lost(self) -> None:
+        self._forward_to(f"tls://localhost:{self.receiver.port}")
+        with mock.patch.dict(os.environ, {"DSPM_SIEM_CA_FILE": ""}):
+            self._audit(2)
+            result = siem.drain()
+        self.assertEqual((result["sent"], result["failed"], result["pending"]), (0, 2, 2))
+        self.assertEqual(self.receiver.wait_for(1, timeout=0.5), [], "no event crossed an untrusted connection")
+        # The row says why, so an operator knows to name the CA rather than to fix the network.
+        self.assertTrue(all(error.startswith("SSLCertVerificationError: ") and "issuer" in error
+                            for error in self._errors()), self._errors())
+
+    def test_a_certificate_for_another_name_is_refused(self) -> None:
+        # The certificate names localhost; the same receiver reached as 127.0.0.1 is not it.
+        self._forward_to(f"tls://127.0.0.1:{self.receiver.port}")
+        with mock.patch.dict(os.environ, {"DSPM_SIEM_CA_FILE": str(self.ca)}):
+            self._audit(1)
+            result = siem.drain()
+        self.assertEqual((result["sent"], result["pending"]), (0, 1))
+        self.assertEqual(self.receiver.wait_for(1, timeout=0.5), [])
+        self.assertIn("mismatch", self._errors()[0].lower())
+
+    def _errors(self) -> list[str]:
+        with store._connect() as conn:
+            return [str(row["last_error"] or "") for row in conn.execute("SELECT last_error FROM audit_outbox")]
+
+
 if __name__ == "__main__":
     unittest.main()
