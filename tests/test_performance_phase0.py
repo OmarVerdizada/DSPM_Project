@@ -54,11 +54,13 @@ class PerRequestWorkTests(unittest.TestCase):
         self.assertIn("dlp_count", columns)
 
         source = Path("backend/store.py").read_text(encoding="utf-8")
-        self.assertIn("_detail_counts(asset.detail_json)", source)
+        # P2: counted from the record while it is a dict, not parsed back out of
+        # its JSON (tests/test_p2_save_derives_once.py compares the two).
+        self.assertIn("asset.reason_count, asset.dlp_count", source)
         self.assertIn("_INVENTORY_READ_COLS", source)
         # Every read model returns the same shape, or the paths disagree about
         # a row's contents rather than only about their speed.
-        for path in ("_list_inventory_blob", "_scan_report_inventory_rows"):
+        for path in ("_list_inventory_blob", "_inventory_row"):
             body = source[source.index(f"def {path}("):]
             body = body[:body.index("\ndef ", 10)]
             self.assertIn("reason_count", body, path)

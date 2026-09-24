@@ -170,6 +170,11 @@ class Asset:
     # The scan a customer named and configured ("HR file share"), not the
     # collector protocol. Blank for assets written before scans carried a name.
     scan_label: str = ""
+    # P2: the collapsed inventory table's two numbers, counted from the record while
+    # it is a dict. The save used to parse them back out of detail_json - the record
+    # it had just serialised - once for the asset row and again for the packed rows.
+    reason_count: int = 0
+    dlp_count: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -369,6 +374,7 @@ def iter_normalized_chunks(
                 share = str(record.get("share") or "")
                 finding_types = _asset_finding_types(record)
                 framework_keys = _asset_framework_keys(record)
+                reason_count, dlp_count = record_detail_counts(record)
                 search_text = " ".join(
                     str(part) for part in (
                         path, name, owner, extension, source, share, risk_level, scan_label,
@@ -400,6 +406,8 @@ def iter_normalized_chunks(
                         finding_types=finding_types,
                         framework_keys=framework_keys,
                         detail_json=json.dumps(record, ensure_ascii=False, separators=(",", ":")),
+                        reason_count=reason_count,
+                        dlp_count=dlp_count,
                     )
                 )
                 asset_versions.append(
@@ -462,6 +470,14 @@ def iter_normalized_chunks(
             batch = []
     if batch:
         yield batch, _build(batch)
+
+
+def record_detail_counts(record) -> tuple[int, int]:
+    """(risk reasons, DLP recommendations) of one file record - store._detail_counts'
+    answer, from the dict rather than from its JSON."""
+    risk = record.get("risk") if isinstance(record, dict) else {}
+    risk = risk if isinstance(risk, dict) else {}
+    return (len(risk.get("reasons") or []), len(risk.get("dlp_recommendations") or []))
 
 
 def iter_normalized_assets(

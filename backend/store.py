@@ -2460,7 +2460,9 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
             ).fetchone()
             if existing and existing["created_at"]:
                 created_at = existing["created_at"]
-            normalized_written = _dual_write_normalized(conn, tenant_id, report, is_new_scan=existing is None)
+            inventory_rows: list[dict] = []
+            normalized_written = _dual_write_normalized(conn, tenant_id, report, is_new_scan=existing is None,
+                                                        inventory_rows=inventory_rows)
             if normalized_written:
                 _write_incremental_baseline(conn, tenant_id, report, is_new_scan=existing is None)
             else:
@@ -2486,7 +2488,7 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                     inline_body,
                     report_ref,
                     report_bytes,
-                    _packed_report_rows(tenant_id, report),
+                    _packed_report_rows(tenant_id, report, inventory_rows if normalized_written else None),
                     _packed_compact_report(report),
                     created_at,
                 ),
@@ -2591,7 +2593,8 @@ def _detail_counts(detail_json) -> tuple[int, int]:
     return (len(risk.get("reasons") or []), len(risk.get("dlp_recommendations") or []))
 
 
-def _dual_write_normalized(conn, tenant_id: str, report: dict, *, is_new_scan: bool = True) -> bool:
+def _dual_write_normalized(conn, tenant_id: str, report: dict, *, is_new_scan: bool = True,
+                           inventory_rows: list | None = None) -> bool:
     """Write the scan's normalized surfaces (roadmap Phase 5, DB-07).
 
     **Authoritative:** assets, findings, occurrences and the finding index are
@@ -2607,7 +2610,7 @@ def _dual_write_normalized(conn, tenant_id: str, report: dict, *, is_new_scan: b
     """
     try:
         conn.execute("SAVEPOINT dspm_norm")
-        _write_normalized_rows(conn, tenant_id, report, refresh_current=is_new_scan)
+        _write_normalized_rows(conn, tenant_id, report, refresh_current=is_new_scan, inventory_rows=inventory_rows)
         conn.execute("RELEASE SAVEPOINT dspm_norm")
         return True
     except Exception as exc:
@@ -3202,7 +3205,7 @@ def _upsert_operational_finding(
     )
 
 def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_current: bool = True,
-                          partition: dict | None = None) -> None:
+                          partition: dict | None = None, inventory_rows: list | None = None) -> None:
     from backend.domain import asset_identity, iter_normalized_chunks, scan_run_from_report
 
     run = scan_run_from_report(tenant_id, report)
@@ -3261,6 +3264,11 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
     cleared_occurrences: set[str] = set()
     for records, piece in iter_normalized_chunks(tenant_id, report):
         estate_rows = bool(write_estate and refresh_current)
+        if inventory_rows is not None and estate_rows:
+            # P2: the rows scan_reports.rows_json holds are these assets. Collected
+            # here, the save no longer normalises the whole report a second time to
+            # build them (15% of a save, and a second dump of every record).
+            inventory_rows.extend(_inventory_row(asset, scan_id) for asset in piece.assets)
         _executemany(
             conn,
             "INSERT INTO assets "
@@ -3288,7 +3296,7 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
                  asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
                  asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
                  asset.finding_types, asset.framework_keys, pack_json_text(asset.detail_json), asset.scan_label,
-                 scan_id, observed_at, *_detail_counts(asset.detail_json))
+                 scan_id, observed_at, asset.reason_count, asset.dlp_count)
                 for asset in (piece.assets if estate_rows else [])
             ),
         )
@@ -5650,12 +5658,13 @@ def read_scan_report_compact(tenant_id: str, scan_id: str | None = None) -> dict
     return compact
 
 
-def _packed_report_rows(tenant_id: str, report: dict):
+def _packed_report_rows(tenant_id: str, report: dict, rows: list[dict] | None = None):
     """The run's inventory projection, compressed, or None if it cannot be
     built. A failure here must never cost the operator the scan itself: the
-    reader falls back to the report exactly as before."""
+    reader falls back to the report exactly as before. `rows`, when the save's
+    normalized write already built them, are used as they are."""
     try:
-        rows = _scan_report_inventory_rows(tenant_id, report)
+        rows = rows or _scan_report_inventory_rows(tenant_id, report)
     except Exception as exc:  # pragma: no cover - projection is best effort
         logger.warning("Scan-report projection not stored: %s", type(exc).__name__)
         return None
@@ -7107,14 +7116,15 @@ def _scan_report_inventory_rows(tenant_id: str, report: dict) -> list[dict]:
     from backend.domain import iter_normalized_assets
 
     scan_id = str(report.get("scan_id") or "")
-    rows: list[dict] = []
-    for asset in iter_normalized_assets(tenant_id, report):
-        row = {column: getattr(asset, column) for column in _INVENTORY_COLS}
-        row["search_text"] = asset.search_text
-        row["scan_id"] = scan_id
-        row["reason_count"], row["dlp_count"] = _detail_counts(asset.detail_json)
-        rows.append(row)
-    return rows
+    return [_inventory_row(asset, scan_id) for asset in iter_normalized_assets(tenant_id, report)]
+
+
+def _inventory_row(asset, scan_id: str) -> dict:
+    row = {column: getattr(asset, column) for column in _INVENTORY_COLS}
+    row["search_text"] = asset.search_text
+    row["scan_id"] = scan_id
+    row["reason_count"], row["dlp_count"] = asset.reason_count, asset.dlp_count
+    return row
 
 
 def _inventory_page_from_rows(
@@ -7199,10 +7209,9 @@ def _list_inventory_blob(tenant_id: str, filt: dict, sort: str, cursor: str, lim
         if not report:
             continue
         for asset in iter_normalized_assets(tenant_id, report):
-            reasons, actions = _detail_counts(asset.detail_json)
             latest[asset.id] = (
                 {c: getattr(asset, c) for c in _INVENTORY_COLS}
-                | {"search_text": asset.search_text, "reason_count": reasons, "dlp_count": actions}
+                | {"search_text": asset.search_text, "reason_count": asset.reason_count, "dlp_count": asset.dlp_count}
             )
     return _inventory_page_from_rows(list(latest.values()), filt, sort, cursor, limit, direction)
 
