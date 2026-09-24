@@ -271,5 +271,55 @@ class AScanOperatorCannotSeeEvidenceTest(_ScannedCase):
             self.assertNotIn(marker, json.dumps(body))
 
 
+class AFiledReportCarriesNoEvidenceTest(_ScannedCase):
+    """An auditor files reports (`report.create`) without `evidence.view`, so the report
+    itself - the HTML and the PDF, as downloaded - must not be a way round the scope.
+    It carries none for anyone: the register names a file, its types, counts and risk."""
+
+    def _filed(self, role: str) -> tuple[str, str]:
+        from io import BytesIO
+
+        from pypdf import PdfReader
+
+        headers = self._as(role)
+        created = self.client.post("/api/v1/reports", headers=headers, json={"scan_id": self.scan_id})
+        self.assertEqual(created.status_code, 200, created.text[:300])
+        path = f"/api/v1/reports/artifacts/{created.json()['artifact_id']}"
+        html = self.client.get(f"{path}?format=html", headers=headers)
+        pdf = self.client.get(f"{path}?format=pdf", headers=headers)
+        self.assertEqual((html.status_code, pdf.status_code), (200, 200))
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf.content)).pages)
+        return html.text, text + pdf.content.decode("latin-1")
+
+    def setUp(self) -> None:
+        super().setUp()
+        from backend.reporting import artifacts
+
+        # ARTIFACT_ROOT is resolved at import; without this the reports land in data/.
+        root = mock.patch.object(artifacts, "ARTIFACT_ROOT", Path(self.temp_dir.name) / "artifacts")
+        root.start()
+        self.addCleanup(root.stop)
+
+    def test_an_auditors_report_names_the_finding_and_not_what_was_read(self) -> None:
+        html, pdf = self._filed("auditor")
+        for label, body in (("html", html), ("pdf", pdf)):
+            with self.subTest(format=label):
+                # It is the right report: the file and what was found in it are there...
+                self.assertIn("payroll.txt", body)
+                self.assertIn("pci_chd_pan", body)
+                # ...and nothing read out of the document is.
+                for marker in MARKERS:
+                    self.assertNotIn(marker, body)
+
+    def test_nor_does_an_analysts(self) -> None:
+        # The report is not scoped per role - it never holds evidence - so the analyst's
+        # is the same shape; were it to start carrying samples, this is where it shows.
+        html, pdf = self._filed("analyst")
+        for body in (html, pdf):
+            self.assertIn("payroll.txt", body)
+            for marker in MARKERS:
+                self.assertNotIn(marker, body)
+
+
 if __name__ == "__main__":
     unittest.main()
