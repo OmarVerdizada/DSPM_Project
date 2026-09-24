@@ -24,6 +24,11 @@ PUBLIC_PATHS = {
     # Authentication itself cannot require authentication.
     "/api/auth/login",
     "/api/auth/register",
+    # C1: the refresh cookie IS the credential here, and the access token this route
+    # replaces has usually expired by the time it is called - requiring one would make
+    # the endpoint useless. Every failure clears the cookie and answers 401 with the
+    # same body, so it tells a caller nothing it did not already hold.
+    "/api/auth/refresh",
     # Liveness and readiness: called by whatever restarts the service.
     "/api/health",
     "/api/ready",
@@ -88,7 +93,8 @@ class EveryRouteIsGuardedTest(unittest.TestCase):
         )
         self.assertEqual(
             public_api,
-            ["/api/auth/login", "/api/auth/register", "/api/health", "/api/ready"],
+            ["/api/auth/login", "/api/auth/refresh", "/api/auth/register",
+             "/api/health", "/api/ready"],
             "an /api route became public without being named here",
         )
 

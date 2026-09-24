@@ -42,17 +42,23 @@ from backend.finding_contracts import build_nist_finding_detail, get_finding_dis
 from backend.jobs import cancel_job, cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
 from backend.inventory_export import inventory_export_response_metadata, inventory_export_stream
 from backend.security import (
+    REFRESH_COOKIE,
+    REFRESH_TTL_SECONDS,
+    TOKEN_TTL_SECONDS,
     Principal,
     authenticate_user,
     create_token,
     generate_api_key,
     hash_password,
     is_platform_admin,
+    issue_refresh_token,
     require_principal,
     require_role,
     revoke_token,
+    rotate_refresh_token,
     sanitize_username,
 )
+from backend.security import _token_jti
 from backend.store import (
     InventoryReadUnavailable,
     audit,
@@ -111,6 +117,7 @@ from backend.store import (
     list_remediation_findings,
     list_inventory,
     probe_incremental_object,
+    revoke_refresh_tokens_for_user,
     revoke_sessions_for_user,
     update_finding_lifecycle,
     update_finding_workflow,
@@ -1509,24 +1516,99 @@ def login(payload: LoginRequest, request: Request) -> dict:
     # (a sprayer who guesses one valid credential must not reset the IP's history).
     _clear_login_failures(login_key)
     audit(principal.tenant_id, principal.subject, "auth.login")
-    return {
-        "access_token": create_token(principal.subject, principal.role, principal.tenant_id),
+    access = create_token(principal.subject, principal.role, principal.tenant_id)
+    # C1: the access token is short now, and the session is carried by a single-use
+    # refresh token in an HttpOnly cookie - out of reach of any script on the page, and
+    # therefore out of reach of an XSS that can read what the console stores.
+    secret, _family, _expires = issue_refresh_token(principal.subject, _token_jti(access))
+    body = {
+        "access_token": access,
         "token_type": "bearer",
         "role": principal.role,
         "tenant_id": principal.tenant_id,
+        "expires_in": TOKEN_TTL_SECONDS,
     }
+    return _with_refresh_cookie(JSONResponse(body), request, secret)
+
+
+def _refresh_cookie_is_secure(request: Request) -> bool:
+    """Secure on HTTPS and in production. Not on a plain-HTTP development console,
+    where a Secure cookie would simply never be sent and refresh would never work."""
+    return IS_PRODUCTION or request.url.scheme == "https"
+
+
+def _with_refresh_cookie(response: Response, request: Request, secret: str) -> Response:
+    response.set_cookie(
+        REFRESH_COOKIE,
+        secret,
+        max_age=REFRESH_TTL_SECONDS,
+        httponly=True,
+        secure=_refresh_cookie_is_secure(request),
+        samesite="strict",
+        # The cookie is only ever presented to the refresh and logout endpoints, so it
+        # is not attached to the hundreds of ordinary API calls a console makes.
+        path="/api/auth",
+    )
+    return response
+
+
+def _clear_refresh_cookie(response: Response, request: Request) -> Response:
+    response.delete_cookie(
+        REFRESH_COOKIE,
+        path="/api/auth",
+        httponly=True,
+        secure=_refresh_cookie_is_secure(request),
+        samesite="strict",
+    )
+    return response
+
+
+@app.post("/api/auth/refresh")
+def refresh_session(request: Request) -> Response:
+    """Exchange the refresh cookie for the next access token, and the next cookie.
+
+    Unauthenticated on purpose: the cookie IS the credential, and the access token it
+    replaces has usually expired by the time this is called. Every failure clears the
+    cookie and says the same thing, so a caller cannot learn from the difference between
+    an unknown token, an expired one and a replayed one.
+    """
+
+    presented = request.cookies.get(REFRESH_COOKIE, "")
+    result = rotate_refresh_token(presented)
+    if result.get("status") != "ok":
+        if result.get("status") == "replayed":
+            # The one case worth recording: a refresh token was presented twice, and
+            # every session in its family has just been ended.
+            audit("default", "unknown", "auth.refresh_replayed", {"family": str(result.get("family_id", ""))[:12]})
+        response = JSONResponse({"detail": "Session expired"}, status_code=401)
+        return _clear_refresh_cookie(response, request)
+
+    principal = result["principal"]
+    audit(principal.tenant_id, principal.subject, "auth.refreshed")
+    body = {
+        "access_token": result["access_token"],
+        "token_type": "bearer",
+        "role": principal.role,
+        "tenant_id": principal.tenant_id,
+        "expires_in": TOKEN_TTL_SECONDS,
+    }
+    return _with_refresh_cookie(JSONResponse(body), request, result["refresh_token"])
 
 
 @app.post("/api/logout")
 @app.post("/api/auth/logout")
 def logout(
+    request: Request,
     authorization: str | None = Header(default=None, alias="Authorization"),
     principal: Principal = Depends(require_role("viewer")),
-) -> dict:
+) -> Response:
     if authorization and authorization.lower().startswith("bearer "):
         revoke_token(authorization.split(" ", 1)[1].strip())
-    audit(principal.tenant_id, principal.subject, "auth.logout")
-    return {"status": "logged_out"}
+    # C1: signing out has to end the refresh chain too, or the cookie still mints
+    # access tokens for the rest of its life.
+    families = revoke_refresh_tokens_for_user(principal.subject)
+    audit(principal.tenant_id, principal.subject, "auth.logout", {"refresh_tokens_ended": families})
+    return _clear_refresh_cookie(JSONResponse({"status": "logged_out"}), request)
 
 
 @app.post("/api/auth/register")

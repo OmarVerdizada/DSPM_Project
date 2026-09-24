@@ -19,6 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pathlib import Path
 
 from backend.store import (
+    consume_refresh_token,
     create_user,
     forget_session,
     get_active_api_key,
@@ -26,6 +27,7 @@ from backend.store import (
     is_token_revoked,
     mark_user_login,
     record_session,
+    revoke_refresh_family,
     revoke_token_jti,
     session_last_seen,
     tenant_exists,
@@ -34,6 +36,7 @@ from backend.store import (
     update_user_password,
     update_user_role,
 )
+from backend.store import issue_refresh_token as store_issue_refresh_token
 
 
 ROLES = {"admin": 3, "analyst": 2, "viewer": 1}
@@ -76,7 +79,12 @@ def _load_secret_key() -> str:
 
 SECRET_KEY = _load_secret_key()
 DEFAULT_SECRET_IN_USE = "DSPM_SECRET_KEY" not in os.environ
-TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "28800"))
+# C1: the ACCESS token's life, now bounded to half an hour. It used to be eight, which
+# made it a bearer credential with an eight-hour blast radius - whoever lifted it from a
+# browser, a proxy log or a crash dump held the account for the rest of the working day.
+# The session is still eight hours long; it is the refresh token below that carries it,
+# and that token is single use (see issue_refresh_token / rotate_refresh_token).
+TOKEN_TTL_SECONDS = int(os.getenv("DSPM_TOKEN_TTL_SECONDS", "1800"))
 
 # How long a token may go unused before it stops working. An 8-hour token with
 # no idle timeout means a console left open on an unlocked machine at 09:00 is
@@ -223,6 +231,87 @@ def _b64url_decode(value: str) -> bytes:
 
 def _sign(message: str) -> str:
     return _b64url(hmac.new(SECRET_KEY.encode(), message.encode(), hashlib.sha256).digest())
+
+
+REFRESH_TTL_SECONDS = int(os.getenv("DSPM_REFRESH_TOKEN_TTL_SECONDS", "28800"))
+REFRESH_COOKIE = "dspm_refresh"
+
+
+def _refresh_hash(secret: str) -> str:
+    """What the database holds. The secret itself never lands in a row, so a copy of
+    the table (a backup, a dump, a support bundle) is not a set of working sessions."""
+    return hashlib.sha256(f"refresh.{secret}".encode()).hexdigest()
+
+
+def issue_refresh_token(subject: str, session_jti: str, family_id: str = "") -> tuple[str, str, int]:
+    """Mint the next link in a refresh chain. Returns (secret, family_id, expires_at).
+
+    The family is the chain: rotation keeps it, and a replay revokes all of it.
+    """
+
+    secret = secrets.token_urlsafe(48)
+    family = family_id or secrets.token_hex(16)
+    now = int(time.time())
+    expires_at = now + REFRESH_TTL_SECONDS
+    store_issue_refresh_token(_refresh_hash(secret), family, subject, session_jti, now, expires_at)
+    return secret, family, expires_at
+
+
+def rotate_refresh_token(secret: str) -> dict:
+    """Exchange a refresh token for the next access token and the next refresh token.
+
+    Returns {"status": "ok", "access_token", "refresh_token", "expires_at", "principal"}
+    or {"status": "replayed"|"expired"|"unknown"|"inactive"} - never a partial success:
+    a caller that gets anything other than "ok" must send the user back to sign in.
+    """
+
+    if not secret:
+        return {"status": "unknown"}
+    record = consume_refresh_token(_refresh_hash(secret))
+    status = record.get("status")
+    if status == "replayed":
+        # Two parties hold this chain. Which one is presenting it cannot be known, so
+        # neither keeps it: the family goes, including the access sessions it issued.
+        revoke_refresh_family(str(record.get("family_id") or ""))
+        return {"status": "replayed", "family_id": record.get("family_id", "")}
+    if status != "ok":
+        return {"status": status or "unknown"}
+
+    username = str(record.get("username") or "")
+    user = get_user(sanitize_username(username))
+    if not user or not user.get("is_active"):
+        revoke_refresh_family(str(record.get("family_id") or ""))
+        return {"status": "inactive"}
+    # The role and tenant come from the row on every refresh, exactly as verify_token
+    # reads them on every request: a demotion must not wait for the chain to end.
+    role = str(user.get("role") or "viewer")
+    tenant_id = str(user.get("tenant_id") or "default")
+
+    previous_jti = str(record.get("session_jti") or "")
+    if previous_jti:
+        revoke_token_jti(previous_jti, int(record.get("expires_at") or 0))
+        _session_last_seen.pop(previous_jti, None)
+        forget_session(previous_jti)
+
+    access = create_token(user["username"], role, tenant_id)
+    next_secret, family, expires_at = issue_refresh_token(
+        user["username"], _token_jti(access), str(record.get("family_id") or "")
+    )
+    return {
+        "status": "ok",
+        "access_token": access,
+        "refresh_token": next_secret,
+        "family_id": family,
+        "expires_at": expires_at,
+        "principal": Principal(user["username"], role, tenant_id),
+    }
+
+
+def _token_jti(token: str) -> str:
+    try:
+        return str(json.loads(_b64url_decode(token.split(".")[1])).get("jti") or "")
+    except Exception:
+        return ""
 
 
 def create_token(subject: str, role: str, tenant_id: str) -> str:

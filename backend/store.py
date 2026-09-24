@@ -786,6 +786,40 @@ def add_user_sessions(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS user_sessions_expiry ON user_sessions (expires_at)")
 
 
+def add_refresh_tokens(conn) -> None:
+    """Revision 0019: the rotating half of a bounded session (C1).
+
+    An access token that lives eight hours is a bearer credential with an eight-hour
+    blast radius: whoever copies it out of a browser, a proxy log or a crash dump holds
+    the account until it expires, and nothing short of revoking it can shorten that. The
+    answer is a SHORT access token and a refresh token that is exchanged for the next
+    one - which only helps if the refresh token is single use, because a long-lived
+    refresh token is the same problem wearing a different name.
+
+    So each exchange retires the token presented and issues a new one in the same
+    FAMILY. Presenting a retired token means two parties hold the chain: the legitimate
+    one that rotated it and someone replaying a copy. Which is which cannot be known, so
+    the whole family is revoked and both are sent back to the sign-in page. That is the
+    detection a rotating token buys, and it is the reason to rotate at all.
+
+    Like `user_sessions`, no tenant column: this is authentication infrastructure that
+    is read before a tenant scope exists (see add_user_sessions).
+    """
+
+    conn.execute("""CREATE TABLE IF NOT EXISTS refresh_tokens (
+            token_hash TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            session_jti TEXT NOT NULL DEFAULT '',
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used_at INTEGER NOT NULL DEFAULT 0
+        );""")
+    conn.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_family ON refresh_tokens (family_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_owner ON refresh_tokens (username)")
+    conn.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_expiry ON refresh_tokens (expires_at)")
+
+
 def _tenant_scoped(func):
     """Run a store function inside db.tenant_scope(<first argument>).
 
@@ -1170,8 +1204,22 @@ def apply_baseline_schema(conn) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
 
+        -- C1 (revision 0019). No tenant_id, for the same reason as user_sessions.
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
+            token_hash TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            session_jti TEXT NOT NULL DEFAULT '',
+            issued_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            used_at INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE INDEX IF NOT EXISTS user_sessions_owner ON user_sessions (username, last_seen_at);
         CREATE INDEX IF NOT EXISTS user_sessions_expiry ON user_sessions (expires_at);
+        CREATE INDEX IF NOT EXISTS refresh_tokens_family ON refresh_tokens (family_id);
+        CREATE INDEX IF NOT EXISTS refresh_tokens_owner ON refresh_tokens (username);
+        CREATE INDEX IF NOT EXISTS refresh_tokens_expiry ON refresh_tokens (expires_at);
 
         CREATE INDEX IF NOT EXISTS idx_scan_reports_tenant_created
             ON scan_reports (tenant_id, created_at);
@@ -8631,7 +8679,112 @@ def revoke_sessions_for_user(username: str, *, keep_jti: str = "") -> int:
                 ended += 1
     if ended:
         _forget_revocation()
+    # A refresh token outliving the sessions it belongs to would mint new ones.
+    revoke_refresh_tokens_for_user(username)
     return ended
+
+
+def issue_refresh_token(token_hash: str, family_id: str, username: str,
+                        session_jti: str, issued_at: int, expires_at: int) -> None:
+    """Record a refresh token. Only its hash is stored - the secret itself lives in the
+    caller's cookie, so a copy of this table is not a set of working credentials."""
+    if not token_hash or not family_id or not username:
+        return
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM refresh_tokens WHERE expires_at < ?", (int(time.time()),))
+            conn.execute(
+                "INSERT OR REPLACE INTO refresh_tokens "
+                "(token_hash, family_id, username, session_jti, issued_at, expires_at, used_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (token_hash, family_id, username, session_jti, int(issued_at), int(expires_at)),
+            )
+
+
+def consume_refresh_token(token_hash: str) -> dict:
+    """Retire a refresh token and say what presenting it meant.
+
+    Returns {"status": ...} where status is:
+      * ``ok``       - it was current; the row is returned and is now spent,
+      * ``replayed`` - it had already been spent. Two parties hold this chain and there
+                       is no way to tell which one this is, so the caller revokes the
+                       family: better both sign in again than one of them be an attacker
+                       with a working session,
+      * ``expired``  - past its absolute life,
+      * ``unknown``  - never issued here, or already cleaned up.
+    """
+
+    if not token_hash:
+        return {"status": "unknown"}
+    now = int(time.time())
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT token_hash, family_id, username, session_jti, issued_at, expires_at, used_at "
+                "FROM refresh_tokens WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                return {"status": "unknown"}
+            record = {key: row[key] for key in row.keys()}
+            if int(record["used_at"]):
+                return {"status": "replayed", **record}
+            if int(record["expires_at"]) < now:
+                conn.execute("DELETE FROM refresh_tokens WHERE token_hash = ?", (token_hash,))
+                return {"status": "expired", **record}
+            conn.execute("UPDATE refresh_tokens SET used_at = ? WHERE token_hash = ?", (now, token_hash))
+    return {"status": "ok", **record}
+
+
+def revoke_refresh_family(family_id: str) -> int:
+    """End a refresh chain and every access session it issued. Returns sessions ended."""
+    if not family_id:
+        return 0
+    revoked_at = datetime.now(timezone.utc).isoformat()
+    ended = 0
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT session_jti FROM refresh_tokens WHERE family_id = ? AND session_jti <> ''",
+                (family_id,),
+            ).fetchall()
+            for row in rows:
+                jti = str(row["session_jti"])
+                session = conn.execute(
+                    "SELECT expires_at FROM user_sessions WHERE jti = ?", (jti,)
+                ).fetchone()
+                if session is not None:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at, revoked_at) VALUES (?, ?, ?)",
+                        (jti, int(session["expires_at"]), revoked_at),
+                    )
+                    conn.execute("DELETE FROM user_sessions WHERE jti = ?", (jti,))
+                    ended += 1
+            conn.execute("DELETE FROM refresh_tokens WHERE family_id = ?", (family_id,))
+    if ended:
+        _forget_revocation()
+    return ended
+
+
+def revoke_refresh_tokens_for_user(username: str) -> int:
+    """Every refresh chain this account holds. A password change has to reach these:
+    ending the access sessions alone would leave a token that mints new ones."""
+    if not username:
+        return 0
+    with _lock:
+        with _connect() as conn:
+            removed = conn.execute(
+                "DELETE FROM refresh_tokens WHERE username = ?", (username,)
+            ).rowcount
+    return int(removed or 0)
+
+
+def count_refresh_tokens_for_user(username: str) -> int:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM refresh_tokens WHERE username = ?", (username,)
+        ).fetchone()
+    return int(row["n"] if row else 0)
 
 
 def count_sessions_for_user(username: str) -> int:

@@ -326,7 +326,7 @@ class TheUpgradeReachesAnOlderInstallTest(unittest.TestCase):
                 store.DB_PATH = original
         self.assertEqual(columns, {"jti", "username", "issued_at", "expires_at", "last_seen_at"})
         self.assertEqual(int(recorded), 1)
-        self.assertEqual(migrations.expected_revision(), 18)
+        self.assertGreaterEqual(migrations.expected_revision(), 18)
 
 
 class SigningInTellsNothingApartTest(_SessionCase):

@@ -738,18 +738,64 @@ async function api(path, payload, method = "POST", options = {}) {
     signal: options.signal,
   });
 
+  if (response.status === 401 && !options.isRetry && await refreshAccessToken()) {
+    // C1: the access token is bounded (half an hour), and the session is carried by a
+    // single-use refresh cookie. A 401 is therefore the NORMAL end of an access token,
+    // not the end of the session - retry once with the new one, and only give up if
+    // the refresh itself fails.
+    return api(path, payload, method, { ...options, isRetry: true });
+  }
+
   if (!response.ok) {
     const message = await readErrorMessage(response);
     if (response.status === 401) {
-      accessToken = "";
-      safeSessionSet("dspm-access-token", "");
-      showToast("Session expired", "Please sign in again.", "danger");
-      window.setTimeout(() => window.location.replace("/login"), 900);
+      endSession("Session expired", "Please sign in again.");
     }
     throw new Error(`${response.status}: ${message}`);
   }
 
   return response.json();
+}
+
+// One refresh at a time. Twenty panels loading at once produce twenty 401s, and each
+// exchanging the cookie would retire the token the others are about to present - which
+// the server reads as a replay and answers by ending the whole family.
+let refreshInFlight = null;
+
+async function refreshAccessToken() {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const response = await fetch("/api/auth/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+        });
+        if (!response.ok) {
+          return false;
+        }
+        const data = await response.json();
+        if (!data.access_token) {
+          return false;
+        }
+        accessToken = data.access_token;
+        safeSessionSet("dspm-access-token", accessToken);
+        return true;
+      } catch {
+        return false;   // offline, or the endpoint is not there: treat as signed out
+      } finally {
+        window.setTimeout(() => { refreshInFlight = null; }, 0);
+      }
+    })();
+  }
+  return refreshInFlight;
+}
+
+function endSession(title, message) {
+  accessToken = "";
+  safeSessionSet("dspm-access-token", "");
+  showToast(title, message, "danger");
+  window.setTimeout(() => window.location.replace("/login"), 900);
 }
 
 async function readErrorMessage(response) {
@@ -10077,6 +10123,8 @@ const AUDIT_ACTIONS = {
   "auth.login_failed": "Sign-in refused",
   "auth.login_blocked": "Sign-in blocked after repeated failures",
   "auth.logout": "Signed out",
+  "auth.refreshed": "Renewed a session",
+  "auth.refresh_replayed": "Session token replayed - all of that session's sign-ins ended",
   "compliance_keywords.exported": "Exported the keyword library",
   "nist.catalog.exported": "Exported the NIST catalog",
   "api_key.created": "Created an API key",

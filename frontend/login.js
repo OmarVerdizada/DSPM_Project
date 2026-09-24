@@ -31,6 +31,8 @@ loginForm.addEventListener("submit", async (event) => {
     const response = await fetch("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      // C1: the reply sets the HttpOnly refresh cookie that carries the session.
+      credentials: "same-origin",
       body: JSON.stringify({
         username: data.get("username") || "",
         password: data.get("password") || "",
