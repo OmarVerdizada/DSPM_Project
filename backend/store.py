@@ -834,6 +834,32 @@ def open_role_catalogue(conn) -> None:
         conn.execute(statement)
 
 
+def add_custom_roles(conn) -> None:
+    """Revision 0021: a tenant's own roles (C3).
+
+    The built-in roles are sets of named permissions; a custom role is the same thing
+    under a name the tenant chooses - "privacy_reviewer" reads evidence and the audit
+    trail and changes nothing. users.role, invites and API keys store its name, which is
+    resolved within the tenant, so two tenants may use one name for different sets.
+
+    Revisions 0003 and 0004 enumerate tenant tables when they run, so both are re-run
+    here to give the new table its tenant foreign key and row-level security.
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS custom_roles (
+            tenant_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            permissions TEXT NOT NULL DEFAULT '[]',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, name)
+        );""")
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def add_refresh_tokens(conn) -> None:
     """Revision 0019: the rotating half of a bounded session (C1).
 
@@ -1251,6 +1277,19 @@ def apply_baseline_schema(conn) -> None:
             revoked INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
+
+        -- C3 (revision 0021): a tenant's own roles, by name.
+        CREATE TABLE IF NOT EXISTS custom_roles (
+            tenant_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            permissions TEXT NOT NULL DEFAULT '[]',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, name)
+        );
 
         -- C1 (revision 0019). No tenant_id, for the same reason as user_sessions.
         CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -8102,6 +8141,7 @@ def delete_tenant(tenant_id: str) -> bool:
 
 _TENANT_ERASURE_TABLES = (
     "registration_invites",
+    "custom_roles",
     "scan_schedules",
     "suppression_rules",
     "derived_cache",
@@ -8427,14 +8467,134 @@ def read_alerts(tenant_id: str, limit: int = 200) -> list[dict]:
     return list(reversed(events))
 
 
-def _require_known_role(role: str) -> None:
-    # C3: revision 0020 took this check out of the schema; it lives here now.
-    if not is_known_role(role):
+def _require_known_role(role: str, tenant_id: str) -> None:
+    # C3: revision 0020 took this check out of the schema; it lives here now, and a
+    # custom role counts only in the tenant that defined it.
+    if not role_exists(role, tenant_id):
         raise ValueError(f"Unknown role: {role!r}")
 
 
+# C3: custom role permissions are read on every request that carries one, several times
+# (the route's permission, evidence scope). A short cache keeps that to one read; a
+# change made in this process clears it at once, one made by another backend within
+# the TTL.
+_CUSTOM_ROLE_TTL_SECONDS = 5.0
+_custom_role_cache: dict[tuple[str, str, str], tuple[float, frozenset | None]] = {}
+
+
+def _custom_role_key(tenant_id: str, name: str) -> tuple[str, str, str]:
+    # The database is part of the key: a process that changes DB_PATH (the suite does)
+    # must not see another database's roles.
+    return (str(DB_PATH), str(tenant_id or ""), str(name or ""))
+
+
+def _forget_custom_role(tenant_id: str, name: str) -> None:
+    _custom_role_cache.pop(_custom_role_key(tenant_id, name), None)
+
+
+def _custom_role_row(row) -> dict:
+    try:
+        granted = sorted(str(item) for item in json.loads(row["permissions"] or "[]"))
+    except (TypeError, ValueError):
+        granted = []
+    return {
+        "name": row["name"],
+        "label": row["label"] or row["name"],
+        "description": row["description"] or "",
+        "permissions": granted,
+        "builtin": False,
+        "created_by": row["created_by"] or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+@_tenant_scoped
+def list_custom_roles(tenant_id: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT name, label, description, permissions, created_by, created_at, updated_at "
+            "FROM custom_roles WHERE tenant_id = ? ORDER BY name",
+            (tenant_id,),
+        ).fetchall()
+    return [_custom_role_row(row) for row in rows]
+
+
+@_tenant_scoped
+def get_custom_role(tenant_id: str, name: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT name, label, description, permissions, created_by, created_at, updated_at "
+            "FROM custom_roles WHERE tenant_id = ? AND name = ?",
+            (tenant_id, str(name or "")),
+        ).fetchone()
+    return _custom_role_row(row) if row is not None else None
+
+
+def custom_role_permissions(tenant_id: str, name: str) -> frozenset | None:
+    """The permissions a tenant's custom role grants, or None when it has no such role."""
+    key = _custom_role_key(tenant_id, name)
+    cached = _custom_role_cache.get(key)
+    now = time.monotonic()
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    role = get_custom_role(key[1], key[2]) if key[1] and key[2] else None
+    granted = frozenset(role["permissions"]) if role is not None else None
+    _custom_role_cache[key] = (now + _CUSTOM_ROLE_TTL_SECONDS, granted)
+    return granted
+
+
+def role_exists(role: str, tenant_id: str) -> bool:
+    """A built-in role, or a custom role of this tenant."""
+    return is_known_role(role) or custom_role_permissions(tenant_id, role) is not None
+
+
+@_tenant_scoped
+def save_custom_role(tenant_id: str, name: str, label: str, description: str, permissions, actor: str) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    granted = json.dumps(sorted(permissions))
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT INTO custom_roles (tenant_id, name, label, description, permissions, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (tenant_id, name) DO UPDATE SET label = excluded.label, "
+                "description = excluded.description, permissions = excluded.permissions, updated_at = excluded.updated_at",
+                (tenant_id, name, label, description, granted, actor, now, now),
+            )
+    _forget_custom_role(tenant_id, name)
+    return get_custom_role(tenant_id, name)
+
+
+@_tenant_scoped
+def delete_custom_role(tenant_id: str, name: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            deleted = conn.execute(
+                "DELETE FROM custom_roles WHERE tenant_id = ? AND name = ?", (tenant_id, name)
+            ).rowcount
+    _forget_custom_role(tenant_id, name)
+    return bool(deleted)
+
+
+@_tenant_scoped
+def role_holders(tenant_id: str, name: str) -> dict:
+    """Who still holds a role in this tenant: a role in use is not deleted from under them."""
+    with _connect() as conn:
+        users = conn.execute("SELECT COUNT(*) FROM users WHERE tenant_id = ? AND role = ?", (tenant_id, name)).fetchone()[0]
+        keys = conn.execute(
+            "SELECT COUNT(*) FROM api_keys WHERE tenant_id = ? AND role = ? AND revoked = 0", (tenant_id, name)
+        ).fetchone()[0]
+        invites = conn.execute(
+            "SELECT COUNT(*) FROM registration_invites WHERE tenant_id = ? AND role = ? AND revoked = 0 "
+            "AND used_count < max_uses",
+            (tenant_id, name),
+        ).fetchone()[0]
+    return {"users": int(users), "api_keys": int(keys), "invites": int(invites)}
+
+
 def create_user(username: str, password_hash: str, role: str, tenant_id: str = "default", full_name: str = "") -> dict:
-    _require_known_role(role)
+    _require_known_role(role, tenant_id)
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:
@@ -8511,7 +8671,10 @@ def list_users(tenant_id: str | None = None) -> list[dict]:
 
 
 def update_user_role(username: str, role: str, tenant_id: str | None = None) -> dict | None:
-    _require_known_role(role)
+    current = get_user(username)
+    if current is None:
+        return None
+    _require_known_role(role, tenant_id or current["tenant_id"])
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:

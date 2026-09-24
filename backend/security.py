@@ -23,6 +23,7 @@ from backend.store import (
     consume_one_time_token,
     consume_refresh_token,
     create_user,
+    custom_role_permissions,
     forget_session,
     get_active_api_key,
     get_user,
@@ -31,6 +32,7 @@ from backend.store import (
     record_session,
     revoke_refresh_family,
     revoke_token_jti,
+    role_exists,
     session_last_seen,
     tenant_exists,
     touch_api_key,
@@ -454,9 +456,9 @@ def verify_token(token: str) -> Principal:
         if not user or not user.get("is_active"):
             raise ValueError("inactive user")
         role = str(user.get("role") or claims.get("role") or "viewer")
-        if not is_known_role(role):
-            raise ValueError("invalid role")
         tenant_id = str(user.get("tenant_id") or claims.get("tenant") or "default")
+        if not role_exists(role, tenant_id):
+            raise ValueError("invalid role")
         return Principal(subject, role, tenant_id, session_id=jti)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
@@ -683,7 +685,7 @@ def _download_claims(token: str, artifact_id: str) -> dict | None:
     if str(claims.get("aid") or "") != artifact_id or int(claims.get("exp", 0)) < int(time.time()):
         return None
     tenant_id, subject, role = (str(claims.get(key) or "") for key in ("tenant", "sub", "role"))
-    if not tenant_id or not subject or not is_known_role(role):
+    if not tenant_id or not subject or not role_exists(role, tenant_id):
         return None
     return claims
 
@@ -780,10 +782,19 @@ def require_artifact_download(principal: Annotated[Principal, Depends(require_ar
 require_artifact_download.required_permissions = ("report.create",)
 
 
+def role_permissions_in(role: str, tenant_id: str) -> frozenset[str]:
+    """What a role grants in a tenant: a built-in role anywhere, a custom role only in the
+    tenant that defined it. An unknown role grants nothing."""
+    if is_known_role(role):
+        return role_permissions(role)
+    return custom_role_permissions(tenant_id, role) or frozenset()
+
+
 def principal_permissions(principal: Principal) -> frozenset[str]:
-    """What this caller may do: its role's permissions, and `platform.admin` for the
-    installation's own administrator identity, which no role can grant."""
-    granted = role_permissions(principal.role)
+    """What this caller may do: its role's permissions - resolved in the tenant the account
+    belongs to, not one a platform administrator has pivoted into - and `platform.admin`
+    for the installation's own administrator identity, which no role can grant."""
+    granted = role_permissions_in(principal.role, principal.home_tenant_id or principal.tenant_id)
     if is_platform_admin(principal):
         granted = granted | PLATFORM_ONLY
     return granted

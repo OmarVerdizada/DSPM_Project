@@ -108,8 +108,7 @@ class ScanScheduleApiTests(unittest.TestCase):
         self.assertEqual(self.client.patch("/api/scan-schedules/sch_nothing", json={"name": "x"},
                                            headers=_headers()).status_code, 404)
         self.assertEqual(self.client.post("/api/scan-schedules/sch_nothing/run", headers=_headers()).status_code, 404)
-        self.assertEqual(self.client.delete("/api/scan-schedules/sch_nothing", headers=_headers()).json(),
-                         {"deleted": False})
+        self.assertEqual(self.client.delete("/api/scan-schedules/sch_nothing", headers=_headers()).status_code, 404)
 
     def test_one_tenant_cannot_see_or_change_anothers(self) -> None:
         tenant = f"sched-{uuid4().hex[:8]}"
@@ -125,7 +124,7 @@ class ScanScheduleApiTests(unittest.TestCase):
         self.assertEqual(self.client.patch(f"/api/scan-schedules/{mine['schedule_id']}", json={"name": "theirs"},
                                            headers=_headers()).status_code, 404)
         self.assertEqual(self.client.delete(f"/api/scan-schedules/{mine['schedule_id']}",
-                                            headers=_headers()).json(), {"deleted": False})
+                                            headers=_headers()).status_code, 404)
         self.assertIsNotNone(store.read_scan_schedule(tenant, mine["schedule_id"]))
 
     def test_a_viewer_neither_reads_nor_changes(self) -> None:

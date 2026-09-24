@@ -12,7 +12,7 @@
     />
     <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=10" />
-    <link rel="stylesheet" href="/static/styles.css?v=255" />
+    <link rel="stylesheet" href="/static/styles.css?v=257" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=20" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
@@ -1610,6 +1610,30 @@
               <pre id="api-key-output" class="code-output">No key generated in this session.</pre>
             </section>
 
+            <section class="visual-panel" id="custom-roles-panel">
+              <div class="panel-title">
+                <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-user-cog"/></svg></span>Custom roles</h4>
+                <span class="panel-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
+              </div>
+              <p class="panel-copy">A role is a set of permissions. The built-in roles are fixed; a custom role can be given to this tenant's users, invites and API keys.</p>
+              <div class="asset-form-grid compact-form">
+                <label>
+                  Name
+                  <input id="custom-role-name" autocomplete="off" placeholder="privacy_reviewer" />
+                </label>
+                <label>
+                  Label
+                  <input id="custom-role-label" autocomplete="off" placeholder="Privacy reviewer" />
+                </label>
+              </div>
+              <fieldset id="custom-role-permissions" class="extension-list">
+                <legend>Permissions</legend>
+              </fieldset>
+              <button type="button" id="save-custom-role-btn">Save role</button>
+              <p id="custom-role-status" class="save-status" role="status">Custom roles load after admin sign-in.</p>
+              <ul id="custom-roles-list"></ul>
+            </section>
+
             <section class="visual-panel">
               <div class="panel-title">
                 <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-file-json"/></svg></span>DLP policy export</h4>
@@ -1772,7 +1796,7 @@
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
-    <script src="/static/app.js?v=242"></script>
+    <script src="/static/app.js?v=244"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

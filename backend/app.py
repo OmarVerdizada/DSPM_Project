@@ -30,7 +30,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from backend.alerts import evaluate_alerts
 from backend.errors import client_message, new_reference
 from backend.evidence import without_evidence
-from backend.permissions import AUTHENTICATED, DELEGABLE_ROLES, is_known_role, permission_catalogue, role_catalogue, role_permissions
+from backend.permissions import (
+    AUTHENTICATED,
+    BUILTIN_ROLES,
+    CUSTOM_ROLE_NAME,
+    is_known_role,
+    permission_catalogue,
+    role_catalogue,
+    validate_custom_role,
+)
 from backend.partitioned_scan import (
     continue_partitioned_scan,
     enqueue_partitioned_scan,
@@ -59,6 +67,7 @@ from backend.security import (
     issue_refresh_token,
     principal_permissions,
     require_principal,
+    role_permissions_in,
     require_permission,
     revoke_token,
     rotate_refresh_token,
@@ -1031,10 +1040,34 @@ class RegisterRequest(BaseModel):
 
 
 def _known_role(value: str) -> str:
+    # The shape of a role name. Whether a custom role exists depends on the tenant, which
+    # the route knows and the request model does not; the route checks that.
     role = str(value or "").strip().lower()
-    if not is_known_role(role):
+    if not (is_known_role(role) or CUSTOM_ROLE_NAME.match(role)):
         raise ValueError("Unknown role")
     return role
+
+
+def _require_role_in(role: str, tenant_id: str) -> None:
+    if not store_module.role_exists(role, tenant_id):
+        raise HTTPException(status_code=400, detail=f"Unknown role in tenant {tenant_id}: {role}")
+
+
+def _delegable(role: str, tenant_id: str) -> bool:
+    """A role an invite or an API key may carry: one that exists in the tenant and does
+    not administer it. An administrator is made deliberately, through the user routes."""
+    return store_module.role_exists(role, tenant_id) and "tenant.admin" not in role_permissions_in(role, tenant_id)
+
+
+def _active_admins(tenant_id: str, *, role_override: tuple[str, frozenset[str]] | None = None) -> list[dict]:
+    """The active accounts that can administer a tenant - optionally as they would be if
+    one role's permissions changed."""
+    def grants(role: str) -> frozenset[str]:
+        if role_override and role == role_override[0]:
+            return role_override[1]
+        return role_permissions_in(role, tenant_id)
+
+    return [user for user in list_users(tenant_id) if user["is_active"] and "tenant.admin" in grants(user["role"])]
 
 
 class UserCreateRequest(RegisterRequest):
@@ -1864,11 +1897,84 @@ def update_feature_settings(payload: FeatureSettingsRequest, principal: Principa
     return _feature_settings_payload(principal)
 
 
+class CustomRoleRequest(BaseModel):
+    name: str = Field(default="", max_length=40)
+    label: str = Field(default="", max_length=80)
+    description: str = Field(default="", max_length=300)
+    permissions: list[str] = Field(default_factory=list, max_length=20)
+
+
+def _roles_payload(tenant_id: str) -> dict:
+    custom = []
+    for role in store_module.list_custom_roles(tenant_id):
+        custom.append({**role, "holders": store_module.role_holders(tenant_id, role["name"])})
+    roles = role_catalogue() + custom
+    return {
+        "roles": roles,
+        "permissions": permission_catalogue(),
+        "delegable": [role["name"] for role in roles if _delegable(role["name"], tenant_id)],
+    }
+
+
 @app.get("/api/roles")
 def roles_index(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
-    """C3: the roles an administrator can give, and what each one allows."""
-    return {"roles": role_catalogue(), "permissions": permission_catalogue(),
-            "delegable": list(DELEGABLE_ROLES)}
+    """C3: the roles an administrator can give - built-in and this tenant's own - and
+    what each one allows."""
+    return _roles_payload(principal.tenant_id)
+
+
+@app.post("/api/roles")
+def custom_role_create(payload: CustomRoleRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    try:
+        name, granted = validate_custom_role(payload.name, payload.permissions)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The role could not be created")) from exc
+    if store_module.get_custom_role(principal.tenant_id, name) is not None:
+        raise HTTPException(status_code=409, detail=f"This tenant already has a role named {name}")
+    role = store_module.save_custom_role(principal.tenant_id, name, payload.label.strip() or name,
+                                         payload.description.strip(), granted, principal.subject)
+    audit(principal.tenant_id, principal.subject, "role.created", {"role": name, "permissions": sorted(granted)})
+    return {"role": role, **_roles_payload(principal.tenant_id)}
+
+
+@app.put("/api/roles/{name}")
+def custom_role_update(name: str, payload: CustomRoleRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    if name in BUILTIN_ROLES:
+        raise HTTPException(status_code=400, detail="A built-in role cannot be changed; define a custom one")
+    current = store_module.get_custom_role(principal.tenant_id, name)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Role not found")
+    try:
+        _, granted = validate_custom_role(name, payload.permissions)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The role could not be changed")) from exc
+    # Taking administration away from a role must not leave the tenant with nobody who
+    # can give it back.
+    if "tenant.admin" in current["permissions"] and "tenant.admin" not in granted:
+        if not _active_admins(principal.tenant_id, role_override=(name, granted)):
+            raise HTTPException(status_code=400, detail="At least one active admin must remain")
+    role = store_module.save_custom_role(principal.tenant_id, name, payload.label.strip() or current["label"],
+                                         payload.description.strip(), granted, principal.subject)
+    audit(principal.tenant_id, principal.subject, "role.updated", {
+        "role": name, "permissions": sorted(granted), "previous": current["permissions"],
+    })
+    return {"role": role, **_roles_payload(principal.tenant_id)}
+
+
+@app.delete("/api/roles/{name}")
+def custom_role_delete(name: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    if name in BUILTIN_ROLES:
+        raise HTTPException(status_code=400, detail="A built-in role cannot be deleted")
+    if store_module.get_custom_role(principal.tenant_id, name) is None:
+        raise HTTPException(status_code=404, detail="Role not found")
+    holders = store_module.role_holders(principal.tenant_id, name)
+    if any(holders.values()):
+        raise HTTPException(status_code=409, detail=(
+            f"The role is still held by {holders['users']} user(s), {holders['api_keys']} API key(s) "
+            f"and {holders['invites']} open invite(s); give them another role first"))
+    store_module.delete_custom_role(principal.tenant_id, name)
+    audit(principal.tenant_id, principal.subject, "role.deleted", {"role": name})
+    return _roles_payload(principal.tenant_id)
 
 
 @app.get("/api/users")
@@ -1887,6 +1993,7 @@ def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends
         raise HTTPException(status_code=400, detail="Tenant does not exist")
     if get_user(username):
         raise HTTPException(status_code=409, detail="Username already exists")
+    _require_role_in(payload.role, tenant_id)
     user = create_user(username, hash_password(payload.password, username=username), payload.role, tenant_id, payload.full_name.strip())
     audit(principal.tenant_id, principal.subject, "user.created", {"username": username, "role": payload.role, "tenant_id": tenant_id})
     return {"user": _public_user(user)}
@@ -1906,9 +2013,9 @@ def admin_update_user_role(username: str, payload: UserRoleRequest, principal: P
         raise HTTPException(status_code=403, detail="Tenant access denied")
     if tenant_id and not tenant_exists(tenant_id):
         raise HTTPException(status_code=400, detail="Tenant does not exist")
-    if target == principal.subject and "tenant.admin" not in role_permissions(payload.role):
-        admins = [user for user in list_users(current_user["tenant_id"])
-                  if "tenant.admin" in role_permissions(user["role"]) and user["is_active"]]
+    _require_role_in(payload.role, effective_tenant)
+    if target == principal.subject and "tenant.admin" not in role_permissions_in(payload.role, effective_tenant):
+        admins = _active_admins(current_user["tenant_id"])
         if len(admins) <= 1:
             raise HTTPException(status_code=400, detail="At least one active admin must remain")
     user = update_user_role(target, payload.role, tenant_id)
@@ -2033,9 +2140,9 @@ def admin_create_invite(tenant_id: str, payload: InviteCreateRequest, principal:
     if not tenant_exists(target):
         raise HTTPException(status_code=404, detail="Tenant not found")
     role = payload.role.strip().lower()
-    if role not in DELEGABLE_ROLES:
+    if not _delegable(role, target):
         # Self-registration invites never mint admins - create admins via /api/users.
-        raise HTTPException(status_code=400, detail=f"Invite role must be one of: {', '.join(DELEGABLE_ROLES)}")
+        raise HTTPException(status_code=400, detail="An invite's role must exist in this tenant and not administer it")
     token = f"inv_{secrets.token_urlsafe(24)}"
     expires_at = (datetime.now(timezone.utc) + timedelta(hours=payload.ttl_hours)).isoformat()
     invite_id = create_registration_invite(
@@ -2133,9 +2240,9 @@ def write_legal_hold(
 @app.post("/api/api-keys")
 def create_api_key(payload: ApiKeyRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     role = payload.role.strip().lower()
-    if role not in DELEGABLE_ROLES:
+    if not _delegable(role, principal.tenant_id):
         # Machine keys never carry admin - create admins via /api/users.
-        raise HTTPException(status_code=400, detail=f"API key role must be one of: {', '.join(DELEGABLE_ROLES)}")
+        raise HTTPException(status_code=400, detail="An API key's role must exist in this tenant and not administer it")
     raw, key_hash = generate_api_key()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=payload.ttl_days)).isoformat()
     key_id = create_api_key_record(principal.tenant_id, key_hash, payload.label, role, principal.subject, expires_at)
@@ -2209,9 +2316,12 @@ def scan_profiles_save(payload: ScanProfileRequest, principal: Principal = Depen
 @app.delete("/api/scan-profiles/{profile_id}")
 def scan_profiles_delete(profile_id: str, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     removed = delete_scan_profile(principal.tenant_id, profile_id)
-    if removed:
-        audit(principal.tenant_id, principal.subject, "scan_profile.deleted", {"profile_id": profile_id})
-    return {"deleted": removed}
+    if not removed:
+        # C3: the same answer for another tenant's profile as for no profile at all -
+        # every other identifier route refuses with a 404, and so does this one.
+        raise HTTPException(status_code=404, detail="Scan profile not found")
+    audit(principal.tenant_id, principal.subject, "scan_profile.deleted", {"profile_id": profile_id})
+    return {"deleted": True}
 
 
 class ScheduleRequest(BaseModel):
@@ -2296,9 +2406,12 @@ def scan_schedules_update(schedule_id: str, payload: ScheduleUpdateRequest,
 @app.delete("/api/scan-schedules/{schedule_id}")
 def scan_schedules_delete(schedule_id: str, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     removed = delete_scan_schedule(principal.tenant_id, schedule_id)
-    if removed:
-        audit(principal.tenant_id, principal.subject, "schedule.deleted", {"schedule_id": schedule_id})
-    return {"deleted": removed}
+    if not removed:
+        # C3: as its own PATCH and run-now already did - a schedule this tenant does not
+        # have is a 404, whoever else has it.
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    audit(principal.tenant_id, principal.subject, "schedule.deleted", {"schedule_id": schedule_id})
+    return {"deleted": True}
 
 
 @app.post("/api/scan-schedules/{schedule_id}/run")

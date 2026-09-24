@@ -104,8 +104,8 @@ class ScanProfileApiTests(unittest.TestCase):
 
         cross_delete = self.client.delete(
             f"/api/scan-profiles/{mine['profile_id']}", headers=_headers("default")
-        ).json()
-        self.assertFalse(cross_delete["deleted"], "another tenant must not delete the profile")
+        )
+        self.assertEqual(cross_delete.status_code, 404, "another tenant must not delete the profile")
         still_there = self.client.get("/api/scan-profiles", headers=tenant_headers).json()["profiles"]
         self.assertIn(mine["profile_id"], [p["profile_id"] for p in still_there])
 

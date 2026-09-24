@@ -12025,7 +12025,8 @@ body.sidebar-collapsed .app-shell > main {
   color: var(--text);
   min-width: 0;
 }
-#tab-security .security-grid input,
+/* Text fields only: a checkbox (C3's permission picker) keeps its own size and focus ring. */
+#tab-security .security-grid input:not([type="checkbox"]):not([type="radio"]),
 #tab-security .security-grid select {
   height: 40px;
   padding: 0 12px !important;
@@ -12033,7 +12034,13 @@ body.sidebar-collapsed .app-shell > main {
   border: 1px solid var(--line) !important;
   transition: border-color .15s ease-out, box-shadow .15s ease-out;
 }
-#tab-security .security-grid input:focus,
+/* C3's permission picker: the global 36px input floor would make each checkbox taller
+   than its row, and the next row's background then covers this one's text. */
+#custom-role-permissions .extension-option input {
+  min-height: 0;
+  height: 16px;
+}
+#tab-security .security-grid input:not([type="checkbox"]):not([type="radio"]):focus,
 #tab-security .security-grid select:focus {
   outline: none !important;
   border-color: color-mix(in srgb, var(--accent) 65%, var(--line)) !important;

@@ -51,7 +51,11 @@ Every API route names the permission it needs (`backend/permissions.py`; the ful
 | `analyst` | read evidence, triage findings, manage rules, scan, export and file reports |
 | `admin` | everything in its tenant, including users, roles, invites and API keys |
 
-Operating the installation itself (tenants, legal holds, the shared NIST catalogue, install-wide settings such as OCR, and database diagnostics) belongs to the built-in `admin` account of the `default` tenant, and no role grants it. Invites and API keys may carry any role except `admin`. `GET /api/roles` lists the roles and what each allows; sign-in, session renewal and `GET /api/profile` return the caller's `permissions`, which the console uses to decide what to show.
+Operating the installation itself (tenants, legal holds, the shared NIST catalogue, install-wide settings such as OCR, and database diagnostics) belongs to the built-in `admin` account of the `default` tenant, and no role grants it.
+
+A tenant administrator can also define **custom roles** (Security ops, or `POST/PUT/DELETE /api/roles`): a name and any set of the permissions above except the installation's. A custom role belongs to its tenant, and one still held by a user, an API key or an open invite cannot be deleted. Invites and API keys may carry any role that does not administer the tenant. `GET /api/roles` lists the roles and what each allows; sign-in, session renewal and `GET /api/profile` return the caller's `permissions`, which the console uses to decide what to show.
+
+**Evidence** - file previews and the matched values behind a finding - is returned only to a role with `evidence.view`. Everyone else sees the same findings, counts, locations and risk, with the evidence left out and the response marked `evidence_hidden`.
 
 ## Quick Start
 
@@ -439,7 +443,7 @@ python scripts/generate_enterprise_test_data.py --output enterprise_test_data --
 - Jira, ServiceNow, Slack, and Teams remediation integrations.
 - SharePoint, OneDrive, Google Drive, S3, Azure Blob, SQL Server, and PostgreSQL connectors.
 - Persisted remediation state with assignment and closure workflow.
-- Custom roles on top of the built-in ones (see Roles and permissions), and evidence masked for roles that may not read it.
+- Directory (AD/LDAP) group mapping onto roles and permissions.
 - Scheduled scans and posture drift alerts.
 - Docker packaging and production deployment profile.
 

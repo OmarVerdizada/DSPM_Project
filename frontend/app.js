@@ -114,6 +114,12 @@ const remediationScopeSummary = document.querySelector("#remediation-scope-summa
 const remediationError = document.querySelector("#remediation-error");
 const msspPortfolio = document.querySelector("#mssp-portfolio");
 const createApiKeyBtn = document.querySelector("#create-api-key-btn");
+const customRoleName = document.querySelector("#custom-role-name");
+const customRoleLabel = document.querySelector("#custom-role-label");
+const customRolePermissions = document.querySelector("#custom-role-permissions");
+const saveCustomRoleBtn = document.querySelector("#save-custom-role-btn");
+const customRoleStatus = document.querySelector("#custom-role-status");
+const customRolesList = document.querySelector("#custom-roles-list");
 const apiKeyLabel = document.querySelector("#api-key-label");
 const apiKeyOutput = document.querySelector("#api-key-output");
 const exportDlpPolicyBtn = document.querySelector("#export-dlp-policy-btn");
@@ -10250,6 +10256,9 @@ const AUDIT_ACTIONS = {
   "user.status_updated": "Changed a user's status",
   "user.password_changed": "Changed a password",
   "user.password_change_refused": "Password change refused - wrong current password",
+  "role.created": "Created a custom role",
+  "role.updated": "Changed a custom role",
+  "role.deleted": "Deleted a custom role",
   "user.password_reset": "Reset a password",
   "user.profile_updated": "Updated a profile",
   "user.avatar_updated": "Updated an avatar",
@@ -10422,14 +10431,10 @@ async function loadUsers() {
     userManagementStatus.textContent = "Admin role is required.";
     return;
   }
-  if (!roleCatalogue.length) {
-    try {
-      const catalogue = await api("/api/roles", null, "GET");
-      roleCatalogue = Array.isArray(catalogue.roles) ? catalogue.roles : [];
-      renderRoleOptions(newUserRole, newUserRole?.value || "viewer");
-    } catch {
-      /* the built-in list in the markup still works */
-    }
+  try {
+    applyRoleCatalogue(await api("/api/roles", null, "GET"));
+  } catch {
+    /* the built-in list in the markup still works */
   }
   const data = await api("/api/users", null, "GET");
   renderUsers(data.users || []);
@@ -10440,6 +10445,68 @@ async function loadUsers() {
 // built-in names; a role the list does not know (a user's current one) is kept visible.
 const BUILTIN_ROLE_NAMES = ["viewer", "auditor", "scan_operator", "analyst", "admin"];
 let roleCatalogue = [];
+let permissionCatalogue = [];
+
+function applyRoleCatalogue(catalogue = {}) {
+  roleCatalogue = Array.isArray(catalogue.roles) ? catalogue.roles : [];
+  permissionCatalogue = Array.isArray(catalogue.permissions) ? catalogue.permissions : [];
+  renderRoleOptions(newUserRole, newUserRole?.value || "viewer");
+  renderCustomRoles();
+}
+
+// C3: a tenant's own roles. The permission list comes from the server, and the one
+// permission no role may hold (the installation's) is not offered.
+function renderCustomRoles() {
+  if (customRolePermissions) {
+    const checked = new Set([...customRolePermissions.querySelectorAll("input:checked")].map((input) => input.value));
+    customRolePermissions.innerHTML = `<legend>Permissions</legend>${permissionCatalogue
+      .filter((permission) => permission.assignable)
+      .map((permission) => `<label class="extension-option" title="${escapeHtml(permission.description)}"><input type="checkbox" value="${escapeHtml(permission.name)}" ${checked.has(permission.name) ? "checked" : ""} /><span>${escapeHtml(permission.name)} - ${escapeHtml(permission.description)}</span></label>`)
+      .join("")}`;
+  }
+  if (customRolesList) {
+    const custom = roleCatalogue.filter((role) => !role.builtin);
+    customRolesList.innerHTML = custom.length
+      ? custom.map((role) => {
+        const holders = role.holders || {};
+        const held = (holders.users || 0) + (holders.api_keys || 0) + (holders.invites || 0);
+        return `<li data-custom-role="${escapeHtml(role.name)}"><b>${escapeHtml(role.label || role.name)}</b> <code>${escapeHtml(role.name)}</code>: ${escapeHtml((role.permissions || []).join(", "))}
+          <button type="button" class="secondary-btn mini-btn" data-edit-role="${escapeHtml(role.name)}">Edit</button>
+          <button type="button" class="danger-btn mini-btn" data-delete-role="${escapeHtml(role.name)}" ${held ? `disabled title="Held by ${held} account(s), key(s) or invite(s)"` : ""}>Delete</button></li>`;
+      }).join("")
+      : '<li class="empty">No custom roles yet.</li>';
+  }
+}
+
+function editCustomRole(name) {
+  const role = roleCatalogue.find((item) => item.name === name && !item.builtin);
+  if (!role) return;
+  customRoleName.value = role.name;
+  customRoleLabel.value = role.label || "";
+  const granted = new Set(role.permissions || []);
+  customRolePermissions.querySelectorAll("input[type=checkbox]").forEach((input) => { input.checked = granted.has(input.value); });
+  customRoleStatus.textContent = `Editing ${role.name}.`;
+}
+
+async function saveCustomRole() {
+  const name = customRoleName.value.trim().toLowerCase();
+  const body = {
+    name,
+    label: customRoleLabel.value.trim(),
+    permissions: [...customRolePermissions.querySelectorAll("input:checked")].map((input) => input.value),
+  };
+  const exists = roleCatalogue.some((role) => role.name === name && !role.builtin);
+  const result = exists
+    ? await api(`/api/roles/${encodeURIComponent(name)}`, body, "PUT")
+    : await api("/api/roles", body, "POST");
+  applyRoleCatalogue(result);
+  customRoleStatus.textContent = exists ? `Role ${name} changed.` : `Role ${name} created.`;
+}
+
+async function deleteCustomRole(name) {
+  applyRoleCatalogue(await api(`/api/roles/${encodeURIComponent(name)}`, null, "DELETE"));
+  customRoleStatus.textContent = `Role ${name} deleted.`;
+}
 
 function roleOptionsHtml(selected) {
   const roles = roleCatalogue.length
@@ -11841,6 +11908,24 @@ usersBody.addEventListener("click", (event) => {
   resetUserPassword(username, input?.value || "").catch((error) => {
     userManagementStatus.textContent = `Reset failed: ${error.message}`;
   });
+});
+saveCustomRoleBtn?.addEventListener("click", () => {
+  saveCustomRole().catch((error) => {
+    customRoleStatus.textContent = error.message;
+  });
+});
+customRolesList?.addEventListener("click", (event) => {
+  const edit = event.target.closest("[data-edit-role]");
+  if (edit) {
+    editCustomRole(edit.dataset.editRole);
+    return;
+  }
+  const remove = event.target.closest("[data-delete-role]");
+  if (remove) {
+    deleteCustomRole(remove.dataset.deleteRole).catch((error) => {
+      customRoleStatus.textContent = error.message;
+    });
+  }
 });
 createApiKeyBtn.addEventListener("click", () => {
   createApiKey().catch((error) => {

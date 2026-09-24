@@ -19,6 +19,8 @@ diagnostics - crosses every tenant, and no tenant's role should reach it.
 
 from __future__ import annotations
 
+import re
+
 # Self-service: any signed-in account, for its own profile, password and sign-out.
 AUTHENTICATED = "authenticated"
 
@@ -83,8 +85,32 @@ BUILTIN_ROLES: dict[str, dict] = {
 DELEGABLE_ROLES = tuple(name for name, role in BUILTIN_ROLES.items() if "tenant.admin" not in role["permissions"])
 
 
+# A custom role (C3): a tenant's own set of permissions under its own name. The name is
+# what users.role, invites and API keys store, so it may not shadow a built-in one.
+CUSTOM_ROLE_NAME = re.compile(r"^[a-z][a-z0-9_]{2,39}$")
+
+
 def is_known_role(role: str) -> bool:
+    """A built-in role. Custom roles are per tenant: see store.role_exists."""
     return str(role or "") in BUILTIN_ROLES
+
+
+def validate_custom_role(name: str, permissions) -> tuple[str, frozenset[str]]:
+    """The name and permission set a custom role may have, or ValueError saying why not."""
+    name = str(name or "").strip().lower()
+    if not CUSTOM_ROLE_NAME.match(name):
+        raise ValueError("A role name is 3-40 lowercase letters, digits or underscores, starting with a letter")
+    if name in BUILTIN_ROLES:
+        raise ValueError(f"'{name}' is a built-in role")
+    granted = frozenset(str(item).strip() for item in (permissions or []) if str(item).strip())
+    unknown = sorted(granted - set(PERMISSIONS))
+    if unknown:
+        raise ValueError(f"Unknown permission: {', '.join(unknown)}")
+    if granted & PLATFORM_ONLY:
+        raise ValueError("platform.admin belongs to the installation's administrator and cannot be given to a role")
+    if not granted:
+        raise ValueError("A role needs at least one permission")
+    return name, granted
 
 
 def role_permissions(role: str) -> frozenset[str]:
