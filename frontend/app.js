@@ -3963,6 +3963,10 @@ function applyTheme(theme, { animate = false } = {}) {
 }
 
 function renderPreview(preview) {
+  // C3: the server leaves evidence out for a role without evidence.view and says so.
+  if (preview?.redacted) {
+    return '<div class="subtext">Content preview hidden: your role does not include evidence.</div>';
+  }
   if (!preview?.available) {
     return "";
   }
@@ -4605,7 +4609,7 @@ function renderFindingMetadataGrid(file, finding) {
 function renderFindingEvidenceSections(finding) {
   const sections = [
     ["Matched field and context keywords", finding.matched_keywords || finding.keywords || []],
-    ["Redacted value samples", finding.samples || []],
+    ["Redacted value samples", can("evidence.view") ? (finding.samples || []) : ["Hidden: your role does not include evidence."]],
     ["Exact occurrence locations", (Array.isArray(finding.occurrences) ? finding.occurrences : []).map((occurrence) => formatObject(occurrence))],
     ["Framework and control mappings", compactEvidence([
       formatSignals(finding.framework_mappings),

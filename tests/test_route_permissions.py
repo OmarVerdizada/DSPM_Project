@@ -209,7 +209,8 @@ class TheMatrixCoversEveryRouteTest(unittest.TestCase):
 
     def test_every_permission_guards_something(self) -> None:
         used = {name for value in MATRIX.values() for name in (value if isinstance(value, tuple) else (value,))}
-        # evidence.view is enforced on fields rather than routes: C3's evidence scope.
+        # evidence.view is enforced on fields rather than routes: backend/evidence.py,
+        # pinned by tests/test_evidence_scope.py.
         unused = set(permissions.PERMISSIONS) - used - {"evidence.view"}
         self.assertEqual(unused, set())
 

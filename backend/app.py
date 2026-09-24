@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import hashlib
 import hmac
 import ipaddress
@@ -28,6 +29,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from backend.alerts import evaluate_alerts
 from backend.errors import client_message, new_reference
+from backend.evidence import without_evidence
 from backend.permissions import AUTHENTICATED, DELEGABLE_ROLES, is_known_role, permission_catalogue, role_catalogue, role_permissions
 from backend.partitioned_scan import (
     continue_partitioned_scan,
@@ -588,6 +590,23 @@ class BodySizeLimitMiddleware:
 
 
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES)
+
+
+def evidence_scoped(route):
+    """C3: a route that can return a scanned record returns its evidence only to a caller
+    holding `evidence.view`; anyone else gets the record without it (backend.evidence).
+    It fails closed - a call it cannot attribute is treated as one without the permission."""
+
+    @functools.wraps(route)
+    def wrapper(*args, **kwargs):
+        result = route(*args, **kwargs)
+        principal = kwargs.get("principal")
+        if isinstance(principal, Principal) and has_permission(principal, "evidence.view"):
+            return result
+        return without_evidence(result)
+
+    wrapper.evidence_scoped = True
+    return wrapper
 
 
 @app.exception_handler(Exception)
@@ -2446,6 +2465,7 @@ def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = D
 
 
 @app.post("/api/endpoint/scan")
+@evidence_scoped
 def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         if not _is_local_endpoint_host(payload.host):
@@ -2490,6 +2510,7 @@ def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(
 
 
 @app.post("/api/scan")
+@evidence_scoped
 def scan(payload: ScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         if not _is_local_endpoint_host(payload.server):
@@ -2525,6 +2546,7 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_permission
 
 
 @app.get("/api/scans/{job_id}")
+@evidence_scoped
 def scan_job(job_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     cleanup_jobs()
     job = get_job(job_id)
@@ -2562,6 +2584,7 @@ def scan_history(
 
 
 @app.get("/api/history/latest/report")
+@evidence_scoped
 def latest_scan_report(
     principal: Principal = Depends(require_permission("inventory.view")),
     include_files: bool = Query(default=True),
@@ -2573,6 +2596,7 @@ def latest_scan_report(
 
 
 @app.get("/api/history/{scan_id}/report")
+@evidence_scoped
 def saved_scan_report(
     scan_id: str,
     principal: Principal = Depends(require_permission("inventory.view")),
@@ -2757,6 +2781,7 @@ def inventory_detail_counts(
 
 
 @app.get("/api/inventory/{asset_id}")
+@evidence_scoped
 def inventory_asset_detail(
     asset_id: str,
     principal: Principal = Depends(require_permission("inventory.view")),
@@ -2769,6 +2794,7 @@ def inventory_asset_detail(
 
 
 @app.get("/api/findings/{finding_id}")
+@evidence_scoped
 def finding_detail(finding_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     finding = get_finding(principal.tenant_id, finding_id)
     if finding is None:
@@ -2792,46 +2818,55 @@ def finding_detail_preview(payload: dict, principal: Principal = Depends(require
 
 
 @app.patch("/api/findings/{finding_id}/status")
+@evidence_scoped
 def finding_status_update(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "status", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/assign")
+@evidence_scoped
 def finding_assign(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "assign", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/comment")
+@evidence_scoped
 def finding_comment(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "comment", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/suppress")
+@evidence_scoped
 def finding_suppress(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "suppress", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/false-positive")
+@evidence_scoped
 def finding_false_positive(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "false-positive", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/risk-acceptance")
+@evidence_scoped
 def finding_risk_acceptance(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "risk-acceptance", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/resolve")
+@evidence_scoped
 def finding_resolve(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "resolve", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/reopen")
+@evidence_scoped
 def finding_reopen(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "reopen", payload, principal)
 
 
 @app.post("/api/findings/{finding_id}/validate")
+@evidence_scoped
 def finding_validate(finding_id: str, payload: FindingLifecyclePayload, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
     return _finding_lifecycle_action(finding_id, "validate", payload, principal)
 
@@ -2845,6 +2880,7 @@ def finding_history(finding_id: str, principal: Principal = Depends(require_perm
 
 
 @app.get("/api/findings/{finding_id}/occurrences")
+@evidence_scoped
 def finding_occurrences(finding_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     occurrences = get_finding_occurrences(principal.tenant_id, finding_id)
     if occurrences is None:
@@ -3004,6 +3040,7 @@ def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLife
 
 
 @app.patch("/api/history/{scan_id}/findings/workflow")
+@evidence_scoped
 def finding_workflow_update(
     scan_id: str,
     payload: FindingWorkflowUpdate,
