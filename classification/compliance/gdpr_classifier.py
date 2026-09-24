@@ -176,7 +176,7 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
                 "prefilter_skipped_rules": skipped_by_prefilter,
                 "timed_out": timed_out,
                 "content_length": normalized_content_length,
-                "prefilter": "aho_corasick_keyword_index",
+                "prefilter": "trigram_keyword_index",
                 "keyword_index_created_at": keyword_index.created_at,
                 "keyword_index_catalog_version": keyword_index.catalog_version,
             },

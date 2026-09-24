@@ -133,9 +133,9 @@ def run_detector_stage(payload: dict[str, Any]) -> dict[str, Any]:
 def warm_up() -> bool:
     """Build the catalogs a worker will need, before it is given real work.
 
-    A cold process pays about 2.5 seconds on its first file: importing the
-    detectors, then compiling the 46,000-term GDPR keyword catalog into its
-    Aho-Corasick index and reading and validating the NIST catalog. Paid here,
+    A cold process pays about a second on its first file: importing the
+    detectors, then indexing the 46,000-term GDPR keyword catalog (0.65 CPU-s
+    since P3) and reading and validating the NIST catalog. Paid here,
     while the collector is still walking the tree, it costs the scan nothing.
     """
     sample = "warm up: name, email a@b.test, card 4111 1111 1111 1111, salary 1 AZN"
