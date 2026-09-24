@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,13 +45,17 @@ def nist_catalog_readonly() -> dict[str, Any]:
     status = nist_catalog_status()
     if status.get("degraded_mode") and not status.get("scanner_available"):
         return {}
-    path = _active_or_builtin_path()
-    resolved = path.resolve()
-    stat = resolved.stat()
+    path, resolved, mtime_ns = _catalog_identity()
     with _lock:
-        if _cache["catalog"] is not None and _cache["path"] == str(resolved) and _cache["mtime_ns"] == stat.st_mtime_ns:
+        if _cache["catalog"] is not None and _cache["path"] == resolved and _cache["mtime_ns"] == mtime_ns:
             return _cache["catalog"]
-    return _load_catalog_from_path(path)
+    # A cold cache: loading fills it, and the caller gets the cached object like every
+    # later caller does - not the private copy the loader hands back.
+    catalog = _load_catalog_from_path(path)
+    with _lock:
+        if _cache["catalog"] is not None and _cache["path"] == resolved:
+            return _cache["catalog"]
+    return catalog
 
 
 # Reading, deep-copying, schema-validating and hashing the whole catalog on
@@ -61,12 +66,37 @@ def nist_catalog_readonly() -> dict[str, Any]:
 _STATUS_CACHE: dict[tuple[str, int], dict[str, Any]] = {}
 
 
-def nist_catalog_status() -> dict[str, Any]:
+# P1 (2026-09-24). The status and the read-only catalog are asked for on every file, and
+# each asked the filesystem which catalog is in force - an exists(), a resolve() and a
+# stat(), twice - which was 16% of the main process in the quality audit. The answer is
+# kept for a second: a catalog swapped on disk by another process is seen within that,
+# and one activated or rolled back here at once (_invalidate_cache), as is a change to
+# the configured paths.
+_IDENTITY_SECONDS = 1.0
+_identity: tuple | None = None
+
+
+def _catalog_identity() -> tuple[Path, str, int]:
+    """(the catalog file in force, its resolved path, its mtime); OSError if unreadable."""
+    global _identity
+    paths = (ACTIVE_PATH, BUILT_IN_CATALOG_PATH)
+    now = time.monotonic()
+    cached = _identity
+    if cached is not None and cached[0] == paths and now - cached[1] < _IDENTITY_SECONDS:
+        return cached[2]
     path = _active_or_builtin_path()
+    resolved = path.resolve()
+    answer = (path, str(resolved), resolved.stat().st_mtime_ns)
+    _identity = (paths, now, answer)
+    return answer
+
+
+def nist_catalog_status() -> dict[str, Any]:
     try:
-        stat = path.resolve().stat()
-        cache_key = (str(path.resolve()), stat.st_mtime_ns)
+        path, resolved, mtime_ns = _catalog_identity()
+        cache_key = (resolved, mtime_ns)
     except OSError:
+        path = _active_or_builtin_path()
         cache_key = None
     if cache_key is not None:
         with _lock:
@@ -390,8 +420,10 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _invalidate_cache() -> None:
+    global _identity
     with _lock:
         _cache.update({"path": "", "mtime_ns": -1, "catalog": None, "status": None})
+        _identity = None
 
 
 def _append_audit(action: str, detail: dict[str, Any]) -> None:

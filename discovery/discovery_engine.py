@@ -1810,7 +1810,10 @@ class DSPMDiscoveryEngine:
         self._write_meta_sidecar(record, cache_key)
 
     def _cache_path(self, cache_key: tuple) -> Path:
-        return Path(self.config.cache_dir).expanduser().resolve() / f"{_cache_key_digest(cache_key)}.json"
+        # P1: _cache_root resolves the directory once; this re-resolved it for every
+        # file, ~10% of the main process on Windows in the quality audit.
+        root = self._cache_root() or Path(self.config.cache_dir).expanduser().resolve()
+        return root / f"{_cache_key_digest(cache_key)}.json"
 
     @staticmethod
     def _build_summary(files: list[dict]) -> ScanSummary:

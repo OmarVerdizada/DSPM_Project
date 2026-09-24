@@ -169,6 +169,52 @@ def _lowered_terms(keywords: tuple[str, ...]) -> tuple[str, ...]:
     return lowered
 
 
+# P1 (2026-09-24). Narrowing a catalog is a loop over every term of it, and it runs for
+# every catalog a file's rules ask about: 8.1 of the 91 CPU-seconds of the quality audit's
+# workload scanned in one process, over 126,632 calls. Two faster-looking answers were
+# measured in that scan and lost. The Aho-Corasick index keyword_index builds walks the
+# text a character at a time in Python. A trie-shaped regex tried at every position cost
+# 11.2 s against the loop's 8.1: most files are small, and a C substring test is hard to
+# beat on a small string. What wins is testing fewer terms. A term cannot occur unless
+# its first three characters do, so each catalog is indexed by that trigram once, each
+# file's trigrams are taken once, and only the terms whose trigram the file contains are
+# tested - with the same `in`, so the answer is the loop's, in the catalog's order.
+_TRIGRAM_INDEXES: dict[int, tuple[tuple[str, ...], "_TrigramIndex"]] = {}
+
+
+class _TrigramIndex:
+    __slots__ = ("by_trigram", "keys", "short")
+
+    def __init__(self, lowered: tuple[str, ...]) -> None:
+        by_trigram: dict[str, list[tuple[int, str]]] = {}
+        short: list[tuple[int, str]] = []
+        for position, term in enumerate(lowered):
+            if len(term) < 3:
+                # "" and one- or two-character terms have no trigram: always tested.
+                short.append((position, term))
+            else:
+                by_trigram.setdefault(term[:3], []).append((position, term))
+        self.by_trigram = {trigram: tuple(entries) for trigram, entries in by_trigram.items()}
+        self.keys = frozenset(by_trigram)
+        self.short = tuple(short)
+
+
+def _trigram_index(keywords: tuple[str, ...]) -> _TrigramIndex:
+    key = id(keywords)
+    cached = _TRIGRAM_INDEXES.get(key)
+    if cached is not None and cached[0] is keywords:
+        return cached[1]
+    index = _TrigramIndex(_lowered_terms(keywords))
+    if len(_TRIGRAM_INDEXES) > 1024:
+        _TRIGRAM_INDEXES.clear()
+    _TRIGRAM_INDEXES[key] = (keywords, index)
+    return index
+
+
+def _content_trigrams(lowered_content: str) -> frozenset[str]:
+    return frozenset(lowered_content[i:i + 3] for i in range(len(lowered_content) - 2))
+
+
 def _present_keywords(content: str, keywords: tuple[str, ...]) -> tuple[str, ...]:
     """The terms from this catalog that occur anywhere in this content.
 
@@ -177,7 +223,8 @@ def _present_keywords(content: str, keywords: tuple[str, ...]) -> tuple[str, ...
     """
     state = getattr(_PRESENT_STATE, "slot", None)
     if state is None or state[0] is not content:
-        state = (content, content.lower(), {})
+        # [content, lowered, per-catalog answers, the content's trigrams once asked for]
+        state = [content, content.lower(), {}, None]
         _PRESENT_STATE.slot = state
     lowered_content = state[1]
     per_catalog = state[2]
@@ -185,7 +232,17 @@ def _present_keywords(content: str, keywords: tuple[str, ...]) -> tuple[str, ...
     cached = per_catalog.get(key)
     if cached is not None and cached[0] is keywords:
         return cached[1]
-    present = tuple(term for term in _lowered_terms(keywords) if term in lowered_content)
+    index = _trigram_index(keywords)
+    hits = [(position, term) for position, term in index.short if term in lowered_content]
+    if index.keys:
+        trigrams = state[3]
+        if trigrams is None:
+            trigrams = state[3] = _content_trigrams(lowered_content)
+        by_trigram = index.by_trigram
+        for trigram in index.keys & trigrams:
+            hits.extend((position, term) for position, term in by_trigram[trigram] if term in lowered_content)
+    hits.sort()
+    present = tuple(term for _, term in hits)
     per_catalog[key] = (keywords, present)
     return present
 
