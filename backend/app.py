@@ -91,6 +91,7 @@ from backend.store import (
     list_users,
     prune_job_records,
     read_audit_log,
+    verify_audit_chain,
     read_job,
     read_scan_history,
     read_scan_report,
@@ -332,6 +333,10 @@ REGISTER_THROTTLE = RouteThrottle(
 # cookie has simply expired in several tabs at once.
 REFRESH_THROTTLE = RouteThrottle(
     "refresh", max(1, int(os.getenv("DSPM_REFRESH_MAX_FAILURES", "30"))), 300)
+# Verifying reads a tenant's whole audit trail (1.4 s at 20,000 rows, measured), so it
+# is counted per tenant: every verification, not only failed ones.
+AUDIT_VERIFY_THROTTLE = RouteThrottle(
+    "audit_verify", max(1, int(os.getenv("DSPM_AUDIT_VERIFY_MAX_PER_HOUR", "20"))), 3600)
 
 # How many scan runs the executive dashboard's posture trend plots, and therefore
 # how many history rows that endpoint needs to read.
@@ -3379,6 +3384,31 @@ def audit_log(
     return {
         "tenant_id": principal.tenant_id,
         "events": read_audit_log(principal.tenant_id, limit),
+    }
+
+
+@app.get("/api/audit/verify")
+def audit_verify_route(principal: Principal = Depends(require_permission("audit.view"))) -> dict:
+    """C4: whether this workspace's audit trail is intact - the check `python main.py audit
+    verify` makes, for this tenant only, by someone who can read its trail. The
+    verification is itself recorded, with its outcome."""
+    if AUDIT_VERIFY_THROTTLE.exhausted(principal.tenant_id):
+        raise HTTPException(status_code=429, detail="The audit trail has been verified too often in the last hour. Try again later.")
+    AUDIT_VERIFY_THROTTLE.failed(principal.tenant_id)
+    result = verify_audit_chain(principal.tenant_id)[0]
+    audit(principal.tenant_id, principal.subject, "audit.verified", {
+        "ok": result["ok"], "rows": result["rows"], "problems": result["problem_count"],
+    })
+    return {
+        "tenant_id": principal.tenant_id,
+        "ok": result["ok"],
+        "rows": result["rows"],
+        "problem_count": result["problem_count"],
+        "problems": result["problems"][:50],
+        "sealed_through_seq": result["sealed_through_seq"],
+        "sealed_at": result["sealed_at"],
+        "pruned_through_seq": result["pruned_through_seq"],
+        "verified_at": datetime.now(timezone.utc).isoformat(),
     }
 
 

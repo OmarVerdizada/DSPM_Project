@@ -222,6 +222,8 @@ python main.py audit verify --tenant acme --json
 
 A changed, deleted, inserted or reordered row, or cut-off newest rows, is reported. Rows written before the chain existed are sealed at upgrade, and verify says how far the seal reaches.
 
+Anyone who can read a workspace's trail (`audit.view`) can run the same check for that workspace from the console - **Verify integrity** on the audit trail - or through `GET /api/audit/verify`. The check is recorded in the trail, and limited to `DSPM_AUDIT_VERIFY_MAX_PER_HOUR` (20) per workspace, since it reads the whole trail.
+
 To forward the trail to a SIEM, set `DSPM_SIEM_URL` (`tcp://`, `udp://` or `tls://host:port`; see `.env.example`). Events leave as CEF (or JSON) in RFC 5424 syslog, queued in the database with the audit row and retried with back-off while the SIEM is down; each carries its chain position, so the SIEM holds an independent copy of every chain. `GET /api/health` reports the backlog, and `python main.py audit forward` drains it on demand. Behind a reverse proxy, set `DSPM_TRUSTED_PROXIES` so audit rows and throttles record the client rather than the proxy.
 
 ## API Overview

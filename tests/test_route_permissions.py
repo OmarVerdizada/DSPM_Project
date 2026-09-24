@@ -123,6 +123,7 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("POST", "/api/audit/browser-export"): "report.create",
     ("GET", "/api/v1/reports/artifacts/{artifact_id}"): "report.create",
     ("GET", "/api/audit"): "audit.view",
+    ("GET", "/api/audit/verify"): "audit.view",
     ("GET", "/api/users/activity"): "audit.view",
     # the tenant's own administration
     ("GET", "/api/api-keys"): "tenant.admin",

@@ -2305,14 +2305,17 @@ def verify_audit_chain(tenant_id: str | None = None) -> list[dict]:
             head_row = conn.execute(
                 "SELECT last_seq, last_hash, pruned_through_seq, pruned_through_hash, sealed_through_seq, sealed_at "
                 "FROM audit_chain_heads WHERE tenant_id = ?", (tenant,)).fetchone()
-            rows = [dict(row) for row in conn.execute(
+            # Streamed from the cursor: verification holds one row at a time, not the trail.
+            rows = (dict(row) for row in conn.execute(
                 "SELECT id, seq, timestamp, actor, action, detail_json, prev_hash, row_hash FROM audit_events "
-                "WHERE tenant_id = ? ORDER BY seq, id", (tenant,)).fetchall()]
+                "WHERE tenant_id = ? ORDER BY seq, id", (tenant,)))
             head = dict(head_row) if head_row is not None else None
             result = audit_chain.verify_chain(tenant, rows, head)
-            if head is None and rows:
+            if head is None and result["rows"]:
                 # A head can be deleted to hide a truncated chain: its absence is itself a finding.
                 result["problems"].insert(0, {"seq": None, "problem": "the tenant has audit rows but no chain head"})
+                del result["problems"][audit_chain.PROBLEM_LIMIT:]
+                result["problem_count"] += 1
                 result["ok"] = False
             results.append(result)
     return results

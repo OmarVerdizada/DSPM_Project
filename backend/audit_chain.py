@@ -24,8 +24,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Iterable
 
 CHAIN_VERSION = 1
+# A chain broken everywhere names a problem per row; the report keeps this many and
+# counts the rest, so verifying a million-row trail cannot build a million-entry list.
+PROBLEM_LIMIT = 1000
 
 
 def row_hash(prev_hash: str, tenant_id: str, seq: int, timestamp: str, actor: str, action: str,
@@ -40,19 +44,25 @@ def row_hash(prev_hash: str, tenant_id: str, seq: int, timestamp: str, actor: st
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def verify_chain(tenant_id: str, rows: list[dict], head: dict | None) -> dict:
+def verify_chain(tenant_id: str, rows: Iterable[dict], head: dict | None) -> dict:
     """Check one tenant's rows (ordered by seq) against each other and against its head.
 
-    Returns {"tenant_id", "ok", "rows", "problems": [...], "sealed_through_seq",
-    "sealed_at", "pruned_through_seq"}. A problem names the seq and what is wrong with
-    it; verification does not stop at the first, so a report shows the extent.
+    Returns {"tenant_id", "ok", "rows", "problems": [...], "problem_count",
+    "sealed_through_seq", "sealed_at", "pruned_through_seq"}. A problem names the seq and
+    what is wrong with it; verification does not stop at the first, so a report shows the
+    extent - the first PROBLEM_LIMIT of them, and how many there were.
+
+    `rows` is read once, in order, so a caller can stream it from a cursor: a tenant's
+    whole trail is never held at once.
     """
     head = head or {}
     pruned_through = int(head.get("pruned_through_seq") or 0)
     expected_prev = str(head.get("pruned_through_hash") or "")
     expected_seq = pruned_through + 1
-    problems: list[dict] = []
+    problems = _Problems()
+    count = 0
     for row in rows:
+        count += 1
         seq = row.get("seq")
         if seq is None:
             problems.append({"seq": None, "id": row.get("id"), "problem": "row is not in the chain"})
@@ -77,10 +87,31 @@ def verify_chain(tenant_id: str, rows: list[dict], head: dict | None) -> dict:
         problems.append({"seq": last_seq, "problem": "the chain head's hash does not match the last row"})
     return {
         "tenant_id": tenant_id,
-        "ok": not problems,
-        "rows": len(rows),
-        "problems": problems,
+        "ok": not problems.count,
+        "rows": count,
+        "problems": problems.kept,
+        "problem_count": problems.count,
         "sealed_through_seq": int(head.get("sealed_through_seq") or 0),
         "sealed_at": str(head.get("sealed_at") or ""),
         "pruned_through_seq": pruned_through,
     }
+
+
+class _Problems:
+    """What verify_chain found: every one counted, the first PROBLEM_LIMIT kept."""
+
+    __slots__ = ("kept", "count")
+
+    def __init__(self) -> None:
+        self.kept: list[dict] = []
+        self.count = 0
+
+    def append(self, problem: dict) -> None:
+        self.count += 1
+        if len(self.kept) < PROBLEM_LIMIT:
+            self.kept.append(problem)
+
+    def insert(self, index: int, problem: dict) -> None:
+        self.count += 1
+        self.kept.insert(index, problem)
+        del self.kept[PROBLEM_LIMIT:]

@@ -417,6 +417,127 @@ class TheClientAddressTest(unittest.TestCase):
         self.assertIn("request_address(request)", middleware)
 
 
+class VerifyingFromTheConsoleTest(_HttpCase):
+    """C4 polish: whoever reads a workspace's trail can have its chain checked, for that
+    workspace only, without shell access to the server."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        store.create_user("audit-auditor", security.hash_password(PASSWORD), "auditor", TENANT)
+        for index in range(5):
+            store.audit(TENANT, "alice", f"test.step_{index}", {"n": index})
+        store.audit(OTHER, "bob", "test.elsewhere", {})
+        self.auditor = self._as("audit-auditor", "auditor")
+
+    def _verify(self, headers: dict | None = None):
+        return self.client.get("/api/audit/verify", headers=headers or self.auditor)
+
+    def test_an_intact_trail_says_so(self) -> None:
+        response = self._verify()
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual((body["tenant_id"], body["ok"], body["problem_count"]), (TENANT, True, 0))
+        self.assertGreaterEqual(body["rows"], 5)
+        self.assertTrue(body["verified_at"])
+
+    def test_a_tampered_row_is_named(self) -> None:
+        conn = self._raw()
+        conn.execute("UPDATE audit_events SET detail_json = '{\"n\": 99}' WHERE tenant_id = ? AND seq = 3", (TENANT,))
+        conn.commit()
+        body = self._verify().json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["problem_count"], 1)
+        self.assertEqual(body["problems"][0]["seq"], 3)
+
+    def test_it_checks_this_workspace_and_says_nothing_of_another(self) -> None:
+        conn = self._raw()
+        conn.execute("UPDATE audit_events SET actor = 'mallory' WHERE tenant_id = ?", (OTHER,))
+        conn.commit()
+        body = self._verify().json()
+        self.assertTrue(body["ok"], "another workspace's broken chain is not this one's")
+        self.assertNotIn(OTHER, json.dumps(body))
+
+    def test_it_needs_the_audit_permission(self) -> None:
+        self.assertEqual(self._verify(self._as("audit-analyst", "analyst")).status_code, 403)
+        self.assertEqual(self._verify(self._as("audit-viewer", "viewer")).status_code, 403)
+
+    def test_the_check_is_itself_recorded(self) -> None:
+        self._verify()
+        events = [event for event in store.read_audit_log(TENANT, 50) if event["action"] == "audit.verified"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["actor"], "audit-auditor")
+        self.assertEqual(events[0]["detail"]["ok"], True)
+        self.assertTrue(self._verify().json()["ok"], "and recording it leaves the chain intact")
+
+    def test_it_is_throttled_per_workspace(self) -> None:
+        with mock.patch.object(app_module, "AUDIT_VERIFY_THROTTLE",
+                               app_module.RouteThrottle("audit_verify_test", 2, 3600)):
+            self.assertEqual([self._verify().status_code for _ in range(3)], [200, 200, 429])
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_the_console_says_what_was_found(self) -> None:
+        intact = ("describeAuditIntegrity({ok: true, rows: 1234, problem_count: 0, problems: [], "
+                  "sealed_through_seq: 40, sealed_at: '2026-09-24T09:00:00Z', pruned_through_seq: 0, "
+                  "verified_at: '2026-09-24T10:00:00Z'})")
+        broken = ("describeAuditIntegrity({ok: false, rows: 1234, problem_count: 2, "
+                  "problems: [{seq: 17, problem: 'content does not match its hash (the row was changed)'}], "
+                  "sealed_through_seq: 0, pruned_through_seq: 0, verified_at: '2026-09-24T10:00:00Z'})")
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = Path(tmp) / "scenario.json"
+            fixture.write_text(json.dumps({"drive": "evaluate", "permissions": ["audit.view"],
+                                           "evaluate": {"intact": intact, "broken": broken}}), encoding="utf-8")
+            # Node writes UTF-8; the Windows default code page would mangle the en dash.
+            result = subprocess.run([NODE, str(SMOKE), str(fixture)], cwd=ROOT, capture_output=True,
+                                    encoding="utf-8", timeout=180, check=False)
+        values = json.loads(result.stdout.strip().splitlines()[-1])["values"]
+        self.assertTrue(values["intact"].startswith("Intact: all 1,234 events"), values["intact"])
+        self.assertIn("Events 1–40 were sealed", values["intact"])
+        self.assertTrue(values["broken"].startswith("Broken: 2 problems in 1,234 events"), values["broken"])
+        self.assertIn("event 17: content does not match its hash", values["broken"])
+
+
+class VerificationStreamsTheTrailTest(_TempDatabase):
+    """Verifying read a tenant's whole trail into a list first: 20 MiB at 20,000 rows,
+    measured, and it grows with the trail. It is streamed from the cursor now, and a trail
+    broken everywhere reports the first PROBLEM_LIMIT problems and how many there were."""
+
+    def test_the_store_hands_the_rows_over_as_they_are_read(self) -> None:
+        for index in range(3):
+            store.audit(TENANT, "alice", "test.step", {"n": index})
+        seen = {}
+        real = audit_chain.verify_chain
+
+        def spy(tenant, rows, head):
+            seen["type"] = type(rows)
+            return real(tenant, rows, head)
+
+        with mock.patch.object(audit_chain, "verify_chain", spy):
+            self.assertTrue(self._verify()["ok"])
+        self.assertFalse(issubclass(seen["type"], (list, tuple)), "a materialised list, not a stream")
+
+    def test_a_chain_is_read_once(self) -> None:
+        rows = [
+            {"id": seq, "seq": seq, "timestamp": "t", "actor": "a", "action": "x", "detail_json": "{}",
+             "prev_hash": "", "row_hash": ""}
+            for seq in range(1, 4)
+        ]
+        prev = ""
+        for row in rows:
+            row["prev_hash"] = prev
+            row["row_hash"] = prev = audit_chain.row_hash(prev, "t", row["seq"], "t", "a", "x", "{}")
+        head = {"last_seq": 3, "last_hash": prev}
+        result = audit_chain.verify_chain("t", iter(rows), head)
+        self.assertEqual((result["ok"], result["rows"]), (True, 3))
+
+    def test_a_trail_broken_everywhere_is_counted_not_listed(self) -> None:
+        rows = ({"id": seq, "seq": seq, "timestamp": "t", "actor": "a", "action": "x", "detail_json": "{}",
+                 "prev_hash": "", "row_hash": "wrong"} for seq in range(1, 1501))
+        result = audit_chain.verify_chain("t", rows, {"last_seq": 1500, "last_hash": "wrong"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["problems"]), audit_chain.PROBLEM_LIMIT)
+        self.assertGreater(result["problem_count"], 1500)
+
+
 class TheChainFunctionTest(unittest.TestCase):
 
     def test_every_field_is_in_the_hash(self) -> None:

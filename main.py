@@ -151,8 +151,8 @@ def audit_verify(args: argparse.Namespace) -> None:
             print(f"{'OK    ' if result['ok'] else 'BROKEN'} {result['tenant_id']}: {result['rows']} rows{suffix}")
             for problem in result["problems"][:25]:
                 print(f"         seq {problem['seq']}: {problem['problem']}")
-            if len(result["problems"]) > 25:
-                print(f"         ... and {len(result['problems']) - 25} more")
+            if result["problem_count"] > 25:
+                print(f"         ... and {result['problem_count'] - 25} more")
     raise SystemExit(0 if all(result["ok"] for result in results) else 1)
 
 

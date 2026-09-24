@@ -125,6 +125,8 @@ const apiKeyOutput = document.querySelector("#api-key-output");
 const exportDlpPolicyBtn = document.querySelector("#export-dlp-policy-btn");
 const dlpPolicyOutput = document.querySelector("#dlp-policy-output");
 const refreshAuditBtn = document.querySelector("#refresh-audit-btn");
+const verifyAuditBtn = document.querySelector("#verify-audit-btn");
+const auditIntegrity = document.querySelector("#audit-integrity");
 const auditRange = document.querySelector("#audit-range");
 const auditFrom = document.querySelector("#audit-from");
 const auditTo = document.querySelector("#audit-to");
@@ -10240,12 +10242,52 @@ async function loadAudit() {
   }
 }
 
+// C4: the server checks every event in this workspace's trail against its hash and the
+// event before it - the check `python main.py audit verify` makes - and says what it found.
+async function verifyAuditTrail() {
+  if (!accessToken || !can("audit.view") || !auditIntegrity) return;
+  if (verifyAuditBtn) verifyAuditBtn.disabled = true;
+  auditIntegrity.hidden = false;
+  auditIntegrity.dataset.state = "checking";
+  auditIntegrity.textContent = "Checking every event against its hash and the event before it…";
+  try {
+    const result = await api("/api/audit/verify", null, "GET");
+    auditIntegrity.dataset.state = result.ok ? "ok" : "broken";
+    auditIntegrity.textContent = describeAuditIntegrity(result);
+  } catch (error) {
+    auditIntegrity.dataset.state = "error";
+    auditIntegrity.textContent = `The audit trail could not be verified: ${error.message}`;
+  } finally {
+    if (verifyAuditBtn) verifyAuditBtn.disabled = false;
+  }
+}
+
+function describeAuditIntegrity(result = {}) {
+  const events = Number(result.rows || 0).toLocaleString();
+  const when = getFriendlyTimestamp(result.verified_at);
+  if (result.ok) {
+    const notes = [];
+    if (result.sealed_through_seq) {
+      notes.push(`Events 1–${Number(result.sealed_through_seq).toLocaleString()} were sealed when the chain was introduced (${getFriendlyTimestamp(result.sealed_at)}); nothing proves what they held before that.`);
+    }
+    if (result.pruned_through_seq) {
+      notes.push(`Events up to ${Number(result.pruned_through_seq).toLocaleString()} were removed by retention.`);
+    }
+    return [`Intact: all ${events} events match their hashes and follow one another (checked ${when}).`, ...notes].join(" ");
+  }
+  const count = Number(result.problem_count || (result.problems || []).length || 0);
+  const first = (result.problems || [])[0] || {};
+  const where = first.seq ? `event ${Number(first.seq).toLocaleString()}` : "the trail";
+  return `Broken: ${count.toLocaleString()} problem${count === 1 ? "" : "s"} in ${events} events (checked ${when}). First, at ${where}: ${first.problem || "see the server log"}. Compare the trail with the copy your SIEM received.`;
+}
+
 // Every action string the product records, in the words an operator would use
 // for it. The raw strings are namespaced identifiers - "scan_profile.saved",
 // "user.role_updated" - which are precise and unreadable; the table used to
 // print them, and a JSON blob beside them.
 const AUDIT_ACTIONS = {
   "auth.login": "Signed in",
+  "audit.verified": "Verified the audit trail",
   "auth.login_failed": "Sign-in refused",
   "auth.login_blocked": "Sign-in blocked after repeated failures",
   "auth.logout": "Signed out",
@@ -11860,6 +11902,9 @@ document.addEventListener("submit", (event) => {
 });
 refreshAuditBtn.addEventListener("click", () => {
   loadAudit().catch((error) => setStatus(`Audit failed: ${error.message}`));
+});
+verifyAuditBtn?.addEventListener("click", () => {
+  verifyAuditTrail().then(() => loadAudit()).catch(() => {});
 });
 refreshUsersBtn.addEventListener("click", () => {
   loadUsers().catch((error) => {

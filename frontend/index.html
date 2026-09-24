@@ -14,7 +14,7 @@
     <link rel="stylesheet" href="/static/styles/tokens.css?v=10" />
     <link rel="stylesheet" href="/static/styles.css?v=257" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
-    <link rel="stylesheet" href="/static/styles/pages.css?v=20" />
+    <link rel="stylesheet" href="/static/styles/pages.css?v=21" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
     <link rel="stylesheet" href="/static/styles/reports.css?v=6" />
     <link rel="stylesheet" href="/static/styles/history.css?v=1" />
@@ -1147,8 +1147,10 @@
                 <input id="audit-from" class="history-date hidden" type="date" title="Audit from date" />
                 <input id="audit-to" class="history-date hidden" type="date" title="Audit to date" />
                 <button type="button" id="refresh-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+                <button type="button" id="verify-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>Verify integrity</button>
               </div>
             </div>
+            <p id="audit-integrity" class="audit-integrity" role="status" aria-live="polite" hidden></p>
             <div class="panel-table-wrap">
               <table class="ledger-table" id="audit-table">
                 <thead id="audit-head"></thead>
@@ -1796,7 +1798,7 @@
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
-    <script src="/static/app.js?v=245"></script>
+    <script src="/static/app.js?v=246"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=1"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

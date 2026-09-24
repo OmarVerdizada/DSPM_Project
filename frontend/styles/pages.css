@@ -1165,6 +1165,21 @@ button.ledger-cell:hover { background: var(--band-wash); }
    between them - the users table sat on the audit trail. */
 #tab-security > .workspace + .workspace { margin-top: var(--space-4); }
 
+/* C4: the audit trail's integrity, one line under the panel head. The rule on the
+   left carries the verdict so the sentence can stay ink-coloured and readable. */
+.audit-integrity {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--line);
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
+  color: var(--ink);
+}
+.audit-integrity[data-state="checking"] { color: var(--ink-muted); }
+.audit-integrity[data-state="ok"] { border-left-color: var(--sev-low); }
+.audit-integrity[data-state="broken"],
+.audit-integrity[data-state="error"] { border-left-color: var(--sev-critical); }
+
 
 
 /* A file with no signal is inventory, not a severity. It needs a badge that
