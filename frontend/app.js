@@ -406,26 +406,53 @@ let currentTenant = safeSessionGet("dspm-tenant-id") || "default";
 let tenantContextVersion = 0;
 let currentUser = safeSessionGet("dspm-user") || "admin";
 let currentRole = safeSessionGet("dspm-role") || "admin";
+// What each built-in role holds - backend/permissions.py BUILTIN_ROLES, which
+// tests/test_route_permissions.py keeps this equal to. Used only when the server has
+// stated NO permissions: a server older than C3 still running beside this console (its
+// files updated on disk, the service not yet restarted) never sends the list, and an
+// empty set hid every gated control - the tenant switcher, the scan pages, exports,
+// reports, triage, the audit trail. A C3 server always states at least one permission
+// (a custom role cannot be empty), so an empty list can only mean "not stated". The
+// server decides either way; this only keeps the console from hiding what it allows.
+const BUILTIN_ROLE_PERMISSIONS = {
+  viewer: ["inventory.view"],
+  auditor: ["inventory.view", "audit.view", "report.create"],
+  scan_operator: ["inventory.view", "scan.run"],
+  analyst: ["inventory.view", "evidence.view", "findings.triage", "scan.run", "credential.manage",
+    "rules.manage", "export", "report.create"],
+  admin: ["inventory.view", "evidence.view", "findings.triage", "scan.run", "credential.manage",
+    "rules.manage", "export", "report.create", "audit.view", "tenant.admin"],
+};
+
+function permissionsOrRoleDefault(list) {
+  const stated = Array.isArray(list) ? list.map(String).filter(Boolean) : [];
+  if (stated.length) return new Set(stated);
+  const fallback = [...(BUILTIN_ROLE_PERMISSIONS[currentRole] || [])];
+  // The installation's own administrator (security.is_platform_admin): the admin
+  // account itself, whose role an older server ranked above every control.
+  if (currentRole === "admin" && currentUser === "admin") fallback.push("platform.admin");
+  return new Set(fallback);
+}
+
+function readStoredPermissions() {
+  try {
+    return permissionsOrRoleDefault(JSON.parse(safeSessionGet("dspm-permissions") || "[]"));
+  } catch {
+    return permissionsOrRoleDefault([]);
+  }
+}
+
 // C3: what this account may do, as the server states it at sign-in, on every session
 // renewal and on every page load. The console hides what it cannot do and does not ask
 // for what it may not read; the server refuses either way.
 let currentPermissions = readStoredPermissions();
-
-function readStoredPermissions() {
-  try {
-    const stored = JSON.parse(safeSessionGet("dspm-permissions") || "[]");
-    return new Set(Array.isArray(stored) ? stored.map(String) : []);
-  } catch {
-    return new Set();
-  }
-}
 
 function can(permission) {
   return currentPermissions.has(permission);
 }
 
 function setPermissions(list) {
-  const next = new Set(Array.isArray(list) ? list.map(String) : []);
+  const next = permissionsOrRoleDefault(list);
   const changed = next.size !== currentPermissions.size || [...next].some((name) => !currentPermissions.has(name));
   currentPermissions = next;
   safeSessionSet("dspm-permissions", JSON.stringify([...next]));

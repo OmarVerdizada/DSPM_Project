@@ -562,6 +562,41 @@ class TheConsoleGatesTest(unittest.TestCase):
                                   "triage": True, "admin": True})
 
     @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_a_server_that_states_no_permissions_does_not_hide_an_admins_console(self) -> None:
+        # 2026-09-24: the live server was still the pre-C3 process while the console on
+        # disk was new. That server never sends `permissions`, and the console read the
+        # absence as "none": the tenant switcher, the scan pages, exports, reports,
+        # triage and the audit trail all disappeared for the administrator. With nothing
+        # stated, the console falls back to the role's built-in permissions (the harness
+        # signs in as the installation's own `admin`).
+        values = self._evaluate([], {**self.PROBES, "platform": "can('platform.admin')"})
+        self.assertEqual(values, {"scan": "file-servers", "endpoint": "endpoint", "security": "security",
+                                  "triage": True, "admin": True, "platform": True})
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
+    def test_the_fallback_follows_the_role_and_a_stated_list_still_wins(self) -> None:
+        held = "[...currentPermissions].sort().join(',')"
+        values = self._evaluate([], {
+            "viewer": f"(currentRole = 'viewer', currentUser = 'v', setPermissions([]), {held})",
+            "tenant_admin": f"(currentRole = 'admin', currentUser = 'boss', setPermissions([]), {held})",
+            "custom": f"(currentRole = 'reviewer', currentUser = 'r', setPermissions([]), {held})",
+            "stated": f"(currentRole = 'admin', currentUser = 'admin', setPermissions(['inventory.view']), {held})",
+        })
+        self.assertEqual(values["viewer"], "inventory.view")
+        self.assertEqual(values["tenant_admin"], ",".join(sorted(permissions.role_permissions("admin"))),
+                         "a tenant's administrator is not the installation's")
+        self.assertEqual(values["custom"], "", "a custom role's permissions only the server can state")
+        self.assertEqual(values["stated"], "inventory.view")
+
+    def test_the_consoles_fallback_is_the_role_catalogue(self) -> None:
+        script = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
+        block = script[script.index("const BUILTIN_ROLE_PERMISSIONS = {"):]
+        block = block[:block.index("};")]
+        fallback = {role: set(re.findall(r'"([a-z_.]+)"', body))
+                    for role, body in re.findall(r"^\s*([a-z_]+): \[(.*?)\],?$", block, re.MULTILINE | re.DOTALL)}
+        self.assertEqual(fallback, {name: set(role["permissions"]) for name, role in permissions.BUILTIN_ROLES.items()})
+
+    @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
     def test_the_role_picker_offers_the_catalogue(self) -> None:
         values = self._evaluate(["tenant.admin"], {"options": "roleOptionsHtml('auditor')"})
         for name in permissions.BUILTIN_ROLES:
