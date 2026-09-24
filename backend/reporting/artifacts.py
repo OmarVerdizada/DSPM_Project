@@ -232,17 +232,26 @@ def create_report_artifact(
     pdf_info = render_visual_report_pdf(pdf_path, model)
     if not pdf_path.exists():
         raise ArtifactError("Report generation failed. The file could not be written.")
-    dl_token = create_artifact_download_token(artifact_id, principal.tenant_id, principal.subject, principal.role)
+    # C8: one fetch, by the session that asked for the report. The token is bound to
+    # that session and spent on first use; the console presents it in a header.
+    dl_token = create_artifact_download_token(
+        artifact_id, principal.tenant_id, principal.subject, principal.role,
+        session_id=principal.session_id,
+    )
     filter_severity_meta = (
         normalized_scope.get("label") if normalized_scope.get("kind") == "severity" else None
     )
+    artifact_path = f"/api/v1/reports/artifacts/{artifact_id}"
     metadata = {
         "artifact_id": artifact_id,
         "type": "pdf",
         "filename": safe_filename,
-        "download_url": f"/api/v1/reports/artifacts/{artifact_id}?dl_token={dl_token}",
-        "preview_url": f"/api/v1/reports/artifacts/{artifact_id}?dl_token={dl_token}&inline=1",
-        "html_download_url": f"/api/v1/reports/artifacts/{artifact_id}?format=html&dl_token={dl_token}",
+        # C8: no URL carries the token any more. A query string is written to every
+        # proxy and access log on the path; these are the plain addresses, fetched with
+        # the token in X-Artifact-Token or with the caller's own session.
+        "download_url": artifact_path,
+        "preview_url": f"{artifact_path}?inline=1",
+        "html_download_url": f"{artifact_path}?format=html",
         "created_at": created_at,
         "source_scan_id": source_scan_id,
         "filter_severity": filter_severity_meta,

@@ -23,7 +23,7 @@ from unittest import mock
 
 from pypdf import PdfReader
 
-from backend import store
+from backend import security, store
 from backend.reporting import artifacts
 from backend.reporting.report_model import report_title
 from backend.reporting.report_pdf import (
@@ -102,7 +102,12 @@ class _ExportCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        self.principal = Principal("analyst-1", "analyst", TENANT)
+        # C8: a download token is bound to the account and the session that minted it,
+        # so the principal behind an export is a real account with a live session.
+        store.create_user("analyst-1", security.hash_password("an-analyst-1"), "analyst", TENANT)
+        session = security.create_token("analyst-1", "analyst", TENANT)
+        self.principal = security.verify_token(session)
+        self.session = session
 
     def _export(self, **kwargs) -> dict:
         return artifacts.create_report_artifact(self.principal, {}, scan_id=SCAN_ID, **kwargs)
@@ -236,18 +241,39 @@ class TheDownloadCredentialTest(_ExportCase):
 
     def test_the_token_it_hands_back_opens_this_artifact_and_no_other(self) -> None:
         artifact = self._export()
+        self.assertIsNone(verify_artifact_download_token(artifact["download_token"], "c" * 32))
         principal = verify_artifact_download_token(artifact["download_token"], artifact["artifact_id"])
         self.assertIsNotNone(principal)
         self.assertEqual((principal.subject, principal.tenant_id, principal.role),
                          ("analyst-1", TENANT, "analyst"))
-        self.assertIsNone(verify_artifact_download_token(artifact["download_token"], "c" * 32))
 
-    def test_every_url_it_returns_carries_that_token(self) -> None:
+    def test_it_opens_the_artifact_once(self) -> None:
+        # C8: single use. The console fetches exactly once, with the header.
         artifact = self._export()
-        for key in ("download_url", "preview_url", "html_download_url"):
+        self.assertIsNotNone(verify_artifact_download_token(artifact["download_token"], artifact["artifact_id"]))
+        self.assertIsNone(verify_artifact_download_token(artifact["download_token"], artifact["artifact_id"]))
+
+    def test_it_is_bound_to_the_session_that_asked_for_the_report(self) -> None:
+        artifact = self._export()
+        security.revoke_token(self.session)
+        store._forget_revocation()
+        self.assertIsNone(verify_artifact_download_token(artifact["download_token"], artifact["artifact_id"]),
+                          "signing out must end the link as well")
+
+    def test_no_url_it_returns_carries_the_token(self) -> None:
+        # C8, the opposite of what Q4 pinned: a query string is written to every proxy
+        # and access log on the path, so the addresses are plain and the token travels
+        # only in the X-Artifact-Token header.
+        artifact = self._export()
+        path = f"/api/v1/reports/artifacts/{artifact['artifact_id']}"
+        self.assertEqual(artifact["artifact_path"], path)
+        self.assertEqual(artifact["download_url"], path)
+        self.assertEqual(artifact["preview_url"], f"{path}?inline=1")
+        self.assertEqual(artifact["html_download_url"], f"{path}?format=html")
+        for key in ("download_url", "preview_url", "html_download_url", "artifact_path"):
             with self.subTest(key):
-                self.assertIn(f"dl_token={artifact['download_token']}", artifact[key])
-        self.assertEqual(artifact["artifact_path"], f"/api/v1/reports/artifacts/{artifact['artifact_id']}")
+                self.assertNotIn("dl_token", artifact[key])
+                self.assertNotIn(artifact["download_token"], artifact[key])
 
     def test_the_token_is_never_written_beside_the_artifact(self) -> None:
         # It is a five-minute credential. On disk it would outlive its purpose in a

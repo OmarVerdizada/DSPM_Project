@@ -35,7 +35,12 @@ class PdfReportTemplateUnificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('fetch("/api/v1/reports"', app_js)
         # Reporting outlived Copilot's removal; it must not point back at it.
         self.assertNotIn("copilot", app_js.lower())
-        self.assertIn("artifact.preview_url", app_js)
+        # C8: the console opens the artifact by fetching it with its one-time token in
+        # a header and showing a same-origin blob; the signed query URL it used to fall
+        # back to no longer exists.
+        self.assertIn('"X-Artifact-Token": token', app_js)
+        self.assertIn("artifact.artifact_path", app_js)
+        self.assertNotIn("dl_token", app_js)
         self.assertNotIn("function buildExecutiveReportHtml", app_js)
 
 

@@ -19,6 +19,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pathlib import Path
 
 from backend.store import (
+    consume_one_time_token,
     consume_refresh_token,
     create_user,
     forget_session,
@@ -122,6 +123,10 @@ class Principal:
     # built-in Local Administrator remains a platform administrator after a
     # pivot (and can therefore list/switch tenants or create another one).
     home_tenant_id: str = ""
+    # C8: the session (access-token jti) this principal was authenticated by, so a
+    # credential minted on its behalf - a download token - can be bound to it and die
+    # with it. Empty for API keys and system principals, which have no session.
+    session_id: str = ""
 
 
 def validate_password_strength(password: str) -> None:
@@ -361,7 +366,7 @@ def verify_token(token: str) -> Principal:
         if role not in ROLES:
             raise ValueError("invalid role")
         tenant_id = str(user.get("tenant_id") or claims.get("tenant") or "default")
-        return Principal(subject, role, tenant_id)
+        return Principal(subject, role, tenant_id, session_id=jti)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
 
@@ -504,6 +509,7 @@ def require_principal(
                 requested_tenant,
                 principal.auth_type,
                 principal.home_tenant_id or principal.tenant_id,
+                principal.session_id,
             )
         return principal
 
@@ -531,13 +537,39 @@ def require_principal(
 ARTIFACT_DL_TOKEN_TTL_SECONDS = int(os.getenv("DSPM_ARTIFACT_DL_TOKEN_TTL_SECONDS", "300"))
 
 
-def create_artifact_download_token(artifact_id: str, tenant_id: str, subject: str, role: str, ttl_seconds: int = ARTIFACT_DL_TOKEN_TTL_SECONDS) -> str:
-    payload = _b64url(json.dumps({"aid": artifact_id, "tenant": tenant_id, "sub": subject, "role": role, "exp": int(time.time()) + ttl_seconds}, separators=(",", ":")).encode())
+def create_artifact_download_token(
+    artifact_id: str,
+    tenant_id: str,
+    subject: str,
+    role: str,
+    ttl_seconds: int = ARTIFACT_DL_TOKEN_TTL_SECONDS,
+    *,
+    session_id: str = "",
+) -> str:
+    """A one-time credential for fetching one artifact.
+
+    C8: it carries its own id (`jti`) so it can be spent exactly once, and the id of the
+    session that minted it (`sid`) so it dies with that session. The role and tenant are
+    recorded so the account can be checked against them when it is used.
+    """
+
+    claims = {
+        "aid": artifact_id,
+        "tenant": tenant_id,
+        "sub": subject,
+        "role": role,
+        "exp": int(time.time()) + ttl_seconds,
+        "jti": secrets.token_hex(12),
+        "sid": session_id,
+    }
+    payload = _b64url(json.dumps(claims, separators=(",", ":")).encode())
     signature = _b64url(hmac.new(SECRET_KEY.encode(), f"artifact_dl.{payload}".encode(), hashlib.sha256).digest())
     return f"{payload}.{signature}"
 
 
-def verify_artifact_download_token(token: str, artifact_id: str) -> Principal | None:
+def _download_claims(token: str, artifact_id: str) -> dict | None:
+    """The token's claims if it is well formed, signed here, for this artifact and in
+    date - and nothing else checked yet."""
     if not token or "." not in token:
         return None
     payload_b64, _, signature = token.partition(".")
@@ -548,19 +580,80 @@ def verify_artifact_download_token(token: str, artifact_id: str) -> Principal | 
         claims = json.loads(_b64url_decode(payload_b64))
     except Exception:
         return None
+    if not isinstance(claims, dict):
+        return None
     if str(claims.get("aid") or "") != artifact_id or int(claims.get("exp", 0)) < int(time.time()):
         return None
     tenant_id, subject, role = (str(claims.get(key) or "") for key in ("tenant", "sub", "role"))
     if not tenant_id or not subject or role not in ROLES:
         return None
-    return Principal(subject, role, tenant_id, "artifact_dl_token")
+    return claims
 
 
-# A query string is written to every proxy and web-server access log in the
-# path. The header is the real delivery mechanism; the query is accepted only
-# because a POPUP opened by top-level navigation cannot send a header, and an
-# operator whose browser will not take the blob-URL route needs a way back.
-ALLOW_DL_TOKEN_QUERY = os.getenv("DSPM_ALLOW_DL_TOKEN_QUERY", "1").strip().lower() in {"1", "true", "yes", "on"}
+def _download_account_still_holds(claims: dict) -> bool:
+    """Whether the account behind a download token still has what it had when minted.
+
+    The token used to be trusted on its own contents: a disabled account, a signed-out
+    session and a demoted role all still downloaded for the rest of its life. It is now
+    held to the same standard as the session it came from - and a stricter one on role,
+    because a link minted under one set of privileges is not re-interpreted under
+    another; it simply stops working.
+    """
+
+    subject = str(claims.get("sub") or "")
+    tenant_id = str(claims.get("tenant") or "")
+    if subject == "api-key":
+        # Minted for an API-key caller, who has no session and fetches with the key
+        # itself; single use and the five-minute life are its bounds.
+        return True
+    session_id = str(claims.get("sid") or "")
+    if not session_id or is_token_revoked(session_id):
+        return False
+    user = get_user(sanitize_username(subject))
+    if not user or not user.get("is_active"):
+        return False
+    if str(user.get("role") or "") != str(claims.get("role") or ""):
+        return False
+    if str(user.get("tenant_id") or "") != tenant_id:
+        # A platform administrator mints tokens while pivoted into another tenant.
+        pivoted = Principal(subject, str(user.get("role") or ""), str(user.get("tenant_id") or ""))
+        if not (is_platform_admin(pivoted) and tenant_exists(tenant_id)):
+            return False
+    return True
+
+
+def verify_artifact_download_token(token: str, artifact_id: str, *, consume: bool = True) -> Principal | None:
+    """The principal a download token stands for, or None.
+
+    `consume` spends the token: a second presentation is refused. It is atomic in the
+    database, so two requests racing with one copied link cannot both succeed.
+    """
+
+    claims = _download_claims(token, artifact_id)
+    if claims is None or not _download_account_still_holds(claims):
+        return None
+    token_id = str(claims.get("jti") or "")
+    if not token_id:
+        # Minted before C8: no id to spend, so it cannot be single use - and it was
+        # never bound to a session. Refused; the console mints a fresh one per fetch.
+        return None
+    if consume and not consume_one_time_token(token_id, int(claims.get("exp") or 0)):
+        return None
+    return Principal(
+        str(claims["sub"]), str(claims["role"]), str(claims["tenant"]), "artifact_dl_token",
+        session_id=str(claims.get("sid") or ""),
+    )
+
+
+# A query string is written to every proxy and web-server access log in the path, so
+# a token carried there is a credential written to disk by machines Sentro does not
+# control. C8: the console fetches with the header and shows a same-origin blob, so the
+# query form is off. DSPM_ALLOW_DL_TOKEN_QUERY=1 turns it back on for a non-production
+# install whose browser refuses blob navigation; production ignores it.
+def _query_tokens_allowed() -> bool:
+    if os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}:
+        return False
+    return os.getenv("DSPM_ALLOW_DL_TOKEN_QUERY", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def require_artifact_principal(
@@ -571,7 +664,7 @@ def require_artifact_principal(
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-ID")] = None,
 ) -> Principal:
-    token = x_artifact_token or (dl_token if ALLOW_DL_TOKEN_QUERY else None)
+    token = x_artifact_token or (dl_token if _query_tokens_allowed() else None)
     principal = verify_artifact_download_token(token, artifact_id) if token else None
     return principal or require_principal(credentials, x_api_key, x_tenant_id)
 

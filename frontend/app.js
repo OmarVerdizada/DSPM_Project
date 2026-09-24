@@ -6223,21 +6223,25 @@ function reportCoverageLine(blocks) {
 const FORMULA_LEAD = /^[=+\-@\t\r]/;
 const NUMERIC_CELL = /^[-+]?\d[\d,. ]*%?$/;
 
-// The artifact bytes, as a URL a window can be pointed at. Falls back to the
-// signed query URL if the fetch cannot be made - an operator whose browser
-// blocks blob navigation still gets their report, and the server still accepts
-// that form unless DSPM_ALLOW_DL_TOKEN_QUERY=0 turns it off.
+// The artifact bytes, as a URL a window can be pointed at.
+//
+// C8: the download token is spent on first use and bound to this session, and it
+// travels only in a header - never in a URL, because a URL is written to every
+// proxy and access log on the way. So there is exactly one fetch, and if it fails
+// the operator is told why rather than sent to a link that cannot work.
 async function artifactBlobUrl(artifact) {
   const path = artifact.artifact_path;
   const token = artifact.download_token;
-  if (!path || !token) return artifact.preview_url;
-  try {
-    const response = await fetch(`${path}?inline=1`, { headers: { "X-Artifact-Token": token } });
-    if (!response.ok) return artifact.preview_url;
-    return URL.createObjectURL(await response.blob());
-  } catch {
-    return artifact.preview_url;
+  if (!path || !token) {
+    throw new Error("The report was filed, but the service did not return a way to open it.");
   }
+  const response = await fetch(`${path}?inline=1`, { headers: { "X-Artifact-Token": token } });
+  if (!response.ok) {
+    throw new Error(response.status === 401
+      ? "The report link has already been used or has expired. File the report again to open it."
+      : `The report could not be opened (${response.status}).`);
+  }
+  return URL.createObjectURL(await response.blob());
 }
 
 function reportCell(value) {
@@ -9437,7 +9441,7 @@ async function exportPdf() {
       throw new Error(await readErrorMessage(response));
     }
     const artifact = await response.json();
-    if (artifact.template_id !== UNIFIED_PDF_TEMPLATE_ID || !artifact.preview_url) {
+    if (artifact.template_id !== UNIFIED_PDF_TEMPLATE_ID || !artifact.artifact_path) {
       throw new Error("The report service returned an unsupported template.");
     }
     // Fetch with the token in a header, then show the bytes from a same-origin

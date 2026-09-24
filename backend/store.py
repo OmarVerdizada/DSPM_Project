@@ -8795,6 +8795,31 @@ def count_sessions_for_user(username: str) -> int:
     return int(row["n"] if row else 0)
 
 
+def consume_one_time_token(token_id: str, expires_at: int) -> bool:
+    """Spend a one-time credential. True only for the caller that spent it.
+
+    C8: download tokens are single use. Checking "has it been used?" and then recording
+    that it has would let two requests racing with one copied link both pass the check;
+    the insert itself is the check here, so exactly one of them wins. The row lives in
+    revoked_tokens because a spent token IS a revoked one, and that table already prunes
+    itself by expiry.
+    """
+
+    if not token_id:
+        return False
+    now = int(time.time())
+    revoked_at = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM revoked_tokens WHERE expires_at < ?", (now,))
+            spent = conn.execute(
+                "INSERT INTO revoked_tokens (jti, expires_at, revoked_at) VALUES (?, ?, ?) "
+                "ON CONFLICT (jti) DO NOTHING",
+                (f"dl:{token_id}", int(expires_at), revoked_at),
+            ).rowcount
+    return bool(spent)
+
+
 def revoke_token_jti(jti: str, expires_at: int) -> None:
     if not jti:
         return
