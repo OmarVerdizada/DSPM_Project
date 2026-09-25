@@ -299,6 +299,7 @@ class TheSaveNeverBuildsTheWholeBodyTest(unittest.TestCase):
         os.environ["DSPM_ARTIFACT_DIR"] = os.path.join(self._dir.name, "artifacts")
         self.tenant = f"t{uuid.uuid4().hex[:8]}"
         store.init_db()
+        store.create_tenant(self.tenant, self.tenant)
 
     def tearDown(self):
         for key, value in self._previous.items():

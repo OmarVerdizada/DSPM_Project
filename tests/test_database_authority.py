@@ -14,18 +14,26 @@ from unittest import mock
 from backend import db
 
 
+# These three are about the SQLite path, so they take it even when the suite runs on
+# PostgreSQL: the backend is chosen by DSPM_DB_URL at each call.
+_ON_SQLITE = {"DSPM_DB_URL": ""}
+
+
 class DatabaseAuthorityTests(unittest.TestCase):
     def test_sqlite_identity_names_the_file(self) -> None:
-        identity = db.database_identity()
+        with mock.patch.dict("os.environ", _ON_SQLITE):
+            identity = db.database_identity()
         self.assertEqual(identity["backend"], "sqlite")
         self.assertTrue(identity["identity"].lower().endswith(".sqlite"))
 
     def test_production_refuses_sqlite(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "production requires PostgreSQL"):
-            db.enforce_database_authority(True)
+        with mock.patch.dict("os.environ", _ON_SQLITE):
+            with self.assertRaisesRegex(RuntimeError, "production requires PostgreSQL"):
+                db.enforce_database_authority(True)
 
     def test_development_allows_sqlite(self) -> None:
-        identity = db.enforce_database_authority(False)
+        with mock.patch.dict("os.environ", _ON_SQLITE):
+            identity = db.enforce_database_authority(False)
         self.assertEqual(identity["backend"], "sqlite")
 
     def test_expected_identity_mismatch_refuses_in_any_environment(self) -> None:

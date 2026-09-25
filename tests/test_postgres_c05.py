@@ -25,10 +25,13 @@ from uuid import uuid4
 
 from backend import db, migrations, store
 
+# A floor: the test also requires every table with a tenant_id column, so a new tenant
+# table the seed does not reach fails it rather than going unchecked.
 REQUIRED_ISOLATED = {
     "assets", "findings", "scan_reports", "scan_runs", "audit_events", "audit_chain_heads",
     "audit_outbox", "suppression_rules", "scan_schedules", "partitioned_scans", "secrets", "custom_roles",
-    "api_keys", "registration_invites", "derived_cache", "alert_events",
+    "api_keys", "registration_invites", "derived_cache", "alert_events", "finding_index", "scan_jobs",
+    "scan_object_baselines", "scan_partitions", "scan_profiles", "users",
 }
 
 
@@ -93,16 +96,28 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
             self._seed(tenant)
 
     def _seed(self, tenant: str) -> None:
+        # An incremental scan, so the object baseline is written; a finding id, as every
+        # engine finding has, so the finding index is.
         store.save_scan_history(tenant, {
-            "scan_id": f"{tenant}-scan", "source": "smb", "summary": {"total_files": 1},
-            "files": [{"path": f"/{tenant}/doc.txt", "name": "doc.txt", "risk": {"level": "HIGH", "score": 80},
-                       "findings": [{"type": "email", "risk": "HIGH", "count": 1}]}],
+            "scan_id": f"{tenant}-scan", "source": "local", "timestamp": "2026-08-06T00:00:00Z",
+            "mode": "incremental", "summary": {"total_files": 1},
+            "scan_diagnostics": {"incremental": {"enabled": True, "baseline_update": True, "scope_key": "scope-a",
+                                                 "version_signature": "policy-v1", "complete": True}},
+            "files": [{"path": f"/{tenant}/doc.txt", "reuse_key": f"local:///{tenant}/doc.txt", "name": "doc.txt",
+                       "size": 7, "modified_at": "2026-08-06T00:00:00Z", "content_hash": "hash-a",
+                       "risk": {"level": "HIGH", "score": 80},
+                       "findings": [{"type": "email", "risk": "HIGH", "count": 1, "finding_id": f"{tenant}-f1"}]}],
         })
+        store.record_job({"id": f"{tenant}-job", "tenant_id": tenant, "status": "running",
+                          "created_at": "2026-08-06T00:00:00Z"})
+        store.save_scan_profile(tenant, profile_id=None, kind="file-server", name="seed", config={"local_path": "C:/x"})
+        store.create_user(f"{tenant}-user", "not-a-hash", "viewer", tenant)
         with mock.patch.dict(os.environ, {"DSPM_SIEM_URL": "tcp://127.0.0.1:9"}):
             store.audit(tenant, "tester", "iso.seeded", {})
         store.create_suppression_rule(tenant, finding_type="email", reason="seed", created_by="tester")
         store.create_scan_schedule(tenant, name="nightly", request={"local_path": "C:/x"}, created_by="tester")
         store.register_partitioned_scan(tenant, f"{tenant}-pscan", job_id=f"{tenant}-job", request={}, header={})
+        store.create_scan_partitions(tenant, f"{tenant}-pscan", f"{tenant}-job", [{"part": 0}])
         store.save_secret(tenant, f"{tenant}-secret", "ciphertext-not-a-secret")
         store.save_custom_role(tenant, "isolation_role", "Isolation", "", ["inventory.view"], actor="tester")
         store.create_api_key_record(tenant, uuid4().hex, "seed", "viewer", "tester", None)
@@ -111,17 +126,23 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
         store.derived_store(tenant, "iso-key", 1, "{}", 60)
         store.save_alerts(tenant, f"{tenant}-scan", [{"kind": "seed"}])
 
-    def _tables_with_rows_for(self, tenant: str) -> list[str]:
+    def _tenant_tables(self) -> list[str]:
         with store._connect() as conn:
-            scoped = [row["table_name"] for row in conn.execute(
+            return [row["table_name"] for row in conn.execute(
                 "SELECT DISTINCT table_name FROM information_schema.columns WHERE column_name = 'tenant_id' "
                 "AND table_schema = current_schema() AND table_name <> 'tenants' ORDER BY table_name").fetchall()]
+
+    def _tables_with_rows_for(self, tenant: str) -> list[str]:
+        scoped = self._tenant_tables()
+        with store._connect() as conn:
             return [table for table in scoped
                     if conn.execute(f'SELECT COUNT(*) AS n FROM "{table}" WHERE tenant_id = ?', (tenant,)).fetchone()["n"]]
 
     def test_tenant_a_can_neither_read_nor_change_tenant_b(self) -> None:
         tables = self._tables_with_rows_for(self.b)
         self.assertEqual(sorted(REQUIRED_ISOLATED - set(tables)), [], "the seed must reach every required table")
+        self.assertEqual(sorted(set(self._tenant_tables()) - set(tables)), [],
+                         "a tenant table the seed does not reach is a table this test does not check")
         leaks = []
         for table in tables:
             with db.tenant_scope(self.a):
@@ -186,6 +207,40 @@ class BackgroundWritersTest(unittest.TestCase):
                 store.audit(tenant, "tester", "bg.queued", {})
             claimed = store.claim_audit_outbox(limit=50, now=9e12, lease_seconds=60, owner="c05")
         self.assertEqual(sorted({row["tenant_id"] for row in claimed} & set(tenants)), sorted(tenants))
+
+
+@unittest.skipUnless(db.is_postgres(), "C0.5 is about PostgreSQL")
+class APartitionWorkerKeepsToItsOwnDatabaseTest(unittest.TestCase):
+    """discovery.partition's worker processes scan into a throwaway SQLite file. With
+    DSPM_DB_URL inherited they converged the SHARED schema instead, all at once and outside
+    the migration lock - three of them deadlocked on its backfill - and created their
+    tenant here. Deterministic where the deadlock was not: the tenant must not appear."""
+
+    def test_the_workers_scan_and_leave_the_shared_database_alone(self) -> None:
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        from discovery.discovery_engine import ScanConfig
+        from discovery.partition import run_partitioned
+
+        tenant = f"pw-{uuid4().hex[:8]}"
+        # Under the repository: the collector does not scan a user's Temp folder.
+        scratch = Path(__file__).resolve().parent.parent / "tmp"
+        scratch.mkdir(exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix="c05-partition-", dir=scratch))
+        try:
+            for name in ("a", "b"):
+                (root / name).mkdir()
+                (root / name / "note.txt").write_text("contact jane.doe@example.com\n", encoding="utf-8")
+            config = ScanConfig(tenant_id=tenant, local_path=str(root), max_depth=3, use_sample_when_empty=True,
+                                persistent_cache_enabled=False, incremental_enabled=False)
+            report = run_partitioned(config, workers=2)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual(report["scan_diagnostics"]["partitioned"]["worker_processes"], 2)
+        self.assertEqual(report["summary"]["total_files"], 2, "the workers scanned")
+        self.assertFalse(store.tenant_exists(tenant), "a worker wrote into the shared database")
 
 
 if __name__ == "__main__":

@@ -143,6 +143,20 @@ class UpsertRewriteTests(unittest.TestCase):
         written = set(re.findall(r"INSERT OR REPLACE INTO (\w+)", source))
         self.assertIn("user_sessions", written, "the scan must find the statements it is about")
         self.assertEqual(sorted(written - set(db._PK)), [], "written with INSERT OR REPLACE but not mapped")
+        if db.is_postgres():
+            # The suite's own database: its keys are the ones ON CONFLICT has to name.
+            with store._connect() as conn:
+                for table, key in db._PK.items():
+                    rows = conn.execute(
+                        "SELECT a.attname AS name FROM pg_index i "
+                        "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+                        "WHERE i.indrelid = to_regclass(?) AND i.indisprimary "
+                        "ORDER BY array_position(i.indkey::int2[], a.attnum)",
+                        (table,),
+                    ).fetchall()
+                    with self.subTest(table=table):
+                        self.assertEqual(tuple(row["name"] for row in rows), key)
+            return
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "schema.sqlite"
             original = store.DB_PATH

@@ -53,7 +53,14 @@ class _TempDatabase(unittest.TestCase):
         for tenant in (TENANT, OTHER):
             store.create_tenant(tenant, tenant)
 
-    def _raw(self) -> sqlite3.Connection:
+    def _raw(self):
+        """A connection that edits the rows behind the store's back - the tamperer's.
+        On PostgreSQL the suite's database is the shared one, reached the store's way."""
+        if db.is_postgres():
+            opened = store._connect()
+            conn = opened.__enter__()
+            self.addCleanup(opened.__exit__, None, None, None)
+            return conn
         conn = sqlite3.connect(self.path)
         self.addCleanup(conn.close)
         return conn

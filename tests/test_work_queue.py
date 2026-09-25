@@ -28,7 +28,7 @@ import time
 import unittest
 from unittest import mock
 
-from backend import partition_worker, partitioned_scan, store
+from backend import db, partition_worker, partitioned_scan, store
 from backend.work_queue import (
     Delivery,
     LedgerQueue,
@@ -108,6 +108,7 @@ class WorkersRunAScanTest(_LocalTest):
     def _rebuild(self, name: str):
         return lambda record: ScanConfig(**self._settings(name))
 
+    @unittest.skipIf(db.is_postgres(), "compares two databases; on PostgreSQL the suite has one")
     def test_a_partition_handed_out_again_after_its_commit_writes_nothing_twice(self) -> None:
         self._use_database("uninterrupted")
         whole = partitioned_scan.run_partitioned_scan(

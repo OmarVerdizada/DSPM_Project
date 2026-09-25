@@ -4,12 +4,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from backend import store
 from backend.reporting.report_pdf import REPORT_TEMPLATE_ID
 from backend.reporting.router import ReportArtifactRequest, create_report
 from backend.security import Principal
 
 
 class PdfReportTemplateUnificationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # The route audits the request in its tenant, which must exist (a foreign key on PostgreSQL).
+        if not store.tenant_exists("tenant-a"):
+            store.create_tenant("tenant-a", "tenant-a")
+
     async def test_dashboard_endpoint_uses_the_shared_artifact_renderer(self) -> None:
         principal = Principal("dashboard-viewer", "viewer", "tenant-a")
         artifact = {

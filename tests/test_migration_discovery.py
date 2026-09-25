@@ -9,10 +9,12 @@ destination-owned revision history are excluded.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.migrate_sqlite_to_postgres import discover_tables
 
@@ -77,8 +79,10 @@ class MigrationDiscoveryTests(unittest.TestCase):
         import backend.db as db
 
         path = Path(self._tmp.name) / "baseline.sqlite"
-        with db.connect(path) as conn:
-            store.apply_baseline_schema(conn)
+        # The source of a migration is a SQLite file, even when the suite runs on PostgreSQL.
+        with mock.patch.dict(os.environ, {"DSPM_DB_URL": ""}):
+            with db.connect(path) as conn:
+                store.apply_baseline_schema(conn)
         raw = sqlite3.connect(path)
         self.addCleanup(raw.close)
         found = set(discover_tables(raw))

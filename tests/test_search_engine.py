@@ -271,6 +271,8 @@ class SearchReconciliationTests(unittest.TestCase):
         self.assertEqual(store.get_search_reconciliation("test-index"), metrics)
 
     def test_authoritative_lookup_requires_matching_tenant_and_id(self) -> None:
+        if not store.tenant_exists("tenant-lookup"):
+            store.create_tenant("tenant-lookup", "tenant-lookup")
         store.save_scan_history("tenant-lookup", {
             "scan_id": "sf2-lookup",
             "timestamp": "2026-08-05T00:00:00Z",

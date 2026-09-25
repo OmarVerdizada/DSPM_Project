@@ -112,6 +112,7 @@ class EstateWriteBatchingTest(unittest.TestCase):
         os.environ["DSPM_DB_PATH"] = os.path.join(self._dir.name, "batched.sqlite")
         self.tenant = f"t{uuid.uuid4().hex[:8]}"
         store.init_db()
+        store.create_tenant(self.tenant, self.tenant)
 
     def tearDown(self):
         if self._previous is None:
@@ -158,6 +159,7 @@ class EstateWriteBatchingTest(unittest.TestCase):
         measured = {}
         for files in (125, 250, 500, 1000):
             self.tenant = f"t{uuid.uuid4().hex[:8]}"
+            store.create_tenant(self.tenant, self.tenant)
             with self._counting() as counts:
                 store.save_scan_history(self.tenant, _report(f"s{files}", files))
             measured[files] = counts["execute"]
@@ -309,6 +311,7 @@ class FindingLifecycleSnapshotTest(unittest.TestCase):
         os.environ["DSPM_DB_PATH"] = os.path.join(self._dir.name, "lifecycle.sqlite")
         self.tenant = f"t{uuid.uuid4().hex[:8]}"
         store.init_db()
+        store.create_tenant(self.tenant, self.tenant)
 
     def tearDown(self):
         if self._previous is None:

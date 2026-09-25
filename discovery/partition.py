@@ -383,6 +383,11 @@ def _partition_worker(config: ScanConfig) -> dict:
     handle = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
     handle.close()
     os.environ["DSPM_DB_PATH"] = handle.name
+    # The throwaway file has to be the database this process uses. With DSPM_DB_URL
+    # inherited, init_db() converged the SHARED PostgreSQL schema from every worker at
+    # once, outside the migration lock - they deadlocked on its backfill (C0.5) - and
+    # created tenants there. The backend is chosen per call, so this is enough.
+    os.environ.pop("DSPM_DB_URL", None)
     from backend import store
 
     store.DB_PATH = Path(handle.name)

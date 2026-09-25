@@ -267,6 +267,7 @@ class TheLedgerDecidesTest(_PartitionTest):
         self.assertLessEqual(store.MAX_SCAN_PARTITIONS * store.PARTITION_SEQ_SPAN - 1, 2_147_483_647)
 
 
+@unittest.skipIf(db.is_postgres(), "restores a SQLite snapshot mid-test")
 class AFailedWriteLeavesNothingTest(_PartitionTest):
 
     def test_a_write_that_fails_partway_rolls_back_and_a_smaller_rerun_is_exact(self) -> None:
@@ -380,6 +381,7 @@ class LimitsAndSchemaTest(_PartitionTest):
                 store._write_normalized_rows(conn, self.tenant, report,
                                              partition={"seq_offset": 0, "seq_span": 3, "write_estate": True})
 
+    @unittest.skipIf(db.is_postgres(), "reads SQLite's EXPLAIN QUERY PLAN")
     def test_a_partitions_deletes_seek_to_its_own_rows(self) -> None:
         """Measured before revision 0013: both deletes walked every row the scan had
         written, so each partition's write cost more memory and time than the last."""
@@ -395,6 +397,7 @@ class LimitsAndSchemaTest(_PartitionTest):
         self.assertIn("idx_occurrences_scan_finding (tenant_id=? AND scan_id=? AND finding_id=?)", occurrences)
         self.assertIn("idx_finding_index_tenant_scan_seq (tenant_id=? AND scan_id=? AND seq>? AND seq<?)", index_range)
 
+    @unittest.skipIf(db.is_postgres(), "builds an older SQLite file; the PostgreSQL upgrade path is scripted in C0.5")
     def test_revision_0013_replaces_the_indexes_on_an_existing_database(self) -> None:
         path = os.path.join(self._dir.name, "indexes-0012.sqlite")
         raw = sqlite3.connect(path)

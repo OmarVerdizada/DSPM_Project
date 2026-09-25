@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from backend import jobs, partitioned_scan, scan_resumer, store
+from backend import db, jobs, partitioned_scan, scan_resumer, store
 from discovery.discovery_engine import ScanConfig
 from discovery.parity import accuracy_projection
 from tests.test_partitioned_local_scan import ALL_FRAMEWORKS, TENANT, _LocalTest
@@ -117,6 +117,7 @@ class AKilledScanResumesTest(_LocalTest):
             self.fail("the scan process never reached its third partition:\n"
                       + log_path.read_text(encoding="utf-8", errors="replace")[-4000:])
 
+    @unittest.skipIf(db.is_postgres(), "compares two databases; on PostgreSQL the suite has one")
     def test_a_scan_killed_inside_a_partition_resumes_into_the_uninterrupted_scans_report(self) -> None:
         self._use_database("whole")
         whole_compact = partitioned_scan.run_partitioned_scan(

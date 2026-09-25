@@ -13,6 +13,14 @@ from pathlib import Path
 from backend import db, store
 
 
+def _index_names(conn, table: str) -> set[str]:
+    if db.is_postgres():
+        rows = conn.execute("SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() "
+                            "AND tablename = ?", (table,)).fetchall()
+        return {row[0] for row in rows}
+    return {row[1] for row in conn.execute(f"PRAGMA index_list({table})")}
+
+
 class ConnectionSettingsTests(unittest.TestCase):
     """0.6 - a 2MB page cache against a 500MB file evicts the working set
     between requests, and a rollback journal writes every page twice while
@@ -28,6 +36,7 @@ class ConnectionSettingsTests(unittest.TestCase):
         synchronous = source[source.index("PRAGMA synchronous = NORMAL") - 300:]
         self.assertIn('_sqlite_journal_mode() == "wal"', synchronous[:400])
 
+    @unittest.skipIf(db.is_postgres(), "SQLite connection pragmas; PostgreSQL has none of them")
     def test_a_live_connection_carries_the_settings(self) -> None:
         with db.connect(store.DB_PATH) as conn:
             self.assertEqual("wal", conn.execute("PRAGMA journal_mode").fetchone()[0])
@@ -49,7 +58,7 @@ class PerRequestWorkTests(unittest.TestCase):
         lists inside detail_json. Reading them per page fetched and parsed the
         whole blob for every row: 11.3MB and 127ms of a 165ms request."""
         with store._connect() as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(assets)")}
+            columns = db.table_columns(conn, "assets")
         self.assertIn("reason_count", columns)
         self.assertIn("dlp_count", columns)
 
@@ -286,7 +295,7 @@ class StorageTests(unittest.TestCase):
         """2.2 - selecting a named scan decrypted an 8.3MB artifact and
         re-normalised every asset: 2.3s a page, and O(report) not O(page)."""
         with store._connect() as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(scan_reports)")}
+            columns = db.table_columns(conn, "scan_reports")
         self.assertIn("rows_json", columns)
         self.assertIn("def _packed_report_rows(", self.STORE)
         # A run saved before the column existed fills it on first read, so the
@@ -303,8 +312,8 @@ class StorageTests(unittest.TestCase):
         """2.3 - "worst first" sorted on a CASE expression, which no index can
         serve: SQLite read the whole current set into a temp b-tree, 29ms."""
         with store._connect() as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(findings)")}
-            indexes = {row[1] for row in conn.execute("PRAGMA index_list(findings)")}
+            columns = db.table_columns(conn, "findings")
+            indexes = _index_names(conn, "findings")
         self.assertIn("severity_rank", columns)
         self.assertIn("idx_findings_tenant_current_rank_id", indexes)
         self.assertIn('"severity": ("severity_rank", False, "DESC")', self.STORE)
@@ -437,7 +446,7 @@ class LooseEndTests(unittest.TestCase):
         parsing the whole 8MB artifact to throw the file array away: 1,429ms
         cold, 20ms served, measured."""
         with store._connect() as conn:
-            columns = {row[1] for row in conn.execute("PRAGMA table_info(scan_reports)")}
+            columns = db.table_columns(conn, "scan_reports")
         self.assertIn("compact_json", columns)
         self.assertIn("def compact_scan_report(", self.STORE)
         self.assertIn("def read_scan_report_compact(", self.STORE)

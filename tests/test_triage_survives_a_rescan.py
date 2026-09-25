@@ -76,6 +76,7 @@ class TriageSurvivesARescanTest(unittest.TestCase):
         os.environ["DSPM_DB_PATH"] = os.path.join(self._dir.name, "triage.sqlite")
         self.tenant = f"t{uuid.uuid4().hex[:8]}"
         store.init_db()
+        store.create_tenant(self.tenant, self.tenant)
         self.day_one = "2026-09-01T02:00:00+00:00"
         store.save_scan_history(self.tenant, _scan_report("night-1", timestamp=self.day_one))
         self.finding_id = self._only_finding()["id"]
@@ -100,7 +101,7 @@ class TriageSurvivesARescanTest(unittest.TestCase):
         with store._connect() as conn:
             row = conn.execute(
                 "SELECT status FROM finding_index WHERE tenant_id = ? AND finding_id = ? "
-                "ORDER BY rowid DESC LIMIT 1", (self.tenant, self.finding_id),
+                "ORDER BY scan_id DESC, seq DESC LIMIT 1", (self.tenant, self.finding_id),  # night-N: newest first
             ).fetchone()
         return None if row is None else str(row["status"])
 

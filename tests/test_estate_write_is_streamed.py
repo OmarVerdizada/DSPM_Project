@@ -128,6 +128,7 @@ class TheWriteDoesNotBuildTheWholeEstateTest(unittest.TestCase):
         os.environ["DSPM_DB_PATH"] = os.path.join(self._dir.name, "streamed.sqlite")
         self.tenant = f"t{uuid.uuid4().hex[:8]}"
         store.init_db()
+        store.create_tenant(self.tenant, self.tenant)
 
     def tearDown(self):
         if self._previous is None:

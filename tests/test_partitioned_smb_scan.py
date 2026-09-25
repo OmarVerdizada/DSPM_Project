@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 from unittest.mock import patch
 
-from backend import partitioned_scan, store
+from backend import db, partitioned_scan, store
 from backend.compliance_service import enrich_report_with_compliance
 from collectors.smb_scanner import SMBConfig, SMBScanner
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
@@ -215,6 +215,7 @@ class AShareThatKeepsResettingTest(_SmbTest):
 
 class APartitionedSmbScanReportsWhatOneScanReportsTest(_SmbTest):
 
+    @unittest.skipIf(db.is_postgres(), "compares two databases; on PostgreSQL the suite has one")
     def test_the_same_records_order_collapse_sections_and_estate(self) -> None:
         self._use_database("smb-single")
         data = DSPMDiscoveryEngine(self._smb_config("smb-single")).run().to_dict()

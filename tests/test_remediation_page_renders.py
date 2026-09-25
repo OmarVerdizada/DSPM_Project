@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from backend import store
+from backend import db, store
 from backend.app import app
 from backend.security import create_token, hash_password
 from tests.test_estate_write_is_batched import _report
@@ -44,6 +44,15 @@ class TheRemediationPageRendersTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.client = TestClient(app)
+        cls._seed()
+
+    def setUp(self) -> None:
+        # On PostgreSQL the suite has one database and empties it before every test.
+        if db.is_postgres():
+            type(self)._seed()
+
+    @classmethod
+    def _seed(cls) -> None:
         cls.tenant = f"rp{uuid4().hex[:8]}"
         cls.user = f"rp-admin-{uuid4().hex[:6]}"
         store.create_tenant(cls.tenant, "remediation page")

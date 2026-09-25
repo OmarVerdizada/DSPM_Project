@@ -65,6 +65,14 @@ class _DatabaseTest(unittest.TestCase):
     def _statements(self):
         """Every SQL statement the store issues while the context is open."""
         seen: list[str] = []
+        if db.is_postgres():
+            execute = db._PgConn.execute
+
+            def recorded(conn, sql, params=()):
+                seen.append(sql)
+                return execute(conn, sql, params)
+
+            return seen, mock.patch.object(db._PgConn, "execute", recorded)
         original = db._apply_sqlite_pragmas
 
         def traced(conn) -> None:

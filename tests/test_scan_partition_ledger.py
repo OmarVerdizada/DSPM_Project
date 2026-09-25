@@ -66,6 +66,7 @@ class TheRevisionTest(_LedgerTest):
         for column in ("tenant_id", "scan_id", "partition_id", "status", "attempt", "spec_json"):
             self.assertIn(column, partitions)
 
+    @unittest.skipIf(db.is_postgres(), "builds an older SQLite file; the PostgreSQL upgrade path is scripted in C0.5")
     def test_it_upgrades_a_database_built_before_it_and_is_idempotent(self) -> None:
         path = os.path.join(self._dir.name, "legacy.sqlite")
         raw = sqlite3.connect(path)

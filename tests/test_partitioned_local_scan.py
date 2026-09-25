@@ -26,7 +26,7 @@ from pathlib import Path
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from backend import partitioned_scan, store
+from backend import db, partitioned_scan, store
 from backend.compliance_service import enrich_report_with_compliance, load_compliance_profiles
 from collectors import file_scanner
 from discovery import discovery_engine
@@ -320,6 +320,7 @@ class APartitionedScanReportsWhatOneScanReportsTest(_LocalTest):
         self.assertTrue(compact["files_omitted"])
         return store.read_scan_report(TENANT, compact["scan_id"])
 
+    @unittest.skipIf(db.is_postgres(), "compares two databases; on PostgreSQL the suite has one")
     def test_the_same_records_order_summary_sections_and_estate(self) -> None:
         self._use_database("single")
         single = self._single(self._config("single"), label="estate", frameworks=ALL_FRAMEWORKS)

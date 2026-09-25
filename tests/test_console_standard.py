@@ -28,7 +28,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from backend import store  # noqa: E402
+from backend import db, store  # noqa: E402
 
 APP_JS = Path("frontend/app.js").read_text(encoding="utf-8")
 INDEX = Path("frontend/index.html").read_text(encoding="utf-8")
@@ -136,6 +136,15 @@ class CoverageStateTests(unittest.TestCase):
         cls._orig = store.DB_PATH
         store.DB_PATH = Path(cls._tmp.name) / "coverage.sqlite"
         store.init_db()
+        cls._seed()
+
+    def setUp(self) -> None:
+        # On PostgreSQL the suite has one database and empties it before every test.
+        if db.is_postgres():
+            type(self)._seed()
+
+    @classmethod
+    def _seed(cls) -> None:
         cls.tid = f"t-{uuid4().hex[:8]}"
         store.create_tenant(cls.tid, "COVER")
 

@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from backend import artifacts, partitioned_scan, store
+from backend import artifacts, db, partitioned_scan, store
 from backend.compliance_service import (
     ComplianceReportAccumulator,
     enrich_report_with_compliance,
@@ -230,6 +230,7 @@ class _FinalizeTest(unittest.TestCase):
             )
 
 
+@unittest.skipIf(db.is_postgres(), "restores a SQLite snapshot between the two runs it compares")
 class FinalizeWritesWhatOneSaveWritesTest(_FinalizeTest):
 
     def _assert_parity(self, *, enabled: bool, frameworks, sizes=(9, 14, 7, 10), label=LABEL, complete=True):

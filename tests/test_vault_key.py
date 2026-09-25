@@ -12,6 +12,7 @@ from unittest import mock
 from cryptography.fernet import Fernet
 
 import backend.vault as vault
+from backend import store
 
 
 class VaultKeyFormatTests(unittest.TestCase):
@@ -63,6 +64,8 @@ class VaultLocalKeyTests(unittest.TestCase):
 
 class VaultRoundTripTests(unittest.TestCase):
     def test_store_resolve_delete_round_trip(self) -> None:
+        if not store.tenant_exists("t_vault_key_test"):
+            store.create_tenant("t_vault_key_test", "t_vault_key_test")
         cv = vault.CredentialVault()
         ref = cv.store("t_vault_key_test", "u", "p", "CORP")
         try:

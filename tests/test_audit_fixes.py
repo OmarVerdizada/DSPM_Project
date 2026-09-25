@@ -83,6 +83,7 @@ class JobPruneTests(unittest.TestCase):
         # F8: bound scan_jobs growth.
         tenant = f"prune-{uuid4().hex[:8]}"
         old_id, run_id = f"{tenant}-old", f"{tenant}-run"
+        store.create_tenant(tenant, tenant)
         with store._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO scan_jobs (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -172,6 +173,7 @@ class RecordJobRetryTests(unittest.TestCase):
         # the terminal write.
         tenant = f"lock-{uuid4().hex[:8]}"
         job_id = f"{tenant}-j"
+        store.create_tenant(tenant, tenant)
         real_connect = store._connect
         calls = {"n": 0}
 
