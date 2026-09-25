@@ -907,7 +907,7 @@ def add_audit_chain(conn) -> None:
         conn.execute("ALTER TABLE audit_events ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''")
     if "row_hash" not in columns:
         conn.execute("ALTER TABLE audit_events ADD COLUMN row_hash TEXT NOT NULL DEFAULT ''")
-    conn.execute(_AUDIT_CHAIN_HEADS_DDL)
+    conn.executescript(_AUDIT_CHAIN_HEADS_DDL)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_chain ON audit_events (tenant_id, seq)")
 
     sealed_at = datetime.now(timezone.utc).isoformat()
@@ -948,7 +948,9 @@ def add_audit_outbox(conn) -> None:
     events. It has a tenant column (erasure removes a tenant's undelivered events with the
     rest of its data), so revisions 0003 and 0004 are re-run for it.
     """
-    conn.execute(_AUDIT_OUTBOX_DDL)
+    # executescript, not execute: it is what translates the dialect (AUTOINCREMENT
+    # becomes an identity column on PostgreSQL) - the C0.5 run found this failing.
+    conn.executescript(_AUDIT_OUTBOX_DDL)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_outbox_due ON audit_outbox (next_attempt_at, id)")
     add_tenant_integrity(conn)
     add_tenant_rls(conn)
@@ -9185,13 +9187,19 @@ def record_session(jti: str, username: str, issued_at: int, expires_at: int) -> 
             )
             surplus = []
             if cap:
+                # Everything past the newest `cap`. `LIMIT -1 OFFSET ?` said that in SQLite
+                # only; PostgreSQL refuses a negative LIMIT (found by the C0.5 run). An
+                # account holds at most cap + 1 rows here, so the skip is done in Python.
+                # Times are whole seconds, so sessions issued within one second tie: the
+                # one being recorded always ranks first - it must never be the one revoked
+                # - and the rest break ties by id, the same way on every backend.
                 surplus = [
                     (str(row["jti"]), int(row["expires_at"]))
                     for row in conn.execute(
                         "SELECT jti, expires_at FROM user_sessions WHERE username = ? "
-                        "ORDER BY last_seen_at DESC, issued_at DESC LIMIT -1 OFFSET ?",
-                        (username, cap),
-                    ).fetchall()
+                        "ORDER BY CASE WHEN jti = ? THEN 0 ELSE 1 END, last_seen_at DESC, issued_at DESC, jti DESC",
+                        (username, jti),
+                    ).fetchall()[cap:]
                 ]
             revoked_at = datetime.now(timezone.utc).isoformat()
             for old_jti, old_exp in surplus:

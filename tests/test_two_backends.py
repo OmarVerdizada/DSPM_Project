@@ -27,6 +27,8 @@ import urllib.request
 from http.cookies import SimpleCookie
 from pathlib import Path
 
+from backend import db
+
 ROOT = Path(__file__).resolve().parent.parent
 USER = "two-backend-user"
 PASSWORD = "a-two-backend-pass-4"
@@ -85,12 +87,17 @@ class TwoBackendsShareOneSessionStateTest(unittest.TestCase):
             "DSPM_TOKEN_REVOCATION_CACHE_SECONDS": "30",
             "DSPM_SCAN_SCHEDULER_INTERVAL_SECONDS": "0",
         }
-        env.pop("DSPM_DB_URL", None)
-        prepare = (
-            "from backend import store, security; "
-            f"store.create_user('{USER}', security.hash_password('{PASSWORD}'), 'analyst', 'default')"
-        )
-        subprocess.run([sys.executable, "-c", prepare], cwd=ROOT, env=env, check=True, timeout=180)
+        # On PostgreSQL (the C1 gate's production backend) both servers share the suite's
+        # own test database, and the account is made per test, after the suite's reset.
+        # On SQLite they share a file of their own, and the account is made here.
+        cls.postgres = db.is_postgres()
+        if not cls.postgres:
+            env.pop("DSPM_DB_URL", None)
+            prepare = (
+                "from backend import store, security; "
+                f"store.create_user('{USER}', security.hash_password('{PASSWORD}'), 'analyst', 'default')"
+            )
+            subprocess.run([sys.executable, "-c", prepare], cwd=ROOT, env=env, check=True, timeout=180)
         cls.ports = [_free_port(), _free_port()]
         cls.servers = [
             subprocess.Popen([sys.executable, "main.py", "serve", "--host", "127.0.0.1", "--port", str(port)],
@@ -119,6 +126,15 @@ class TwoBackendsShareOneSessionStateTest(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 server.kill()
         cls.temp.cleanup()
+
+    def setUp(self) -> None:
+        if self.postgres:
+            from backend import security, store
+
+            if store.get_tenant("default") is None:
+                store.create_tenant("default", "Default")
+            if store.get_user(USER) is None:
+                store.create_user(USER, security.hash_password(PASSWORD), "analyst", "default")
 
     def _sign_in(self, port: int, password: str = PASSWORD) -> tuple[str, str]:
         status, body, refresh = _call(port, "POST", "/api/auth/login", body={"username": USER, "password": password})

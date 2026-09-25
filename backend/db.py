@@ -185,6 +185,12 @@ _PK: dict[str, tuple[str, ...]] = {
     "secrets": ("tenant_id", "secret_id"),
     "revoked_tokens": ("jti",),
     "tenants": ("tenant_id",),
+    # C1's two tables. Missing until the C0.5 run on PostgreSQL (2026-09-25): every
+    # sign-in and every session renewal raised here, because nothing checked that a
+    # table written with INSERT OR REPLACE had an entry - tests/test_db_dialect.py
+    # now does, against the real schema.
+    "user_sessions": ("jti",),
+    "refresh_tokens": ("token_hash",),
 }
 
 

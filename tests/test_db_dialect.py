@@ -127,6 +127,40 @@ class UpsertRewriteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             db.translate_sql("INSERT OR REPLACE INTO not_a_real_table (x) VALUES (?)")
 
+    def test_every_table_written_with_insert_or_replace_has_its_real_key(self) -> None:
+        """C0.5 (2026-09-25): user_sessions and refresh_tokens were written with INSERT OR
+        REPLACE and had no entry, so on PostgreSQL every sign-in and every session renewal
+        raised. The map is now checked in both directions against the schema itself: the
+        tables the backend writes this way, and each one's actual primary key."""
+        import re
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        from backend import migrations, store
+
+        source = "".join(path.read_text(encoding="utf-8") for path in Path("backend").rglob("*.py"))
+        written = set(re.findall(r"INSERT OR REPLACE INTO (\w+)", source))
+        self.assertIn("user_sessions", written, "the scan must find the statements it is about")
+        self.assertEqual(sorted(written - set(db._PK)), [], "written with INSERT OR REPLACE but not mapped")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "schema.sqlite"
+            original = store.DB_PATH
+            store.DB_PATH = path
+            try:
+                migrations.upgrade()
+            finally:
+                store.DB_PATH = original
+            conn = sqlite3.connect(path)
+            try:
+                for table, key in db._PK.items():
+                    columns = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                    real = tuple(name for _cid, name, *_rest, pk in sorted(columns, key=lambda c: c[-1]) if pk)
+                    with self.subTest(table=table):
+                        self.assertEqual(real, key)
+            finally:
+                conn.close()
+
     def test_plain_insert_is_untouched_except_placeholders(self) -> None:
         out = db.translate_sql(
             "INSERT INTO audit_events (tenant_id, timestamp) VALUES (?, ?)"

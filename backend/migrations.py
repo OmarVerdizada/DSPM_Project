@@ -187,25 +187,27 @@ def upgrade() -> int:
     with store._lock:
         with store._connect() as conn:
             if db.is_postgres():
-                # Serialize concurrent starters/deployers cluster-wide.
-                conn.execute("SELECT pg_advisory_lock(?)", (_ADVISORY_LOCK_KEY,))
-            try:
-                _ensure_table(conn)
-                applied = current_revision(conn)
-                for number, name, func in _revisions():
-                    if number <= applied:
-                        continue
-                    func(conn)
-                    conn.execute(
-                        "INSERT INTO schema_migrations (revision, name, checksum, applied_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (number, name, _checksum(func), datetime.now(timezone.utc).isoformat()),
-                    )
-                    applied = number
-                return applied
-            finally:
-                if db.is_postgres():
-                    conn.execute("SELECT pg_advisory_unlock(?)", (_ADVISORY_LOCK_KEY,))
+                # Serialize concurrent starters/deployers cluster-wide - for exactly the
+                # length of this transaction. C0.5 (2026-09-25): this was a SESSION lock
+                # released in a `finally`. When a revision failed, that unlock ran inside
+                # the aborted transaction and raised "current transaction is aborted",
+                # which replaced the real error; and the lock stayed held by the pooled
+                # connection, so the next upgrade from any other connection waited on it
+                # forever. A transaction lock ends with the commit or the rollback.
+                conn.execute("SELECT pg_advisory_xact_lock(?)", (_ADVISORY_LOCK_KEY,))
+            _ensure_table(conn)
+            applied = current_revision(conn)
+            for number, name, func in _revisions():
+                if number <= applied:
+                    continue
+                func(conn)
+                conn.execute(
+                    "INSERT INTO schema_migrations (revision, name, checksum, applied_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (number, name, _checksum(func), datetime.now(timezone.utc).isoformat()),
+                )
+                applied = number
+            return applied
 
 
 def verify_or_raise() -> None:

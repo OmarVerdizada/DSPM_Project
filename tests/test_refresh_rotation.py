@@ -31,7 +31,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from backend import security, store
+from backend import db, security, store
 from backend.app import app
 
 PASSWORD = "an-analyst-1"
@@ -404,6 +404,7 @@ class TheUpgradeCarriesExistingSessionsTest(_RefreshCase):
             "/api/profile", headers={"Authorization": f"Bearer {legacy}"}).status_code, 200)
         self.assertEqual(self.client.post("/api/auth/refresh").status_code, 401)
 
+    @unittest.skipIf(db.is_postgres(), "builds an older SQLite file; the PostgreSQL upgrade path is scripted in C0.5")
     def test_revision_0019_creates_the_table_on_an_older_install(self) -> None:
         from backend import migrations
 

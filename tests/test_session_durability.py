@@ -33,7 +33,7 @@ from unittest import mock
 
 from fastapi import HTTPException
 
-from backend import security, store
+from backend import db, security, store
 
 PASSWORD = "an-analyst-1"
 
@@ -185,11 +185,15 @@ class APasswordChangeEndsEverySessionTest(_SessionCase):
 class AnAccountIsCappedTest(_SessionCase):
 
     def test_the_oldest_sessions_are_revoked_past_the_cap(self) -> None:
+        # Session times are whole seconds, so "oldest" needs sessions issued in different
+        # seconds. This used to sleep 10 ms - the same second - and passed on SQLite only
+        # because its ties happened to come back in insertion order (C0.5, PostgreSQL).
+        start = time.time()
         with mock.patch.dict(os.environ, {"DSPM_MAX_SESSIONS_PER_USER": "3"}):
             tokens = []
-            for _ in range(5):
-                tokens.append(self._token())
-                time.sleep(0.01)       # distinct last_seen ordering
+            for step in range(5):
+                with mock.patch("time.time", return_value=start + step):
+                    tokens.append(self._token())
         self.assertEqual(store.count_sessions_for_user(self.user), 3)
         self._restart()
         # The two eldest are revoked, not merely forgotten: a token in someone's hand
@@ -198,6 +202,20 @@ class AnAccountIsCappedTest(_SessionCase):
             with self.subTest(token=token[:12]), self.assertRaises(HTTPException):
                 security.verify_token(token)
         self.assertEqual(security.verify_token(tokens[-1]).subject, self.user)
+
+    def test_the_session_just_issued_is_never_the_one_revoked(self) -> None:
+        # Three sign-ins in one second tie on every timestamp. Whatever the cap evicts,
+        # it must not be the session the caller has just been handed.
+        start = time.time()
+        with mock.patch.dict(os.environ, {"DSPM_MAX_SESSIONS_PER_USER": "1"}), \
+                mock.patch("time.time", return_value=start):
+            tokens = [self._token() for _ in range(3)]
+        self.assertEqual(store.count_sessions_for_user(self.user), 1)
+        self._restart()
+        self.assertEqual(security.verify_token(tokens[-1]).subject, self.user)
+        for token in tokens[:-1]:
+            with self.subTest(token=token[:12]), self.assertRaises(HTTPException):
+                security.verify_token(token)
 
     def test_the_cap_can_be_turned_off(self) -> None:
         with mock.patch.dict(os.environ, {"DSPM_MAX_SESSIONS_PER_USER": "0"}):
@@ -295,6 +313,7 @@ class ThroughTheRoutesTest(_SessionCase):
         self.assertIn("sessions_ended", json.dumps(events[0]))
 
 
+@unittest.skipIf(db.is_postgres(), "builds an older SQLite file; the PostgreSQL upgrade path is scripted in C0.5")
 class TheUpgradeReachesAnOlderInstallTest(unittest.TestCase):
     """Revision 0018 on a database that predates the table (roadmap C0.4 cares about
     this too: an upgrade that only works on a fresh database is not an upgrade)."""
