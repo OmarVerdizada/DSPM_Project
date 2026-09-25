@@ -15040,6 +15040,45 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
 }
 :root:root .settings-danger-btn:hover { background: color-mix(in srgb, var(--status-critical) 10%, transparent) !important; }
 
+/* C4: SIEM Integration, the second install feature. It is the OCR row plus a panel the
+   switch opens; the dot carries the state's tone so the sentence can stay readable. The
+   panel and its parts toggle the hidden attribute, which loses to any author display
+   rule - so each says so itself. */
+.siem-row { margin-top: 4px; }
+.siem-state { display: inline-flex; align-items: flex-start; gap: 7px; margin-top: 3px; font-size: var(--text-xs); color: var(--muted); }
+.siem-dot { width: 8px; height: 8px; flex: 0 0 8px; margin-top: .45em; border-radius: 50%; background: var(--line); }
+.siem-state[data-state="connected"] .siem-dot { background: var(--status-low); }
+.siem-state[data-state="not_connected"] .siem-dot,
+.siem-state[data-state="not_configured"] .siem-dot { background: var(--status-warning); }
+.siem-state[data-state="degraded"] .siem-dot { background: var(--status-critical); }
+.siem-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 10px;
+  padding: 16px 14px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+}
+.siem-panel select { font-weight: 400; }
+/* The grid stretches its fields; inputs and selects are one height here. */
+.siem-panel .settings-field input, .siem-panel .settings-field select { height: 42px; flex: 0 0 auto; }
+.siem-ca-field, .siem-note { grid-column: 1 / -1; }
+.siem-note { margin: 0; }
+.siem-ca-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-weight: 400; }
+.siem-ca-summary { font-family: "JetBrains Mono", monospace; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.siem-actions { display: inline-flex; flex-wrap: wrap; gap: 10px; }
+.siem-facts { padding-top: 4px; border-top: 1px solid var(--line); }
+.siem-facts strong { text-align: right; overflow-wrap: anywhere; }
+.siem-remove-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 12px; }
+.siem-remove-row .settings-hint { margin: 0; }
+.siem-panel[hidden], .siem-remove-row[hidden], .siem-panel [hidden] { display: none; }
+@media (max-width: 560px) {
+  .siem-remove-row { flex-direction: column; align-items: stretch; }
+  .siem-facts > div { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .siem-facts strong { text-align: left; }
+}
+
 @media (max-width: 860px) {
   .settings-shell { grid-template-columns: 1fr; }
   .settings-rail { flex-direction: column; border-right: 0; border-bottom: 1px solid var(--line); }
@@ -15279,6 +15318,12 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   top: 0;
   height: 100vh;
   overflow-y: auto;
+}
+/* Below 860px the rail stacks ABOVE the content, and pinned at a full viewport's height
+   it covered every setting on a phone - the switches, being positioned, painted through
+   it. Stacked, it scrolls away with the page. */
+@media (max-width: 860px) {
+  :root:root .settings-page .settings-rail { position: static; height: auto; overflow: visible; }
 }
 
 /* Topbar search: long enough to feel like the primary way in, capped so

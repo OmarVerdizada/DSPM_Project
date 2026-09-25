@@ -12,7 +12,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=1" />
-    <link rel="stylesheet" href="/static/styles.css?v=241" />
+    <link rel="stylesheet" href="/static/styles.css?v=246" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=1" />
   </head>
   <body class="profile-page settings-page">
@@ -174,6 +174,83 @@
               </label>
             </div>
             <p id="features-status" class="settings-hint" role="status">&nbsp;</p>
+
+            <!-- C4: the audit trail forwarded to the customer's SIEM. The engine (queue,
+                 retries, TLS, delivery) is the server's; this is its configuration. -->
+            <div class="settings-feature-row siem-row" id="feature-siem-row">
+              <div class="settings-feature-copy">
+                <strong>SIEM Integration</strong>
+                <span>Forward every audit event to your SIEM as syslog, with its place in the tamper-evident audit chain.</span>
+                <span id="siem-state" class="siem-state" data-state="loading"><span class="siem-dot" aria-hidden="true"></span><span id="siem-state-text">Checking&hellip;</span></span>
+              </div>
+              <label class="settings-switch" for="feature-siem-toggle">
+                <input type="checkbox" id="feature-siem-toggle" disabled aria-controls="siem-panel" aria-expanded="false" aria-label="SIEM Integration" />
+                <span class="settings-switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div id="siem-panel" class="siem-panel" hidden>
+              <form id="siem-form" class="settings-form-grid" novalidate>
+                <label class="settings-field">
+                  Receiver host or IP address
+                  <input id="siem-host" name="host" autocomplete="off" spellcheck="false" placeholder="siem.corp.local" />
+                </label>
+                <label class="settings-field">
+                  Port
+                  <input id="siem-port" name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="6514" />
+                </label>
+                <label class="settings-field">
+                  Transport
+                  <select id="siem-transport" name="transport">
+                    <option value="tls">TLS (encrypted)</option>
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                </label>
+                <label class="settings-field">
+                  Syslog format
+                  <select id="siem-format" name="format">
+                    <option value="cef">CEF</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </label>
+                <label class="settings-field siem-tls-only">
+                  Certificate verification
+                  <select id="siem-trust" name="trust">
+                    <option value="system">System trust store</option>
+                    <option value="custom">Private CA</option>
+                  </select>
+                </label>
+                <div class="settings-field siem-tls-only siem-ca-field" id="siem-ca-field">
+                  <span>CA certificate</span>
+                  <div class="siem-ca-row">
+                    <span id="siem-ca-summary" class="siem-ca-summary">No certificate uploaded</span>
+                    <input type="file" id="siem-ca-file" accept=".pem,.crt,.cer" hidden />
+                    <button type="button" class="secondary-btn" id="siem-ca-choose">Upload certificate</button>
+                    <button type="button" class="secondary-btn" id="siem-ca-remove" hidden>Remove certificate</button>
+                  </div>
+                </div>
+                <p class="settings-hint siem-note" id="siem-transport-note"></p>
+                <div class="settings-form-foot">
+                  <span class="siem-actions">
+                    <button type="button" class="secondary-btn" id="siem-test-btn">Test connection</button>
+                    <button type="button" class="secondary-btn" id="siem-retry-btn" hidden>Retry now</button>
+                  </span>
+                  <button type="submit" id="siem-save-btn">Save</button>
+                </div>
+              </form>
+              <div class="settings-kv siem-facts" id="siem-facts">
+                <div><span>Receiver</span><strong id="siem-fact-receiver" class="mono">&ndash;</strong></div>
+                <div><span>Last delivery</span><strong id="siem-fact-delivery">&ndash;</strong></div>
+                <div><span>Queued events</span><strong id="siem-fact-queue">&ndash;</strong></div>
+                <div><span>Certificate</span><strong id="siem-fact-ca" class="mono">&ndash;</strong></div>
+                <div id="siem-fact-error-row" hidden><span>Last error</span><strong id="siem-fact-error"></strong></div>
+              </div>
+            </div>
+            <div class="siem-remove-row" id="siem-remove-row" hidden>
+              <span class="settings-hint" id="siem-remove-note">Removing deletes the receiver and its certificate. Events already queued stay queued.</span>
+              <button type="button" class="settings-danger-btn" id="siem-remove-btn">Remove configuration</button>
+            </div>
+            <p id="siem-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
           </article>
         </section>
 
@@ -224,6 +301,6 @@
       </div>
     </div>
 
-    <script src="/static/profile.js?v=100"></script>
+    <script src="/static/profile.js?v=105"></script>
   </body>
 </html>

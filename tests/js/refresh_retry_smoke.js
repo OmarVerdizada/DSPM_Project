@@ -7,7 +7,7 @@
 //   script: "app.js" (the console, default) or "profile.js" (the settings page)
 //   drive:  "api" (default: `calls` concurrent api() calls), "logout" (sign out), or
 //           "password_changed" (profile.js: what the page does after a password change), or
-//           "evaluate" (app.js: setPermissions(scenario.permissions), then each expression
+//           "evaluate" (app.js: setPermissions(scenario.permissions); either page: each expression
 //           in scenario.evaluate, reported under its name in "values")
 // Prints one JSON line: {"refreshCalls", "apiCalls", "resolved", "rejected", "redirected",
 // "logoutCalls", "logoutAccepted"}.
@@ -193,8 +193,11 @@ async function main() {
   vm.runInContext(drive, context, { filename: "drive" });
 
   if (scenario.drive === "evaluate") {
-    context.__permissions = Array.isArray(scenario.permissions) ? scenario.permissions : [];
-    vm.runInContext("setPermissions(globalThis.__permissions);", context, { filename: "permissions" });
+    if (SCRIPT === "app.js") {
+      // The console gates on permissions; the settings page has no such step.
+      context.__permissions = Array.isArray(scenario.permissions) ? scenario.permissions : [];
+      vm.runInContext("setPermissions(globalThis.__permissions);", context, { filename: "permissions" });
+    }
     const values = {};
     for (const [name, expression] of Object.entries(scenario.evaluate || {})) {
       try {

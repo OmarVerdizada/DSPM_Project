@@ -2220,7 +2220,9 @@ def _append_audit(conn, tenant_id: str, timestamp: str, actor: str, action: str,
     )
     from backend.siem import forwarding_enabled
 
-    if forwarding_enabled():
+    # Asked through this transaction's own connection: an event is queued exactly when
+    # forwarding was on at the moment it was recorded, on whichever backend recorded it.
+    if forwarding_enabled(conn):
         # Same transaction as the row: an event is never recorded without being queued
         # for the SIEM, nor queued without being recorded (backend.siem).
         payload = json.dumps({
@@ -2279,7 +2281,8 @@ def audit_outbox_status() -> dict:
     """What is waiting for the SIEM: a count and the age of the oldest - never content."""
     with _connect() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS pending, MIN(created_at) AS oldest, MAX(attempts) AS attempts FROM audit_outbox"
+            "SELECT COUNT(*) AS pending, MIN(created_at) AS oldest, MAX(attempts) AS attempts, "
+            "SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END) AS failing FROM audit_outbox"
         ).fetchone()
     oldest = str(row["oldest"] or "")
     age = 0.0
@@ -2288,7 +2291,19 @@ def audit_outbox_status() -> dict:
             age = max(0.0, (datetime.now(timezone.utc) - datetime.fromisoformat(oldest)).total_seconds())
         except ValueError:
             age = 0.0
-    return {"pending": int(row["pending"] or 0), "oldest_seconds": round(age, 1), "max_attempts": int(row["attempts"] or 0)}
+    return {"pending": int(row["pending"] or 0), "oldest_seconds": round(age, 1), "max_attempts": int(row["attempts"] or 0),
+            "failing": int(row["failing"] or 0)}
+
+
+def reset_audit_outbox_backoff() -> int:
+    """Make every waiting event due now - the console's Retry. Only the wait changes:
+    attempts and the last error stay, and delivery still needs a receiver that answers."""
+    with _lock:
+        with _connect() as conn:
+            return int(conn.execute(
+                "UPDATE audit_outbox SET next_attempt_at = 0 WHERE next_attempt_at > 0 AND lease_until <= ?",
+                (time.time(),),
+            ).rowcount or 0)
 
 
 def verify_audit_chain(tenant_id: str | None = None) -> list[dict]:

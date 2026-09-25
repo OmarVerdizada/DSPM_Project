@@ -462,6 +462,7 @@ const OCR_STATE_LINES = {
 };
 
 function renderFeatures(features) {
+  renderSiemSummary(features?.siem);
   const ocr = features?.ocr;
   if (!ocr) return;
   ocrToggle.checked = Boolean(ocr.enabled);
@@ -498,6 +499,334 @@ ocrToggle.addEventListener("change", async () => {
     ocrToggle.disabled = false;
     setStatus(featuresStatus, `Change failed: ${error.message}`);
   }
+});
+
+/* ── SIEM integration (C4) ────────────────────────────────────── */
+// The server owns forwarding - the queue, retries, TLS, delivery. This is where it is
+// configured and watched. The page never holds the CA certificate the server stored (it
+// gets a name and a fingerprint), and a save carries a certificate only when one was
+// chosen here: an omitted certificate keeps the stored one, "Remove certificate" deletes
+// it. Syslog over TLS, TCP or UDP has no credential, so there is no password field.
+const siemToggle = document.querySelector("#feature-siem-toggle");
+const siemState = document.querySelector("#siem-state");
+const siemStateText = document.querySelector("#siem-state-text");
+const siemPanel = document.querySelector("#siem-panel");
+const siemForm = document.querySelector("#siem-form");
+const siemHost = document.querySelector("#siem-host");
+const siemPort = document.querySelector("#siem-port");
+const siemTransport = document.querySelector("#siem-transport");
+const siemFormat = document.querySelector("#siem-format");
+const siemTrust = document.querySelector("#siem-trust");
+const siemCaField = document.querySelector("#siem-ca-field");
+const siemCaSummary = document.querySelector("#siem-ca-summary");
+const siemCaFile = document.querySelector("#siem-ca-file");
+const siemCaChoose = document.querySelector("#siem-ca-choose");
+const siemCaRemove = document.querySelector("#siem-ca-remove");
+const siemNote = document.querySelector("#siem-transport-note");
+const siemTestBtn = document.querySelector("#siem-test-btn");
+const siemRetryBtn = document.querySelector("#siem-retry-btn");
+const siemSaveBtn = document.querySelector("#siem-save-btn");
+const siemRemoveRow = document.querySelector("#siem-remove-row");
+const siemRemoveBtn = document.querySelector("#siem-remove-btn");
+const siemStatus = document.querySelector("#siem-status");
+const siemFacts = {
+  receiver: document.querySelector("#siem-fact-receiver"),
+  delivery: document.querySelector("#siem-fact-delivery"),
+  queue: document.querySelector("#siem-fact-queue"),
+  ca: document.querySelector("#siem-fact-ca"),
+  errorRow: document.querySelector("#siem-fact-error-row"),
+  error: document.querySelector("#siem-fact-error"),
+};
+
+const SIEM_DEFAULT_PORTS = { tls: 6514, tcp: 514, udp: 514 };
+const SIEM_CA_MAX_BYTES = 64 * 1024;
+const SIEM_TRANSPORT_NOTES = {
+  tls: "The receiver's certificate and name are always verified.",
+  tcp: "TCP is not encrypted: audit events cross the network in clear text.",
+  udp: "UDP is not encrypted and confirms nothing: an event lost in transit is not resent.",
+};
+
+let siemView = null;        // the last /api/settings/siem answer
+let siemPendingCa = null;   // { pem, name } chosen on this visit, not saved yet
+let siemRemoveCa = false;   // "Remove certificate" pressed, not saved yet
+
+function siemWhen(iso, now = Date.now()) {
+  if (!iso) return "Never";
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return "Never";
+  const seconds = Math.max(0, Math.round((now - at) / 1000));
+  if (seconds < 60) return "Just now";
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
+  return new Date(at).toLocaleString();
+}
+
+// One sentence for the state. "On" is never "connected": only a delivery or a passed
+// test of this configuration, with no failure since, is.
+function siemStateLine(view, now = Date.now()) {
+  if (!view) return "Checking…";
+  const queue = view.queue || {};
+  const receiver = view.config?.host ? `${view.config.host}:${view.config.port}` : "";
+  switch (view.state) {
+    case "disabled":
+      return receiver ? `Off — the configuration for ${receiver} is kept.` : "Off — audit events are not forwarded.";
+    case "not_configured":
+      return "On — no receiver configured yet. Events are not being sent.";
+    // Someone who may not change the receiver is not told where it is: the summary
+    // carries the state alone, and the sentence says only that.
+    case "not_connected":
+      return receiver
+        ? `On — not connected to ${receiver} yet. Test the connection, or wait for the next delivery.`
+        : "On — not connected yet.";
+    case "connected":
+      return receiver
+        ? `Connected to ${receiver} — last delivery ${siemWhen(view.status?.last_delivery_at, now).toLowerCase()}.`
+        : "Connected — audit events are being delivered.";
+    case "degraded": {
+      if (!receiver) return "Delivery degraded — audit events are queued and being retried.";
+      const count = Number(queue.pending || 0);
+      return `Delivery degraded — ${count} event${count === 1 ? "" : "s"} queued for ${receiver}, retrying.`;
+    }
+    case "unavailable":
+      return "Status unavailable.";
+    default:
+      return "Checking…";
+  }
+}
+
+// What a save or a test sends. A certificate only when one was chosen here; nothing that
+// stands for a stored value is ever sent back as if it were one.
+function siemRequestBody(fields, pendingCa, removeCa) {
+  const port = Number(String(fields.port ?? "").trim());
+  const body = {
+    transport: fields.transport || "tls",
+    host: String(fields.host || "").trim(),
+    port: Number.isInteger(port) && port > 0 ? port : null,
+    format: fields.format || "cef",
+    trust: fields.transport === "tls" ? (fields.trust || "system") : "system",
+  };
+  if (pendingCa && pendingCa.pem) {
+    body.ca_pem = pendingCa.pem;
+    body.ca_name = pendingCa.name || "ca.pem";
+  } else if (removeCa) {
+    body.remove_ca = true;
+  }
+  return body;
+}
+
+function siemFields() {
+  return {
+    host: siemHost.value,
+    port: siemPort.value,
+    transport: siemTransport.value,
+    format: siemFormat.value,
+    trust: siemTrust.value,
+  };
+}
+
+function siemCaText() {
+  if (siemPendingCa) return `${siemPendingCa.name} — will be saved`;
+  if (siemRemoveCa) return "Will be removed when you save";
+  const ca = siemView?.config?.ca;
+  if (!ca) return "No certificate uploaded";
+  return `${ca.name} · SHA-256 ${String(ca.fingerprint || "").slice(0, 23)}…`;
+}
+
+function syncSiemFieldVisibility() {
+  const tls = siemTransport.value === "tls";
+  document.querySelectorAll(".siem-tls-only").forEach((element) => { element.hidden = !tls; });
+  siemCaField.hidden = !tls || siemTrust.value !== "custom";
+  siemNote.textContent = SIEM_TRANSPORT_NOTES[siemTransport.value] || "";
+  siemPort.placeholder = String(SIEM_DEFAULT_PORTS[siemTransport.value] || 6514);
+  siemCaSummary.textContent = siemCaText();
+  siemCaRemove.hidden = !(siemPendingCa || (siemView?.config?.ca && !siemRemoveCa));
+}
+
+function setSiemState(state, line) {
+  siemState.dataset.state = state;
+  siemStateText.textContent = line;
+}
+
+function renderSiemSummary(summary) {
+  if (!summary) return;
+  siemToggle.checked = Boolean(summary.enabled);
+  siemToggle.disabled = !summary.editable;
+  if (!summary.editable) {
+    siemPanel.hidden = true;
+    siemRemoveRow.hidden = true;
+    setSiemState(summary.state, siemStateLine({ state: summary.state }));
+    setStatus(siemStatus, "Only the installation's administrator can change SIEM forwarding.");
+    return;
+  }
+  // Loaded once per visit: the OCR switch re-renders the features, and reloading here
+  // would throw away a half-filled form.
+  if (!siemView) {
+    setSiemState(summary.state, siemStateLine({ state: summary.state }));
+    loadSiem();
+  }
+}
+
+function renderSiem(view, { fillForm = true } = {}) {
+  siemView = view;
+  const config = view.config || {};
+  siemToggle.checked = Boolean(view.enabled);
+  siemToggle.disabled = !view.editable;
+  const open = Boolean(view.enabled && view.editable);
+  siemPanel.hidden = !open;
+  siemToggle.setAttribute("aria-expanded", String(open));
+  setSiemState(view.state, siemStateLine(view));
+  if (fillForm) {
+    siemHost.value = config.host || "";
+    siemPort.value = config.host ? String(config.port || "") : "";
+    siemTransport.value = config.transport || "tls";
+    siemFormat.value = config.format || "cef";
+    siemTrust.value = config.trust || "system";
+    siemPendingCa = null;
+    siemRemoveCa = false;
+  }
+  syncSiemFieldVisibility();
+  const queue = view.queue || {};
+  const status = view.status || {};
+  siemFacts.receiver.textContent = config.host ? `${config.host}:${config.port} (${String(config.transport).toUpperCase()}, ${String(config.format).toUpperCase()})` : "Not configured";
+  siemFacts.delivery.textContent = siemWhen(status.last_delivery_at);
+  siemFacts.queue.textContent = queue.pending
+    ? `${queue.pending} waiting${queue.failing ? `, ${queue.failing} failed at least once` : ""}`
+    : "None";
+  siemFacts.ca.textContent = config.transport !== "tls"
+    ? `Not used over ${String(config.transport || "").toUpperCase()}${config.ca ? ` (${config.ca.name} is kept for TLS)` : ""}`
+    : (config.trust === "custom" ? (config.ca ? `${config.ca.name} · ${config.ca.fingerprint}` : "Missing") : "System trust store");
+  // The last error matters while delivery is failing; once events flow again it is history.
+  siemFacts.errorRow.hidden = !(status.last_error && (view.state === "degraded" || view.state === "not_connected"));
+  siemFacts.error.textContent = status.last_error ? `${status.last_error} (${siemWhen(status.last_error_at).toLowerCase()})` : "";
+  siemRetryBtn.hidden = !queue.pending;
+  siemRemoveRow.hidden = !(view.editable && view.configured);
+}
+
+async function loadSiem() {
+  try {
+    renderSiem(await api("/api/settings/siem"));
+  } catch (error) {
+    setSiemState("unavailable", "Status unavailable.");
+    setStatus(siemStatus, `Could not load the SIEM settings: ${error.message}`);
+  }
+}
+
+function siemBusy(busy) {
+  [siemTestBtn, siemRetryBtn, siemSaveBtn, siemRemoveBtn, siemCaChoose, siemCaRemove].forEach((button) => {
+    if (button) button.disabled = busy;
+  });
+}
+
+async function siemAction(pending, run, done) {
+  siemBusy(true);
+  siemStatus.classList.remove("error");
+  setStatus(siemStatus, pending);
+  try {
+    setStatus(siemStatus, done(await run()));
+  } catch (error) {
+    siemStatus.classList.add("error");
+    setStatus(siemStatus, error.message);
+  } finally {
+    siemBusy(false);
+  }
+}
+
+siemToggle.addEventListener("change", () => {
+  const wanted = siemToggle.checked;
+  siemToggle.disabled = true;
+  siemAction(wanted ? "Turning SIEM forwarding on…" : "Turning SIEM forwarding off…", async () => {
+    const view = await api("/api/settings/siem/enabled", { enabled: wanted }, "PUT");
+    renderSiem(view);
+    if (wanted && !view.configured) siemHost.focus();
+    return view;
+  }, (view) => (wanted
+    ? (view.configured ? "SIEM forwarding is on." : "SIEM forwarding is on. Configure the receiver and save.")
+    : "SIEM forwarding is off. The configuration is kept.")).finally(() => {
+    // Whatever happened, the switch shows what the server says.
+    siemToggle.disabled = !(siemView?.editable);
+    siemToggle.checked = siemView ? Boolean(siemView.enabled) : !wanted;
+  });
+});
+
+siemTransport.addEventListener("change", () => {
+  const previous = Object.values(SIEM_DEFAULT_PORTS).map(String);
+  if (!siemPort.value || previous.includes(siemPort.value)) siemPort.value = String(SIEM_DEFAULT_PORTS[siemTransport.value]);
+  syncSiemFieldVisibility();
+});
+siemTrust.addEventListener("change", syncSiemFieldVisibility);
+
+siemCaChoose.addEventListener("click", () => siemCaFile.click());
+siemCaFile.addEventListener("change", async () => {
+  const file = siemCaFile.files?.[0];
+  siemCaFile.value = "";
+  if (!file) return;
+  siemStatus.classList.add("error");
+  if (file.size > SIEM_CA_MAX_BYTES) {
+    setStatus(siemStatus, "That file is larger than 64 KB. Upload the CA certificate only.");
+    return;
+  }
+  const pem = await file.text();
+  if (/PRIVATE KEY/i.test(pem)) {
+    // Not kept, not sent: a private key is never needed here.
+    setStatus(siemStatus, "That file contains a private key. Upload the CA's certificate only.");
+    return;
+  }
+  if (!pem.includes("-----BEGIN CERTIFICATE-----")) {
+    setStatus(siemStatus, "Upload a PEM certificate (-----BEGIN CERTIFICATE-----).");
+    return;
+  }
+  siemStatus.classList.remove("error");
+  siemPendingCa = { pem, name: file.name };
+  siemRemoveCa = false;
+  syncSiemFieldVisibility();
+  setStatus(siemStatus, `${file.name} is ready. Save to use it, or test the connection with it first.`);
+});
+siemCaRemove.addEventListener("click", () => {
+  siemPendingCa = null;
+  siemRemoveCa = Boolean(siemView?.config?.ca);
+  syncSiemFieldVisibility();
+});
+
+siemForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const body = siemRequestBody(siemFields(), siemPendingCa, siemRemoveCa);
+  siemAction("Saving…", async () => renderSiem(await api("/api/settings/siem", body, "PUT")),
+    () => "Saved. Test the connection to confirm the receiver answers.");
+});
+
+siemTestBtn.addEventListener("click", () => {
+  const body = siemRequestBody(siemFields(), siemPendingCa, siemRemoveCa);
+  siemAction("Testing the connection…", async () => {
+    const data = await api("/api/settings/siem/test", body, "POST");
+    renderSiem(data, { fillForm: false });
+    if (!data.test.ok) throw new Error(data.test.message);
+    return data.test.message;
+  }, (message) => message);
+});
+
+siemRetryBtn.addEventListener("click", () => {
+  siemAction("Sending the queued events…", async () => {
+    const data = await api("/api/settings/siem/retry", null, "POST");
+    renderSiem(data, { fillForm: false });
+    if (data.retry.failed) throw new Error(`${data.retry.sent} sent; ${data.retry.failed} still waiting. ${data.status?.last_error || ""}`.trim());
+    return data.retry;
+  }, (retry) => (retry.sent ? `Sent ${retry.sent} queued event${retry.sent === 1 ? "" : "s"}.` : "Nothing was due."));
+});
+
+// The state changes on its own - a receiver goes down, a queue drains - so while the
+// Features section is on screen the status is re-read every 15 seconds. The form is
+// never touched by it.
+window.setInterval(() => {
+  if (document.visibilityState !== "visible" || !siemView?.editable) return;
+  if (!document.querySelector('.settings-section[data-panel="features"]')?.classList.contains("active")) return;
+  api("/api/settings/siem").then((view) => renderSiem(view, { fillForm: false })).catch(() => {});
+}, 15000);
+
+siemRemoveBtn.addEventListener("click", () => {
+  const receiver = siemView?.config?.host ? `${siemView.config.host}:${siemView.config.port}` : "the receiver";
+  if (!window.confirm(`Remove the SIEM configuration for ${receiver}? Forwarding stops and its certificate is deleted. Events already queued stay queued.`)) return;
+  siemAction("Removing the configuration…", async () => renderSiem(await api("/api/settings/siem", null, "DELETE")),
+    () => "Configuration removed. Forwarding is off.");
 });
 
 /* ── Forms ────────────────────────────────────────────────────── */

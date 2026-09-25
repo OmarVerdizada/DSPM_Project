@@ -1148,6 +1148,26 @@ class FeatureSettingsRequest(BaseModel):
     ocr_enabled: bool
 
 
+class SiemSettingsRequest(BaseModel):
+    """The SIEM receiver. There is no credential field: syslog over TLS, TCP or UDP carries
+    none. The CA certificate follows the stored-secret rule anyway - omitted, the saved one
+    is kept; sent, it replaces it; `remove_ca` deletes it."""
+    # Every field defaults to "not sent": an omitted field keeps the saved value, so a
+    # test of the saved configuration is an empty body and a save may change one field.
+    transport: str | None = Field(default=None, max_length=8)
+    host: str | None = Field(default=None, max_length=253)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    format: str | None = Field(default=None, max_length=8)
+    trust: str | None = Field(default=None, max_length=8)
+    ca_pem: str | None = Field(default=None, max_length=70_000)
+    ca_name: str | None = Field(default=None, max_length=200)
+    remove_ca: bool = False
+
+
+class SiemEnabledRequest(BaseModel):
+    enabled: bool
+
+
 class CredentialRequest(BaseModel):
     username: str = Field(min_length=1, max_length=160)
     password: str = Field(min_length=1, max_length=512)
@@ -1202,7 +1222,11 @@ def _siem_health() -> dict:
     from backend.siem import forwarding_enabled
     from backend.store import audit_outbox_status
 
-    if not forwarding_enabled():
+    try:
+        enabled = forwarding_enabled()
+    except Exception:  # health must answer even if the settings cannot be read
+        return {"enabled": None}
+    if not enabled:
         return {"enabled": False}
     try:
         status = audit_outbox_status()
@@ -1930,9 +1954,29 @@ def _feature_settings_payload(principal: Principal) -> dict:
                 "state": status["state"],
                 # Install-wide: turning OCR on changes every tenant's scans.
                 "editable": has_permission(principal, "platform.admin"),
-            }
+            },
+            # Everyone sees whether the audit trail reaches a SIEM; the receiver and its
+            # certificate are for whoever may change them (/api/settings/siem).
+            "siem": _siem_summary(principal),
         }
     }
+
+
+def _siem_view(principal: Principal) -> dict:
+    from backend import siem_settings
+    from backend.store import audit_outbox_status
+
+    enabled, config, status = siem_settings.load()
+    return siem_settings.public_view(enabled, config, status, audit_outbox_status(),
+                                     editable=has_permission(principal, "platform.admin"))
+
+
+def _siem_summary(principal: Principal) -> dict:
+    try:
+        view = _siem_view(principal)
+    except Exception:  # the features page must load even if the outbox cannot be read
+        return {"enabled": False, "state": "unavailable", "editable": False}
+    return {"enabled": view["enabled"], "state": view["state"], "editable": view["editable"]}
 
 
 @app.get("/api/settings/features")
@@ -1947,6 +1991,109 @@ def update_feature_settings(payload: FeatureSettingsRequest, principal: Principa
     os.environ["DSPM_OCR_ENABLED"] = value
     audit(principal.tenant_id, principal.subject, "settings.feature_toggled", {"feature": "ocr", "enabled": payload.ocr_enabled})
     return _feature_settings_payload(principal)
+
+
+# ── C4: SIEM integration, configured in the console ─────────────────────────────────
+# The engine - outbox, retries, TLS, delivery - is backend.siem; these routes are the
+# configuration, the switch, the connection test and the status, all install-wide and all
+# platform.admin, like the OCR switch. Nothing here returns the CA certificate itself.
+
+def _siem_audit(principal: Principal, action: str, detail: dict) -> None:
+    audit(principal.tenant_id, principal.subject, action, detail)
+
+
+@app.get("/api/settings/siem")
+def siem_settings_read(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    return _siem_view(principal)
+
+
+@app.put("/api/settings/siem")
+def siem_settings_save(payload: SiemSettingsRequest, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    from backend import siem_settings
+
+    _enabled, saved, _status = siem_settings.load()
+    try:
+        config = siem_settings.merge(saved, payload.model_dump(exclude_none=True))
+    except siem_settings.SiemSettingsError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The SIEM settings were refused.")) from exc
+    changed = siem_settings.changed_fields(saved, config)
+    siem_settings.save_config(config)
+    if changed or not saved:
+        _siem_audit(principal, "settings.siem_changed", {
+            "changed": changed, "transport": config["transport"], "host": config["host"], "port": config["port"],
+            "format": config["format"], "trust": config["trust"], "ca_fingerprint": config.get("ca_fingerprint", ""),
+        })
+    return _siem_view(principal)
+
+
+@app.put("/api/settings/siem/enabled")
+def siem_settings_enable(payload: SiemEnabledRequest, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    from backend import siem, siem_settings
+
+    enabled, config, _status = siem_settings.load()
+    if payload.enabled == enabled:
+        return _siem_view(principal)
+    if payload.enabled:
+        siem_settings.set_enabled(True)
+        _siem_audit(principal, "settings.siem_enabled", {"host": config.get("host", ""), "port": config.get("port", "")})
+    else:
+        # Recorded while forwarding is still on, and sent before it stops, so the SIEM is
+        # told it has been turned off. If it cannot be reached, the event stays queued.
+        _siem_audit(principal, "settings.siem_disabled", {"host": config.get("host", ""), "port": config.get("port", "")})
+        with suppress(Exception):
+            siem.drain(limit=50)
+        siem_settings.set_enabled(False)
+    return _siem_view(principal)
+
+
+@app.post("/api/settings/siem/test")
+def siem_settings_test(payload: SiemSettingsRequest, principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    """Test the receiver in the form - saved or not - without saving it."""
+    from backend import siem, siem_settings
+
+    _enabled, saved, _status = siem_settings.load()
+    try:
+        config = siem_settings.merge(saved, payload.model_dump(exclude_none=True))
+    except siem_settings.SiemSettingsError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The SIEM settings were refused.")) from exc
+    result = siem.test_connection(siem_settings.target_from(config))
+    stamp = datetime.now(timezone.utc).isoformat()
+    siem_settings.record(last_test={"at": stamp, "ok": result["ok"], "message": result["message"],
+                                    "signature": siem_settings.config_signature(config)})
+    _siem_audit(principal, "settings.siem_test_succeeded" if result["ok"] else "settings.siem_test_failed", {
+        "transport": config["transport"], "host": config["host"], "port": config["port"], "ok": result["ok"],
+    })
+    return {"test": {**result, "at": stamp}, **_siem_view(principal)}
+
+
+@app.post("/api/settings/siem/retry")
+def siem_settings_retry(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    """Send what is queued now instead of at its next back-off. Delivery is still at least
+    once and still acknowledged only by the receiver: this only moves the wait."""
+    from backend import siem
+    from backend.store import reset_audit_outbox_backoff
+
+    made_due = reset_audit_outbox_backoff()
+    # Recorded first, so the same pass carries it to the SIEM with the rest.
+    _siem_audit(principal, "settings.siem_retry", {"made_due": made_due})
+    result = siem.drain(limit=500)
+    return {"retry": result, **_siem_view(principal)}
+
+
+@app.delete("/api/settings/siem")
+def siem_settings_remove(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    """Delete the receiver's configuration and its certificate; forwarding is off after.
+    Events already queued stay queued until a receiver is configured again."""
+    from backend import siem, siem_settings
+
+    enabled, config, _status = siem_settings.load()
+    _siem_audit(principal, "settings.siem_removed", {"host": config.get("host", ""), "port": config.get("port", ""),
+                                                     "was_enabled": enabled})
+    if enabled:
+        with suppress(Exception):
+            siem.drain(limit=50)
+    siem_settings.remove_config()
+    return _siem_view(principal)
 
 
 class CustomRoleRequest(BaseModel):
