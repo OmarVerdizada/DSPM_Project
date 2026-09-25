@@ -232,6 +232,7 @@ class WhatTheCacheMayNeverDoTest(_DatabaseTest):
         with store._connect() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM derived_cache").fetchone()["n"], 0)
 
+    @unittest.skipIf(db.is_postgres(), "drops the table; on PostgreSQL that is the shared test database")
     def test_a_database_without_the_table_is_not_an_outage(self) -> None:
         with store._connect() as conn:
             conn.execute("DROP TABLE derived_cache")

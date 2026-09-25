@@ -26,7 +26,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from backend import app as app_module
-from backend import audit_chain, migrations, security, store
+from backend import audit_chain, db, migrations, security, store
 from backend.app import app
 from backend.client_address import client_address, request_address
 from backend.reporting import artifacts
@@ -188,6 +188,7 @@ class WritersDoNotForkTheChainTest(_TempDatabase):
         self.assertEqual(result["rows"], 90)
 
 
+@unittest.skipIf(db.is_postgres(), "builds an older SQLite file; the PostgreSQL upgrade path is scripted in C0.5")
 class RevisionTwentyTwoTest(unittest.TestCase):
     """An install whose audit rows predate the chain: sealed at upgrade, and said to be."""
 

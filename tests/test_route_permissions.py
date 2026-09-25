@@ -28,7 +28,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 from backend import app as app_module
-from backend import migrations, permissions, security, store
+from backend import db, migrations, permissions, security, store
 from backend.app import app
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -454,6 +454,7 @@ class TheConsoleIsToldTest(_RolesCase):
         self.assertIn("export", self.client.get("/api/profile", headers=headers).json()["permissions"])
 
 
+@unittest.skipIf(db.is_postgres(), "builds an older SQLite file; the PostgreSQL upgrade path is scripted in C0.5")
 class RevisionTwentyTest(unittest.TestCase):
     """users.role had CHECK (role IN ('admin', 'analyst', 'viewer')) since the baseline."""
 

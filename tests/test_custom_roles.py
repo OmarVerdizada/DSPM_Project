@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend import migrations, permissions, security, store
+from backend import db, migrations, permissions, security, store
 from backend.app import app
 
 TENANT = "tenant-roles"
@@ -207,6 +207,7 @@ class ARoleBelongsToItsTenantTest(_RolesCase):
         self.assertEqual(store.list_custom_roles(TENANT), [])
 
 
+@unittest.skipIf(db.is_postgres(), "builds an older SQLite file; the PostgreSQL upgrade path is scripted in C0.5")
 class RevisionTwentyOneTest(unittest.TestCase):
 
     def test_an_install_at_revision_twenty_gains_the_table(self) -> None:
