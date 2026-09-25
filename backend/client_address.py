@@ -63,7 +63,52 @@ def client_address(peer: str, forwarded_for: str = "") -> str:
     return peer
 
 
+def _forwarded_for(headers) -> str:
+    """Every X-Forwarded-For line, in order, as one list (C5). A proxy that adds its own
+    line rather than appending to the client's leaves the client's forgery FIRST; reading
+    only the first line would have believed it."""
+    getlist = getattr(headers, "getlist", None)
+    values = getlist("x-forwarded-for") if callable(getlist) else [headers.get("x-forwarded-for", "")]
+    return ", ".join(str(value) for value in values if str(value or "").strip())
+
+
 def request_address(request) -> str:
     peer = getattr(getattr(request, "client", None), "host", "") or ""
     headers = getattr(request, "headers", None) or {}
-    return client_address(peer, headers.get("x-forwarded-for", ""))
+    return client_address(peer, _forwarded_for(headers))
+
+
+def request_scheme(request) -> str:
+    """https or http, as the client used it. Behind a TLS-terminating proxy the backend
+    is spoken to in plain HTTP; the proxy's X-Forwarded-Proto is believed only from a
+    trusted proxy, like its X-Forwarded-For (C5)."""
+    scheme = str(getattr(getattr(request, "url", None), "scheme", "") or "http")
+    peer = getattr(getattr(request, "client", None), "host", "") or ""
+    networks = trusted_proxies()
+    if networks and _is_trusted(peer, networks):
+        headers = getattr(request, "headers", None) or {}
+        forwarded = str(headers.get("x-forwarded-proto", "") or "").split(",")[-1].strip().lower()
+        if forwarded in {"http", "https"}:
+            return forwarded
+    return scheme
+
+
+def trusted_proxy_problems(setting: str | None = None) -> list[str]:
+    """What is wrong with DSPM_TRUSTED_PROXIES, for the production startup check. At run
+    time an unreadable entry is skipped; at startup in production it is refused, and so is
+    a network that trusts every address - which would let any client name itself."""
+    setting = os.getenv("DSPM_TRUSTED_PROXIES", "") if setting is None else setting
+    problems = []
+    for item in str(setting).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            problems.append(f"DSPM_TRUSTED_PROXIES entry {item!r} is not an address or network")
+            continue
+        if network.prefixlen == 0:
+            problems.append(f"DSPM_TRUSTED_PROXIES entry {item!r} trusts every address, so any client could "
+                            "choose the address it is audited and throttled as")
+    return problems

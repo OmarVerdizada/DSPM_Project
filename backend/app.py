@@ -27,8 +27,14 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# C5: the network boundary is checked before any other backend module loads - an unsafe
+# production configuration refuses to start, it is not logged (backend/deployment_boundary).
+from backend import deployment_boundary
+
+deployment_boundary.enforce(deployment_boundary.trusted_hosts_setting(), deployment_boundary.cors_origins_setting())
+
 from backend.alerts import evaluate_alerts
-from backend.client_address import request_address
+from backend.client_address import request_address, request_scheme
 from backend.errors import client_message, new_reference
 from backend.evidence import without_evidence
 from backend.permissions import (
@@ -193,22 +199,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 vault = CredentialVault()
 PROTECTED_USERS = {"admin"}
-DEFAULT_CORS_ORIGINS = [
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3000",
-]
-CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv("DSPM_CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS)).split(",")
-    if origin.strip()
-]
-TRUSTED_HOSTS = [
-    host.strip()
-    for host in os.getenv("DSPM_TRUSTED_HOSTS", "").split(",")
-    if host.strip()
-]
+# C5: the console is served by this backend, so it needs no cross-origin access. The
+# localhost list is a development convenience; production starts with none and refuses a
+# wildcard, local or plain-HTTP origin (checked at the top of this module).
+DEFAULT_CORS_ORIGINS = list(deployment_boundary.DEVELOPMENT_CORS_ORIGINS)
+CORS_ORIGINS = deployment_boundary.cors_origins_setting()
+TRUSTED_HOSTS = deployment_boundary.trusted_hosts_setting()
 ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE = 256
 # A file whose text is larger than this is read up to here and marked truncated. The
 # collector's own default is the local one - a hundred megabytes - which one file can
@@ -543,7 +539,7 @@ async def secure_response_headers(request: Request, call_next):
         "font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     )
-    if request.url.scheme == "https" or IS_PRODUCTION:
+    if request_scheme(request) == "https" or IS_PRODUCTION:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
@@ -1741,7 +1737,7 @@ def login(payload: LoginRequest, request: Request) -> dict:
 def _refresh_cookie_is_secure(request: Request) -> bool:
     """Secure on HTTPS and in production. Not on a plain-HTTP development console,
     where a Secure cookie would simply never be sent and refresh would never work."""
-    return IS_PRODUCTION or request.url.scheme == "https"
+    return IS_PRODUCTION or request_scheme(request) == "https"
 
 
 def _with_refresh_cookie(response: Response, request: Request, secret: str) -> Response:

@@ -79,6 +79,14 @@ def serve(args: argparse.Namespace) -> None:
     is_production = os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}
     if args.reload and is_production:
         raise SystemExit("--reload is disabled when DSPM_ENV=production")
+    if is_production:
+        # C5: where the backend listens is decided here; the rest of the boundary is
+        # checked again when the app is imported.
+        from backend import deployment_boundary
+
+        problems = deployment_boundary.bind_problems(args.host)
+        if problems:
+            raise SystemExit(deployment_boundary.refusal(problems))
     workers = max(1, int(getattr(args, "workers", 1) or 1))
     if workers > 1:
         if args.reload:
@@ -95,6 +103,10 @@ def serve(args: argparse.Namespace) -> None:
     uvicorn.run(
         "backend.app:app", host=args.host, port=args.port,
         reload=args.reload, workers=workers if workers > 1 else None,
+        # C5: uvicorn believes X-Forwarded-For and -Proto from 127.0.0.1 by default,
+        # whatever DSPM_TRUSTED_PROXIES says - so behind a proxy on this host any local
+        # program could name its own address. The app decides (backend/client_address).
+        proxy_headers=False,
     )
 
 
