@@ -31,7 +31,7 @@ REQUIRED_ISOLATED = {
     "assets", "findings", "scan_reports", "scan_runs", "audit_events", "audit_chain_heads",
     "audit_outbox", "suppression_rules", "scan_schedules", "partitioned_scans", "secrets", "custom_roles",
     "api_keys", "registration_invites", "derived_cache", "alert_events", "finding_index", "scan_jobs",
-    "scan_object_baselines", "scan_partitions", "scan_profiles", "users",
+    "scan_object_baselines", "scan_partitions", "scan_profiles", "users", "scan_targets",
 }
 
 
@@ -125,6 +125,7 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
                                          (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), False, "tester")
         store.derived_store(tenant, "iso-key", 1, "{}", 60)
         store.save_alerts(tenant, f"{tenant}-scan", [{"kind": "seed"}])
+        store.add_scan_target(tenant, "network", "10.20.0.0/16", "seed", "tester")
 
     def _tenant_tables(self) -> list[str]:
         with store._connect() as conn:

@@ -171,7 +171,8 @@ from classification.compliance.nist_catalog import (
     validate_nist_catalog,
 )
 from collectors.file_scanner import normalize_extension_filter, scan_directory
-from collectors.net_guard import ip_disallowed_reason
+from collectors.net_guard import resolve_addresses
+from backend import target_scope
 from collectors.win_security import security_for_path
 from collectors.winrm_endpoint_scanner import (
     ENDPOINT_PATH_ALIASES,
@@ -1321,6 +1322,11 @@ def readiness() -> "JSONResponse":
         warnings.append("no backup manifest found")
     elif age > max_age_hours * 3600:
         warnings.append(f"newest backup is {age / 3600:.1f}h old (threshold {max_age_hours:g}h)")
+    if os.getenv("DSPM_ALLOW_PRIVATE_TARGETS", "").strip():
+        # C5: an install upgraded with the old switch set would otherwise not know why
+        # its scans are now refused (production) or unrestricted (development, no list).
+        warnings.append("DSPM_ALLOW_PRIVATE_TARGETS is set but no longer read: each workspace lists its "
+                        "scan targets under Security operations -> Scan targets")
 
     body = {
         "ready": not failures,
@@ -2172,6 +2178,72 @@ def custom_role_delete(name: str, principal: Principal = Depends(require_permiss
     return _roles_payload(principal.tenant_id)
 
 
+# ── Scan targets (C5) ────────────────────────────────────────────────────────────
+# The networks and host names a workspace may scan. Reading them is for whoever runs
+# scans; changing them is the workspace administrator's, and every change is audited.
+class ScanTargetRequest(BaseModel):
+    value: str = Field(default="", max_length=253)
+    note: str = Field(default="", max_length=200)
+
+
+class ScanTargetCheckRequest(BaseModel):
+    host: str = Field(default="", max_length=253)
+
+
+def _scan_targets_view(principal: Principal) -> dict:
+    entries = store_module.list_scan_targets(principal.tenant_id)
+    production = deployment_boundary.is_production()
+    return {
+        "entries": entries,
+        # list: only what is listed; closed: nothing (production, no list); open: anything
+        # but the addresses that are never targets (development, no list).
+        "mode": "list" if entries else ("closed" if production else "open"),
+        "production": production,
+        "editable": has_permission(principal, "tenant.admin"),
+        "limit": target_scope.MAX_ENTRIES,
+    }
+
+
+@app.get("/api/scan-targets")
+def scan_targets_read(principal: Principal = Depends(require_permission("scan.run", "tenant.admin"))) -> dict:
+    return _scan_targets_view(principal)
+
+
+@app.post("/api/scan-targets")
+def scan_targets_add(payload: ScanTargetRequest, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    try:
+        kind, value = target_scope.parse_entry(payload.value)
+        entry = store_module.add_scan_target(principal.tenant_id, kind, value, payload.note.strip(), principal.subject,
+                                             limit=target_scope.MAX_ENTRIES)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "That scan target was refused.")) from exc
+    audit(principal.tenant_id, principal.subject, "scan_targets.added",
+          {"kind": kind, "value": value, "note": entry["note"]})
+    return _scan_targets_view(principal)
+
+
+@app.delete("/api/scan-targets/{entry_id}")
+def scan_targets_remove(entry_id: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    removed = store_module.delete_scan_target(principal.tenant_id, entry_id)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="Scan target not found")
+    audit(principal.tenant_id, principal.subject, "scan_targets.removed",
+          {"kind": removed["kind"], "value": removed["value"]})
+    return _scan_targets_view(principal)
+
+
+@app.post("/api/scan-targets/check")
+def scan_targets_check(payload: ScanTargetCheckRequest, principal: Principal = Depends(require_permission("scan.run", "tenant.admin"))) -> dict:
+    """Would this host be scanned? Asked before a scan, so it records nothing."""
+    host = payload.host.strip()
+    if not host:
+        raise HTTPException(status_code=400, detail="Enter a host name or address.")
+    addresses = resolve_addresses(host)
+    reason = target_scope.decide(target_scope.scope_for(principal.tenant_id), host, addresses)
+    return {"host": host, "allowed": reason is None, "reason": reason or "",
+            "addresses": [str(address) for address in addresses[:5]]}
+
+
 @app.get("/api/users")
 def users(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
     tenant_id = None if _is_platform_admin(principal) else principal.tenant_id
@@ -2624,7 +2696,7 @@ def scan_schedules_run_now(schedule_id: str, principal: Principal = Depends(requ
 @app.post("/api/test-connection")
 def test_connection(payload: ConnectionRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     if not _is_local_endpoint_host(payload.server):
-        _validate_scan_target(payload.server)
+        _validate_scan_target(payload.server, principal)
     engine = DSPMDiscoveryEngine(_to_config(payload, principal.tenant_id))
     audit(principal.tenant_id, principal.subject, "connection.test", {"server": _safe_target_label(payload.server)})
     return engine.test_connection()
@@ -2648,7 +2720,7 @@ def endpoint_test_connection(payload: EndpointScanRequest, principal: Principal 
             "computer": socket.gethostname(),
             "message": "Local workstation scan is available without WinRM.",
         }
-    _validate_scan_target(payload.host)
+    _validate_scan_target(payload.host, principal)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     transport = scanner.transport_summary()
     audit(
@@ -2689,7 +2761,7 @@ def endpoint_check_access(payload: EndpointScanRequest, principal: Principal = D
             "verdict": "A local scan runs as the account the DSPM backend runs as; there is no WinRM credential to check.",
             "profiles": [],
         }
-    _validate_scan_target(payload.host)
+    _validate_scan_target(payload.host, principal)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     transport = scanner.transport_summary()
     audit(
@@ -2731,7 +2803,7 @@ def endpoint_activate_winrm(payload: EndpointScanRequest, principal: Principal =
             LocalWinRMActivationRequest(domain=payload.domain, username=payload.username, password=payload.password),
             principal,
         )
-    _validate_scan_target(payload.host)
+    _validate_scan_target(payload.host, principal)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     try:
         result = scanner.activate_winrm()
@@ -2753,7 +2825,7 @@ def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = D
             LocalWinRMActivationRequest(domain=payload.domain, username=payload.username, password=payload.password),
             principal,
         )
-    _validate_scan_target(payload.host)
+    _validate_scan_target(payload.host, principal)
     scanner = WinRMEndpointScanner(_to_endpoint_config(payload, principal.tenant_id))
     try:
         result = scanner.activate_winrm()
@@ -2777,7 +2849,7 @@ def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = D
 def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         if not _is_local_endpoint_host(payload.host):
-            _validate_scan_target(payload.host)
+            _validate_scan_target(payload.host, principal)
         config = _to_endpoint_config(payload, principal.tenant_id)
         if payload.async_scan:
             job = create_job(principal.tenant_id, lambda job: _run_endpoint_scan_payload(config, payload, principal, job))
@@ -2822,7 +2894,7 @@ def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(
 def scan(payload: ScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
     try:
         if not _is_local_endpoint_host(payload.server):
-            _validate_scan_target(payload.server)
+            _validate_scan_target(payload.server, principal)
         _prepare_local_scan_data(payload)
         if partitioned_scans_enabled():
             # Local targets split into runs of their walk, SMB servers into groups of
@@ -3721,38 +3793,16 @@ def _is_local_endpoint_host(host: str) -> bool:
     return bool(target and target in {name for name in local_names if name})
 
 
-def _host_addresses(host: str) -> set[ipaddress._BaseAddress]:
-    target = (host or "").strip().strip("[]")
-    if not target:
-        return set()
-    try:
-        return {ipaddress.ip_address(target)}
-    except ValueError:
-        pass
-    addresses: set[ipaddress._BaseAddress] = set()
-    try:
-        for family, _, _, _, sockaddr in socket.getaddrinfo(target, None):
-            if family in {socket.AF_INET, socket.AF_INET6}:
-                addresses.add(ipaddress.ip_address(sockaddr[0]))
-    except socket.gaierror:
-        return set()
-    return addresses
-
-
-def _validate_scan_target(target: str) -> None:
+def _validate_scan_target(target: str, principal: Principal) -> None:
+    """C5: the workspace's scan targets decide (backend/target_scope); a refusal is
+    audited and the scan never starts. The collectors ask again when they connect."""
     target = (target or "").strip()
     if not target:
         return
-    addresses = _host_addresses(target)
-    if not addresses:
-        return
-    allow_private = os.getenv("DSPM_ALLOW_PRIVATE_TARGETS", "0" if IS_PRODUCTION else "1") == "1"
-    # M12: single source of truth for "is this a permissible scan-target address",
-    # shared with the collectors' resolve-and-pin connect guard (collectors/net_guard).
-    for address in addresses:
-        reason = ip_disallowed_reason(address, allow_private)
-        if reason:
-            raise HTTPException(status_code=400, detail=f"Target address is not allowed: {reason}")
+    reason = target_scope.check(principal.tenant_id, target, actor=principal.subject, where="api")
+    if reason:
+        raise HTTPException(status_code=403, detail=reason)
+
 
 def _safe_tenant(tenant_id: str) -> str:
     safe = "".join(ch for ch in tenant_id.strip() if ch.isalnum() or ch in {"-", "_"}) or "default"
@@ -5062,6 +5112,7 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         domain = secret.get("domain", domain)
 
     return WinRMEndpointConfig(
+        tenant_id=tenant_id,
         host=payload.host.strip(),
         username=username,
         password=password,

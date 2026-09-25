@@ -668,6 +668,8 @@ class WinRMEndpointConfig:
     host: str
     username: str
     password: str
+    # C5: the workspace whose scan targets decide whether `host` may be connected to.
+    tenant_id: str = ""
     domain: str = "WORKGROUP"
     target_username: str = ""
     paths: list[str] = field(default_factory=lambda: ["desktop", "documents", "downloads"])
@@ -1151,7 +1153,7 @@ class WinRMEndpointScanner:
         # address is the dialed address; over HTTPS we keep the hostname in the URL
         # so certificate validation still applies (a rebind to loopback then fails
         # the cert), while still refusing a disallowed resolved address.
-        pinned = resolve_and_pin(connection_host)
+        pinned = resolve_and_pin(connection_host, tenant_id=self.config.tenant_id)
         host_for_url = connection_host if self.config.use_ssl else pinned
         if ":" in host_for_url and not host_for_url.startswith("["):
             host_for_url = f"[{host_for_url}]"  # bracket IPv6 literals for the URL

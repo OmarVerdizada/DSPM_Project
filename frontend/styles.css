@@ -17701,3 +17701,22 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
     padding-top: 4px;
   }
 }
+
+/* C5: one scan target per row - the entry, what it is, and Remove at the end. */
+#scan-targets-list {
+  list-style: none;
+  margin: var(--space-3) 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+#scan-targets-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+}
+#scan-targets-list li > span { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
+#scan-targets-list button { margin-top: 0; }

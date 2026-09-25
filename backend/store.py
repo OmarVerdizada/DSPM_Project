@@ -956,6 +956,31 @@ def add_audit_outbox(conn) -> None:
     add_tenant_rls(conn)
 
 
+_SCAN_TARGETS_DDL = """CREATE TABLE IF NOT EXISTS scan_targets (
+            tenant_id TEXT NOT NULL,
+            entry_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            value TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, entry_id)
+        );"""
+
+
+def add_scan_targets(conn) -> None:
+    """Revision 0024: the networks and host names a workspace may scan (C5).
+
+    Replaces the install-wide DSPM_ALLOW_PRIVATE_TARGETS switch with a list per tenant
+    (backend/target_scope). A tenant table, so revisions 0003 and 0004 are re-run for
+    its foreign key and row-level security; erased with its tenant.
+    """
+    conn.execute(_SCAN_TARGETS_DDL)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_targets_value ON scan_targets (tenant_id, value)")
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def add_refresh_tokens(conn) -> None:
     """Revision 0019: the rotating half of a bounded session (C1).
 
@@ -1402,6 +1427,19 @@ def apply_baseline_schema(conn) -> None:
             revoked INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash);
+
+        -- C5 (revision 0024): the networks and host names a tenant may scan.
+        CREATE TABLE IF NOT EXISTS scan_targets (
+            tenant_id TEXT NOT NULL,
+            entry_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            value TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, entry_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_scan_targets_value ON scan_targets (tenant_id, value);
 
         -- C3 (revision 0021): a tenant's own roles, by name.
         CREATE TABLE IF NOT EXISTS custom_roles (
@@ -8465,6 +8503,7 @@ def delete_tenant(tenant_id: str) -> bool:
 
 _TENANT_ERASURE_TABLES = (
     "registration_invites",
+    "scan_targets",
     "audit_chain_heads",
     "audit_outbox",
     "custom_roles",
@@ -8901,6 +8940,60 @@ def delete_custom_role(tenant_id: str, name: str) -> bool:
             ).rowcount
     _forget_custom_role(tenant_id, name)
     return bool(deleted)
+
+
+def _scan_target_row(row) -> dict:
+    return {"entry_id": row["entry_id"], "kind": row["kind"], "value": row["value"], "note": row["note"],
+            "created_by": row["created_by"], "created_at": row["created_at"]}
+
+
+@_tenant_scoped
+def list_scan_targets(tenant_id: str) -> list[dict]:
+    """The networks and host names this tenant may scan (C5, backend/target_scope)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT entry_id, kind, value, note, created_by, created_at FROM scan_targets "
+            "WHERE tenant_id = ? ORDER BY kind DESC, value",
+            (tenant_id,),
+        ).fetchall()
+    return [_scan_target_row(row) for row in rows]
+
+
+@_tenant_scoped
+def add_scan_target(tenant_id: str, kind: str, value: str, note: str, actor: str, *, limit: int = 500) -> dict:
+    """Add one entry; a value the tenant already lists is refused, as is a list at its limit."""
+    entry_id = secrets.token_hex(8)
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            existing = conn.execute("SELECT entry_id FROM scan_targets WHERE tenant_id = ? AND value = ?",
+                                    (tenant_id, value)).fetchone()
+            if existing is not None:
+                raise ValueError(f"{value} is already in this workspace's scan targets.")
+            count = conn.execute("SELECT COUNT(*) FROM scan_targets WHERE tenant_id = ?", (tenant_id,)).fetchone()[0]
+            if int(count) >= limit:
+                raise ValueError(f"A workspace can list at most {limit} scan targets; use a wider network.")
+            conn.execute(
+                "INSERT INTO scan_targets (tenant_id, entry_id, kind, value, note, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, entry_id, kind, value, note, actor, now),
+            )
+    return {"entry_id": entry_id, "kind": kind, "value": value, "note": note, "created_by": actor, "created_at": now}
+
+
+@_tenant_scoped
+def delete_scan_target(tenant_id: str, entry_id: str) -> dict | None:
+    """Remove one entry of this tenant's; None when it has no such entry."""
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT entry_id, kind, value, note, created_by, created_at FROM scan_targets "
+                "WHERE tenant_id = ? AND entry_id = ?", (tenant_id, str(entry_id or "")),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute("DELETE FROM scan_targets WHERE tenant_id = ? AND entry_id = ?", (tenant_id, row["entry_id"]))
+    return _scan_target_row(row)
 
 
 @_tenant_scoped

@@ -76,6 +76,7 @@ ATTEMPTS = [
     ("GET", "/api/v1/reports/artifacts/{artifact_id}", None),
     ("PUT", "/api/roles/{name}", {"permissions": ["export"]}),
     ("DELETE", "/api/roles/{name}", None),
+    ("DELETE", "/api/scan-targets/{entry_id}", None),
 ]
 
 # Routes that take an identifier but not a tenant's: said here, with the reason.
@@ -151,6 +152,7 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
         invite = self._ok(self.client.post(f"/api/tenants/{A}/invites", headers=boss, json={"role": "viewer"}))
         key = self._ok(self.client.post("/api/api-keys", headers=boss, json={"label": "ops", "role": "viewer"}))
         self._ok(self.client.post("/api/roles", headers=boss, json={"name": "xt_reviewer", "permissions": ["inventory.view"]}))
+        targets = self._ok(self.client.post("/api/scan-targets", headers=boss, json={"value": "10.20.0.0/16"}))
         artifact = self._ok(self.client.post("/api/v1/reports", headers=analyst, json={}))
         job = jobs.create_job(A, lambda _job: {"ok": True})
         for _ in range(100):
@@ -165,6 +167,7 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
             "rule_id": (rule.get("rule") or rule)["rule_id"],
             "invite_id": invite["invite_id"], "key_id": key["key_id"], "artifact_id": artifact["artifact_id"],
             "username": "a-member", "name": "xt_reviewer", "tenant_id": A,
+            "entry_id": targets["entries"][0]["entry_id"],
         }
 
     def _state_of_a(self) -> str:
@@ -181,6 +184,7 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
             "keys": self._ok(self.client.get("/api/api-keys", headers=boss)),
             "users": self._ok(self.client.get("/api/users", headers=boss)),
             "roles": [role for role in self._ok(self.client.get("/api/roles", headers=boss))["roles"] if not role.get("builtin")],
+            "scan_targets": self._ok(self.client.get("/api/scan-targets", headers=boss))["entries"],
             "tenant": store.get_tenant(A),
             "legal_hold": store.get_legal_hold(A),
             "password": store.get_user("a-member")["password_hash"],

@@ -66,6 +66,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (21, "custom_roles", store.add_custom_roles),
         (22, "audit_chain", store.add_audit_chain),
         (23, "audit_outbox", store.add_audit_outbox),
+        (24, "scan_targets", store.add_scan_targets),
     ]
 
 

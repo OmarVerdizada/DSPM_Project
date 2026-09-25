@@ -120,6 +120,15 @@ const customRolePermissions = document.querySelector("#custom-role-permissions")
 const saveCustomRoleBtn = document.querySelector("#save-custom-role-btn");
 const customRoleStatus = document.querySelector("#custom-role-status");
 const customRolesList = document.querySelector("#custom-roles-list");
+const scanTargetsMode = document.querySelector("#scan-targets-mode");
+const scanTargetValue = document.querySelector("#scan-target-value");
+const scanTargetNote = document.querySelector("#scan-target-note");
+const addScanTargetBtn = document.querySelector("#add-scan-target-btn");
+const scanTargetStatus = document.querySelector("#scan-target-status");
+const scanTargetsList = document.querySelector("#scan-targets-list");
+const scanTargetCheckHost = document.querySelector("#scan-target-check-host");
+const checkScanTargetBtn = document.querySelector("#check-scan-target-btn");
+const scanTargetCheckResult = document.querySelector("#scan-target-check-result");
 const apiKeyLabel = document.querySelector("#api-key-label");
 const apiKeyOutput = document.querySelector("#api-key-output");
 const exportDlpPolicyBtn = document.querySelector("#export-dlp-policy-btn");
@@ -3948,6 +3957,7 @@ function switchTab(tabName) {
       if (!accessToken) return;
       loadAudit().catch(() => {});
       loadUsers().catch(() => {});
+      loadScanTargets().catch((error) => { if (scanTargetStatus) scanTargetStatus.textContent = error.message; });
     });
   }
 
@@ -10327,6 +10337,9 @@ const AUDIT_ACTIONS = {
   "settings.siem_test_failed": "Tested the SIEM connection - it failed",
   "settings.siem_retry": "Retried queued SIEM events",
   "settings.siem_removed": "Removed the SIEM configuration",
+  "scan.target_refused": "A scan target outside the workspace's list was refused",
+  "scan_targets.added": "Added a scan target",
+  "scan_targets.removed": "Removed a scan target",
   "nist.catalog.imported": "Imported a NIST catalogue",
   "nist.catalog.validated": "Validated a NIST catalogue",
   "nist.catalog.activated": "Activated a NIST catalogue",
@@ -10600,6 +10613,73 @@ async function saveCustomRole() {
 async function deleteCustomRole(name) {
   applyRoleCatalogue(await api(`/api/roles/${encodeURIComponent(name)}`, null, "DELETE"));
   customRoleStatus.textContent = `Role ${name} deleted.`;
+}
+
+// C5: what this workspace may scan. The server decides and audits; this lists it and
+// says, in one line, what the list means right now.
+function scanTargetsModeLine(view) {
+  const count = (view?.entries || []).length;
+  if (view?.mode === "list") {
+    return `Only what is listed here (${count} ${count === 1 ? "entry" : "entries"}) can be scanned. Anything else is refused before the scan connects.`;
+  }
+  if (view?.mode === "closed") {
+    return "Nothing on the network can be scanned yet: this is a production install and no targets are listed.";
+  }
+  return "No targets are listed. On this development install anything but loopback, link-local and cloud-metadata addresses can be scanned; in production nothing could be until targets are listed.";
+}
+
+// Only someone who may change the list is offered Remove; the server refuses anyone else.
+function scanTargetsListHtml(view) {
+  const editable = Boolean(view?.editable);
+  const entries = view?.entries || [];
+  return entries.length
+    ? entries.map((entry) => `<li data-scan-target="${escapeHtml(entry.entry_id)}"><span><code>${escapeHtml(entry.value)}</code>
+        ${entry.kind === "network" ? "network" : "host name"}${entry.note ? ` - ${escapeHtml(entry.note)}` : ""}</span>
+        ${editable ? `<button type="button" class="secondary-btn mini-btn" data-remove-scan-target="${escapeHtml(entry.entry_id)}" data-value="${escapeHtml(entry.value)}">Remove</button>` : ""}</li>`).join("")
+    : '<li class="empty">No scan targets listed.</li>';
+}
+
+function renderScanTargets(view) {
+  if (scanTargetsMode) scanTargetsMode.textContent = scanTargetsModeLine(view);
+  const editable = Boolean(view?.editable);
+  [scanTargetValue, scanTargetNote, addScanTargetBtn].forEach((element) => { if (element) element.disabled = !editable; });
+  if (scanTargetsList) scanTargetsList.innerHTML = scanTargetsListHtml(view);
+}
+
+async function loadScanTargets() {
+  if (!accessToken || !scanTargetsList) return;
+  renderScanTargets(await api("/api/scan-targets", null, "GET"));
+  if (scanTargetStatus) scanTargetStatus.textContent = "";
+}
+
+async function addScanTarget() {
+  const value = scanTargetValue.value.trim();
+  if (!value) {
+    scanTargetStatus.textContent = "Enter a network (10.20.0.0/16 or an address) or a host name.";
+    return;
+  }
+  renderScanTargets(await api("/api/scan-targets", { value, note: scanTargetNote.value.trim() }, "POST"));
+  scanTargetValue.value = "";
+  scanTargetNote.value = "";
+  scanTargetStatus.textContent = `${value} added.`;
+}
+
+async function removeScanTarget(entryId, value) {
+  if (!window.confirm(`Remove ${value} from this workspace's scan targets? Scans of it will be refused.`)) return;
+  renderScanTargets(await api(`/api/scan-targets/${encodeURIComponent(entryId)}`, null, "DELETE"));
+  scanTargetStatus.textContent = `${value} removed.`;
+}
+
+async function checkScanTarget() {
+  const host = scanTargetCheckHost.value.trim();
+  if (!host) {
+    scanTargetCheckResult.textContent = "Enter a host name or address to check.";
+    return;
+  }
+  const result = await api("/api/scan-targets/check", { host }, "POST");
+  scanTargetCheckResult.textContent = result.allowed
+    ? `${result.host} can be scanned${result.addresses?.length ? ` (${result.addresses.join(", ")})` : ""}.`
+    : result.reason;
 }
 
 function roleOptionsHtml(selected) {
@@ -11917,6 +11997,24 @@ refreshUsersBtn.addEventListener("click", () => {
   loadUsers().catch((error) => {
     userManagementStatus.textContent = `Users failed: ${error.message}`;
   });
+  loadScanTargets().catch((error) => { if (scanTargetStatus) scanTargetStatus.textContent = error.message; });
+});
+addScanTargetBtn?.addEventListener("click", () => {
+  addScanTarget().catch((error) => { scanTargetStatus.textContent = error.message; });
+});
+scanTargetValue?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") addScanTargetBtn.click();
+});
+scanTargetsList?.addEventListener("click", (event) => {
+  const remove = event.target.closest("[data-remove-scan-target]");
+  if (remove) {
+    removeScanTarget(remove.dataset.removeScanTarget, remove.dataset.value || "").catch((error) => {
+      scanTargetStatus.textContent = error.message;
+    });
+  }
+});
+checkScanTargetBtn?.addEventListener("click", () => {
+  checkScanTarget().catch((error) => { scanTargetCheckResult.textContent = error.message; });
 });
 refreshTenantsBtn.addEventListener("click", () => {
   loadTenants().catch((error) => {

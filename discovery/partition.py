@@ -205,6 +205,7 @@ def plan_share_partitions(config: ScanConfig, *, stop_check=None) -> dict | None
         return None
     scanner = SMBScanner(SMBConfig(
         server=config.server,
+        tenant_id=config.tenant_id,
         username=config.username,
         password=config.password,
         domain=config.domain,

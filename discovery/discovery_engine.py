@@ -335,6 +335,7 @@ class DSPMDiscoveryEngine:
         scanner = SMBScanner(
             SMBConfig(
                 server=self.config.server,
+                tenant_id=self.config.tenant_id,
                 username=self.config.username,
                 password=self.config.password,
                 domain=self.config.domain,
@@ -1274,6 +1275,7 @@ class DSPMDiscoveryEngine:
             scanner = SMBScanner(
                 SMBConfig(
                     server=self.config.server,
+                    tenant_id=self.config.tenant_id,
                     username=self.config.username,
                     password=self.config.password,
                     domain=self.config.domain,

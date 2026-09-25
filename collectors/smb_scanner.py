@@ -155,6 +155,8 @@ class _SMBFileData:
 @dataclass(slots=True)
 class SMBConfig:
     server: str
+    # C5: the workspace whose scan targets decide whether `server` may be connected to.
+    tenant_id: str = ""
     username: str = ""
     password: str = ""
     domain: str = "WORKGROUP"
@@ -272,7 +274,7 @@ class SMBScanner:
             # and connect cannot turn the scanner into an SSRF primitive. The
             # NetBIOS remote_name (for auth) stays the hostname.
             try:
-                pinned_ip = resolve_and_pin(server)
+                pinned_ip = resolve_and_pin(server, tenant_id=self.config.tenant_id)
             except TargetNotAllowed as exc:
                 logger.warning("Refusing SMB target %s: %s", server, exc)
                 self._target_refused = str(exc)
