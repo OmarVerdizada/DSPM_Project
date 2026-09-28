@@ -374,6 +374,19 @@ class MeilisearchClient:
             self.wait_task(task_uid)
         return task_uid
 
+    def delete_tenant(self, tenant_id: str, *, wait: bool = True) -> int | None:
+        """Every document of one tenant, by filter - erasure's part in the index (C10).
+        An index that was never created holds nothing to delete."""
+        task = self.request(
+            "POST", f"{self.index_path}/documents/delete",
+            json_body={"filter": f"tenant_id = {_filter_value(tenant_id)}"},
+            allowed=(202, 404),
+        )
+        task_uid = int(task["taskUid"]) if task.get("taskUid") is not None else None
+        if wait and task_uid is not None:
+            self.wait_task(task_uid)
+        return task_uid
+
     def delete_index(self, *, wait: bool = True) -> None:
         deleted = self.request("DELETE", self.index_path, allowed=(202, 404))
         if wait and deleted.get("taskUid") is not None:
@@ -479,6 +492,18 @@ def close_search_clients() -> None:
         _clients.clear()
     for client in clients:
         client.close()
+
+
+def erase_tenant(tenant_id: str) -> str:
+    """Remove a tenant's documents from the optional index when the tenant is erased (C10).
+    Returns "removed", or "not configured" when there is no index. Raises SearchUnavailable
+    if the index cannot be reached; the caller reports that, and reconciliation removes
+    the documents once it can."""
+    config = config_from_env()
+    if not config.enabled:
+        return "not configured"
+    _client(config).delete_tenant(tenant_id, wait=True)
+    return "removed"
 
 
 def search_inventory(tenant_id: str, filt: dict, sort: str, direction: str, cursor: str, limit: int) -> dict:

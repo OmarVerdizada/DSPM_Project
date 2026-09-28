@@ -37,6 +37,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main() -> int:
+    # C10: an operator data migration spans tenants, and says so - on PostgreSQL a
+    # transaction that names no tenant and no purpose sees no tenant rows.
+    from backend import db
+
+    with db.platform_scope("migration"):
+        return _main()
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="perform the move (default is a report)")
     parser.add_argument("--dry-run", action="store_true", help="explicit no-op form of the default")

@@ -90,6 +90,15 @@ def compact(dry_run: bool = False, batch_size: int = 400) -> dict:
 
 
 def main() -> int:
+    # C10: an operator data migration spans tenants, and says so - on PostgreSQL a
+    # transaction that names no tenant and no purpose sees no tenant rows.
+    from backend import db
+
+    with db.platform_scope("migration"):
+        return _main()
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-vacuum", action="store_true", help="leave the freed pages in the file")

@@ -480,25 +480,41 @@ def close_pool() -> None:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Request-scoped tenant context (roadmap Phase 4c, DB-03). When a scope is
-# active, every PostgreSQL transaction opened through connect() runs
-# SET LOCAL app.tenant_id, and the row-level-security policies installed by
-# revision 0004 confine that transaction to the scoped tenant - a query with
-# a missing or hostile predicate cannot cross tenants. Sessions default to
-# the sentinel '*' (set per role), which the policies treat as unscoped, so
-# paths that legitimately span tenants (login, platform administration,
-# migrations, backups) behave exactly as before.
+# Who a transaction is for (Phase 4c, DB-03; C10). Every PostgreSQL transaction
+# opened through connect() carries one of three answers, and the row-level-security
+# policies (store.add_tenant_rls) read it:
+#
+# * a tenant (tenant_scope) - that tenant's rows, and nothing else;
+# * a platform purpose (platform_scope) - work that is for no single tenant, such as
+#   claiming due schedules or draining the SIEM queue. Each purpose is named, and each
+#   tenant table admits only the purposes that need it (store.PLATFORM_ACCESS);
+# * neither - no rows of any tenant table. Until C10 an unset scope saw everything;
+#   '*' no longer means "all" anywhere, so a role default of '*' grants nothing.
+#
+# A tenant scope inside a platform scope wins: work for one tenant started by a
+# background job is confined to that tenant. No-op on SQLite.
 # ---------------------------------------------------------------------------
 
 _tenant_scope_var: ContextVar[str | None] = ContextVar("dspm_tenant_scope", default=None)
+_platform_scope_var: ContextVar[str | None] = ContextVar("dspm_platform_scope", default=None)
 
-TENANT_SCOPE_ALL = "*"
+# The purposes a transaction may name. Adding one is a decision about which tenant
+# tables it may read and write across tenants - see store.PLATFORM_ACCESS.
+PLATFORM_PURPOSES = {
+    "auth": "sign-in, sessions and API keys: an account is found before its tenant is known",
+    "platform-admin": "the installation administrator's cross-tenant views",
+    "scheduler": "claiming the scan schedules that are due, in every tenant",
+    "siem": "draining the audit outbox to the SIEM",
+    "housekeeping": "retention and pruning across tenants",
+    "resume": "finding interrupted scans and partitions to resume or fail",
+    "search-indexer": "keeping the optional search index in step with the inventory",
+    "migration": "schema revisions and operator data migrations",
+}
 
 
 @contextmanager
 def tenant_scope(tenant_id: str):
-    """Confine PostgreSQL transactions opened inside this block to one tenant
-    (or explicitly broaden with TENANT_SCOPE_ALL). No-op on SQLite."""
+    """Confine PostgreSQL transactions opened inside this block to one tenant. No-op on SQLite."""
     token = _tenant_scope_var.set(str(tenant_id))
     try:
         yield
@@ -506,8 +522,27 @@ def tenant_scope(tenant_id: str):
         _tenant_scope_var.reset(token)
 
 
+@contextmanager
+def platform_scope(purpose: str):
+    """Name the cross-tenant work this block does (C10). The policies admit a purpose only
+    on the tables it needs; an unknown purpose is refused here. No-op on SQLite."""
+    if purpose not in PLATFORM_PURPOSES:
+        raise ValueError(f"Unknown platform purpose {purpose!r}")
+    platform = _platform_scope_var.set(purpose)
+    tenant = _tenant_scope_var.set(None)
+    try:
+        yield
+    finally:
+        _tenant_scope_var.reset(tenant)
+        _platform_scope_var.reset(platform)
+
+
 def current_tenant_scope() -> str | None:
     return _tenant_scope_var.get()
+
+
+def current_platform_scope() -> str | None:
+    return _platform_scope_var.get()
 
 
 # ``journal_mode`` is a property of the FILE, not of a connection, so it is set
@@ -689,9 +724,17 @@ def connect(sqlite_path: Path):
 
 
 def _apply_tenant_scope(raw) -> None:
+    """One statement per transaction, and none when there is no scope: a session's own
+    values (a role default of '*', or nothing) admit no tenant rows."""
     scope = _tenant_scope_var.get()
     if scope is not None:
-        raw.execute("SELECT set_config('app.tenant_id', %s, true)", (str(scope),))
+        raw.execute("SELECT set_config('app.tenant_id', %s, true), set_config('app.platform', '', true)",
+                    (str(scope),))
+        return
+    purpose = _platform_scope_var.get()
+    if purpose is not None:
+        raw.execute("SELECT set_config('app.tenant_id', '', true), set_config('app.platform', %s, true)",
+                    (str(purpose),))
 
 
 def collate_c(sql_expr: str) -> str:

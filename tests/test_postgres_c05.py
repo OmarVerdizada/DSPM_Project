@@ -128,14 +128,15 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
         store.add_scan_target(tenant, "network", "10.20.0.0/16", "seed", "tester")
 
     def _tenant_tables(self) -> list[str]:
-        with store._connect() as conn:
+        with db.platform_scope("migration"), store._connect() as conn:
             return [row["table_name"] for row in conn.execute(
                 "SELECT DISTINCT table_name FROM information_schema.columns WHERE column_name = 'tenant_id' "
                 "AND table_schema = current_schema() AND table_name <> 'tenants' ORDER BY table_name").fetchall()]
 
     def _tables_with_rows_for(self, tenant: str) -> list[str]:
         scoped = self._tenant_tables()
-        with store._connect() as conn:
+        # Counted as an operator would (C10: a transaction that names no one sees nothing).
+        with db.platform_scope("migration"), store._connect() as conn:
             return [table for table in scoped
                     if conn.execute(f'SELECT COUNT(*) AS n FROM "{table}" WHERE tenant_id = ?', (tenant,)).fetchone()["n"]]
 

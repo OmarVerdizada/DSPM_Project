@@ -67,6 +67,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (22, "audit_chain", store.add_audit_chain),
         (23, "audit_outbox", store.add_audit_outbox),
         (24, "scan_targets", store.add_scan_targets),
+        (25, "deny_unscoped_tenant_access", store.deny_unscoped_tenant_access),
     ]
 
 
@@ -185,7 +186,9 @@ def upgrade() -> int:
     """Apply pending revisions in order. Returns the resulting revision."""
     from backend import store, db
 
-    with store._lock:
+    # C10: revisions span tenants (backfills, re-sealing, policy rebuilds), so the
+    # runner names its purpose; an unscoped transaction would see no tenant rows.
+    with store._lock, db.platform_scope("migration"):
         with store._connect() as conn:
             if db.is_postgres():
                 # Serialize concurrent starters/deployers cluster-wide - for exactly the

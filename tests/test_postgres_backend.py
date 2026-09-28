@@ -205,17 +205,24 @@ class PostgresBackendTests(unittest.TestCase):
             self.assertIn("tenant_id", str(combined[0]).lower())
             self.assertIn("gin_trgm_ops", str(combined[0]).lower())
 
-            # A tiny test table normally makes a sequential scan cheaper. Disable
-            # it for this transaction so EXPLAIN proves the predicate and index
-            # expression match, independent of fixture cardinality.
+        # C10: with RLS forced for the application role, PostgreSQL applies the tenant
+        # policy before any predicate that is not leakproof - and LIKE is not - so the
+        # trigram expression can never be an index condition for this role, whatever
+        # the index. Turning RLS off or searching through a role that bypasses it was
+        # ruled out (product owner, 2026-09-25): substring search across very large
+        # estates is the optional search tier's job, fed by the narrowly scoped
+        # "search-indexer" purpose. What the database guarantees is that a tenant's
+        # search is narrowed to that tenant by an index, never a scan of every tenant.
+        with db.tenant_scope(self.tenant), store._connect() as conn:
             conn.execute("SET LOCAL enable_seqscan = off")
             plan_rows = conn.execute(
                 "EXPLAIN SELECT id FROM assets "
-                "WHERE lower(COALESCE(search_text, '')) LIKE ? ESCAPE '\\'",
-                ("%quarterly%",),
+                "WHERE tenant_id = ? AND lower(COALESCE(search_text, '')) LIKE ? ESCAPE '\\'",
+                (self.tenant, "%quarterly%"),
             ).fetchall()
         plan = "\n".join(str(row[0]) for row in plan_rows)
-        self.assertIn("idx_assets_search_trgm", plan)
+        self.assertNotIn("Seq Scan", plan)
+        self.assertRegex(plan, r"Index Cond: \(tenant_id = ")
 
     def test_inventory_keyset_and_readiness_indexes_are_installed(self) -> None:
         expected = {

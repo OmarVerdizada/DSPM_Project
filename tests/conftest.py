@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 import pathlib
 import tempfile
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 
 import pytest
@@ -132,6 +132,33 @@ _APP_TABLES = (
 
 _admin_hash: str | None = None
 
+# C10, PostgreSQL only. The policies show a transaction that names no tenant and no
+# purpose nothing - which product code must never rely on, and the suite is how that
+# is caught. A TEST that opens store._connect() itself to look at what was written
+# reads like an operator does, as the "migration" purpose; product code gets no such
+# default. These modules are about unscoped access itself, so they get none either.
+_SCOPE_OPT_OUT = {"tests.test_platform_scope", "tests.test_postgres_c05", "tests.test_tenant_rls"}
+
+
+def _inspector_connect(real):
+    import sys
+
+    def connect():
+        caller = sys._getframe(1).f_globals.get("__name__", "")
+        name = caller.rsplit(".", 1)[-1]
+        if (caller.startswith("tests.") and name.startswith("test_") and caller not in _SCOPE_OPT_OUT
+                and db.current_tenant_scope() is None and db.current_platform_scope() is None):
+            @contextmanager
+            def inspecting():
+                with db.platform_scope("migration"):
+                    with real() as conn:
+                        yield conn
+            return inspecting()
+        return real()
+
+    connect._inspector = True
+    return connect
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -181,7 +208,12 @@ def _isolate_db_state():
         from backend.security import hash_password
         _admin_hash = hash_password("ConftestDevAdmin1")  # letters+digits (strength check)
 
-    with store._connect() as conn:
+    from backend import db as _db
+
+    if not getattr(store._connect, "_inspector", False):
+        store._connect = _inspector_connect(store._connect)
+    # C10: the seed is the default tenant's; an unscoped insert is refused by the policies.
+    with _db.tenant_scope("default"), store._connect() as conn:
         conn.execute("TRUNCATE TABLE " + ", ".join(_APP_TABLES) + " RESTART IDENTITY CASCADE")
         now = _now()
         conn.execute(

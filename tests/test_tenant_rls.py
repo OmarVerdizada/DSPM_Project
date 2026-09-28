@@ -66,15 +66,16 @@ class TenantRlsTests(unittest.TestCase):
                     )
         self.assertIn("row-level security", str(caught.exception))
 
-    def test_unscoped_behavior_is_unchanged(self) -> None:
+    def test_unscoped_sees_no_tenant_and_a_named_purpose_spans_them(self) -> None:
+        """C10: until then an unscoped transaction saw every tenant. Now it sees none, and
+        spanning tenants takes a purpose the table admits."""
+        query = "SELECT DISTINCT tenant_id FROM assets WHERE tenant_id IN (?, ?)"
         with store._connect() as conn:
-            tenants = {
-                str(row["tenant_id"]) for row in conn.execute(
-                    "SELECT DISTINCT tenant_id FROM assets WHERE tenant_id IN (?, ?)",
-                    (self.tenant_a, self.tenant_b),
-                ).fetchall()
-            }
-        self.assertEqual(tenants, {self.tenant_a, self.tenant_b})
+            unscoped = {str(row["tenant_id"]) for row in conn.execute(query, (self.tenant_a, self.tenant_b)).fetchall()}
+        with db.platform_scope("search-indexer"), store._connect() as conn:
+            indexer = {str(row["tenant_id"]) for row in conn.execute(query, (self.tenant_a, self.tenant_b)).fetchall()}
+        self.assertEqual(unscoped, set())
+        self.assertEqual(indexer, {self.tenant_a, self.tenant_b})
 
     def test_an_ended_scope_leaves_the_connection_unscoped(self) -> None:
         """Regression: after a SET LOCAL scope ends, PostgreSQL reverts the GUC
@@ -86,7 +87,8 @@ class TenantRlsTests(unittest.TestCase):
             with store._connect() as conn:
                 conn.execute("SELECT 1 AS one").fetchone()
 
-        # The next transaction on that pooled connection must span tenants again.
+        # The next transaction on that pooled connection is unscoped again - which since
+        # C10 sees no tenant and writes nothing, rather than seeing every tenant.
         with store._connect() as conn:
             setting = conn.execute(
                 "SELECT current_setting('app.tenant_id', true) AS s"
@@ -97,14 +99,16 @@ class TenantRlsTests(unittest.TestCase):
                     (self.tenant_a, self.tenant_b),
                 ).fetchall()
             }
-            # And an unrelated write must still be permitted.
-            conn.execute(
-                "INSERT INTO audit_events (tenant_id, timestamp, actor, action, detail_json) "
-                "VALUES (?, '2026-09-02T00:00:00+00:00', 'test', 'unscoped-write', '{}')",
-                (self.tenant_b,),
-            )
         self.assertIn(setting, (None, "", "*"), "scope must not persist past the transaction")
-        self.assertEqual(tenants, {self.tenant_a, self.tenant_b})
+        self.assertEqual(tenants, set(), "tenant A's scope did not outlive its transaction")
+        with self.assertRaises(Exception) as refused:
+            with store._connect() as conn:
+                conn.execute(
+                    "INSERT INTO audit_events (tenant_id, timestamp, actor, action, detail_json) "
+                    "VALUES (?, '2026-09-02T00:00:00+00:00', 'test', 'unscoped-write', '{}')",
+                    (self.tenant_b,),
+                )
+        self.assertIn("row-level security", str(refused.exception))
 
     def test_store_reads_are_scoped_by_decorator(self) -> None:
         # list_inventory(A) runs inside tenant_scope(A); its result can only

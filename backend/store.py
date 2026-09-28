@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import functools
+import inspect
 import contextvars
 import hashlib
 import json
@@ -428,19 +430,8 @@ def add_tenant_rls(conn) -> None:
             "AND table_name <> 'tenants' ORDER BY table_name"
         ).fetchall()
     ]
-    # NULLIF before COALESCE is load-bearing. When a SET LOCAL scope ends,
-    # PostgreSQL reverts the GUC to its SESSION value, and for a custom GUC
-    # that was never set at session level that value is the EMPTY STRING, not
-    # NULL. COALESCE alone therefore left '' - which matches neither '*' nor
-    # any tenant - so every later unscoped statement on that pooled connection
-    # was denied. The bug was invisible on any database where db_roles.py had
-    # set a role default of '*', which is exactly the wrong thing for a
-    # security control to depend on.
-    predicate = (
-        "COALESCE(NULLIF(current_setting('app.tenant_id', true), ''), '*') "
-        "IN ('*', tenant_id)"
-    )
     for table in tables:
+        predicate = tenant_policy_predicate(table)
         conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
         conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
         conn.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
@@ -448,6 +439,44 @@ def add_tenant_rls(conn) -> None:
             f"CREATE POLICY tenant_isolation ON {table} FOR ALL "
             f"USING ({predicate}) WITH CHECK ({predicate})"
         )
+
+
+# C10: the cross-tenant work each tenant table admits, by purpose (db.PLATFORM_PURPOSES).
+# A table not listed admits only its own tenant's scope - and "migration", which every
+# table admits, because schema revisions and operator data migrations span tenants.
+# Widening an entry is a security decision; tests/test_platform_scope.py pins this map.
+# The policies are written from it when a revision runs add_tenant_rls, so a change here
+# ships with a revision that re-runs it (the same test compares a live database's policies).
+PLATFORM_ACCESS: dict[str, frozenset] = {
+    "users": frozenset({"auth", "platform-admin"}),
+    "api_keys": frozenset({"auth"}),
+    "registration_invites": frozenset({"auth"}),
+    "scan_schedules": frozenset({"scheduler"}),
+    "audit_outbox": frozenset({"siem"}),
+    # The installation's tenant portfolio counts scans, audit rows and alerts per tenant.
+    "audit_events": frozenset({"housekeeping", "platform-admin"}),
+    "audit_chain_heads": frozenset({"housekeeping"}),
+    "alert_events": frozenset({"housekeeping", "platform-admin"}),
+    "derived_cache": frozenset({"housekeeping"}),
+    "scan_reports": frozenset({"housekeeping", "platform-admin"}),
+    "scan_jobs": frozenset({"housekeeping", "resume"}),
+    "partitioned_scans": frozenset({"resume"}),
+    # Artifact collection must see a partition's records, or it would take them for garbage.
+    "scan_partitions": frozenset({"resume", "housekeeping"}),
+    "assets": frozenset({"search-indexer", "housekeeping"}),
+}
+
+
+def tenant_policy_predicate(table: str) -> str:
+    """Rows of `table` a transaction may see and write: its tenant's, or every tenant's
+    when it names a purpose this table admits. Nothing when it names neither - an unset
+    scope used to mean everything (C10). NULLIF because a SET LOCAL that ends reverts a
+    never-set custom setting to '', not NULL; '*' matches no tenant, so a role default of
+    '*' - which db_roles.py once set - grants nothing now."""
+    purposes = sorted(PLATFORM_ACCESS.get(table, frozenset()) | {"migration"})
+    listed = ", ".join(f"'{purpose}'" for purpose in purposes)
+    return (f"tenant_id = NULLIF(current_setting('app.tenant_id', true), '') "
+            f"OR NULLIF(current_setting('app.platform', true), '') IN ({listed})")
 
 
 def tenant_isolation_coverage() -> dict:
@@ -981,6 +1010,18 @@ def add_scan_targets(conn) -> None:
     add_tenant_rls(conn)
 
 
+def deny_unscoped_tenant_access(conn) -> None:
+    """Revision 0025: an unscoped transaction sees no tenant's rows (C10).
+
+    Until now the policies treated an unset tenant scope as "every tenant", so any code
+    path that forgot its scope read and wrote across tenants, and the background
+    writers depended on exactly that. They now name their purpose (db.platform_scope)
+    and each table admits only the purposes that need it (PLATFORM_ACCESS). Re-running
+    revision 0004 rebuilds every tenant table's policy with that predicate.
+    """
+    add_tenant_rls(conn)
+
+
 def add_refresh_tokens(conn) -> None:
     """Revision 0019: the rotating half of a bounded session (C1).
 
@@ -1015,19 +1056,67 @@ def add_refresh_tokens(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_expiry ON refresh_tokens (expires_at)")
 
 
-def _tenant_scoped(func):
-    """Run a store function inside db.tenant_scope(<first argument>).
+def _tenant_scoped(func, all_tenants_purpose: str | None = None):
+    """Run a store function inside db.tenant_scope(<its tenant_id>).
 
-    On PostgreSQL every transaction the function opens is then confined by
-    the revision-0004 RLS policies to that tenant; on SQLite this is a no-op.
-    Apply to functions whose first positional argument is tenant_id and whose
-    queries serve user-shaped input.
+    On PostgreSQL every transaction the function opens is then confined by the RLS
+    policies to that tenant; on SQLite this is a no-op. Called with no tenant (a
+    function where None means "every tenant"), it runs in `all_tenants_purpose`'s
+    platform scope when one is named, and otherwise in whatever scope its caller has.
+    Since C10 every store function whose first parameter is tenant_id is wrapped (see
+    the end of this module); the decorator marks the ones written before that.
     """
+    if getattr(func, "_tenant_scoped", False):
+        return func
+    default = inspect.signature(func).parameters["tenant_id"].default
+
+    def scope_for(args, kwargs):
+        tenant = args[0] if args else kwargs.get("tenant_id", default)
+        if tenant not in (None, "", inspect.Parameter.empty):
+            return db.tenant_scope(str(tenant))
+        if all_tenants_purpose:
+            return db.platform_scope(all_tenants_purpose)
+        return contextlib.nullcontext()
+
+    if inspect.isgeneratorfunction(func):
+        @functools.wraps(func)
+        def generator(*args, **kwargs):
+            with scope_for(args, kwargs):
+                yield from func(*args, **kwargs)
+        generator._tenant_scoped = True
+        return generator
+
     @functools.wraps(func)
-    def wrapper(tenant_id, *args, **kwargs):
-        with db.tenant_scope(str(tenant_id)):
-            return func(tenant_id, *args, **kwargs)
+    def wrapper(*args, **kwargs):
+        with scope_for(args, kwargs):
+            return func(*args, **kwargs)
+    wrapper._tenant_scoped = True
     return wrapper
+
+
+def _platform_scoped(purpose: str):
+    """Run a store function in db.platform_scope(purpose): work that is for no one
+    tenant, which the policies admit only on the tables that purpose needs (C10)."""
+    if purpose not in db.PLATFORM_PURPOSES:
+        raise ValueError(f"Unknown platform purpose {purpose!r}")
+
+    def decorate(func):
+        if inspect.isgeneratorfunction(func):
+            # Around the iteration, not the call: a generator's queries run as it is read.
+            @functools.wraps(func)
+            def generator(*args, **kwargs):
+                with db.platform_scope(purpose):
+                    yield from func(*args, **kwargs)
+            generator._platform_purpose = purpose
+            return generator
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with db.platform_scope(purpose):
+                return func(*args, **kwargs)
+        wrapper._platform_purpose = purpose
+        return wrapper
+    return decorate
 
 
 def add_report_artifact_refs(conn) -> None:
@@ -3664,7 +3753,8 @@ def record_job(job: dict) -> None:
     # silently dropping the transition. Non-lock errors propagate immediately.
     for attempt in range(3):
         try:
-            with _lock:
+            # C10: the job's own tenant - unscoped, the policies would refuse the write.
+            with _lock, db.tenant_scope(str(job.get("tenant_id"))):
                 with _connect() as conn:
                     # An explicit upsert rather than INSERT OR REPLACE. On
                     # SQLite a REPLACE deletes the row and inserts a new one, so
@@ -8635,9 +8725,23 @@ def delete_tenant_with_data(tenant_id: str) -> dict:
             # not one tenant. Invalidate it after any erasure so the next pass
             # detects and removes documents that no longer exist in the DB.
             conn.execute("DELETE FROM search_reconciliation_state")
+    usage["search_documents"] = _erase_tenant_search_documents(tenant_id)
     _invalidate_inventory_query_cache(tenant_id)
     _forget_tenant_existence()
     return usage
+
+
+def _erase_tenant_search_documents(tenant_id: str) -> str:
+    """C10: the optional search index is part of erasure, not left to the next
+    reconciliation. If it cannot be reached the erasure still stands, says so, and the
+    reconciliation (whose state was just cleared) removes the documents later."""
+    from backend import search
+
+    try:
+        return search.erase_tenant(tenant_id)
+    except search.SearchUnavailable as exc:
+        logger.warning("Search index erasure for %s is pending: %s", tenant_id, exc)
+        return "pending - the index could not be reached; the next reconciliation removes them"
 
 
 def reset_default_tenant_data() -> dict:
@@ -8651,7 +8755,8 @@ def reset_default_tenant_data() -> dict:
     tenant_id = "default"
     usage = tenant_usage(tenant_id)
     now = datetime.now(timezone.utc).isoformat()
-    with _lock:
+    # C10: scoped to the tenant it resets - unscoped, the policies would show it nothing.
+    with _lock, db.tenant_scope(tenant_id):
         with _connect() as conn:
             admin = conn.execute(
                 "SELECT 1 FROM users WHERE username = ? AND tenant_id = ?",
@@ -8688,6 +8793,7 @@ def reset_default_tenant_data() -> dict:
             )
             conn.execute("DELETE FROM login_failures")
             conn.execute("DELETE FROM search_reconciliation_state")
+    usage["search_documents"] = _erase_tenant_search_documents(tenant_id)
     _invalidate_inventory_query_cache(tenant_id)
     return usage
 
@@ -9603,3 +9709,74 @@ def update_user_active(username: str, is_active: bool) -> dict | None:
             if result.rowcount == 0:
                 return None
     return get_user(username)
+
+
+# ── Scope for every store function (C10) ─────────────────────────────────────────
+# PostgreSQL's policies deny a transaction that names neither a tenant nor a purpose,
+# so every function that reaches a tenant table must name one. Two rules, applied
+# here so a function added later cannot forget:
+#
+# * A function whose first parameter is tenant_id runs in that tenant's scope.
+#   Where None means "every tenant", ALL_TENANTS_PURPOSE names the platform purpose.
+# * A function that serves no single tenant runs in the purpose PLATFORM_FUNCTIONS
+#   names. tests/test_platform_scope.py fails on a database-touching function that is
+#   in neither group and not in NO_TENANT_TABLES (it touches only tables without
+#   tenant rows: sessions, refresh tokens, revocations, settings, throttles).
+ALL_TENANTS_PURPOSE = {
+    "list_users": "platform-admin",
+    "list_tenants": "platform-admin",
+    "requeue_expired_partitions": "resume",
+    "requeue_interrupted_partitions": "resume",
+    "purge_demo_sample_assets": "housekeeping",
+    "backfill_normalized_scans": "migration",
+    "verify_audit_chain": "housekeeping",
+    "refresh_read_model_state": "housekeeping",
+    "bump_estate_generation": "housekeeping",
+}
+
+PLATFORM_FUNCTIONS = {
+    # Accounts are found by name, key or token before their tenant is known.
+    "get_user": "auth", "create_user": "auth", "delete_user": "auth", "mark_user_login": "auth",
+    "update_user_active": "auth", "update_user_avatar": "auth", "update_user_password": "auth",
+    "update_user_profile": "auth", "update_user_role": "auth", "token_state": "auth",
+    "get_active_api_key": "auth", "touch_api_key": "auth",
+    "claim_due_schedules": "scheduler",
+    "claim_audit_outbox": "siem", "delete_audit_outbox": "siem", "retry_audit_outbox": "siem",
+    "audit_outbox_status": "siem", "reset_audit_outbox_backoff": "siem",
+    "_prune_audit_chains": "housekeeping", "prune_event_tables": "housekeeping",
+    "prune_job_records": "housekeeping", "referenced_artifact_ids": "housekeeping",
+    "recover_interrupted_jobs": "resume", "list_unfinished_partitioned_scans": "resume",
+    "iter_search_asset_batches": "search-indexer", "get_search_assets_by_refs": "search-indexer",
+    "init_db": "migration",
+}
+
+# Functions that name their scope themselves, from their arguments.
+SCOPED_INSIDE = {"record_job", "reset_default_tenant_data", "delete_tenant_with_data"}
+
+NO_TENANT_TABLES = {
+    "_connect", "claim_housekeeping_run", "clear_login_failures", "count_login_failures",
+    "record_login_failure", "consume_one_time_token", "is_token_revoked", "revoke_token_jti",
+    "consume_refresh_token", "count_refresh_tokens_for_user", "issue_refresh_token",
+    "revoke_refresh_family", "revoke_refresh_tokens_for_user", "count_sessions_for_user",
+    "forget_session", "record_session", "session_last_seen", "touch_session",
+    "revoke_sessions_for_user", "get_app_setting", "set_app_setting", "get_search_reconciliation",
+    "save_search_reconciliation", "tenant_isolation_coverage", "tenants_under_legal_hold",
+}
+
+
+def _apply_scopes() -> None:
+    namespace = globals()
+    for name, func in list(namespace.items()):
+        if not inspect.isfunction(func) or func.__module__ != __name__:
+            continue
+        if name in PLATFORM_FUNCTIONS:
+            namespace[name] = _platform_scoped(PLATFORM_FUNCTIONS[name])(func)
+            continue
+        params = list(inspect.signature(func).parameters)
+        if params and params[0] == "tenant_id" and not getattr(func, "_tenant_scoped", False):
+            namespace[name] = _tenant_scoped(func, ALL_TENANTS_PURPOSE.get(name))
+        elif name in ALL_TENANTS_PURPOSE and getattr(func, "_tenant_scoped", False):
+            namespace[name] = _tenant_scoped(inspect.unwrap(func), ALL_TENANTS_PURPOSE[name])
+
+
+_apply_scopes()

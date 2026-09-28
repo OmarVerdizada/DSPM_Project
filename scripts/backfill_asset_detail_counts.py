@@ -64,6 +64,15 @@ def backfill(tenant: str = "", batch_size: int = 500, dry_run: bool = False) -> 
 
 
 def main() -> int:
+    # C10: an operator data migration spans tenants, and says so - on PostgreSQL a
+    # transaction that names no tenant and no purpose sees no tenant rows.
+    from backend import db
+
+    with db.platform_scope("migration"):
+        return _main()
+
+
+def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tenant", default="", help="one tenant id (default: all)")
     parser.add_argument("--batch-size", type=int, default=500)
