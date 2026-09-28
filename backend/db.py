@@ -511,6 +511,7 @@ PLATFORM_PURPOSES = {
     "resume": "finding interrupted scans and partitions to resume or fail",
     "search-indexer": "keeping the optional search index in step with the inventory",
     "migration": "schema revisions and operator data migrations",
+    "vault": "re-sealing every tenant's saved credentials and MFA seeds when the vault key rotates (C12)",
 }
 
 

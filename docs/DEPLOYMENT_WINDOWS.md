@@ -141,6 +141,22 @@ address.
 | `evidence_hmac_key` | evidence fingerprints | fingerprints from before cannot be matched |
 | `admin_password`, `db_url` | first sign-in, database access | reset from the host / re-issue the URL |
 
+The vault key is versioned (`DSPM_VAULT_KEYRING` = `<DataRoot>\secrets\vault_keyring.json`,
+created by the first rotation). Rotate it, and keep its escrow current, as an administrator:
+
+```powershell
+$app = 'C:\Program Files\Sentro\current'; $cfg = 'C:\ProgramData\Sentro\config\sentro.toml'
+& "$app\python\python.exe" "$app\app\main.py" --config $cfg vault rotate
+& "$app\python\python.exe" "$app\app\main.py" --config $cfg vault escrow export --out E:\escrow\sentro-keys.json
+& "$app\python\python.exe" "$app\app\main.py" --config $cfg vault escrow verify E:\escrow\sentro-keys.json
+```
+
+The services keep running: the new key is active before anything is re-sealed, the ring
+keeps the old one, and the re-seal is one transaction. The escrow is encrypted with a
+passphrase you type (or give in `--passphrase-file`); keep the escrow and the passphrase
+apart, and both apart from the backups. After losing the secrets folder, `vault escrow
+recover` writes the ring back.
+
 Keep an off-host copy of the secrets folder, held separately from the backups (a backup
 and the key that opens it must not travel together), under the customer's key custody.
 Report bodies and backups are encrypted; the database backup covers the artifact store.

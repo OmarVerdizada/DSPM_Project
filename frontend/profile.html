@@ -312,6 +312,42 @@
             </div>
             <p id="directory-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
           </article>
+          <!-- C12: the workspace's saved scan credentials. Accounts and dates only: a
+               password is typed to replace one and never shown or sent back. -->
+          <article class="settings-card" id="credentials-card" hidden>
+            <div class="settings-card-copy">
+              <h2>Saved scan credentials</h2>
+              <p>Accounts the scans sign in with. Change each password regularly (every <span id="credentials-rotation-days">90</span> days is the recommendation), and scan with an account that can read, not administer.</p>
+            </div>
+            <div class="credentials-table-wrap">
+              <table class="credentials-table">
+                <thead>
+                  <tr><th scope="col">Account</th><th scope="col">Saved</th><th scope="col">Last used</th><th scope="col">Password changed</th><th scope="col">Privilege</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+                </thead>
+                <tbody id="credentials-body"><tr><td colspan="6" class="settings-hint">Loading&hellip;</td></tr></tbody>
+              </table>
+            </div>
+            <form id="credential-replace-form" class="settings-form-grid credential-replace" hidden>
+              <p class="settings-hint credential-replace-lead" id="credential-replace-lead"></p>
+              <label class="settings-field">
+                User name
+                <input id="credential-replace-user" name="username" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="settings-field">
+                Domain
+                <input id="credential-replace-domain" name="domain" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="settings-field">
+                New password
+                <input id="credential-replace-password" name="password" type="password" autocomplete="new-password" />
+              </label>
+              <div class="settings-form-foot">
+                <button type="button" class="secondary-btn" id="credential-replace-cancel">Cancel</button>
+                <button type="submit" id="credential-replace-save">Save new password</button>
+              </div>
+            </form>
+            <p id="credentials-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
+          </article>
         </section>
 
         

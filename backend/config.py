@@ -97,6 +97,10 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_LOCAL_EVIDENCE_KEY_PATH", "path"),
     ("DSPM_LOCAL_JWT_SECRET_PATH", "path"),
     ("DSPM_LOCAL_VAULT_KEY_PATH", "path"),
+    # C12: the versioned key ring (a file holding keys: protect it like one), and the
+    # recommended interval between a saved credential's password changes.
+    ("DSPM_VAULT_KEYRING", "path"),
+    ("DSPM_CREDENTIAL_ROTATION_DAYS", "int", {"default": "90", "minimum": 1, "maximum": 3650}),
     # database
     ("DSPM_DB_URL", "secret"),
     ("DSPM_DB_PATH", "path"),

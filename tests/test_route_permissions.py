@@ -163,6 +163,11 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("POST", "/api/users/{username}/reset-password"): "tenant.admin",
     ("PUT", "/api/users/{username}/role"): "tenant.admin",
     ("POST", "/api/users/{username}/mfa/reset"): "tenant.admin",
+    # C12: saved credentials - listed, replaced, checked and deleted by a credential manager
+    ("GET", "/api/credentials"): "credential.manage",
+    ("PUT", "/api/credentials/{secret_ref}"): "credential.manage",
+    ("DELETE", "/api/credentials/{secret_ref}"): "credential.manage",
+    ("POST", "/api/credentials/{secret_ref}/preflight"): "credential.manage",
     # C2: the workspace's directory sign-in
     ("GET", "/api/settings/directory"): "tenant.admin",
     ("PUT", "/api/settings/directory"): "tenant.admin",

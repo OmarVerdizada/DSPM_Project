@@ -1340,6 +1340,184 @@ document.querySelector("#directory-remove-btn").addEventListener("click", () => 
     () => "Directory settings removed.");
 });
 
+/* ── Saved scan credentials (C12) ─────────────────────────────── */
+// The list shows accounts and dates; a password is only ever typed, to replace one. Built
+// with DOM nodes, not HTML strings: labels come from the directory and from people.
+const credentialsCard = document.querySelector("#credentials-card");
+const credentialsBody = document.querySelector("#credentials-body");
+const credentialsStatus = document.querySelector("#credentials-status");
+const credentialReplaceForm = document.querySelector("#credential-replace-form");
+const credentialReplaceLead = document.querySelector("#credential-replace-lead");
+const credentialReplaceUser = document.querySelector("#credential-replace-user");
+const credentialReplaceDomain = document.querySelector("#credential-replace-domain");
+const credentialReplacePassword = document.querySelector("#credential-replace-password");
+const PRIVILEGE_WORDS = { excessive: "Too much", warning: "Check", ok: "Read-only", unchecked: "Not checked" };
+let credentialReplacing = "";
+
+function credentialsSay(message, isError = false) {
+  credentialsStatus.classList.toggle("error", Boolean(isError));
+  setStatus(credentialsStatus, message);
+}
+
+function shortDate(value) {
+  if (!value) return "Never";
+  try {
+    return new Date(value).toLocaleDateString([], { dateStyle: "medium" });
+  } catch {
+    return String(value).slice(0, 10);
+  }
+}
+
+function cell(text, className = "") {
+  const td = document.createElement("td");
+  td.textContent = text;
+  if (className) td.className = className;
+  return td;
+}
+
+function credentialRow(item) {
+  const row = document.createElement("tr");
+  const account = cell(item.label || "(unnamed)");
+  if (item.kind === "directory") {
+    const note = document.createElement("div");
+    note.className = "settings-hint credentials-note";
+    note.textContent = "Directory sign-in service account";
+    account.append(note);
+  }
+  row.append(account, cell(shortDate(item.created_at)), cell(shortDate(item.last_used_at)));
+  const changed = cell(item.rotated_at ? shortDate(item.rotated_at) : "Not since saved");
+  if (item.rotation_due) {
+    const due = document.createElement("span");
+    due.className = "credential-badge credential-badge-due";
+    due.textContent = `Change due (${item.age_days} days)`;
+    changed.append(document.createElement("br"), due);
+  }
+  row.append(changed);
+  const privilege = document.createElement("td");
+  const level = (item.privilege && item.privilege.level) || "unchecked";
+  const badge = document.createElement("span");
+  badge.className = `credential-badge credential-badge-${level}`;
+  badge.textContent = PRIVILEGE_WORDS[level] || level;
+  privilege.append(badge);
+  for (const finding of (item.privilege && item.privilege.findings) || []) {
+    const line = document.createElement("div");
+    line.className = "settings-hint credentials-note";
+    line.textContent = finding;
+    privilege.append(line);
+  }
+  row.append(privilege);
+  const actions = document.createElement("td");
+  actions.className = "credentials-actions";
+  if (item.kind === "scan") {
+    for (const [label, action] of [["Replace password", "replace"], ["Check privilege", "check"], ["Delete", "delete"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = action === "delete" ? "settings-danger-btn" : "secondary-btn";
+      button.textContent = label;
+      button.dataset.credentialAction = action;
+      button.dataset.credentialRef = item.credential_ref;
+      button.dataset.credentialLabel = item.label || "";
+      actions.append(button);
+    }
+  }
+  row.append(actions);
+  return row;
+}
+
+async function loadCredentials() {
+  let permissions = [];
+  try {
+    permissions = JSON.parse(sessionGet("dspm-permissions") || "[]");
+  } catch {
+    permissions = [];
+  }
+  if (!permissions.includes("credential.manage")) return;
+  credentialsCard.hidden = false;
+  try {
+    const data = await api("/api/credentials");
+    document.querySelector("#credentials-rotation-days").textContent = String(data.rotation_days || 90);
+    const items = data.credentials || [];
+    if (!items.length) {
+      const empty = document.createElement("tr");
+      empty.append(cell("No saved credentials. Scans that save their password add one here.", "settings-hint"));
+      empty.firstChild.colSpan = 6;
+      credentialsBody.replaceChildren(empty);
+      return;
+    }
+    credentialsBody.replaceChildren(...items.map(credentialRow));
+  } catch (error) {
+    credentialsSay(error.code === "mfa_required"
+      ? "Confirm a code from your authenticator (Two-step sign-in, above) to see saved credentials."
+      : `Could not load saved credentials: ${error.message}`, true);
+  }
+}
+
+credentialsBody.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-credential-action]");
+  if (!button) return;
+  const ref = button.dataset.credentialRef;
+  const label = button.dataset.credentialLabel;
+  if (button.dataset.credentialAction === "replace") {
+    credentialReplacing = ref;
+    const [domain, user] = label.includes("\\") ? label.split("\\", 2) : ["", label];
+    credentialReplaceUser.value = user;
+    credentialReplaceDomain.value = domain;
+    credentialReplacePassword.value = "";
+    credentialReplaceLead.textContent = `New password for ${label}. The same reference is kept, so scans and schedules that use it carry on.`;
+    credentialReplaceForm.hidden = false;
+    credentialReplacePassword.focus();
+    return;
+  }
+  if (button.dataset.credentialAction === "delete") {
+    if (!window.confirm(`Delete the saved credential for ${label}? Scans and schedules that use it will fail until they get another.`)) return;
+    try {
+      await api(`/api/credentials/${encodeURIComponent(ref)}`, null, "DELETE");
+      credentialsSay(`Deleted the credential for ${label}.`);
+      await loadCredentials();
+    } catch (error) {
+      credentialsSay(error.message, true);
+    }
+    return;
+  }
+  credentialsSay(`Checking ${label}...`);
+  try {
+    const result = await api(`/api/credentials/${encodeURIComponent(ref)}/preflight`, {}, "POST");
+    credentialsSay(`${label}: ${PRIVILEGE_WORDS[result.privilege.level] || result.privilege.level}.`);
+    await loadCredentials();
+  } catch (error) {
+    credentialsSay(error.message, true);
+  }
+});
+
+document.querySelector("#credential-replace-cancel").addEventListener("click", () => {
+  credentialReplacePassword.value = "";
+  credentialReplaceForm.hidden = true;
+  credentialReplacing = "";
+});
+
+credentialReplaceForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = {
+    username: credentialReplaceUser.value.trim(),
+    domain: credentialReplaceDomain.value.trim() || "WORKGROUP",
+    password: credentialReplacePassword.value,
+  };
+  credentialReplacePassword.value = "";
+  if (!body.username || !body.password) {
+    credentialsSay("Enter the user name and the new password.", true);
+    return;
+  }
+  try {
+    const result = await api(`/api/credentials/${encodeURIComponent(credentialReplacing)}`, body, "PUT");
+    credentialReplaceForm.hidden = true;
+    credentialsSay(`Password replaced. Privilege: ${PRIVILEGE_WORDS[result.privilege.level] || result.privilege.level}.`);
+    credentialReplacing = "";
+    await loadCredentials();
+  } catch (error) {
+    credentialsSay(error.message, true);
+  }
+});
+
 /* ── Forms ────────────────────────────────────────────────────── */
 profileForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1507,3 +1685,4 @@ loadProfile();
 loadFeatures();
 loadMfa();
 loadDirectory();
+loadCredentials();

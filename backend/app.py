@@ -163,7 +163,8 @@ from backend.store import (
     update_user_role,
     update_user_active,
 )
-from backend.vault import CredentialVault
+from backend import credential_preflight
+from backend.vault import CredentialVault, credential_listing, rotation_days
 from classification.compliance.keyword_library import (
     export_keyword_groups,
     import_keyword_groups,
@@ -2252,7 +2253,8 @@ def directory_settings_save(payload: DirectorySettingsRequest,
         vault.delete(tenant_id, ref)
         ref, secret_action = "", "removed"
     elif payload.bind_password:
-        new_ref = vault.store(tenant_id, config["bind_dn"], payload.bind_password, "")
+        new_ref = vault.store(tenant_id, config["bind_dn"], payload.bind_password, "", kind="directory",
+                              label=config["bind_dn"])
         if ref:
             vault.delete(tenant_id, ref)
         secret_action = "replaced" if ref else "set"
@@ -2987,17 +2989,80 @@ def revoke_api_key_route(key_id: str, principal: Principal = Depends(require_per
     return {"revoked": True, "key_id": key_id}
 
 
+def _credential_privilege(tenant_id: str, secret_ref: str, username: str, domain: str) -> dict:
+    """C12: how much the account can do, checked when it is saved and on request, kept with
+    it. A failed check says so; it never blocks saving."""
+    try:
+        result = credential_preflight.assess(tenant_id, username, domain)
+    except Exception as exc:
+        result = {"level": "unchecked", "findings": [f"The privilege check could not run ({type(exc).__name__})."],
+                  "source": "none", "advice": ""}
+    store_module.set_secret_privilege(tenant_id, secret_ref, result)
+    return result
+
+
 @app.post("/api/credentials")
 def store_credentials(payload: CredentialRequest,
                       principal: Principal = Depends(require_permission("scan.run", "credential.manage", mfa=True))) -> dict:
-    secret_ref = vault.store(
-        principal.tenant_id,
-        payload.username.strip(),
-        payload.password,
-        payload.domain.strip() or "WORKGROUP",
-    )
-    audit(principal.tenant_id, principal.subject, "credential.stored", {"secret_ref": secret_ref})
-    return {"credential_ref": secret_ref, "domain": payload.domain.strip() or "WORKGROUP"}
+    username = payload.username.strip()
+    domain = payload.domain.strip() or "WORKGROUP"
+    secret_ref = vault.store(principal.tenant_id, username, payload.password, domain)
+    privilege = _credential_privilege(principal.tenant_id, secret_ref, username, domain)
+    audit(principal.tenant_id, principal.subject, "credential.stored",
+          {"secret_ref": secret_ref, "account": username, "privilege": privilege["level"]})
+    return {"credential_ref": secret_ref, "domain": domain, "privilege": privilege}
+
+
+@app.get("/api/credentials")
+def list_credentials(principal: Principal = Depends(require_permission("credential.manage"))) -> dict:
+    """C12: the workspace's saved credentials - account, dates, key, privilege - never a secret."""
+    return {"credentials": credential_listing(principal.tenant_id), "rotation_days": rotation_days()}
+
+
+def _own_credential(tenant_id: str, secret_ref: str) -> dict:
+    entry = next((item for item in store_module.list_secret_metadata(tenant_id)
+                  if item["credential_ref"] == secret_ref), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    return entry
+
+
+@app.put("/api/credentials/{secret_ref}")
+def replace_credential(secret_ref: str, payload: CredentialRequest,
+                       principal: Principal = Depends(require_permission("credential.manage"))) -> dict:
+    """The account's password changed: seal the new one under the same reference, so the
+    scan profiles and schedules that use it keep working."""
+    entry = _own_credential(principal.tenant_id, secret_ref)
+    if entry["kind"] != "scan":
+        raise HTTPException(status_code=400, detail="This credential belongs to directory sign-in; change it there.")
+    username = payload.username.strip()
+    domain = payload.domain.strip() or "WORKGROUP"
+    vault.replace(principal.tenant_id, secret_ref, username, payload.password, domain)
+    privilege = _credential_privilege(principal.tenant_id, secret_ref, username, domain)
+    audit(principal.tenant_id, principal.subject, "credential.rotated",
+          {"secret_ref": secret_ref, "account": username, "privilege": privilege["level"]})
+    return {"credential_ref": secret_ref, "privilege": privilege}
+
+
+@app.post("/api/credentials/{secret_ref}/preflight")
+def check_credential_privilege(secret_ref: str, principal: Principal = Depends(require_permission("credential.manage"))) -> dict:
+    _own_credential(principal.tenant_id, secret_ref)
+    account = vault.resolve(principal.tenant_id, secret_ref)
+    privilege = _credential_privilege(principal.tenant_id, secret_ref, account.get("username", ""),
+                                      account.get("domain", ""))
+    audit(principal.tenant_id, principal.subject, "credential.preflight",
+          {"secret_ref": secret_ref, "privilege": privilege["level"]})
+    return {"credential_ref": secret_ref, "privilege": privilege}
+
+
+@app.delete("/api/credentials/{secret_ref}")
+def delete_credential(secret_ref: str, principal: Principal = Depends(require_permission("credential.manage"))) -> dict:
+    entry = _own_credential(principal.tenant_id, secret_ref)
+    if entry["kind"] != "scan":
+        raise HTTPException(status_code=400, detail="This credential belongs to directory sign-in; remove it there.")
+    vault.delete(principal.tenant_id, secret_ref)
+    audit(principal.tenant_id, principal.subject, "credential.deleted", {"secret_ref": secret_ref, "account": entry["label"]})
+    return {"deleted": True, "credential_ref": secret_ref}
 
 
 class ScanProfileRequest(BaseModel):

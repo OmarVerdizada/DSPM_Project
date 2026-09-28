@@ -348,6 +348,9 @@ def render_config(layout: Layout, mode: str, port: int, public_host: str = "") -
     for setting, (filename, _make) in SECRET_FILES.items():
         name = "DSPM_DEV_ADMIN_PASSWORD" if (setting == "DSPM_ADMIN_PASSWORD" and not production) else setting
         lines.append(f"{name}_FILE = {q(layout.secrets / filename)}")
+    lines.append("# C12: the vault's versioned key ring. The first `main.py vault rotate` creates it from")
+    lines.append("# vault_key; from then on it holds every key a saved credential names.")
+    lines.append(f"DSPM_VAULT_KEYRING = {q(layout.secrets / 'vault_keyring.json')}")
     if production:
         lines.append(f"DSPM_DB_URL_FILE = {q(layout.secrets / 'db_url')}")
         lines.append("# The name users type, served by the HTTPS reverse proxy on this host (C5).")

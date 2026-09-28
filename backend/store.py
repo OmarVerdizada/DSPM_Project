@@ -453,7 +453,9 @@ PLATFORM_ACCESS: dict[str, frozenset] = {
     # C2: an account's MFA state is read while it signs in, before its tenant is known.
     # Directory settings are read by tenant (the workspace named at sign-in), so they
     # need no platform purpose at all.
-    "user_mfa": frozenset({"auth"}),
+    "user_mfa": frozenset({"auth", "vault"}),
+    # C12: a vault key rotation re-seals every tenant's credentials in one transaction.
+    "secrets": frozenset({"vault"}),
     "registration_invites": frozenset({"auth"}),
     "scan_schedules": frozenset({"scheduler"}),
     "audit_outbox": frozenset({"siem"}),
@@ -1066,6 +1068,40 @@ def _identity_ddl(conn) -> None:
     for table in ("user_sessions", "refresh_tokens"):
         if "mfa_verified" not in db.table_columns(conn, table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN mfa_verified INTEGER NOT NULL DEFAULT 0")
+
+
+_SECRET_COLUMNS = (
+    ("kind", "TEXT NOT NULL DEFAULT 'scan'"),
+    ("label", "TEXT NOT NULL DEFAULT ''"),
+    ("last_used_at", "TEXT"),
+    ("rotated_at", "TEXT"),
+    ("rekeyed_at", "TEXT"),
+    ("privilege_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("updated_at", "TEXT"),
+)
+
+
+def _vault_ddl(conn) -> None:
+    """Idempotent DDL for revision 0027, also run by the convergent baseline."""
+    columns = db.table_columns(conn, "secrets")
+    for column, ddl in _SECRET_COLUMNS:
+        if column not in columns:
+            conn.execute(f"ALTER TABLE secrets ADD COLUMN {column} {ddl}")
+
+
+def add_vault_key_lifecycle(conn) -> None:
+    """Revision 0027: what a saved credential is, and its dates (C12).
+
+    `secrets` gains the credential's kind (a scan credential, or a directory service
+    account's password), its label (DOMAIN\\username - the account's name, never its
+    password), when it was last used, when its password was last replaced, when it was
+    last re-sealed under a new vault key, and the result of the last privilege check.
+    Re-runs revision 0004, because PLATFORM_ACCESS now admits the "vault" purpose to
+    `secrets` and `user_mfa` (a key rotation re-seals every tenant's values). Rollback:
+    restore the pre-upgrade backup; the columns are additive and older code ignores them.
+    """
+    _vault_ddl(conn)
+    add_tenant_rls(conn)
 
 
 def add_tenant_scoped_identities(conn) -> None:
@@ -2210,6 +2246,7 @@ def apply_baseline_schema(conn) -> None:
             )
 
     _identity_ddl(conn)  # C2 (revision 0026)
+    _vault_ddl(conn)  # C12 (revision 0027)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -8947,16 +8984,110 @@ def data_retention_summary(tenant_id: str) -> dict:
     }
 
 
-def save_secret(tenant_id: str, secret_id: str, ciphertext: str) -> None:
+def save_secret(tenant_id: str, secret_id: str, ciphertext: str, *, kind: str = "scan", label: str = "") -> None:
+    now = datetime.now(timezone.utc).isoformat()
     with _lock:
         with _connect() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO secrets (tenant_id, secret_id, ciphertext, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO secrets (tenant_id, secret_id, ciphertext, created_at, kind, label, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (tenant_id, secret_id, ciphertext, datetime.now(timezone.utc).isoformat()),
+                (tenant_id, secret_id, ciphertext, now, kind, label, now),
             )
+
+
+def replace_secret(tenant_id: str, secret_id: str, ciphertext: str, label: str) -> bool:
+    """C12: the account's password changed; same reference, new sealed value, new date."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            return conn.execute(
+                "UPDATE secrets SET ciphertext = ?, label = ?, rotated_at = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND secret_id = ?",
+                (ciphertext, label, now, now, tenant_id, secret_id)).rowcount > 0
+
+
+# A use is recorded at most once an hour: a scan resolves its credential on every
+# partition, and "last used" answers "is this account still needed?", not "how often?".
+_SECRET_USE_RESOLUTION = timedelta(hours=1)
+
+
+def touch_secret_used(tenant_id: str, secret_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    cutoff = (now - _SECRET_USE_RESOLUTION).isoformat()
+    with _connect() as conn:
+        conn.execute("UPDATE secrets SET last_used_at = ? WHERE tenant_id = ? AND secret_id = ? "
+                     "AND (last_used_at IS NULL OR last_used_at < ?)", (now.isoformat(), tenant_id, secret_id, cutoff))
+
+
+def set_secret_privilege(tenant_id: str, secret_id: str, privilege: dict) -> None:
+    with _connect() as conn:
+        conn.execute("UPDATE secrets SET privilege_json = ? WHERE tenant_id = ? AND secret_id = ?",
+                     (json.dumps(privilege, separators=(",", ":")), tenant_id, secret_id))
+
+
+def list_secret_metadata(tenant_id: str) -> list[dict]:
+    """A workspace's saved credentials without their sealed values."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT secret_id, ciphertext, created_at, kind, label, last_used_at, rotated_at, rekeyed_at, "
+            "privilege_json FROM secrets WHERE tenant_id = ? ORDER BY created_at", (tenant_id,)).fetchall()
+    items = []
+    for row in rows:
+        sealed = str(row["ciphertext"] or "")
+        key = sealed[4:].split(".", 1)[0] if sealed.startswith("vk1.") else ""
+        try:
+            privilege = json.loads(row["privilege_json"] or "{}")
+        except ValueError:
+            privilege = {}
+        items.append({"credential_ref": row["secret_id"], "kind": row["kind"] or "scan", "label": row["label"] or "",
+                      "created_at": row["created_at"], "last_used_at": row["last_used_at"],
+                      "rotated_at": row["rotated_at"], "rekeyed_at": row["rekeyed_at"],
+                      "key_id": key, "privilege": privilege})
+    return items
+
+
+# C12: every value the vault seals, wherever it lives: (table, key columns, sealed column).
+_SEALED_COLUMNS = (
+    ("secrets", ("tenant_id", "secret_id"), "ciphertext"),
+    ("user_mfa", ("username",), "secret_ciphertext"),
+    ("user_mfa", ("username",), "pending_ciphertext"),
+)
+
+
+def vault_sealed_values() -> list[str]:
+    """Every sealed value in every tenant (for the key ring's status and escrow check)."""
+    values: list[str] = []
+    with _connect() as conn:
+        for table, _keys, column in _SEALED_COLUMNS:
+            values.extend(str(row["v"]) for row in conn.execute(
+                f"SELECT {column} AS v FROM {table} WHERE {column} <> ''").fetchall())  # noqa: S608 - fixed names
+    return values
+
+
+def reseal_vault_values(transform) -> int:
+    """C12: pass every sealed value through `transform` (a new sealed value, or None to
+    keep it) and write the results - in ONE transaction, so a failure part-way leaves
+    every value as it was. Each write is conditional on the value it replaces."""
+    now = datetime.now(timezone.utc).isoformat()
+    changed = 0
+    with _lock:
+        with _connect() as conn:
+            for table, keys, column in _SEALED_COLUMNS:
+                rows = conn.execute(
+                    f"SELECT {', '.join(keys)}, {column} AS v FROM {table} WHERE {column} <> ''").fetchall()  # noqa: S608
+                for row in rows:
+                    new = transform(str(row["v"]))
+                    if new is None or new == row["v"]:
+                        continue
+                    stamp = ", rekeyed_at = ?" if table == "secrets" else ""
+                    where = " AND ".join(f"{key} = ?" for key in keys)
+                    params = [new, *([now] if stamp else []), *[row[key] for key in keys], row["v"]]
+                    changed += conn.execute(
+                        f"UPDATE {table} SET {column} = ?{stamp} WHERE {where} AND {column} = ?",  # noqa: S608
+                        tuple(params)).rowcount
+    return changed
 
 
 def read_secret(tenant_id: str, secret_id: str) -> str | None:
@@ -10034,6 +10165,7 @@ PLATFORM_FUNCTIONS = {
     "allocate_account_key": "auth", "update_directory_account": "auth", "get_user_mfa": "auth",
     "consume_mfa_step": "auth", "consume_recovery_code": "auth",
     "claim_due_schedules": "scheduler",
+    "vault_sealed_values": "vault", "reseal_vault_values": "vault",
     "claim_audit_outbox": "siem", "delete_audit_outbox": "siem", "retry_audit_outbox": "siem",
     "audit_outbox_status": "siem", "reset_audit_outbox_backoff": "siem",
     "_prune_audit_chains": "housekeeping", "prune_event_tables": "housekeeping",

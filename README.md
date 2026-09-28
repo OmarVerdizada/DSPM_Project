@@ -73,6 +73,24 @@ python main.py mfa reset admin
 
 People sign in with their directory name and their workspace (with no workspace named, the `default` workspace's directory is asked). The first directory sign-in creates the account (it has no local password, so it can never be signed into with one). Groups are read again at session renewal once `DSPM_DIRECTORY_REVALIDATE_SECONDS` (900) have passed: a changed group changes the role, and a removed group, a disabled directory account or a vanished one ends every session of that account. If the directory cannot be reached, sign-in answers that it is unavailable and renewal is refused - it fails closed. Local accounts are never affected, so the local administrator can always sign in during an outage. Every directory sign-in, failure (with its reason), role change and settings change is in the audit trail; no password is.
 
+## The credential vault's keys
+
+Saved scan credentials, the directory's service account password and every MFA seed are sealed with the vault key; each sealed value names the key that sealed it. With `DSPM_VAULT_KEYRING` set (the Windows package sets it), the keys form a versioned ring:
+
+```powershell
+python main.py vault status                    # the active key, every key held, how many values each seals
+python main.py vault rotate                    # a new key becomes active; everything is re-sealed with it
+python main.py vault rotate --resume           # finish a rotation that was interrupted
+python main.py vault rollback                  # the previous key becomes active again
+python main.py vault escrow export --out D:\escrow\sentro-keys.json
+python main.py vault escrow verify D:\escrow\sentro-keys.json
+python main.py vault escrow recover D:\escrow\sentro-keys.json --out <DSPM_VAULT_KEYRING>
+```
+
+A rotation makes the new key active first, then re-seals every value in one database transaction; the ring keeps the old key, so a rotation that stops part-way never leaves a value unreadable, and `--resume` finishes it. The escrow is the whole ring encrypted with a key derived (scrypt) from a passphrase of at least 16 characters, asked for or read from `--passphrase-file` - never taken from the command line; keep it off the host, apart from the backups. `escrow verify` checks the escrow opens and holds every key a sealed value names - run it after every rotation. Every key operation is in the audit trail (key ids only, never a key).
+
+**Settings -> Security -> Saved scan credentials** (credential managers) lists each saved credential's account, when it was saved, last used and last had its password changed, which key seals it, and a privilege check: members of Domain Admins and the other protected groups, accounts Active Directory marks `adminCount=1` (when directory sign-in is configured), and names like Administrator are flagged when the credential is saved and on request. Replace a password there (the reference stays, so scan profiles and schedules keep working) or delete the credential. A password older than `DSPM_CREDENTIAL_ROTATION_DAYS` (90) is marked due - a recommendation, not an enforcement.
+
 ## Quick Start
 
 Install dependencies:

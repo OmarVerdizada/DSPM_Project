@@ -75,6 +75,8 @@ class Outcome:
     matched_group: str = ""
     detail: str = ""
     dn: str = field(default="", repr=False)
+    # C12: Active Directory sets adminCount=1 on every account a protected group reaches.
+    admin_count: bool = False
 
     @property
     def ok(self) -> bool:
@@ -262,7 +264,7 @@ def _find_user(connection, config: dict, login: str) -> tuple[str, dict]:
     attribute = config["user_attribute"]
     query = f"(&(|(objectClass=person)(objectClass=user)(objectClass=inetOrgPerson))({attribute}={escape_filter_chars(login)}))"
     wanted = [*_ID_ATTRIBUTES, "memberOf", "userAccountControl", "displayName", "cn", "pwdAccountLockedTime",
-              "nsAccountLock", attribute]
+              "nsAccountLock", "adminCount", attribute]
     if not connection.search(config["base_dn"], query, SUBTREE, attributes=wanted, size_limit=2):
         return "", {}
     entries = list(connection.entries)
@@ -299,15 +301,16 @@ def _disabled(attributes: dict) -> bool:
 def _outcome(config: dict, login: str, dn: str, attributes: dict, groups: tuple) -> Outcome:
     external = next((_first(attributes, name) for name in _ID_ATTRIBUTES if _first(attributes, name)), dn.lower())
     display = _first(attributes, "displayName") or _first(attributes, "cn")
+    protected = _first(attributes, "adminCount") == "1"
     if _disabled(attributes):
         return Outcome("disabled", login_name=login, external_id=external, display_name=display, groups=groups, dn=dn,
-                       detail="The directory account is disabled.")
+                       detail="The directory account is disabled.", admin_count=protected)
     role, group = map_role(config, groups)
     if not role:
         return Outcome("no_mapped_group", login_name=login, external_id=external, display_name=display, groups=groups,
-                       dn=dn, detail="The account is in none of the groups mapped to a role.")
+                       dn=dn, detail="The account is in none of the groups mapped to a role.", admin_count=protected)
     return Outcome("ok", role=role, login_name=login, external_id=external, display_name=display, groups=groups,
-                   matched_group=group, dn=dn)
+                   matched_group=group, dn=dn, admin_count=protected)
 
 
 def authenticate(config: dict, bind_password: str, login: str, password: str) -> Outcome:

@@ -462,6 +462,27 @@
       "code": "rows = conn.execute( f\"\"\" SELECT username, role, tenant_id, full_name, is_active, created_at, updated_at, last_login_at, login_name, auth_source FROM users {where} ORDER BY tenant_id, username \"\"\", params,",
       "reviewed": "2026-09-28",
       "reason": "list_users: interpolates a WHERE fragment assembled from code-owned SQL text (C2 added login_name and auth_source to the column list). Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "values.extend(str(row[\"v\"]) for row in conn.execute( f\"SELECT {column} AS v FROM {table} WHERE {column} <> ''\").fetchall())  # noqa: S608 - fixed names return values",
+      "reviewed": "2026-09-28",
+      "reason": "C12 vault re-seal: table and column names come from the fixed _SEALED_COLUMNS constant; every value, including the compared sealed value, is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {', '.join(keys)}, {column} AS v FROM {table} WHERE {column} <> ''\").fetchall()  # noqa: S608 for row in rows:",
+      "reviewed": "2026-09-28",
+      "reason": "C12 vault re-seal: table and column names come from the fixed _SEALED_COLUMNS constant; every value, including the compared sealed value, is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "changed += conn.execute( f\"UPDATE {table} SET {column} = ?{stamp} WHERE {where} AND {column} = ?\",  # noqa: S608 tuple(params)).rowcount",
+      "reviewed": "2026-09-28",
+      "reason": "C12 vault re-seal: table and column names come from the fixed _SEALED_COLUMNS constant; every value, including the compared sealed value, is a bound parameter."
     }
   ]
 }

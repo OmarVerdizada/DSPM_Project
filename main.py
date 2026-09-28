@@ -322,6 +322,34 @@ def backup_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def vault_command(args: argparse.Namespace) -> int:
+    """The vault's keys (C12): status, rotation, rollback and escrow. Run as an
+    administrator, with the services running or not - a rotation never leaves a sealed
+    value its key ring cannot open. No key or passphrase is ever printed or taken from
+    the command line."""
+    from backend import vault, vault_keys
+
+    try:
+        if args.vault_command == "status":
+            result = vault.status()
+        elif args.vault_command == "rotate":
+            result = vault.rotate(resume=args.resume)
+        elif args.vault_command == "rollback":
+            result = vault.rollback()
+        elif getattr(args, "escrow_command", "") == "export":
+            result = vault.export_escrow(Path(args.out), vault_keys.read_passphrase(args.passphrase_file, confirm=True))
+        elif getattr(args, "escrow_command", "") == "verify":
+            result = vault.verify_escrow(Path(args.file), vault_keys.read_passphrase(args.passphrase_file))
+        else:
+            result = vault.recover_escrow(Path(args.file), vault_keys.read_passphrase(args.passphrase_file),
+                                          Path(args.out), force=args.force)
+    except vault_keys.VaultKeyError as refused:
+        print(f"REFUSED: {refused}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=None if args.json else 2))
+    return 0 if result.get("ok", True) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DSPM scanner for AD file-server data discovery.")
     parser.add_argument("--config", default=None,
@@ -393,6 +421,30 @@ def build_parser() -> argparse.ArgumentParser:
         command = migrate_commands.add_parser(name, help=text)
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=migrate_command)
+
+    vault_parser = subparsers.add_parser("vault", help="The credential vault's keys (C12).")
+    vault_commands = vault_parser.add_subparsers(dest="vault_command", required=True)
+    vault_commands.add_parser("status", help="The active key, the keys held, and what each seals.")
+    rotate_parser = vault_commands.add_parser("rotate", help="Make a new key active and re-seal everything with it.")
+    rotate_parser.add_argument("--resume", action="store_true", help="Finish a rotation that stopped part-way.")
+    vault_commands.add_parser("rollback", help="Make the previous key active again and re-seal with it.")
+    escrow_parser = vault_commands.add_parser("escrow", help="The key ring, encrypted with a passphrase.")
+    escrow_commands = escrow_parser.add_subparsers(dest="escrow_command", required=True)
+    escrow_export = escrow_commands.add_parser("export", help="Write an escrow of the key ring.")
+    escrow_export.add_argument("--out", required=True)
+    escrow_verify = escrow_commands.add_parser("verify", help="Check an escrow opens and holds every key in use.")
+    escrow_verify.add_argument("file")
+    escrow_recover = escrow_commands.add_parser("recover", help="Write the key ring back from an escrow.")
+    escrow_recover.add_argument("file")
+    escrow_recover.add_argument("--out", required=True, help="The key ring file to write (DSPM_VAULT_KEYRING).")
+    escrow_recover.add_argument("--force", action="store_true", help="Replace an existing key ring.")
+    for command in (escrow_export, escrow_verify, escrow_recover):
+        command.add_argument("--passphrase-file", default=None,
+                             help="A file whose first line is the passphrase (else it is asked for).")
+    for command in (vault_commands.choices["status"], rotate_parser, vault_commands.choices["rollback"],
+                    escrow_export, escrow_verify, escrow_recover):
+        command.add_argument("--json", action="store_true")
+        command.set_defaults(func=vault_command)
 
     backup_parser = subparsers.add_parser("backup", help="Encrypted backups of the database and artifacts.")
     backup_commands = backup_parser.add_subparsers(dest="backup_command", required=True)
