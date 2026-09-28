@@ -179,8 +179,12 @@ class ReportCompositionTests(unittest.TestCase):
         block = reports_block()
         for fmt in ("pdf", "word", "excel"):
             self.assertIn(f'id: "{fmt}"', block)
-        self.assertIn("application/msword", block)
-        self.assertIn("application/vnd.ms-excel", block)
+        # C9: Word and Excel are real .docx and .xlsx files from the server, not HTML
+        # saved under an Office extension.
+        self.assertIn('word: { format: "docx"', block)
+        self.assertIn('excel: { format: "xlsx"', block)
+        self.assertNotIn("application/msword", block)
+        self.assertNotIn("application/vnd.ms-excel", block)
 
     def test_the_build_line_counts_the_rows_it_is_about_to_print(self) -> None:
         """It counted the findings in SCOPE, so at Standard depth - where every
@@ -195,7 +199,8 @@ class ReportCompositionTests(unittest.TestCase):
 
     def test_the_preview_and_the_file_are_built_by_one_function(self) -> None:
         block = reports_block()
-        for builder in ("buildReportDocumentHtml", "buildReportWorkbookHtml", "renderReportPreview"):
+        # C9: Word and Excel are built on the server from reportOfficePayload - the same blocks.
+        for builder in ("reportOfficePayload", "renderReportPreview"):
             body = block[block.index(f"function {builder}") if f"function {builder}" in block
                          else block.index(f"async function {builder}"):]
             self.assertIn("reportSectionBlocks()", body[:body.index("\n}\n")])
@@ -423,11 +428,17 @@ class ReportDetailTests(unittest.TestCase):
         self.assertIn("Math.min(20", clamp[:clamp.index("\n}")])
 
     def test_a_detail_block_reaches_all_three_destinations(self) -> None:
+        # The preview draws it; Word and Excel receive it through the payload, and the
+        # server renders it in both (tests/test_office_export.py).
         block = reports_block()
         self.assertIn("function reportDetailMarkup(", block)
-        self.assertIn("function reportDetailWordHtml(", block)
-        self.assertIn("function reportDetailWorkbookHtml(", block)
-        self.assertIn("block.detail", block)
+        payload = block[block.index("function reportOfficePayload("):]
+        payload = payload[:payload.index("\n}\n")]
+        self.assertIn("detail: (block.detail || []).map(reportOfficeDetail)", payload)
+        detail = block[block.index("function reportOfficeDetail("):]
+        detail = detail[:detail.index("\n}\n")]
+        for field in ("reason: entry.reason", "recommendation: entry.recommendation"):
+            self.assertIn(field, detail)
 
     def test_a_detail_block_carries_the_reason_and_the_action(self) -> None:
         block = reports_block()
@@ -475,8 +486,9 @@ class ReportColumnTests(unittest.TestCase):
         block = reports_block()
         preview = block[block.index("function reportTableMarkup("):]
         self.assertIn("reportDroppedNote(table)", preview[:preview.index("\n}")])
-        self.assertEqual(block.count("reportDroppedText(block.table)"), 2)
-        self.assertIn("reportDroppedNote(block.table)", block)
+        # C9: the payload carries it as a note; the server prints notes in Word and Excel.
+        payload = block[block.index("function reportOfficePayload("):]
+        self.assertIn("notes: [reportDroppedText(block.table)", payload[:payload.index("\n}\n")])
 
 
 if __name__ == "__main__":

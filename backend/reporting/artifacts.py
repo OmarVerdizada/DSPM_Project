@@ -11,6 +11,7 @@ from backend.reporting.report_model import build_report_model, report_title
 from backend.reporting.report_pdf import REPORT_TEMPLATE_ID, render_visual_report_pdf
 from backend.security import Principal, create_artifact_download_token
 from backend.store import DATA_DIR, read_scan_history, read_scan_report
+from classification.masking import mask_in_text
 
 
 ARTIFACT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -56,7 +57,11 @@ def _scope_line(scope: dict) -> str:
 
 def _render_report_html(model: dict) -> str:
     """Accessible HTML companion for the shared visual PDF report."""
-    e = html.escape
+
+    def e(value: object, quote: bool = True) -> str:
+        # C9: the same export masking the PDF and the Office files apply, then escaped.
+        return html.escape(mask_in_text(value)[0], quote=quote)
+
     scope = model.get("scope") or {}
     posture = model.get("posture") or {}
     full = model.get("full_summary") or {}
@@ -270,6 +275,7 @@ def create_report_artifact(
         "render_style": pdf_info["render_style"],
         "template_id": pdf_info["template_id"],
         "page_count": pdf_info["page_count"],
+        "font": pdf_info["font"],
     }
     # The signed download token is a CREDENTIAL with a five-minute life. It is
     # handed to the caller that just authenticated and is not written beside the

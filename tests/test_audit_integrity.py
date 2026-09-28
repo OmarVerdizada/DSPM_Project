@@ -322,36 +322,45 @@ class EveryExportIsRecordedTest(_HttpCase):
         self.assertEqual(self.client.post("/api/dlp-policy", headers=self.analyst, json={}).status_code, 200)
         self.assertIn("dlp_policy.exported", self._actions())
 
-    def test_a_report_built_in_the_browser_is_asked_for_first(self) -> None:
-        recorded = self.client.post("/api/audit/browser-export", headers=self.analyst,
-                                    json={"format": "excel", "report_type": "Executive", "rows": 12})
-        self.assertEqual(recorded.status_code, 200, recorded.text)
-        refused = self.client.post("/api/audit/browser-export", headers=self._as("audit-viewer", "viewer"),
-                                   json={"format": "word"})
+    def test_a_word_or_excel_report_is_built_and_recorded_on_the_server(self) -> None:
+        # C9 (was "asked for first" in C4): the server builds the file, so the export is
+        # recorded where it happens - and a role without report.create gets no file.
+        report = {"format": "xlsx", "report_type": "Executive", "scan_id": self.scan_id, "title": "Executive",
+                  "blocks": [{"label": "Findings", "table": {"headers": ["File"], "rows": [["a.csv"], ["b.csv"]]}}]}
+        built = self.client.post("/api/v1/reports/office", headers=self.analyst, json=report)
+        self.assertEqual(built.status_code, 200, built.text[:300])
+        refused = self.client.post("/api/v1/reports/office", headers=self._as("audit-viewer", "viewer"),
+                                   json={**report, "format": "docx"})
         self.assertEqual(refused.status_code, 403)
-        exports = [e["detail"] for e in store.read_audit_log(TENANT, 100) if e["action"] == "report.exported_in_browser"]
-        self.assertEqual([detail["format"] for detail in exports], ["excel"])
+        exports = [e["detail"] for e in store.read_audit_log(TENANT, 100) if e["action"] == "report.exported"]
+        self.assertEqual([(detail["format"], detail["rows"]) for detail in exports], [("xlsx", 2)])
 
     @unittest.skipUnless(NODE, "Node is not installed; the console smoke needs it")
-    def test_the_console_asks_before_it_builds_and_builds_nothing_if_refused(self) -> None:
-        # Driven in the real app.js: the server's answer decides whether a file is built.
+    def test_the_console_saves_only_what_the_server_built(self) -> None:
+        # Driven in the real app.js: the file saved is the server's response, and a refusal
+        # saves nothing. The page's section builder is stood in for; the request and the
+        # save are the console's own.
         drive = (
             "(async () => {{ const events = []; "
-            "fetch = async (url) => {{ events.push('ask ' + url); return {{ ok: {ok}, status: {status}, "
-            "json: async () => ({{recorded: true}}), text: async () => '{{\"detail\":\"no\"}}', headers: {{ get: () => null }} }}; }}; "
-            "try {{ await buildBrowserReport('word', () => events.push('built')); }} catch (error) {{ events.push('refused'); }} "
+            "reportOfficePayload = (format) => ({{ format, blocks: [] }}); "
+            "downloadFile = (name, content, type) => events.push('saved ' + name + ' ' + type); "
+            "fetch = async (url, init) => {{ events.push(init.method + ' ' + url + ' ' + JSON.parse(init.body).format); "
+            "return {{ ok: {ok}, status: {status}, text: async () => '{{\"detail\":\"no\"}}', "
+            "blob: async () => ({{ type: 'application/test' }}), headers: {{ get: () => null }} }}; }}; "
+            "try {{ await downloadOfficeReport('excel'); }} catch (error) {{ events.push('refused: ' + error.message); }} "
             "return events; }})()"
         )
         refused = self._evaluate({"events": drive.format(ok="false", status=403)})["events"]
         allowed = self._evaluate({"events": drive.format(ok="true", status=200)})["events"]
-        self.assertEqual(refused, ["ask /api/audit/browser-export", "refused"])
-        self.assertEqual(allowed, ["ask /api/audit/browser-export", "built"])
+        self.assertEqual(refused, ["POST /api/v1/reports/office xlsx", "refused: no"])
+        self.assertEqual(len(allowed), 2)
+        self.assertEqual(allowed[0], "POST /api/v1/reports/office xlsx")
+        self.assertRegex(allowed[1], r"^saved sentro_\w+_\d{4}-\d{2}-\d{2}\.xlsx application/test$")
         script = (ROOT / "frontend" / "app.js").read_text(encoding="utf-8")
         generate = script[script.index("async function generateReport("):]
         generate = generate[:generate.index("\n}\n")]
-        for format_name in ("word", "excel"):
-            self.assertIn(f'await buildBrowserReport("{format_name}", () => downloadFile(', generate)
-        self.assertEqual(generate.count("downloadFile("), 2, "every browser-built file goes through the guard")
+        self.assertIn("await downloadOfficeReport(format)", generate)
+        self.assertNotIn("downloadFile(", generate, "no report file is built in the browser any more")
 
     def _evaluate(self, expressions: dict) -> dict:
         with tempfile.TemporaryDirectory() as tmp:

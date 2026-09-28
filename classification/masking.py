@@ -23,9 +23,10 @@ partial value, masked to the minimum that identifies the class:
 
 Two rules the formats follow, both learned the hard way:
 
-  * ASCII only. `backend/reporting/report_pdf.py` encodes every cell latin-1
-    with `replace`, so a bullet character renders as `?` in the PDF a customer
-    is handed.
+  * ASCII only. A mask reads the same in every place it lands - the console,
+    a CSV, a SIEM event, the Word and Excel exports and the PDF (which drew
+    in Latin-1 Helvetica until C9 embedded a Unicode font, and printed a
+    bullet character as `?`).
   * Never widen an existing reveal. The PCI family already masks to its own
     rules - and CVV and PIN deliberately show only a LENGTH, because PCI DSS
     forbids keeping sensitive authentication data at all. This module does not
@@ -200,3 +201,73 @@ def mask(value: str, data_class: str = GENERIC) -> str:
     # Belt and braces: a mask that returns its input reveals everything, which
     # is the one outcome this module must never produce.
     return masked if masked != text else _stars(len(text))
+
+
+# ---- Text that leaves the product ------------------------------------------------
+# C9: a report or an export is built from scan results - file names, owners, reasons,
+# and whatever a page composed from them - and it leaves the building: attached to a
+# ticket, mailed to an auditor. The samples in it are masked where they are made; this
+# is the second line, run over every string on its way into the file, for the value
+# that reached a report by another road: a file NAMED after a card number, an IBAN in a
+# share name, a key pasted into an owner field. The same function serves the PDF, the
+# Word document and the workbook, so no format is the one that forgot.
+#
+# It masks only what is unambiguous without context. A card number is issuer-valid,
+# Luhn-valid and not a structural non-card (the shared validator's rules, minus the
+# nearby-words test - in a file bound for a customer, a bare card number is masked
+# whether or not a payment word is near it). An IBAN passes its mod-97 check. A
+# private key block is replaced whole.
+_PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|\Z)", re.S)
+_IBAN_CANDIDATE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Za-z0-9])")
+
+
+def _iban_valid(candidate: str) -> bool:
+    compact = re.sub(r"\s", "", candidate).upper()
+    if not 15 <= len(compact) <= 34:
+        return False
+    rearranged = compact[4:] + compact[:4]
+    try:
+        return int("".join(str(int(char, 36)) for char in rearranged)) % 97 == 1
+    except ValueError:
+        return False
+
+
+def mask_in_text(value: object) -> tuple[str, int]:
+    """`value` as text with every whole card number, IBAN and private key in it
+    masked, and how many were."""
+
+    from classification.pan_validator import (
+        PAN_CANDIDATE_RE, card_issuer, is_luhn_valid, normalize_candidate, structural_exclusion)
+
+    text = "" if value is None else str(value)
+    if not text:
+        return "", 0
+    count = 0
+
+    def _key(_match: re.Match) -> str:
+        nonlocal count
+        count += 1
+        return _MASKS[PRIVATE_KEY]("")
+
+    def _pan(match: re.Match) -> str:
+        nonlocal count
+        digits = normalize_candidate(match.group(0))
+        if not digits or not is_luhn_valid(digits) or not card_issuer(digits)[1] or structural_exclusion(digits):
+            return match.group(0)
+        count += 1
+        return mask(digits, PAN)
+
+    def _iban(match: re.Match) -> str:
+        nonlocal count
+        if not _iban_valid(match.group(0)):
+            return match.group(0)
+        count += 1
+        return mask(match.group(0), IBAN)
+
+    if "PRIVATE KEY" in text:
+        text = _PRIVATE_KEY_BLOCK.sub(_key, text)
+    if any(char.isdigit() for char in text):
+        text = PAN_CANDIDATE_RE.sub(_pan, text)
+        text = _IBAN_CANDIDATE.sub(_iban, text)
+    return text, count

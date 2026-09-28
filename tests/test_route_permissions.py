@@ -120,7 +120,7 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("GET", "/api/inventory/export"): "export",
     ("GET", "/api/nist/catalog/export"): "export",
     ("POST", "/api/v1/reports"): "report.create",
-    ("POST", "/api/audit/browser-export"): "report.create",
+    ("POST", "/api/v1/reports/office"): "report.create",
     ("GET", "/api/v1/reports/artifacts/{artifact_id}"): "report.create",
     ("GET", "/api/audit"): "audit.view",
     ("GET", "/api/audit/verify"): "audit.view",

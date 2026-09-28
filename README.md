@@ -22,7 +22,7 @@ The product is designed around an MSSP workflow: scan a customer environment, cl
 - Right-side detail drawers for long risk reasons and DLP recommendations.
 - Dashboard tables keep long file paths visible instead of truncating them, and priority queues stay read-only so analysts can search or filter inventory deliberately. The Data Inventory table consumes the cursor-paginated `/api/inventory` endpoint in a bounded 100-row page window, caches at most three pages, and refetches evicted pages by cursor instead of growing the DOM indefinitely. Saved-scan restore and scan-completion responses are metadata-only in the console; filter facets come from `/api/inventory/facets`, and full evidence for one row is fetched from `/api/inventory/{asset_id}` only when its detail drawer is opened. Filtered CSV and NDJSON actions stream the normalized inventory directly to disk without constructing a browser Blob.
 - History and security audit views include working date-range filters for all scans, last 24 hours, last 5 days, last 7 days, last 30 days, and custom ranges.
-- Report center with polished Excel, Word, and print/PDF exports, including KPI cards, SVG charts, department risk, folder heatmap, trend context, and priority file queues.
+- Report center with Word (.docx), Excel (.xlsx) and PDF reports built on the server, including KPI cards, department risk, folder heatmap, trend context, and priority file queues. Every export passes one masking step (a card number or IBAN that arrives as a file name is masked too). Workbook cells never run as formulas. The PDF embeds a Unicode font, so Azerbaijani, Russian and Greek file names print as themselves.
 - Security operations view with API keys, audit trail, DLP policy export, and credential vault support.
 - SQLite-backed tenant and user management with invitation-code registration, admin role management, password resets, and activity logging.
 - Windows endpoint profile scanning over WinRM, including DSPM host preparation, target WinRM verification, credential vault handoff, and scoped profile scans.
@@ -211,7 +211,7 @@ This project does not perform full AD inventory collection. It uses AD/Windows a
 
 ## Audit trail
 
-Every administrative and security-relevant action is written to a per-tenant audit trail, including sign-in attempts (recorded in the tenant the attempted name belongs to), report creation and download, full-report fetches, the DLP policy and reports built in the browser. Blocked sign-in attempts are aggregated, one row per order of magnitude, so a brute force cannot flood the table.
+Every administrative and security-relevant action is written to a per-tenant audit trail, including sign-in attempts (recorded in the tenant the attempted name belongs to), report creation and download, full-report fetches, the DLP policy, and Word and Excel exports (recorded with their size and masked-value count, never their content). Blocked sign-in attempts are aggregated, one row per order of magnitude, so a brute force cannot flood the table.
 
 Each tenant's rows form a hash chain. Check it at any time:
 

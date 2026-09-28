@@ -22,7 +22,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -1192,25 +1192,51 @@ class DemoDataRequest(BaseModel):
     files_per_share: int = Field(default=10, ge=1, le=40)
 
 
+# C6 caches a `?v=` static file for a year, so the version in a page's URL must change
+# whenever the file does - or every browser that saw the old file keeps running it. A
+# hand-bumped number is a promise someone forgets, so each page is served with every
+# /static/ reference versioned by the file's own content digest.
+_STATIC_REFERENCE = re.compile(r"(/static/([A-Za-z0-9_./-]+))\?v=[A-Za-z0-9_.-]*")
+
+
+@functools.lru_cache(maxsize=128)
+def _asset_digest(path: str, mtime_ns: int, size: int) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
+
+
+def _asset_version(match: re.Match) -> str:
+    root = FRONTEND_DIR.resolve()
+    path = (root / match.group(2)).resolve()
+    if root not in path.parents or not path.is_file():
+        return match.group(0)
+    stat = path.stat()
+    return f"{match.group(1)}?v={_asset_digest(str(path), stat.st_mtime_ns, stat.st_size)}"
+
+
+def _page(name: str) -> HTMLResponse:
+    html = (FRONTEND_DIR / name).read_text(encoding="utf-8")
+    return HTMLResponse(_STATIC_REFERENCE.sub(_asset_version, html))
+
+
 @app.get("/")
-def login_root() -> FileResponse:
+def login_root() -> HTMLResponse:
     # The product starts at login: no marketing landing page ships on-prem.
-    return FileResponse(FRONTEND_DIR / "login.html")
+    return _page("login.html")
 
 
 @app.get("/login")
-def login_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "login.html")
+def login_page() -> HTMLResponse:
+    return _page("login.html")
 
 
 @app.get("/register")
-def register_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "register.html")
+def register_page() -> HTMLResponse:
+    return _page("register.html")
 
 
 @app.get("/profile")
-def profile_page() -> FileResponse:
-    return FileResponse(FRONTEND_DIR / "profile.html")
+def profile_page() -> HTMLResponse:
+    return _page("profile.html")
 
 
 @app.get("/dashboard")
@@ -1219,10 +1245,10 @@ def profile_page() -> FileResponse:
 @app.get("/scan")
 @app.get("/evidence")
 @app.get("/administration")
-def dashboard() -> FileResponse:
+def dashboard() -> HTMLResponse:
     # Every sidebar destination is a real, reloadable path. The console is one
     # page; app.js reads location.pathname (+#member) to open the right view.
-    return FileResponse(FRONTEND_DIR / "index.html")
+    return _page("index.html")
 
 
 def _siem_health() -> dict:
@@ -3900,23 +3926,6 @@ def _scan_extension_settings(extensions: list[str], enabled: bool) -> tuple[list
     if not enabled or not normalized:
         return [], False
     return normalized, True
-
-
-class BrowserExportRequest(BaseModel):
-    format: str = Field(pattern="^(word|excel)$")
-    report_type: str = Field(default="", max_length=60)
-    rows: int = Field(default=0, ge=0, le=10_000_000)
-    scan_id: str = Field(default="", max_length=160)
-
-
-@app.post("/api/audit/browser-export")
-def record_browser_export(payload: BrowserExportRequest,
-                          principal: Principal = Depends(require_permission("report.create"))) -> dict:
-    """C4: Word and Excel reports are built in the browser from data it already holds, so
-    the server never sees the file. The console asks here first - and builds nothing if
-    this refuses - so the export is recorded, and permitted, where the trail is kept."""
-    audit(principal.tenant_id, principal.subject, "report.exported_in_browser", payload.model_dump())
-    return {"recorded": True}
 
 
 @app.post("/api/dlp-policy")

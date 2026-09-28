@@ -6127,8 +6127,8 @@ function reportSectionIsAvailable(id) {
 
 const REPORT_FORMATS = [
   { id: "pdf", label: "PDF", note: "Filed on the server as evidence, on the standard template. Scope applies; sections are fixed." },
-  { id: "word", label: "Word", note: "An editable document of the sections ticked above." },
-  { id: "excel", label: "Excel", note: "Every section as a table, ready to filter and pivot." },
+  { id: "word", label: "Word", note: "An editable .docx of the sections ticked above, built on the server." },
+  { id: "excel", label: "Excel", note: "A .xlsx with every section on its own sheet, ready to filter and pivot." },
 ];
 
 let reportState = { type: "executive", format: "word", sections: null };
@@ -6329,10 +6329,6 @@ function reportFileStem() {
   return `sentro_${type}_${stamp}`;
 }
 
-function reportDocumentTitle() {
-  return `${reportType().label} — ${reportScopeLabel()}`;
-}
-
 // A filed document says what it covers. When the scope is larger than one
 // document should carry, it says that too, rather than looking complete.
 function reportCoverageLine(blocks) {
@@ -6347,20 +6343,6 @@ function reportCoverageLine(blocks) {
     ? `${counted} · this document carries the ${reportRows.rows.length.toLocaleString()} highest-scoring of them`
     : counted;
 }
-
-// Excel, LibreOffice and Numbers all EXECUTE a cell that begins with =, +, -
-// or @. Every cell below is built from scanned content - file names, owners,
-// share names - so a file called `=HYPERLINK("http://x","x").txt` on the share
-// being scanned becomes a live formula in the customer's report. The backend
-// CSV export has guarded this since Track S; these three builders did not.
-//
-// A leading apostrophe is the portable "treat this as text" marker. Numbers are
-// exempt: the report prints counts and percentages, and quoting those would
-// turn a spreadsheet of figures into a spreadsheet of strings.
-// The four characters a spreadsheet treats as the start of a formula, plus
-// the two whitespace characters Excel strips before deciding.
-const FORMULA_LEAD = /^[=+\-@\t\r]/;
-const NUMERIC_CELL = /^[-+]?\d[\d,. ]*%?$/;
 
 // The artifact bytes, as a URL a window can be pointed at.
 //
@@ -6383,94 +6365,90 @@ async function artifactBlobUrl(artifact) {
   return URL.createObjectURL(await response.blob());
 }
 
-function reportCell(value) {
-  const text = String(value ?? "");
-  if (!text || !FORMULA_LEAD.test(text)) return escapeHtml(text);
-  // A figure is not a formula. The report prints counts, percentages and
-  // deltas like "-12", and quoting those turns a sheet of numbers into a
-  // sheet of strings.
-  if (NUMERIC_CELL.test(text)) return escapeHtml(text);
-  return escapeHtml("'" + text);
+// C9: Word and Excel reports are real .docx and .xlsx files, built by the server from
+// the sections this page composed - the same blocks the preview draws, so the file is
+// what the operator looked at. The server masks every string it writes (the pass the
+// PDF uses), types every workbook cell so none can run as a formula, and records the
+// export; a role without report.create is refused there, and nothing is saved.
+const OFFICE_FORMATS = {
+  word: { format: "docx", label: "Word" },
+  excel: { format: "xlsx", label: "Excel" },
+};
+
+// A section that is prose here (a "nothing to show" note, a sample caveat) travels as
+// its text. Parsed into an inert document: no script runs and nothing loads.
+function reportHtmlText(markup) {
+  if (!markup) return [];
+  const parsed = new DOMParser().parseFromString(String(markup), "text/html");
+  const blocks = [...parsed.body.querySelectorAll("p, li, h3, h4")];
+  return (blocks.length ? blocks : [parsed.body])
+    .map((node) => String(node.textContent || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
 }
 
-function buildReportDocumentHtml() {
+function reportOfficeDetail(entry) {
+  return {
+    finding: entry.finding,
+    severity: severityLabel(entry.severity),
+    status: entry.status,
+    file: entry.path || entry.name,
+    data_class: keywordCategoryLabel(entry.dataClass),
+    owner: entry.owner,
+    frameworks: (entry.frameworks || []).map(frameworkLabel).join(", "),
+    score: entry.score ? String(entry.score) : "",
+    occurrences: entry.occurrences > 1 ? String(entry.occurrences) : "",
+    due: entry.due ? formatReportDate(entry.due) : "",
+    reason: entry.reason,
+    recommendation: entry.recommendation,
+  };
+}
+
+function reportOfficeCell(cell) {
+  return typeof cell === "number" && Number.isFinite(cell) ? cell : String(cell ?? "");
+}
+
+function reportOfficePayload(format) {
   const blocks = reportSectionBlocks();
-  const body = blocks.map((block, index) => `
-    <h2>${index + 1}. ${escapeHtml(block.label)}</h2>
-    ${block.detail ? reportDetailWordHtml(block.detail) : block.table ? `<table border="1" cellspacing="0" cellpadding="6">
-      <thead><tr>${block.table.headers.map((head) => `<th align="left">${escapeHtml(head)}</th>`).join("")}</tr></thead>
-      <tbody>${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${reportCell(cell)}</td>`).join("")}</tr>`).join("")}</tbody>
-    </table>${reportDroppedNote(block.table)}${block.note || ""}` : (block.html || "")}`).join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(reportDocumentTitle())}</title>
-    <style>
-      body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; color: #111827; }
-      h1 { font-size: 20pt; margin: 0 0 4pt; }
-      h2 { font-size: 13pt; margin: 18pt 0 6pt; border-bottom: 1px solid #d1d5db; padding-bottom: 3pt; }
-      p.scope { color: #4b5563; margin: 0 0 18pt; }
-      table { border-collapse: collapse; width: 100%; font-size: 10pt; }
-      th { background: #eef2ff; }
-    </style></head><body>
-    <h1>${escapeHtml(reportType().label)}</h1>
-    <p class="scope">${escapeHtml(reportScopeLabel())} &middot; tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}<br/>${escapeHtml(reportCoverageLine(blocks))}</p>
-    ${body}
-  </body></html>`;
-}
-
-function buildReportWorkbookHtml() {
-  const blocks = reportSectionBlocks();
-  const tables = blocks.map((block) => {
-    // A spreadsheet holds long text happily, so the detail blocks travel as a
-    // wide sheet rather than as prose.
-    if (block.detail) return reportDetailWorkbookHtml(block);
-    if (!block.table) return "";
-    return `<table border="1" cellspacing="0" cellpadding="4">
-      <tr><td colspan="${block.table.headers.length}"><b>${escapeHtml(block.label)}</b></td></tr>
-      <tr>${block.table.headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr>
-      ${block.table.rows.map((row) => `<tr>${row.map((cell) => `<td>${reportCell(cell)}</td>`).join("")}</tr>`).join("")}
-      ${reportDroppedText(block.table) ? `<tr><td colspan="${block.table.headers.length}">${escapeHtml(reportDroppedText(block.table))}</td></tr>` : ""}
-    </table><br/>`;
-  }).join("");
-  return `<!doctype html><html><head><meta charset="utf-8"></head><body>
-    <table><tr><td><b>${escapeHtml(reportDocumentTitle())}</b></td></tr>
-    <tr><td>tenant ${escapeHtml(currentTenant)} &middot; ${escapeHtml(new Date().toLocaleString())}</td></tr>
-    <tr><td>${escapeHtml(reportCoverageLine(blocks))}</td></tr></table><br/>
-    ${tables}</body></html>`;
-}
-
-function reportDetailWordHtml(entries) {
-  return entries.map((entry, index) => `
-    <h3>${index + 1}. ${escapeHtml(entry.finding)} &mdash; ${escapeHtml(severityLabel(entry.severity))}</h3>
-    <p><i>${escapeHtml(entry.path || entry.name)}</i></p>
-    <p>${reportDetailFacts(entry).map(([term, value]) =>
-      `<b>${escapeHtml(term)}:</b> ${escapeHtml(value)}`).join(" &nbsp;&middot;&nbsp; ")}</p>
-    ${entry.reason ? `<p><b>Why it is a risk.</b> ${escapeHtml(entry.reason)}</p>` : ""}
-    ${entry.recommendation ? `<p><b>Recommended action.</b> ${escapeHtml(entry.recommendation)}</p>` : ""}`).join("");
-}
-
-function reportDetailWorkbookHtml(block) {
-  const headers = ["#", "Finding", "Severity", "Status", "File", "Data class", "Owner", "Why it is a risk", "Recommended action"];
-  return `<table border="1" cellspacing="0" cellpadding="4">
-    <tr><td colspan="${headers.length}"><b>${escapeHtml(block.label)}</b></td></tr>
-    <tr>${headers.map((head) => `<th>${escapeHtml(head)}</th>`).join("")}</tr>
-    ${block.detail.map((entry, index) => `<tr>${[
-      String(index + 1), entry.finding, severityLabel(entry.severity), entry.status,
-      entry.path || entry.name, keywordCategoryLabel(entry.dataClass), entry.owner,
-      entry.reason, entry.recommendation,
-    ].map((cell) => `<td>${reportCell(cell)}</td>`).join("")}</tr>`).join("")}
-  </table><br/>`;
-}
-
-// C4: a Word or Excel report is built here from data the page already holds, so the
-// server never sees the file. It is told first - which records the export and refuses a
-// role without report.create - and nothing is built if it says no.
-async function buildBrowserReport(format, build) {
-  await api("/api/audit/browser-export", {
+  return {
     format,
     report_type: reportType().label || "",
-    rows: activeReportFileCount(),
     scan_id: latestReport?.scan_id || "",
-  }, "POST");
-  build();
+    title: reportType().label,
+    lines: [
+      reportScopeLabel(),
+      `Tenant ${currentTenant} · ${new Date().toLocaleString()}`,
+      reportCoverageLine(blocks),
+    ],
+    filename: reportFileStem(),
+    blocks: blocks.map((block) => ({
+      label: block.label,
+      table: block.table
+        ? { headers: block.table.headers.map(String), rows: block.table.rows.map((row) => row.map(reportOfficeCell)) }
+        : null,
+      detail: (block.detail || []).map(reportOfficeDetail),
+      paragraphs: reportHtmlText(block.html),
+      notes: [reportDroppedText(block.table), ...reportHtmlText(block.note)].filter(Boolean),
+    })),
+  };
+}
+
+async function fetchOfficeReport(payload, isRetry = false) {
+  const response = await fetch("/api/v1/reports/office", {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(payload),
+  });
+  // C1: a 401 is the normal end of an access token; renew once and ask again.
+  if (response.status === 401 && !isRetry && await refreshAccessToken()) return fetchOfficeReport(payload, true);
+  if (!response.ok) throw new Error(await readErrorMessage(response));
+  return response.blob();
+}
+
+async function downloadOfficeReport(kind) {
+  const office = OFFICE_FORMATS[kind];
+  const file = await fetchOfficeReport(reportOfficePayload(office.format));
+  downloadFile(`${reportFileStem()}.${office.format}`, file, file.type);
+  return office;
 }
 
 async function generateReport(event) {
@@ -6499,12 +6477,10 @@ async function generateReport(event) {
       if (label) label.textContent = "Collecting findings…";
       await loadReportRows({ complete: true });
     }
-    if (format === "word") {
-      await buildBrowserReport("word", () => downloadFile(`${reportFileStem()}.doc`, buildReportDocumentHtml(), "application/msword;charset=utf-8"));
-      showToast("Report generated", `${reportType().label} saved as Word.`, "success");
-    } else if (format === "excel") {
-      await buildBrowserReport("excel", () => downloadFile(`${reportFileStem()}.xls`, buildReportWorkbookHtml(), "application/vnd.ms-excel;charset=utf-8"));
-      showToast("Report generated", `${reportType().label} saved as Excel.`, "success");
+    if (OFFICE_FORMATS[format]) {
+      if (label) label.textContent = `Building the ${OFFICE_FORMATS[format].label} file…`;
+      const office = await downloadOfficeReport(format);
+      showToast("Report generated", `${reportType().label} saved as ${office.label} (.${office.format}).`, "success");
     } else {
       await exportPdf();
     }
@@ -10383,6 +10359,8 @@ const AUDIT_ACTIONS = {
   "role.created": "Created a custom role",
   "report.created": "Filed a report",
   "report.downloaded": "Downloaded a report",
+  "report.exported": "Exported a Word or Excel report",
+  // Recorded before C9, when the browser built the file; kept so older entries read.
   "report.exported_in_browser": "Built a Word or Excel report",
   "scan_report.viewed": "Fetched a full scan report",
   "dlp_policy.exported": "Exported a DLP policy",

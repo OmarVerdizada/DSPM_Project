@@ -162,6 +162,13 @@ class AnExportedReportTest(_ExportCase):
         self.assertNotIn(SHARE_FOLDER.encode(), raw, "SC-13: file names only, never the full path")
         self.assertNotIn(b"fs01", raw)
 
+    def test_a_zero_count_is_printed_as_zero(self) -> None:
+        # The fixture has no LOW file. The card printed nothing at all - "LOW" over a
+        # blank read as a rendering fault, not as "none" - until C9's review caught it.
+        text = self._pdf_text(self.pdf)
+        self.assertRegex(text, r"LOW\s+0\b")
+        self.assertRegex(text, r"Low 0\b", "and the Low bar's count")
+
     def test_the_html_twin_shows_the_same_and_no_more(self) -> None:
         html = self.html.read_text(encoding="utf-8")
         self.assertIn("cards.csv", html)
@@ -227,14 +234,19 @@ class TheDocumentIsNamedTest(_ExportCase):
         # The cover headline shrinks to fit its band rather than wrapping into the
         # line below it or colliding with the block on the right, and a title too
         # long even at the smallest size is cut rather than allowed to overlap.
-        for label in ("Full scan", "Critical severity", "A" * 70):
-            with self.subTest(label=label):
-                title = report_title({"label": label})
-                headline, size = _fitted_headline(title, HEADLINE_WIDTH, 25, 14)
-                self.assertLessEqual(len(headline) * size * 0.52, HEADLINE_WIDTH + 0.01)
-                self.assertGreaterEqual(size, 14)
-                self.assertTrue(title.startswith(headline.rstrip('.')),
-                                "the headline must be the title, not a different string")
+        # C9: measured with the embedded bold face the cover is drawn in.
+        from backend.reporting.report_pdf import rendering, text_width
+
+        with rendering() as fonts:
+            self.assertIsNotNone(fonts)
+            for label in ("Full scan", "Critical severity", "A" * 70, "Müştəri məlumatları və ödəniş kartları"):
+                with self.subTest(label=label):
+                    title = report_title({"label": label})
+                    headline, size = _fitted_headline(title, HEADLINE_WIDTH, 25, 14)
+                    self.assertLessEqual(text_width(headline, size, bold=True), HEADLINE_WIDTH + 0.01)
+                    self.assertGreaterEqual(size, 14)
+                    self.assertTrue(title.startswith(headline.rstrip('.')),
+                                    "the headline must be the title, not a different string")
 
 
 class TheDownloadCredentialTest(_ExportCase):
@@ -331,7 +343,7 @@ class AScopedExportTest(_ExportCase):
         text = self._pdf_text(self._files(artifact["artifact_id"])[0])
         self.assertIn("cards.csv", text)
         self.assertIn("rows 1-1 of 1", text)
-        self.assertNotIn("siyahisi", text, "a HIGH file has no place in a CRITICAL-scoped export")
+        self.assertNotIn("siyahısı", text, "a HIGH file has no place in a CRITICAL-scoped export")
 
     def test_the_full_picture_is_still_reported_alongside_the_scope(self) -> None:
         # The scoped register is not the whole estate, and the summary page must not
@@ -347,24 +359,124 @@ class AScopedExportTest(_ExportCase):
         self.assertIn("No DSPM scan report", str(failed.exception))
 
 
-class WhatTheFontsCannotPrintTest(_ExportCase):
-    """GAP (C9). The PDF is built on the base-14 fonts, which are Latin-1 only."""
+class EveryNamePrintsAsItselfTest(_ExportCase):
+    """C9 (was GAP): the PDF embeds Inter as a Unicode font.
 
-    def test_azerbaijani_and_turkish_names_are_transliterated(self) -> None:
-        # Deliberate, and the reason the export is readable for this customer at all:
-        # the letters outside Latin-1 are mapped to their nearest ASCII form.
-        text = self._pdf_text(self._files(self._export()["artifact_id"])[0])
+    It used the base-14 Helvetica, which is Latin-1 only: "müştəri_siyahısı.csv" printed
+    as "musteri_siyahisi.csv" and "отчет_2026.csv" as "?????_2026.csv". A report is
+    evidence about named files, and the reader has to be able to find the file it names.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.artifact = self._export()
+        self.pdf = self._files(self.artifact["artifact_id"])[0]
+        self.text = self._pdf_text(self.pdf)
+
+    def test_azerbaijani_and_turkish_names_round_trip(self) -> None:
+        self.assertIn("müştəri_siyahısı.csv", self.text)
+        self.assertNotIn("musteri_siyahisi", self.text)
+
+    def test_a_cyrillic_name_round_trips(self) -> None:
+        self.assertIn("отчет_2026.csv", self.text)
+        self.assertNotRegex(self.text, r"\?{3,}_2026\.csv")
+
+    def test_the_font_is_embedded_and_maps_back_to_text(self) -> None:
+        raw = self.pdf.read_bytes()
+        for marker in (b"/FontFile2", b"/CIDFontType2", b"/Identity-H", b"/ToUnicode", b"/BaseFont /Inter-Bold"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, raw)
+        self.assertEqual(self.artifact["font"], "Inter (embedded, Unicode)")
+
+    def test_each_glyph_is_as_wide_in_the_file_as_it_was_measured(self) -> None:
+        # A viewer lays text out from the font dictionary's /W array; if it disagreed
+        # with the advances the renderer wrapped by, lines would overrun their cells.
+        import re as _re
+
+        from backend.reporting import pdf_font
+
+        raw = self.pdf.read_bytes().decode("latin-1")
+        for bold, name in ((False, "Inter-Regular"), (True, "Inter-Bold")):
+            face = pdf_font.load(bold)
+            match = _re.search(rf"/CIDFontType2 /BaseFont /{name} .*?/W \[((?:\d+ \[\d+\] ?)*)\]", raw)
+            self.assertIsNotNone(match, name)
+            pairs = _re.findall(r"(\d+) \[(\d+)\]", match.group(1))
+            self.assertGreater(len(pairs), 10)
+            for gid, width in pairs:
+                with self.subTest(font=name, gid=gid):
+                    self.assertEqual(int(width), round(face.advances[int(gid)] * 1000 / face.units_per_em))
+
+    def test_a_title_in_another_script_names_the_document(self) -> None:
+        from backend.reporting.report_pdf import render_visual_report_pdf
+
+        path = Path(self.temp_dir.name) / "titled.pdf"
+        render_visual_report_pdf(path, {"title": "Hesabat — müştəri məlumatları", "scan_id": "s-1"})
+        self.assertEqual(PdfReader(str(path)).metadata.title, "Hesabat — müştəri məlumatları")
+
+
+class WithoutTheFontFilesTest(_ExportCase):
+    """An install that lost backend/reporting/fonts still files a report: Helvetica and
+    the Latin-1 transliteration, and the metadata says which face drew it."""
+
+    def test_the_fallback_still_renders_and_says_so(self) -> None:
+        from backend.reporting.report_pdf import render_visual_report_pdf
+
+        empty = Path(self.temp_dir.name) / "no-fonts"
+        empty.mkdir()
+        path = Path(self.temp_dir.name) / "fallback.pdf"
+        model = {"title": "Report", "scan_id": "s-1",
+                 "evidence_register": [{"name": "müştəri_siyahısı.csv", "severity": "HIGH", "risk_score": 71}]}
+        info = render_visual_report_pdf(path, model, font_dir=empty)
+        self.assertEqual(info["font"], "Helvetica (Latin-1 fallback)")
+        text = self._pdf_text(path)
         self.assertIn("musteri_siyahisi.csv", text)
-        self.assertNotIn("müştəri", text)
+        self.assertNotIn(b"/FontFile2", path.read_bytes())
 
-    def test_any_other_script_becomes_question_marks(self) -> None:
-        # A Cyrillic, Greek or CJK file name is unreadable in the export: it is
-        # replaced character by character. C9 is where an embedded font decides
-        # whether this stays a documented limit or becomes a bug.
-        text = self._pdf_text(self._files(self._export()["artifact_id"])[0])
-        self.assertNotIn("отчет", text)
-        self.assertIn("_2026.csv", text)
-        self.assertRegex(text, r"\?{3,}_2026\.csv")
+
+class WhateverReachesAPageIsMaskedTest(_ExportCase):
+    """C9: the shared export masking runs over every string the PDF draws - including a
+    card number that arrived as a FILE NAME rather than as a finding's sample."""
+
+    def test_a_file_named_after_a_card_number_is_masked(self) -> None:
+        from backend.reporting.report_pdf import render_visual_report_pdf
+
+        path = Path(self.temp_dir.name) / "named.pdf"
+        name = f"refund_{PAN}.csv"
+        model = {"title": "Report", "scan_id": "s-1",
+                 "priority_files": [{"name": name, "severity": "HIGH", "risk_score": 80}],
+                 "evidence_register": [{"name": name, "severity": "HIGH", "risk_score": 80,
+                                        "findings": [f"card {PAN}"], "actions": ["Remove it"]}]}
+        render_visual_report_pdf(path, model)
+        text = self._pdf_text(path)
+        self.assertNotIn(PAN, text)
+        self.assertIn("refund_411111******1111.csv", text)
+
+    def test_the_html_twin_is_masked_the_same_way(self) -> None:
+        html = artifacts._render_report_html({"evidence_register": [
+            {"name": f"refund_{PAN}.csv", "path": f"C:/x/refund_{PAN}.csv", "severity": "HIGH"}]})
+        self.assertNotIn(PAN, html)
+        self.assertIn("411111******1111", html)
+
+
+class LinesAreMeasuredNotGuessedTest(unittest.TestCase):
+    """C9: with a real font the renderer knows how wide each line is, so a wrapped line
+    is never wider than its column - Inter is wider than the 0.52 em the old estimate
+    assumed, and a guess would run text over the cell borders."""
+
+    def test_every_wrapped_line_fits_its_column(self) -> None:
+        from backend.reporting.report_pdf import _wrap, rendering, text_width
+
+        value = ("Şəxsi məlumatlar: müştərilərin ünvanları və telefon nömrələri açıq paylaşımda "
+                 "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW saxlanılır")
+        with rendering() as fonts:
+            self.assertIsNotNone(fonts)
+            for bold in (False, True):
+                lines = _wrap(value, 180, 9, bold=bold)
+                with self.subTest(bold=bold):
+                    self.assertGreater(len(lines), 2)
+                    for line in lines:
+                        self.assertLessEqual(text_width(line, 9, bold), 180 + 0.01, line)
+                    self.assertEqual("".join(lines).replace(" ", ""), value.replace(" ", ""))
 
 
 if __name__ == "__main__":

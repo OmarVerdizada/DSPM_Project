@@ -118,6 +118,44 @@ class OnlyAVersionedFileIsKeptTest(unittest.TestCase):
                 self.assertEqual(client.get(path).headers.get("cache-control"), expected)
 
 
+class TheVersionIsTheFilesOwnTest(unittest.TestCase):
+    """A year-long cache is only safe if the URL changes when the file does. The pages
+    are served with every /static/ reference versioned by the file's content digest, so
+    no one has to remember to bump a number - C9 found app.js about to ship under the
+    version its previous content was cached with."""
+
+    def test_every_page_names_each_file_by_its_digest(self) -> None:
+        import hashlib
+
+        client = TestClient(app)
+        for page in ("/", "/register", "/profile", "/dashboard"):
+            html = client.get(page).text
+            references = re.findall(r'/static/([A-Za-z0-9_./-]+)\?v=([^"\']+)', html)
+            self.assertTrue(references, page)
+            for name, version in references:
+                with self.subTest(page=page, file=name):
+                    expected = hashlib.sha256((FRONTEND / name).read_bytes()).hexdigest()[:12]
+                    self.assertEqual(version, expected)
+
+    def test_a_changed_file_gets_a_new_version(self) -> None:
+        from unittest import mock
+
+        import backend.app as app_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.html").write_text('<script src="/static/app.js?v=1"></script>'
+                                             '<link href="/static/../secret.css?v=1">', encoding="utf-8")
+            (root / "app.js").write_text("one", encoding="utf-8")
+            with mock.patch.object(app_module, "FRONTEND_DIR", root):
+                first = app_module._page("index.html").body.decode()
+                (root / "app.js").write_text("two, and longer", encoding="utf-8")
+                second = app_module._page("index.html").body.decode()
+        version = re.compile(r"app\.js\?v=([0-9a-f]{12})")
+        self.assertNotEqual(version.search(first).group(1), version.search(second).group(1))
+        self.assertIn("/static/../secret.css?v=1", second, "a path out of frontend/ is left alone")
+
+
 class TheSignInPageTest(unittest.TestCase):
 
     def test_landmarks_labels_and_a_live_status(self) -> None:

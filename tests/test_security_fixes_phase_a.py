@@ -60,34 +60,53 @@ class S1LoginByLinkTests(unittest.TestCase):
 
 class S2FormulaInjectionTests(unittest.TestCase):
     """Report cells are built from names on the scanned share. Excel executes a
-    cell that begins with =, +, - or @."""
+    cell that begins with =, +, - or @.
 
-    def test_every_report_table_routes_cells_through_the_guard(self) -> None:
-        self.assertIn("function reportCell(value)", APP_JS)
-        # The three builders: Word, workbook, and the detail sheet.
-        self.assertEqual(APP_JS.count("`<td>${reportCell(cell)}</td>`"), 3)
+    C9 moved the guard to the server: the workbook is a real .xlsx whose text cells
+    are inline strings - which Excel never evaluates - and whose formula-looking text
+    also carries the quote-prefix style, so editing a cell keeps it text. The page no
+    longer builds a report file at all."""
 
-    def test_no_builder_still_emits_a_raw_cell(self) -> None:
-        self.assertNotIn('`<td>${escapeHtml(String(cell ?? ""))}</td>`', APP_JS)
+    def _cells(self, values: list) -> dict:
+        import io
+        import zipfile
+        from xml.etree import ElementTree
+
+        from backend.reporting.office import render_xlsx
+
+        data, _stats = render_xlsx({"title": "t", "blocks": [
+            {"label": "Cells", "table": {"headers": ["Value"], "rows": [[value] for value in values]}}]})
+        main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        with zipfile.ZipFile(io.BytesIO(data)) as package:
+            sheet = ElementTree.fromstring(package.read("xl/worksheets/sheet2.xml"))
+            styles = ElementTree.fromstring(package.read("xl/styles.xml"))
+        quoted = {str(index) for index, xf in enumerate(styles.find(f"{main}cellXfs"))
+                  if xf.get("quotePrefix") == "1"}
+        cells = {}
+        for cell in sheet.iter(f"{main}c"):
+            if cell.get("r") == "A1":
+                continue
+            self.assertIsNone(cell.find(f"{main}f"), "a cell holds a formula")
+            text = "".join(node.text or "" for node in cell.iter(f"{main}t"))
+            cells[text or cell.findtext(f"{main}v")] = (cell.get("t"), cell.get("s") in quoted)
+        return cells
 
     def test_the_guard_neutralises_a_formula_and_leaves_a_number_alone(self) -> None:
-        """Behaviour, checked against the regexes the console ships."""
-        import re
+        cells = self._cells(['=HYPERLINK("http://x","x").txt', "@SUM(A1)", "-file.txt", "+cmd", "-12", "1,234",
+                             "45%", "invoice.pdf"])
+        for formula in ('=HYPERLINK("http://x","x").txt', "@SUM(A1)", "-file.txt", "+cmd"):
+            with self.subTest(formula=formula):
+                self.assertEqual(cells[formula], ("inlineStr", True))
+        self.assertEqual(cells["invoice.pdf"], ("inlineStr", False))
+        for figure in ("-12", "1234", "0.45"):
+            with self.subTest(figure=figure):
+                self.assertEqual(cells[figure][0], None, "a figure is a number, not quoted text")
 
-        lead = re.compile(r"^[=+\-@\t\r]")
-        numeric = re.compile(r"^[-+]?\d[\d,. ]*%?$")
-
-        def guarded(value: str) -> str:
-            if not value or not lead.match(value):
-                return value
-            return value if numeric.match(value) else "'" + value
-
-        self.assertEqual(guarded('=HYPERLINK("http://x","x").txt'), "'" + '=HYPERLINK("http://x","x").txt')
-        self.assertEqual(guarded("@SUM(A1)"), "'@SUM(A1)")
-        self.assertEqual(guarded("-file.txt"), "'-file.txt")
-        for untouched in ("-12", "+1234", "1,234", "45%", "invoice.pdf"):
-            with self.subTest(value=untouched):
-                self.assertEqual(guarded(untouched), untouched)
+    def test_the_console_no_longer_builds_a_spreadsheet_itself(self) -> None:
+        self.assertNotIn("function reportCell(value)", APP_JS)
+        self.assertNotIn("application/vnd.ms-excel", APP_JS)
+        self.assertNotIn("application/msword", APP_JS)
+        self.assertIn('fetch("/api/v1/reports/office"', APP_JS)
 
 
 class S3AuditTests(unittest.TestCase):
