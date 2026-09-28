@@ -5,8 +5,11 @@ name: DAST baseline (nightly)
 # password - nothing real is scanned. The report is uploaded as an artifact for review;
 # the job does not fail on findings (a baseline scan's warnings need a person to judge),
 # and no issue is filed automatically. Evidence exists only once a run has produced an
-# artifact and someone has reviewed it.
+# artifact and someone has reviewed it. It also runs on a pull request to main, so the
+# change that brings this workflow (or any later one) is scanned before it merges.
 on:
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "30 2 * * *" # 02:30 UTC daily
   workflow_dispatch:
@@ -41,7 +44,8 @@ jobs:
           export DSPM_DB_PATH="$RUNNER_TEMP/dast.sqlite"
           export DSPM_ARTIFACT_DIR="$RUNNER_TEMP/artifacts"
           export DSPM_SCAN_CACHE_DIR="$RUNNER_TEMP/scan_cache"
-          export DSPM_ADMIN_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          # token_urlsafe has no digit about one time in 230, and the password policy wants one.
+          export DSPM_ADMIN_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(24) + "7a")')"
           nohup python main.py serve --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/server.log" 2>&1 &
           for i in $(seq 1 60); do
             curl -fsS http://127.0.0.1:8000/api/ready >/dev/null && exit 0

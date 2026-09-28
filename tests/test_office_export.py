@@ -231,6 +231,75 @@ class TheDocumentTest(_PackageChecks, unittest.TestCase):
         self.assertEqual(core.findtext("{http://purl.org/dc/elements/1.1/}creator"), "SENTRO DSPM")
 
 
+def _sheet_cells(data: bytes, sheet: int) -> list[ElementTree.Element]:
+    return list(_parts(data)[f"xl/worksheets/sheet{sheet}.xml"].iter(f"{{{NS['s']}}}c"))
+
+
+def _cell_text(cell: ElementTree.Element) -> str:
+    return "".join(node.text or "" for node in cell.iter(f"{{{NS['s']}}}t"))
+
+
+class WhatTheReviewFoundTest(unittest.TestCase):
+    """Defects the review of C9 reproduced, each pinned."""
+
+    def test_a_short_card_number_is_masked_before_it_could_become_a_figure(self) -> None:
+        # 13-15 digits is also a valid number: typed first, it reached the workbook whole.
+        rows = [["as text", "378282246310005"], ["as a number", 378282246310005], ["visa-13", "4222222222222"]]
+        report = {"title": "refund 4111111111111111", "blocks": [
+            {"label": "Cards", "table": {"headers": ["Kind", "Value"], "rows": rows}}]}
+        data, stats = render_xlsx(report)
+        cells = {cell.get("r"): cell for cell in _sheet_cells(data, 2)}
+        for ref, expected in (("B2", "378282*****0005"), ("B3", "378282*****0005"), ("B4", "422222***2222")):
+            with self.subTest(ref=ref):
+                self.assertEqual(cells[ref].get("t"), "inlineStr")
+                self.assertEqual(_cell_text(cells[ref]), expected)
+        # Three cells and the title, each counted once, in both formats (the document
+        # masked its title twice and reported one more than it held).
+        self.assertEqual(stats["masked_values"], 4)
+        _docx, docx_stats = render_docx(report)
+        self.assertEqual(docx_stats["masked_values"], 4)
+
+    def test_figures_are_read_in_the_locale_the_page_printed_them(self) -> None:
+        rows = [["files", "1.204"], ["share", "61,5"], ["owned", "82 %"], ["id", "0042"]]
+        block = {"label": "Counts", "table": {"headers": ["Measure", "Value"], "rows": rows}}
+        az, _ = render_xlsx({"title": "t", "blocks": [block], "number_format": {"group": ".", "decimal": ","}})
+        values = {cell.get("r"): (cell.get("t"), cell.findtext("s:v", namespaces=NS), _cell_text(cell))
+                  for cell in _sheet_cells(az, 2)}
+        self.assertEqual(values["B2"][:2], (None, "1204"), "az-AZ writes one thousand two hundred and four as 1.204")
+        self.assertEqual(values["B3"][:2], (None, "61.5"))
+        self.assertEqual(values["B4"][:2], (None, "0.82"))
+        self.assertEqual(values["B5"], ("inlineStr", None, "0042"))
+        en, _ = render_xlsx({"title": "t", "blocks": [block]})
+        english = {cell.get("r"): (cell.get("t"), cell.findtext("s:v", namespaces=NS)) for cell in _sheet_cells(en, 2)}
+        self.assertEqual(english["B2"], (None, "1.204"), "without a stated format the page is read as en-US")
+        broken, _ = render_xlsx({"title": "t", "blocks": [block], "number_format": {"group": "5", "decimal": "5"}})
+        self.assertEqual({c.get("r"): c.findtext("s:v", namespaces=NS) for c in _sheet_cells(broken, 2)}["B2"],
+                         "1.204", "a malformed format falls back to en-US")
+
+    def test_formula_looking_headers_titles_and_notes_are_quote_prefixed(self) -> None:
+        data, _ = render_xlsx({"title": "=HYPERLINK(\"x\")", "lines": ["@SUM(1)"], "blocks": [
+            {"label": "L", "table": {"headers": ["=cmd|' /C calc'!A0", "b"], "rows": [["1", "2"]]},
+             "notes": ["+note"]}]})
+        styles = _parts(data)["xl/styles.xml"].find("s:cellXfs", NS)
+        quoted = {str(index) for index, xf in enumerate(styles) if xf.get("quotePrefix") == "1"}
+        leading = [cell for sheet in (1, 2) for cell in _sheet_cells(data, sheet)
+                   if _cell_text(cell) and _cell_text(cell)[0] in "=+-@"]
+        self.assertGreaterEqual(len(leading), 4)
+        for cell in leading:
+            with self.subTest(text=_cell_text(cell)):
+                self.assertIn(cell.get("s"), quoted)
+
+    def test_a_cut_sheet_name_never_ends_on_an_apostrophe(self) -> None:
+        data, _ = render_xlsx({"title": "t", "blocks": [
+            {"label": "Sensitive files, all owners' drives", "paragraphs": ["x"]},
+            {"label": "Sensitive files, all owners' drives", "paragraphs": ["x"]}]})
+        names = [sheet.get("name") for sheet in _parts(data)["xl/workbook.xml"].findall("s:sheets/s:sheet", NS)]
+        for name in names:
+            with self.subTest(name=name):
+                self.assertFalse(name.endswith("'") or name.startswith("'"))
+                self.assertLessEqual(len(name), 31)
+
+
 class TheExportRouteTest(unittest.TestCase):
     """Permitted by report.create, recorded with its shape and never its content (C3/C4)."""
 
@@ -306,6 +375,20 @@ class TheExportRouteTest(unittest.TestCase):
         response = self._export("xlsx", blocks=wide)
         self.assertEqual(response.status_code, 413)
         self.assertIn("at most 400,000", response.json()["detail"])
+
+    def test_empty_rows_count_as_the_cells_they_become(self) -> None:
+        # The document pads every row to its table's width: 160 KB of empty rows was a
+        # 242 MB document.xml when only the cells SENT were counted (review of C9).
+        empty = [{"label": f"S{index}", "table": {"headers": [f"h{n}" for n in range(40)], "rows": [[]] * 20_000}}
+                 for index in range(2)]
+        response = self._export("docx", blocks=empty)
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("1,600,", response.json()["detail"])
+
+    def test_the_page_states_its_number_format(self) -> None:
+        response = self._export("xlsx", number_format={"group": ".", "decimal": ","})
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertEqual(self._export("xlsx", number_format={"group": "..", "decimal": ","}).status_code, 400)
 
 
 if __name__ == "__main__":

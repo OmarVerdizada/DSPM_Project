@@ -215,11 +215,36 @@ def mask(value: str, data_class: str = GENERIC) -> str:
 # It masks only what is unambiguous without context. A card number is issuer-valid,
 # Luhn-valid and not a structural non-card (the shared validator's rules, minus the
 # nearby-words test - in a file bound for a customer, a bare card number is masked
-# whether or not a payment word is near it). An IBAN passes its mod-97 check. A
-# private key block is replaced whole.
+# whether or not a payment word is near it). An IBAN has its country's registered length
+# and passes mod 97. A private key block is replaced whole.
+#
+# A value is found inside whatever surrounds it: `visa4111111111111111.csv`,
+# `4111 1111 1111 1111 05/27`, `GB82WEST12345698765432 EUR`. The first reviewed
+# version took each pattern's longest match and gave up when that failed validation,
+# so a card followed by an expiry date, or an IBAN followed by its currency, was left
+# whole in the file.
 _PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----.*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|\Z)", re.S)
-_IBAN_CANDIDATE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}(?![A-Za-z0-9])")
+# Digits joined by at most one space, tab, no-break space or hyphen, not glued to more
+# digits; letters on either side are allowed, so a card inside a file name is found.
+_DIGIT_RUN = re.compile(r"(?<!\d)\d(?:(?:[^\S\n]|-)?\d)*(?!\d)")
+_RUN_SEPARATOR = re.compile(r"(?:[^\S\n]|-)")
+_IBAN_START = re.compile(r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9])+")
+# The SWIFT IBAN registry's length per country. A candidate is cut to exactly its
+# country's length before the check, so trailing text ("EUR", a year) cannot hide it,
+# and an unknown country is never matched on a guess.
+_IBAN_LENGTHS = {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16, "BG": 22, "BH": 22,
+    "BI": 27, "BR": 29, "BY": 28, "CH": 21, "CR": 22, "CY": 28, "CZ": 24, "DE": 22, "DJ": 27,
+    "DK": 18, "DO": 28, "EE": 20, "EG": 29, "ES": 24, "FI": 18, "FK": 18, "FO": 18, "FR": 27,
+    "GB": 22, "GE": 22, "GI": 23, "GL": 18, "GR": 27, "GT": 28, "HR": 21, "HU": 28, "IE": 22,
+    "IL": 23, "IQ": 23, "IS": 26, "IT": 27, "JO": 30, "KW": 30, "KZ": 20, "LB": 28, "LC": 32,
+    "LI": 21, "LT": 20, "LU": 20, "LV": 21, "LY": 25, "MC": 27, "MD": 24, "ME": 22, "MK": 19,
+    "MN": 20, "MR": 27, "MT": 31, "MU": 30, "NI": 28, "NL": 18, "NO": 15, "OM": 23, "PK": 24,
+    "PL": 28, "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22, "RU": 33, "SA": 24, "SC": 31,
+    "SD": 18, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "SO": 23, "ST": 25, "SV": 28, "TL": 23,
+    "TN": 24, "TR": 26, "UA": 29, "VA": 22, "VG": 24, "XK": 20, "YE": 30,
+}
 
 
 def _iban_valid(candidate: str) -> bool:
@@ -233,12 +258,62 @@ def _iban_valid(candidate: str) -> bool:
         return False
 
 
+def _card_spans(run: str) -> list[tuple[int, int, str]]:
+    """(start, end, digits) of each card number inside one run of digits: the longest
+    valid window of whole groups at each position, left to right."""
+
+    from classification.pan_validator import card_issuer, is_luhn_valid, normalize_candidate, structural_exclusion
+
+    groups = []  # (start, end) of each digit group within the run
+    position = 0
+    for separator in _RUN_SEPARATOR.finditer(run):
+        groups.append((position, separator.start()))
+        position = separator.end()
+    groups.append((position, len(run)))
+    if len(groups) == 1 and len(run) > 19:
+        return []  # one unbroken block longer than any card is an identifier
+    spans = []
+    first = 0
+    while first < len(groups):
+        found = None
+        for last in range(len(groups) - 1, first - 1, -1):
+            window = run[groups[first][0]:groups[last][1]]
+            digits = normalize_candidate(window)
+            if (digits and is_luhn_valid(digits) and card_issuer(digits)[1]
+                    and not structural_exclusion(digits)):
+                found = (groups[first][0], groups[last][1], digits, last)
+                break
+        if found:
+            spans.append(found[:3])
+            first = found[3] + 1
+        else:
+            first += 1
+    return spans
+
+
+def _iban_span(candidate: str) -> int | None:
+    """How many characters of `candidate` (spaces included) are its country's IBAN, or
+    None when it is not one."""
+
+    length = _IBAN_LENGTHS.get(candidate[:2])
+    if not length:
+        return None
+    seen = 0
+    for index, char in enumerate(candidate):
+        if char != " ":
+            seen += 1
+        if seen == length:
+            end = index + 1
+            # An IBAN ends at a boundary: not glued to more digits.
+            if end < len(candidate) and candidate[end].isdigit():
+                return None
+            return end if _iban_valid(candidate[:end]) else None
+    return None
+
+
 def mask_in_text(value: object) -> tuple[str, int]:
     """`value` as text with every whole card number, IBAN and private key in it
     masked, and how many were."""
-
-    from classification.pan_validator import (
-        PAN_CANDIDATE_RE, card_issuer, is_luhn_valid, normalize_candidate, structural_exclusion)
 
     text = "" if value is None else str(value)
     if not text:
@@ -250,24 +325,31 @@ def mask_in_text(value: object) -> tuple[str, int]:
         count += 1
         return _MASKS[PRIVATE_KEY]("")
 
-    def _pan(match: re.Match) -> str:
+    def _cards(match: re.Match) -> str:
         nonlocal count
-        digits = normalize_candidate(match.group(0))
-        if not digits or not is_luhn_valid(digits) or not card_issuer(digits)[1] or structural_exclusion(digits):
-            return match.group(0)
-        count += 1
-        return mask(digits, PAN)
+        run = match.group(0)
+        spans = _card_spans(run) if sum(char.isdigit() for char in run) >= 12 else []
+        if not spans:
+            return run
+        pieces, position = [], 0
+        for start, end, digits in spans:
+            pieces += [run[position:start], mask(digits, PAN)]
+            position = end
+            count += 1
+        return "".join(pieces) + run[position:]
 
     def _iban(match: re.Match) -> str:
         nonlocal count
-        if not _iban_valid(match.group(0)):
-            return match.group(0)
+        candidate = match.group(0)
+        end = _iban_span(candidate)
+        if end is None:
+            return candidate
         count += 1
-        return mask(match.group(0), IBAN)
+        return mask(candidate[:end], IBAN) + candidate[end:]
 
     if "PRIVATE KEY" in text:
         text = _PRIVATE_KEY_BLOCK.sub(_key, text)
     if any(char.isdigit() for char in text):
-        text = PAN_CANDIDATE_RE.sub(_pan, text)
-        text = _IBAN_CANDIDATE.sub(_iban, text)
+        text = _DIGIT_RUN.sub(_cards, text)
+        text = _IBAN_START.sub(_iban, text)
     return text, count

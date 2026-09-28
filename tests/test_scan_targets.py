@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from backend import store, target_scope
 from backend.app import app
-from backend.security import create_token, hash_password
+from backend.security import create_token, hash_password, verify_token
 from backend.target_scope import Scope, TargetScopeError, decide, parse_entry
 from collectors.net_guard import TargetNotAllowed
 
@@ -212,6 +212,9 @@ class OutOfScopeFailsBeforeConnectTest(_Workspace):
         self.assertTrue(all(row["detail"]["target"] == "fs9.corp.example" and row["detail"]["where"] == "api"
                             for row in refused))
         self.assertEqual({row["detail"]["addresses"][0] for row in refused}, {"10.99.0.1"})
+        # Who asked: every refusal is recorded against the operator's own account.
+        operator = verify_token(self.operator["Authorization"].split(" ", 1)[1]).subject
+        self.assertEqual({row["actor"] for row in refused}, {operator})
 
     def test_the_smb_collector_refuses_before_it_connects(self) -> None:
         from collectors.smb_scanner import SMBConfig, SMBScanner

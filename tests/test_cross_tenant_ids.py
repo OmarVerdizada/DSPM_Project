@@ -212,6 +212,29 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
         self.assertEqual(wrong, [], "answered with something other than a refusal")
         self.assertEqual(self._state_of_a(), before, "tenant A changed")
 
+    def test_an_identifier_in_a_body_or_a_query_is_scoped_too(self) -> None:
+        # The attempts above carry the identifier in the PATH. These carry it in a request
+        # body or a query string (found by the M2 claims review): tenant B's administrator
+        # names tenant A's scan.
+        before = self._state_of_a()
+        intruder = self._as("b-boss", "admin", B)
+        store.save_scan_history(B, {"scan_id": "xt-bravo-scan", "source": "local", "timestamp": "2026-09-28T00:00:00+00:00",
+                                    "summary": {"total_files": 1},
+                                    "files": [{"path": "/b/bravo-only.txt", "name": "bravo-only.txt", "size": 1,
+                                               "risk": {"level": "LOW", "score": 5}, "findings": []}]})
+        own_asset = self._ok(self.client.get("/api/inventory", headers=intruder))["items"][0]
+        leaks = [self.ids["asset_path"], "payroll.txt", "known test data"]
+
+        filed = self.client.post("/api/v1/reports", headers=intruder, json={"scan_id": self.ids["scan_id"]})
+        self.assertEqual(filed.status_code, 404, "a report of another tenant's scan is not filed")
+        in_context = self.client.get(f"/api/inventory/{own_asset['id']}?scan_id={self.ids['scan_id']}",
+                                     headers=intruder)
+        self.assertIn(in_context.status_code, (200, 404))
+        for response in (filed, in_context):
+            for marker in leaks:
+                self.assertNotIn(marker, response.text)
+        self.assertEqual(self._state_of_a(), before, "tenant A changed")
+
 
 if __name__ == "__main__":
     unittest.main()

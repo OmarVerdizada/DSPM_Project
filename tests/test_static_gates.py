@@ -8,6 +8,7 @@ fails on everything proves nothing either.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -46,6 +47,7 @@ class AnUndefinedNameFailsTheConsoleGateTest(unittest.TestCase):
         self.assertEqual(static_gate.gate_eslint(), [])
 
 
+@unittest.skipUnless(importlib.util.find_spec("ruff"), "ruff comes from requirements-static.txt (CI static-analysis job)")
 class AMissingImportFailsThePythonGateTest(unittest.TestCase):
 
     def test_a_seeded_missing_import_fails(self) -> None:
@@ -63,6 +65,7 @@ class AMissingImportFailsThePythonGateTest(unittest.TestCase):
         self.assertEqual(static_gate.gate_ruff(), [])
 
 
+@unittest.skipUnless(importlib.util.find_spec("bandit"), "bandit comes from requirements-static.txt (CI static-analysis job)")
 class ANewSecurityFindingFailsBanditTest(unittest.TestCase):
 
     def test_an_unreviewed_finding_fails_and_the_baseline_says_why_for_each(self) -> None:

@@ -448,6 +448,21 @@ python scripts/static_gate.py            # or one gate: ruff | mypy | bandit | s
 
 `.github/workflows/dast-nightly.yml` runs an OWASP ZAP baseline scan every night against a disposable instance on a throwaway database. It never fails on findings: the report is uploaded as an artifact for a person to review.
 
+To review an install's security configuration without touching it:
+
+```powershell
+python scripts/review_install_copy.py --report docs/evidence/install-review.json
+```
+
+The script copies the database read-only (the install can keep running), then checks the copy:
+
+- verifies every tenant's audit hash chain;
+- serves the copy with this tree on its own port and temporary keys;
+- checks the CSP, security headers, content-versioned asset URLs, refusals without a session and API caching;
+- names what a production start would refuse.
+
+It deletes the copy afterwards and exits 1 if any check fails.
+
 Optional tooling:
 
 - Git is required only for committing and pushing changes to GitHub.

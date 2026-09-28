@@ -34,12 +34,17 @@ NAMESPACES = {"http://www.w3.org/2000/svg", "http://www.w3.org/1999/xlink"}
 class NothingComesFromElsewhereTest(unittest.TestCase):
 
     def test_no_page_script_or_stylesheet_names_another_origin(self) -> None:
+        # Any absolute URL at all, not only in src/href/url()/@import: a fetch("https://..."),
+        # a string a script later assigns, or a protocol-relative "//host". The only ones
+        # allowed are XML namespaces (identifiers, never requested) and licence comments.
         found = []
         for path in PAGES + SCRIPTS + STYLESHEETS:
-            text = path.read_text(encoding="utf-8")
-            for url in re.findall(r"""(?:src|href|url\(|@import)\s*=?\s*["']?(https?://[^"')\s>]+)""", text):
+            text = re.sub(r"/\*!.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+            for url in re.findall(r"https?://[^\s\"'`)>;]+", text):
                 if url not in NAMESPACES:
                     found.append(f"{path.name}: {url}")
+            for url in re.findall(r"""["'`(]\s*(//[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)""", text):
+                found.append(f"{path.name}: {url}")
         self.assertEqual(found, [])
         self.assertTrue(PAGES and SCRIPTS, "the scan must find the files it is about")
 
@@ -90,13 +95,44 @@ class TheCspNeedsNoExceptionsTest(unittest.TestCase):
                 self.assertNotRegex(text, r"setAttribute\(\s*[\"']style[\"']")
                 self.assertNotIn("cssText", text)
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js runs the console's own code")
     def test_what_data_style_says_is_applied_through_the_cssom(self) -> None:
+        # The console's own applier and observer, run in Node on stand-in elements: a node
+        # added under the document has each declaration set through style.setProperty (which
+        # the CSP allows) and its data-style removed - including a value with a colon in it.
         source = (FRONTEND / "app.js").read_text(encoding="utf-8")
-        applier = source[source.index("function applyDataStyles("):]
-        applier = applier[:applier.index("\n}\n") + 3]
-        self.assertIn("element.style.setProperty(", applier)
-        self.assertIn('removeAttribute("data-style")', applier)
-        self.assertIn("new MutationObserver(", source)
+        start = source.index("function dataStyleDeclarations(")
+        end = source.index("}).observe(document.documentElement", start)
+        end = source.index("\n}\n", end) + 3
+        harness = """
+const set = [];
+function element(style, children = []) {
+  const attributes = { "data-style": style };
+  return {
+    nodeType: 1,
+    matches: (selector) => selector === "[data-style]" && "data-style" in attributes,
+    querySelectorAll: () => children.filter((child) => "data-style" in child.attributes),
+    getAttribute: (name) => attributes[name],
+    removeAttribute: (name) => { delete attributes[name]; },
+    style: { setProperty: (property, value) => set.push([property, value]) },
+    attributes,
+  };
+}
+let observed = null;
+globalThis.MutationObserver = class { constructor(callback) { observed = callback; } observe() {} };
+globalThis.document = { documentElement: {} };
+""" + source[start:end] + """
+const child = element("width: 42%; background-image: url(data:image/png;base64,AAAA)");
+const parent = element("--bar-color: var(--accent)", [child]);
+observed([{ addedNodes: [parent, { nodeType: 3 }] }]);
+console.log(JSON.stringify({ set, left: [parent.attributes, child.attributes] }));
+"""
+        run = subprocess.run([shutil.which("node"), "-e", harness], capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        result = json.loads(run.stdout.strip().splitlines()[-1])
+        self.assertEqual(result["set"], [["--bar-color", "var(--accent)"], ["width", "42%"],
+                                         ["background-image", "url(data:image/png;base64,AAAA)"]])
+        self.assertEqual(result["left"], [{}, {}], "data-style is removed once applied")
         self.assertGreaterEqual(source.count('data-style="'), 10)
 
 

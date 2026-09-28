@@ -87,6 +87,9 @@ class TrueTypeFont:
             gid = self._glyph(char)
             if gid is None:  # pragma: no cover - printable() only returns mapped characters
                 gid = 0
+            # A glyph maps back to ONE character. Inter draws U+2019 and U+02BC with the
+            # same glyph, so a document using both extracts the second as the first - the
+            # page looks right; only copy/search of that one character is affected.
             self.used.setdefault(gid, char)
             ids.append(f"{gid:04X}")
         return "<" + "".join(ids) + ">"

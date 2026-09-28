@@ -37,6 +37,30 @@ class WhatIsMaskedTest(unittest.TestCase):
         self.assertEqual(mask_in_text(text), ("owner [private key] end", 1))
         self.assertEqual(mask_in_text("-----BEGIN PRIVATE KEY-----\nMIIE truncated"), ("[private key]", 1))
 
+    def test_a_value_is_found_inside_what_surrounds_it(self) -> None:
+        # The first version took each pattern's longest match and gave up when that failed
+        # validation: a card followed by its expiry, an IBAN followed by its currency, a
+        # card glued to the letters of a file name all reached the file whole (review of C9).
+        cases = {
+            "4111111111111111 05/27": "411111******1111 05/27",
+            "refund_4111111111111111-1.pdf": "refund_411111******1111-1.pdf",
+            "visa4111111111111111.csv": "visa411111******1111.csv",
+            "05 4111111111111111": "05 411111******1111",
+            "Account GB82WEST12345698765432 EUR": "Account GB82WEST**********5432 EUR",
+            "DE89370400440532013000 2024.pdf": "DE893704**********3000 2024.pdf",
+            "GB82 WEST 1234 5698 7654 32 EUR": "GB82WEST**********5432 EUR",
+            "GB82WEST12345698765432EUR": "GB82WEST**********5432EUR",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(mask_in_text(raw), (expected, 1))
+
+    def test_short_card_lengths_are_masked_too(self) -> None:
+        for raw, expected in (("378282246310005", "378282*****0005"), ("4222222222222", "422222***2222"),
+                              ("30569309025904", "305693****5904")):
+            with self.subTest(raw=raw):
+                self.assertEqual(mask_in_text(raw), (expected, 1))
+
     def test_several_in_one_string_are_all_counted(self) -> None:
         masked, count = mask_in_text("4111111111111111 and 5500000000000004 and GB82WEST12345698765432")
         self.assertEqual(count, 3)
@@ -52,7 +76,10 @@ class WhatIsLeftAloneTest(unittest.TestCase):
                      "4111111111111112",               # fails Luhn
                      "GB82WEST12345698765433",         # fails mod 97
                      "2026-09-28 1,204 files 45%",
-                     "ticket 9876543210987"):          # no issuer prefix
+                     "ticket 9876543210987",           # no issuer prefix
+                     "41111111111111110000",           # one unbroken block longer than any card
+                     "GB82WEST123456987654321",        # an IBAN's length, glued to one more digit
+                     "XX12ABCDEFGHIJKLMNOP"):          # not a registered IBAN country
             with self.subTest(text=text):
                 self.assertEqual(mask_in_text(text), (text, 0))
 

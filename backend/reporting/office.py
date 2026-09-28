@@ -161,8 +161,8 @@ def _word_table(headers: list[str], rows: list[list[str]]) -> str:
             f"<w:tblGrid>{grid}</w:tblGrid>{header_row}{body}</w:tbl>")
 
 
-def _word_body(report: dict, text: _Text) -> tuple[str, dict]:
-    parts = [_paragraph(_run(text(report.get("title") or "SENTRO report", 500)), "Title")]
+def _word_body(report: dict, text: _Text, title: str) -> tuple[str, dict]:
+    parts = [_paragraph(_run(title), "Title")]
     for line in report.get("lines") or []:
         if str(line or "").strip():
             parts.append(_paragraph(_run(text(line, 2000)), "Subtitle"))
@@ -241,7 +241,7 @@ def _word_footer(title: str) -> str:
 def render_docx(report: dict) -> tuple[bytes, dict]:
     text = _Text()
     title = text(report.get("title") or "SENTRO report", 500)
-    document, stats = _word_body(report, text)
+    document, stats = _word_body(report, text, title)
     parts = {
         "[Content_Types].xml": (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
@@ -279,7 +279,9 @@ def render_docx(report: dict) -> tuple[bytes, dict]:
 # ── Excel ─────────────────────────────────────────────────────────────────────────
 # Cell styles, by index into cellXfs below.
 (_XF_DEFAULT, _XF_HEADER, _XF_TITLE, _XF_TEXT_QUOTED, _XF_WRAP, _XF_WRAP_QUOTED, _XF_PERCENT, _XF_INTEGER,
- _XF_DECIMAL, _XF_MUTED) = range(10)
+ _XF_DECIMAL, _XF_MUTED, _XF_HEADER_QUOTED, _XF_TITLE_QUOTED, _XF_MUTED_QUOTED) = range(13)
+# A header, title or note that looks like a formula keeps its look and gains the prefix.
+_QUOTED_STYLE = {_XF_HEADER: _XF_HEADER_QUOTED, _XF_TITLE: _XF_TITLE_QUOTED, _XF_MUTED: _XF_MUTED_QUOTED}
 
 _XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
@@ -288,7 +290,7 @@ _XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEEF2FF"/><bgColor indexed="64"/></patternFill></fill></fills>
 <borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left/><right/><top/><bottom style="thin"><color rgb="FFC7D2FE"/></bottom><diagonal/></border></borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="10">
+<cellXfs count="13">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>
 <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
@@ -299,6 +301,9 @@ _XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xf numFmtId="3" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
 <xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" quotePrefix="1"/>
+<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" quotePrefix="1"/>
+<xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1" quotePrefix="1"/>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>"""
@@ -306,10 +311,47 @@ _XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 # A figure the page printed as text ("1,204", "37.5", "12%") becomes a number, so the
 # sheet sums and pivots. Not an identifier: a leading zero or more than 15 digits (all
 # a spreadsheet keeps exactly) stays text, or "0042" would print as 42.
-_INTEGER = re.compile(r"-?(?:0|[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*)")
-_DECIMAL = re.compile(r"-?(?:0|[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*)\.\d+")
-_PERCENT = re.compile(r"-?(?:0|[1-9]\d*)(?:\.\d+)?%")
 _EXACT_DIGITS = 15
+
+
+class _Figures:
+    """Reads a figure the way the page wrote it. The console formats counts in the
+    browser's locale, so "1.204" is one thousand two hundred and four in az-AZ, tr-TR and
+    de-DE and a decimal in en-US; the page says which separators it used, and an unknown
+    or malformed pair falls back to en-US."""
+
+    def __init__(self, group: str = ",", decimal: str = ".") -> None:
+        group, decimal = str(group or ""), str(decimal or "")
+        if (len(group) > 1 or len(decimal) != 1 or group == decimal
+                or any(char.isalnum() or char in "-%" for char in group + decimal)):
+            group, decimal = ",", "."
+        self.group, self.decimal = group, decimal
+        grouped = rf"[1-9]\d{{0,2}}(?:{re.escape(group)}\d{{3}})+|" if group else ""
+        whole = rf"-?(?:0|{grouped}[1-9]\d*)"
+        self.integer = re.compile(whole)
+        self.fraction = re.compile(rf"{whole}{re.escape(decimal)}\d+")
+        self.percent = re.compile(rf"(-?(?:0|[1-9]\d*)(?:{re.escape(decimal)}\d+)?)\s?%")
+
+    def __call__(self, value: Any) -> tuple[float | int, int] | None:
+        """(number, cell style) when `value` is a figure, else None."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return (value, _XF_INTEGER) if len(str(abs(value))) <= _EXACT_DIGITS else None
+        if isinstance(value, float):
+            return (value, _XF_DECIMAL) if value == value and abs(value) != float("inf") else None
+        text = str(value if value is not None else "").strip()
+        if len(re.sub(r"\D", "", text)) > _EXACT_DIGITS:
+            return None
+        plain = text.replace(self.group, "") if self.group else text
+        if self.integer.fullmatch(text):
+            return int(plain), _XF_INTEGER
+        if self.fraction.fullmatch(text):
+            return float(plain.replace(self.decimal, ".")), _XF_DECIMAL
+        percent = self.percent.fullmatch(text)
+        if percent:
+            return float(percent.group(1).replace(self.decimal, ".")) / 100, _XF_PERCENT
+        return None
 
 
 def _column_letter(index: int) -> str:
@@ -321,30 +363,11 @@ def _column_letter(index: int) -> str:
     return letters
 
 
-def _figure(value: Any) -> tuple[float | int, int] | None:
-    """(number, cell style) when `value` is a figure, else None."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return (value, _XF_INTEGER) if len(str(abs(value))) <= _EXACT_DIGITS else None
-    if isinstance(value, float):
-        return (value, _XF_DECIMAL) if value == value and abs(value) != float("inf") else None
-    text = str(value if value is not None else "").strip()
-    if len(re.sub(r"\D", "", text)) > _EXACT_DIGITS:
-        return None
-    if _INTEGER.fullmatch(text):
-        return int(text.replace(",", "")), _XF_INTEGER
-    if _DECIMAL.fullmatch(text):
-        return float(text.replace(",", "")), _XF_DECIMAL
-    if _PERCENT.fullmatch(text):
-        return float(text[:-1]) / 100, _XF_PERCENT
-    return None
-
-
 class _Sheet:
-    def __init__(self, name: str, text: _Text) -> None:
+    def __init__(self, name: str, text: _Text, figures: _Figures) -> None:
         self.name = name
         self.text = text
+        self.figures = figures
         self.rows: list[str] = []
         self.widths: dict[int, int] = {}
         self.table: tuple[int, int] | None = None  # (columns, last row) of the filterable table
@@ -354,13 +377,16 @@ class _Sheet:
         out = []
         for column, value in enumerate(cells):
             reference = f"{_column_letter(column)}{number}"
-            figure = _figure(value) if style is None else None
+            # Masked FIRST: a 13-15 digit card number is also a valid figure, and typing it
+            # as a number before masking wrote it into the workbook whole (review of C9).
+            masked_before = self.text.masked
+            text = self.text("" if value is None else value, EXCEL_CELL_LIMIT)
+            figure = self.figures(value) if style is None and self.text.masked == masked_before else None
             if figure is not None:
                 amount, xf = figure
                 out.append(f'<c r="{reference}" s="{xf}"><v>{amount!r}</v></c>')
                 self._width(column, len(str(value)))
                 continue
-            text = self.text("" if value is None else value, EXCEL_CELL_LIMIT)
             if not text:
                 continue
             # Never a formula: text is an inline string, which Excel does not evaluate.
@@ -368,7 +394,7 @@ class _Sheet:
             # cell and pressing Enter keeps it text instead of running it.
             quoted = bool(FORMULA_LEAD.match(text))
             if style is not None:
-                xf = style
+                xf = _QUOTED_STYLE.get(style, style) if quoted else style
             elif len(text) > wrap_from:
                 xf = _XF_WRAP_QUOTED if quoted else _XF_WRAP
             else:
@@ -415,21 +441,23 @@ def _sheet_name(label: str, used: set[str]) -> str:
     """A name Excel accepts: at most 31 characters, none of []:*?/\\, no edge apostrophe,
     not the reserved "History", unique ignoring case."""
     base = _SHEET_NAME_ILLEGAL.sub(" ", _XML_ILLEGAL.sub("", label))
-    base = re.sub(r"\s+", " ", base).strip().strip("'")[:EXCEL_SHEET_NAME_LIMIT].strip() or "Section"
+    # Cut first, then strip: cutting can leave an apostrophe at the new end.
+    base = re.sub(r"\s+", " ", base).strip()[:EXCEL_SHEET_NAME_LIMIT].strip(" '") or "Section"
     if base.lower() == "history":
         base = "History (report)"
     name, counter = base, 2
     while name.lower() in used:
         suffix = f" ({counter})"
-        name = base[:EXCEL_SHEET_NAME_LIMIT - len(suffix)].rstrip() + suffix
+        name = base[:EXCEL_SHEET_NAME_LIMIT - len(suffix)].rstrip(" '") + suffix
         counter += 1
     used.add(name.lower())
     return name
 
 
-def _section_sheet(number: int, block: dict, text: _Text, used: set[str]) -> tuple[_Sheet, str, int]:
+def _section_sheet(number: int, block: dict, text: _Text, used: set[str],
+                   figures: _Figures) -> tuple[_Sheet, str, int]:
     label = text(block.get("label"), 300) or f"Section {number}"
-    sheet = _Sheet(_sheet_name(f"{number}. {label}", used), text)
+    sheet = _Sheet(_sheet_name(f"{number}. {label}", used), text, figures)
     count = 0
     table = block.get("table") or None
     if table and table.get("headers"):
@@ -461,7 +489,9 @@ def render_xlsx(report: dict) -> tuple[bytes, dict]:
     text = _Text()
     title = text(report.get("title") or "SENTRO report", 500)
     used: set[str] = set()
-    summary = _Sheet(_sheet_name("Summary", used), text)
+    number_format = report.get("number_format") or {}
+    figures = _Figures(number_format.get("group", ","), number_format.get("decimal", "."))
+    summary = _Sheet(_sheet_name("Summary", used), text, figures)
     summary.add([title], style=_XF_TITLE)
     for line in report.get("lines") or []:
         if str(line or "").strip():
@@ -472,7 +502,7 @@ def render_xlsx(report: dict) -> tuple[bytes, dict]:
     sections: list[_Sheet] = []
     rows = 0
     for number, block in enumerate(_blocks(report), start=1):
-        sheet, label, count = _section_sheet(number, block, text, used)
+        sheet, label, count = _section_sheet(number, block, text, used, figures)
         sections.append(sheet)
         summary.add([number, label, sheet.name, count])
         rows += count

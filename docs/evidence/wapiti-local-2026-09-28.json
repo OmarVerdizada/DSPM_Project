@@ -1,0 +1,51 @@
+{
+  "tool": "Wapiti 3.3.2 (pip, own virtualenv)",
+  "status": "supplemental local DAST - NOT the C7 gate (ZAP in GitHub Actions is authoritative)",
+  "target": "disposable Sentro instance: temp database, keys and directories, 127.0.0.1:8974, OpenAPI imported",
+  "modules": "exec,file,permanentxss,redirect,sql,upload,xss,crlf,methods,htaccess,backup",
+  "modules_left_out": {
+    "ssrf,xxe": "call an outside service",
+    "nikto,wapp": "download databases"
+  },
+  "limits": {
+    "max_scan_time_s": 1500,
+    "max_attack_time_s": 300,
+    "tasks": 8,
+    "attack_time_reached": [
+      "exec",
+      "file",
+      "sql"
+    ]
+  },
+  "passes": [
+    {
+      "pass": "unauthenticated",
+      "date": "Mon, 28 Sep 2026 12:51:12 +0000",
+      "crawled": 185,
+      "vulnerabilities": {},
+      "anomalies": [],
+      "informational": {
+        "HTTP Methods": 100
+      }
+    },
+    {
+      "pass": "signed in as a read-only viewer",
+      "date": "Mon, 28 Sep 2026 13:08:40 +0000",
+      "crawled": 179,
+      "vulnerabilities": {},
+      "anomalies": [
+        {
+          "type": "Internal Server Error",
+          "method": "GET",
+          "path": "/api/compliance-keywords",
+          "parameter": "framework",
+          "info": "The server responded with a 500 HTTP error code while attempting to inject a payload in the parameter framework",
+          "fixed_by": "tests/test_keyword_routes_refuse_bad_input.py"
+        }
+      ],
+      "informational": {
+        "HTTP Methods": 96
+      }
+    }
+  ]
+}

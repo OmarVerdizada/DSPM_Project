@@ -90,6 +90,13 @@ class OfficeBlock(BaseModel):
     notes: list[str] = Field(default_factory=list, max_length=20)
 
 
+class OfficeNumberFormat(BaseModel):
+    """The separators the page's locale formats numbers with, so "1.204" is read as the
+    page meant it. Validated again, and defaulted to en-US, by the writer."""
+    group: str = Field(default=",", max_length=1)
+    decimal: str = Field(default=".", min_length=1, max_length=1)
+
+
 class OfficeReportRequest(BaseModel):
     format: Literal["docx", "xlsx"]
     report_type: str = Field(default="", max_length=60)
@@ -98,6 +105,19 @@ class OfficeReportRequest(BaseModel):
     lines: list[str] = Field(default_factory=list, max_length=8)
     blocks: list[OfficeBlock] = Field(default_factory=list, max_length=40)
     filename: str = Field(default="", max_length=120)
+    number_format: OfficeNumberFormat | None = None
+
+
+def _office_cells(payload: OfficeReportRequest) -> int:
+    """Every cell the files will hold. The document pads each row out to its table's
+    width, so an empty row costs as much as a full one; counting what was SENT let a
+    160 KB request build a 242 MB document (review of C9)."""
+    cells = 0
+    for block in payload.blocks:
+        if block.table:
+            cells += len(block.table.rows) * max(1, len(block.table.headers))
+        cells += len(block.detail) * 13 + len(block.paragraphs) + len(block.notes)
+    return cells + len(payload.lines)
 
 
 def _office_filename(stem: str, extension: str) -> str:
@@ -114,8 +134,7 @@ def export_office_report(
 
     A plain `def`, so FastAPI runs the build on its thread pool rather than on the
     event loop every other request shares."""
-    cells = sum(len(row) for block in payload.blocks if block.table for row in block.table.rows)
-    cells += sum(len(block.detail) * 13 for block in payload.blocks)
+    cells = _office_cells(payload)
     if cells > OFFICE_MAX_CELLS:
         raise HTTPException(status_code=413, detail=(
             f"The report holds {cells:,} cells; one file carries at most {OFFICE_MAX_CELLS:,}. "

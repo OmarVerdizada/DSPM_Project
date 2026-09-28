@@ -1459,7 +1459,12 @@ def compliance_keywords(
     source: str = Query(default="all", max_length=20),
     principal: Principal = Depends(require_permission("inventory.view")),
 ) -> dict:
-    return list_keyword_groups(principal.tenant_id, framework, language=language, category=category, source=source)
+    # An unknown framework is the caller's mistake, not the server's: 400, never a 500
+    # (found by the M2 polish DAST run, which sent a URL as the framework).
+    try:
+        return list_keyword_groups(principal.tenant_id, framework, language=language, category=category, source=source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "Unknown compliance framework")) from exc
 
 
 @app.post("/api/compliance-keywords/validate")
@@ -1495,7 +1500,11 @@ def compliance_keywords_export(
     format: str = Query(default="json", max_length=10),
     principal: Principal = Depends(require_permission("export")),
 ) -> Response:
-    filename, media_type, content = export_keyword_groups(principal.tenant_id, framework, language=language, source=source, fmt=format)
+    try:
+        filename, media_type, content = export_keyword_groups(principal.tenant_id, framework, language=language,
+                                                              source=source, fmt=format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "Unknown compliance framework or format")) from exc
     audit(
         principal.tenant_id,
         principal.subject,

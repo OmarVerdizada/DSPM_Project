@@ -25,21 +25,33 @@ Usage:
     python scripts/check_frontend_tokens.py                 # working tree vs HEAD
     python scripts/check_frontend_tokens.py --base origin/main
     python scripts/check_frontend_tokens.py --stats         # report the debt, exit 0
+    python scripts/check_frontend_tokens.py --base origin/main --write-baseline
 
 Exit code 1 means a changed line breaks a rule. The message names the file, the
-line and the token to use instead.
+line and the token to use instead. Exit code 2 means the diff itself failed (an
+unknown base, a shallow clone): that is never reported as "clean".
+
+The baseline (frontend/token-gate-baseline.json) is debt that exists on this
+branch but not yet on the base it is compared with: lines the F0-F4 refit added
+while it stayed unmerged, and the sign-in page's styles C6 moved out of an inline
+<style> block into login.css. Each entry is keyed by file, rule and the line's text
+(not its number, so edits elsewhere do not disturb it) and counted, like the Bandit
+baseline. A line beyond the baseline fails; D4 burns the baseline down.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 TOKEN_FILE = "frontend/styles/tokens.css"
+BASELINE = REPO / "frontend" / "token-gate-baseline.json"
 
 # The type scale from tokens.css. Anything else must go through a var().
 ALLOWED_PX = {12, 13, 14, 16, 20, 28}
@@ -66,7 +78,14 @@ def changed_css_lines(base: str) -> list[tuple[str, int, str]]:
     cmd = ["git", "diff", "--unified=0", "--no-color"]
     if base:
         cmd.append(base)
-    diff = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True).stdout
+    run = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if run.returncode != 0:
+        # An unknown base or a clone too shallow to hold it: nothing was compared, so
+        # nothing may be reported clean.
+        print(f"frontend token gate: git diff against {base or 'HEAD'!r} failed: {run.stderr.strip()[:300]}",
+              file=sys.stderr)
+        raise SystemExit(2)
+    diff = run.stdout
 
     out: list[tuple[str, int, str]] = []
     path, lineno = None, 0
@@ -85,6 +104,17 @@ def changed_css_lines(base: str) -> list[tuple[str, int, str]]:
         elif not raw.startswith("-"):
             lineno += 1
     return out
+
+
+RULES = (("'!important'", "important"), ("raw colour", "raw-colour"), ("below the", "font-size-floor"),
+         ("off the scale", "font-size-scale"), ("uppercase", "uppercase"))
+
+
+def baseline_key(problem: str, text: str) -> tuple[str, str, str]:
+    """(file, rule id, line text) for a problem check_line reported."""
+    where, _, message = problem.partition(": ")
+    rule = next((rule_id for marker, rule_id in RULES if marker in message), "other")
+    return where.rsplit(":", 1)[0], rule, text.strip()
 
 
 def check_line(path: str, lineno: int, text: str) -> list[str]:
@@ -159,6 +189,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="", help="git ref to diff against (default: working tree vs HEAD)")
     parser.add_argument("--stats", action="store_true", help="print the current debt counters and exit 0")
+    parser.add_argument("--write-baseline", action="store_true",
+                        help="record today's problems as reviewed debt in frontend/token-gate-baseline.json")
     args = parser.parse_args()
 
     if args.stats:
@@ -166,12 +198,32 @@ def main() -> int:
             print(f"{key:<28} {value:>7}")
         return 0
 
-    problems: list[str] = []
+    found: list[tuple[str, tuple[str, str, str]]] = []
     for path, lineno, text in changed_css_lines(args.base):
-        problems.extend(check_line(path, lineno, text))
+        found.extend((problem, baseline_key(problem, text)) for problem in check_line(path, lineno, text))
+
+    if args.write_baseline:
+        counts = Counter(key for _problem, key in found)
+        entries = [{"file": file, "rule": rule, "text": text, "count": count}
+                   for (file, rule, text), count in sorted(counts.items())]
+        BASELINE.write_text(json.dumps({"reviewed": "2026-09-28", "base": args.base or "HEAD", "entries": entries},
+                                       indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(f"frontend token gate: {len(found)} problem(s) recorded in {len(entries)} baseline entries")
+        return 0
+
+    allowed: Counter = Counter()
+    if BASELINE.is_file():
+        for entry in json.loads(BASELINE.read_text(encoding="utf-8"))["entries"]:
+            allowed[(entry["file"], entry["rule"], entry["text"])] += int(entry["count"])
+    problems: list[str] = []
+    for problem, key in found:
+        if allowed[key] > 0:
+            allowed[key] -= 1
+        else:
+            problems.append(problem)
 
     if not problems:
-        print("frontend token gate: clean")
+        print(f"frontend token gate: clean ({len(found)} baseline debt line(s) carried)")
         return 0
 
     print(f"frontend token gate: {len(problems)} problem(s) in added CSS\n", file=sys.stderr)

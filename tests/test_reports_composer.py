@@ -491,5 +491,21 @@ class ReportColumnTests(unittest.TestCase):
         self.assertIn("notes: [reportDroppedText(block.table)", payload[:payload.index("\n}\n")])
 
 
+class ReportNumberFormatTests(unittest.TestCase):
+    """C9 review: counts are printed with toLocaleString(), so "1.204" means 1,204 in an
+    az-AZ browser. The payload states the separators it used; the server reads figures
+    with them (tests/test_office_export.py)."""
+
+    def test_the_payload_states_this_browsers_separators(self) -> None:
+        block = reports_block() + SCRIPT[SCRIPT.index("function reportNumberFormat()"):]
+        helper = block[block.index("function reportNumberFormat()"):]
+        helper = helper[:helper.index("\n}\n")]
+        self.assertIn("new Intl.NumberFormat().formatToParts(", helper)
+        self.assertIn('part.type === "group"', helper)
+        self.assertIn('part.type === "decimal"', helper)
+        payload = SCRIPT[SCRIPT.index("function reportOfficePayload("):]
+        self.assertIn("number_format: reportNumberFormat(),", payload[:payload.index("\n}\n")])
+
+
 if __name__ == "__main__":
     unittest.main()

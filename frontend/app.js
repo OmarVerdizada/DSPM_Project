@@ -10,11 +10,35 @@ const statusBox = document.querySelector("#connection-status");
 // C6: the CSP allows no style attributes. Markup that needs a computed size or custom
 // property says it as data-style, and this applies it through the CSSOM - which the CSP
 // does allow - as the nodes arrive. Mutation callbacks run before the next paint.
+// Declarations end at a semicolon that is not inside parentheses or quotes, so a value such
+// as url(data:image/png;base64,...) arrives whole (a plain split cut it at ";base64").
+function dataStyleDeclarations(text) {
+  const declarations = [];
+  let depth = 0;
+  let quote = "";
+  let start = 0;
+  for (let index = 0; index <= text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'") quote = char;
+    else if (char === "(") depth += 1;
+    else if (char === ")") depth = Math.max(0, depth - 1);
+    else if ((char === ";" && depth === 0) || index === text.length) {
+      declarations.push(text.slice(start, index));
+      start = index + 1;
+    }
+  }
+  return declarations;
+}
+
 function applyDataStyles(root) {
   const elements = root.matches?.("[data-style]") ? [root] : [];
   root.querySelectorAll?.("[data-style]").forEach((element) => elements.push(element));
   for (const element of elements) {
-    for (const declaration of String(element.getAttribute("data-style") || "").split(";")) {
+    for (const declaration of dataStyleDeclarations(String(element.getAttribute("data-style") || ""))) {
       const colon = declaration.indexOf(":");
       if (colon > 0) element.style.setProperty(declaration.slice(0, colon).trim(), declaration.slice(colon + 1).trim());
     }
@@ -6407,9 +6431,20 @@ function reportOfficeCell(cell) {
   return typeof cell === "number" && Number.isFinite(cell) ? cell : String(cell ?? "");
 }
 
+// Counts are printed with toLocaleString(), so "1.204" is 1,204 in az-AZ and 1.204 in
+// en-US. The server reads a figure with the separators this browser used.
+function reportNumberFormat() {
+  const parts = new Intl.NumberFormat().formatToParts(12345.6);
+  return {
+    group: parts.find((part) => part.type === "group")?.value || "",
+    decimal: parts.find((part) => part.type === "decimal")?.value || ".",
+  };
+}
+
 function reportOfficePayload(format) {
   const blocks = reportSectionBlocks();
   return {
+    number_format: reportNumberFormat(),
     format,
     report_type: reportType().label || "",
     scan_id: latestReport?.scan_id || "",
