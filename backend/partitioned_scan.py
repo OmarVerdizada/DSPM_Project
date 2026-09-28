@@ -23,6 +23,7 @@ on the host that planned it.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import socket
@@ -661,6 +662,14 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
             unit["partition_id"], scan.scan_id, unit["attempt"], type(exc).__name__,
         )
         return False
+    finally:
+        # A partition's engine leaves its records, findings and worker futures in
+        # reference cycles, which only a full collection frees - and full collections
+        # grow rarer as the heap grows. Uncollected, every partition's garbage stayed:
+        # the scan's peak grew with the corpus (37 KiB a file) instead of following the
+        # partition size, the whole point of partitioning (C14). One full collection per
+        # partition costs a fraction of a partition's scan.
+        gc.collect()
 
 
 def _finalize(scan: _Scan) -> dict:

@@ -1,0 +1,244 @@
+{
+  "requested_files": 200000,
+  "plan": {
+    "files": 200000,
+    "volume": "C:\\",
+    "total_gib": 78.7,
+    "free_gib": 3.14,
+    "reserve_gib": 15.73,
+    "state_bytes_per_file": 643072,
+    "basis": "quality audit",
+    "projected_gib": 150.717,
+    "free_after_gib": -147.57,
+    "within_reserve": false,
+    "projected_bytes": 161831500000,
+    "free_bytes": 3375497216
+  },
+  "host": {
+    "cpus": 6
+  },
+  "held": [
+    "HELD FOR SCALE HOST: 200,000 files need about 150.717 GiB (quality audit), and C:\\ must keep 15.73 GiB free; it has 3.14 GiB."
+  ],
+  "bounded": {
+    "cap_mb": 483,
+    "why": "the host is already below its reserve; this run's projected footprint is capped, and it is a measurement, not the gate",
+    "largest_safe_files": 6500
+  },
+  "calibration": {
+    "files": 200,
+    "state_bytes_per_file": 57973,
+    "parity": {
+      "the corpus was scanned": true,
+      "partitioned reports the same files": true,
+      "partitioned reports the same findings per file": true,
+      "no finding lost or added": true,
+      "no file twice": true,
+      "no finding id twice": true,
+      "unchanged incremental gives the same answer": true,
+      "unchanged incremental reads no file again": true
+    }
+  },
+  "measured": {
+    "files": 6500,
+    "partition_max_files": 2000,
+    "partition_size_is": "the product default",
+    "runs": [
+      {
+        "mode": "full",
+        "tenant": "c14-full",
+        "seconds": 103.07,
+        "files": 6500,
+        "findings": 9500,
+        "digest": "842bc6f1923c4985c62e93ba3f4ad3c579fa1ab587147ed252bae009aa626935",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 0,
+        "content_reads": 6500,
+        "partitions": null,
+        "peak_combined_mib": 380.1,
+        "peak_processes": 2,
+        "peak_with_verification_mib": 380.1,
+        "peak_by_tree_mib": {
+          "scan": 278.9,
+          "backend": 101.3
+        },
+        "samples": 397,
+        "files_per_second": 63.1,
+        "state_growth_bytes": 141599892
+      },
+      {
+        "mode": "partitioned",
+        "tenant": "default",
+        "seconds": 61.28,
+        "files": 6500,
+        "findings": 9500,
+        "digest": "842bc6f1923c4985c62e93ba3f4ad3c579fa1ab587147ed252bae009aa626935",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 0,
+        "content_reads": 6500,
+        "partitions": 4,
+        "peak_combined_mib": 310.4,
+        "peak_processes": 2,
+        "peak_with_verification_mib": 310.4,
+        "peak_by_tree_mib": {
+          "scan": 235.0,
+          "backend": 108.1
+        },
+        "samples": 236,
+        "files_per_second": 106.1,
+        "dashboard_under_scan": {
+          "errors": 0,
+          "/api/executive-dashboard": {
+            "requests": 107,
+            "p50_ms": 30.9,
+            "p95_ms": 151.4,
+            "max_ms": 1654.7
+          },
+          "/api/inventory/facets": {
+            "requests": 107,
+            "p50_ms": 19.9,
+            "p95_ms": 38.0,
+            "max_ms": 1248.4
+          }
+        },
+        "state_growth_bytes": 115276876
+      },
+      {
+        "mode": "incremental",
+        "tenant": "default",
+        "seconds": 50.49,
+        "files": 6500,
+        "findings": 9500,
+        "digest": "842bc6f1923c4985c62e93ba3f4ad3c579fa1ab587147ed252bae009aa626935",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 6500,
+        "content_reads": 0,
+        "partitions": 4,
+        "peak_combined_mib": 290.9,
+        "peak_processes": 2,
+        "peak_with_verification_mib": 290.9,
+        "peak_by_tree_mib": {
+          "scan": 227.4,
+          "backend": 74.8
+        },
+        "samples": 195,
+        "files_per_second": 128.7,
+        "state_growth_bytes": 40359057
+      },
+      {
+        "mode": "compliance",
+        "tenant": "c14-comp",
+        "seconds": 68.02,
+        "files": 6500,
+        "findings": 17352,
+        "digest": "6e472d8fb4b99ed1cbd5629170e6fca75678f7f83a8b1856e185390d0bdde842",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 0,
+        "content_reads": 6500,
+        "partitions": null,
+        "peak_combined_mib": 884.0,
+        "peak_processes": 7,
+        "peak_with_verification_mib": 884.0,
+        "peak_by_tree_mib": {
+          "scan": 833.9,
+          "backend": 57.4
+        },
+        "samples": 263,
+        "files_per_second": 95.6,
+        "state_growth_bytes": 134689060
+      }
+    ],
+    "corpus_text_bytes": 1007975,
+    "dashboard_idle": {
+      "errors": 0,
+      "/api/executive-dashboard": {
+        "requests": 10,
+        "p50_ms": 18.8,
+        "p95_ms": 70.5,
+        "max_ms": 70.5
+      },
+      "/api/inventory/facets": {
+        "requests": 10,
+        "p50_ms": 15.9,
+        "p95_ms": 26.7,
+        "max_ms": 26.7
+      }
+    },
+    "parity": {
+      "the corpus was scanned": true,
+      "partitioned reports the same files": true,
+      "partitioned reports the same findings per file": true,
+      "no finding lost or added": true,
+      "no file twice": true,
+      "no finding id twice": true,
+      "unchanged incremental gives the same answer": true,
+      "unchanged incremental reads no file again": true
+    },
+    "disk": {
+      "database_bytes": 284082176,
+      "cache_bytes": 53391729,
+      "artifact_bytes": 27776636,
+      "corpus_bytes": 1043725,
+      "state_bytes": 432621549,
+      "state_bytes_per_file": 66557
+    }
+  },
+  "gate": {
+    "peak combined working set < 2 GiB": {
+      "measured_mib": 884.0,
+      "holds_here": true,
+      "at_gate_size": false
+    },
+    "parity with the unpartitioned result": {
+      "holds_here": true,
+      "at_gate_size": false
+    },
+    "responsive dashboard under scan": {
+      "p95_ms": [
+        151.4,
+        38.0
+      ],
+      "errors": 0,
+      "bound_ms": 2000.0,
+      "holds_here": true,
+      "at_gate_size": false
+    }
+  },
+  "plan_at_requested_size": {
+    "files": 200000,
+    "volume": "C:\\",
+    "total_gib": 78.7,
+    "free_gib": 3.14,
+    "reserve_gib": 15.73,
+    "state_bytes_per_file": 57973,
+    "basis": "measured on this host",
+    "projected_gib": 14.488,
+    "free_after_gib": -11.35,
+    "within_reserve": false,
+    "projected_bytes": 15556750000,
+    "free_bytes": 3371827200
+  },
+  "projection_to_requested_size": {
+    "files": 200000,
+    "state_gib": 12.4,
+    "full_hours": 0.88,
+    "partitioned_hours": 0.52,
+    "incremental_hours": 0.43,
+    "compliance_hours": 0.58,
+    "note": "a linear projection from the bounded run; the peak at 200,000 files is what the scale host must measure",
+    "unpartitioned_memory": {
+      "full": {
+        "kib_per_file": 32.36,
+        "projected_scan_peak_gib": 6.24
+      },
+      "compliance": {
+        "kib_per_file": 62.58,
+        "projected_scan_peak_gib": 12.36
+      }
+    }
+  }
+}
