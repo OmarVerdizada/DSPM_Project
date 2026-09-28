@@ -601,7 +601,7 @@
       }
       var legend = SEVS.map(function (sev) {
         var pct = total ? Math.round((values[sev] / total) * 100) : 0;
-        return '<div data-sev="' + sev + '"><i style="background:' + sevColor(sev) + '"></i>' +
+        return '<div data-sev="' + sev + '"><i data-style="background:' + sevColor(sev) + '"></i>' +
           sev.charAt(0).toUpperCase() + sev.slice(1) + "<b>" + (total ? values[sev] + " · " + pct + "%" : "0") + "</b></div>";
       }).join("");
       donutHost.innerHTML =
@@ -680,12 +680,12 @@
     (function paintSkeletons() {
       function sklRows(n, h) {
         var rows = "";
-        for (var i = 0; i < n; i++) rows += '<div class="skl" style="height:' + h + 'px;margin:10px 0;width:' + (92 - i * 9) + '%"></div>';
+        for (var i = 0; i < n; i++) rows += '<div class="skl" data-style="height:' + h + 'px;margin:10px 0;width:' + (92 - i * 9) + '%"></div>';
         return rows;
       }
       if (scansHost) scansHost.innerHTML = sklRows(4, 16);
       if (feedHost) feedHost.innerHTML = sklRows(4, 16);
-      if (postureHost) postureHost.innerHTML = '<div class="skl" style="height:150px"></div>';
+      if (postureHost) postureHost.innerHTML = '<div class="skl" data-style="height:150px"></div>';
       if (donutHost) donutHost.innerHTML = '<div class="skl skl-circle"></div>';
     })();
 

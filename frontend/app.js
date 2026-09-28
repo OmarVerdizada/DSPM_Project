@@ -6,6 +6,26 @@ const generateDemoDataBtn = document.querySelector("#generate-demo-data-btn");
 const demoDataTitle = document.querySelector("#demo-data-title");
 const demoDataStatus = document.querySelector("#demo-data-status");
 const statusBox = document.querySelector("#connection-status");
+
+// C6: the CSP allows no style attributes. Markup that needs a computed size or custom
+// property says it as data-style, and this applies it through the CSSOM - which the CSP
+// does allow - as the nodes arrive. Mutation callbacks run before the next paint.
+function applyDataStyles(root) {
+  const elements = root.matches?.("[data-style]") ? [root] : [];
+  root.querySelectorAll?.("[data-style]").forEach((element) => elements.push(element));
+  for (const element of elements) {
+    for (const declaration of String(element.getAttribute("data-style") || "").split(";")) {
+      const colon = declaration.indexOf(":");
+      if (colon > 0) element.style.setProperty(declaration.slice(0, colon).trim(), declaration.slice(colon + 1).trim());
+    }
+    element.removeAttribute("data-style");
+  }
+}
+if (typeof MutationObserver === "function" && document.documentElement) {
+  new MutationObserver((records) => {
+    for (const record of records) record.addedNodes.forEach((node) => { if (node.nodeType === 1) applyDataStyles(node); });
+  }).observe(document.documentElement, { childList: true, subtree: true });
+}
 const scanProgress = document.querySelector("#scan-progress");
 const scanProgressLabel = document.querySelector("#scan-progress-label");
 const scanProgressBar = document.querySelector("#scan-progress-bar");
@@ -2254,7 +2274,7 @@ async function hydrateWorkspaceSliceNow({ force = false, scanId = "" } = {}) {
     const widths = [86, 62, 48, 40, 46, 78, 78];
     resultsBody.innerHTML = Array.from({ length: 6 }, () =>
       "<tr class=\"skl-tr\">" + widths.map((w) =>
-        `<td><div class="skl" style="height:12px;width:${w}%"></div></td>`).join("") + "</tr>").join("");
+        `<td><div class="skl" data-style="height:12px;width:${w}%"></div></td>`).join("") + "</tr>").join("");
   }
   try {
     const data = await api("/api/inventory?sort=risk_score&limit=200", null, "GET");
@@ -7871,7 +7891,7 @@ function renderDataClassesCard() {
         const share = Math.max(4, Math.round((item.count / max) * 100));
         return `
         <button type="button" class="class-row plain-btn" data-inventory-search="${escapeHtml(item.type)}"
-                data-cat="${escapeHtml(kind.cat)}" style="--plot-share:${share}%"
+                data-cat="${escapeHtml(kind.cat)}" data-style="--plot-share:${share}%"
                 aria-label="${escapeHtml(item.type)}, ${item.count} files — open in Findings">
           ${coin(kind.glyph, kind.cat)}
           <span class="class-row-name">${escapeHtml(item.type)}</span>
@@ -7936,7 +7956,7 @@ function renderLocationsCard() {
         return `
         <button type="button" class="place-row plain-btn" data-location-jump="${escapeHtml(entry.label)}"
                 data-depth="${entry.depth}" ${last ? "data-last" : ""}
-                style="--fw-share:${Math.max(10, Math.round((entry.total / max) * 100))}%"
+                data-style="--fw-share:${Math.max(10, Math.round((entry.total / max) * 100))}%"
                 aria-label="${escapeHtml(entry.label)}, ${entry.total} files, ${escapeHtml(mix)} — open in Findings">
           <span class="place-lead">
             <span class="place-mark" aria-hidden="true">${glyph(entry.depth ? "li-folder" : "li-database")}</span>
@@ -8060,7 +8080,7 @@ function renderCoverageCard() {
          aria-label="${columns.map(([, count, label]) => `${count.toLocaleString()} ${label.toLowerCase()}`).join(", ")}">
       ${columns.map(([kind, count, label, jump]) => `
         <button type="button" class="col-item plain-btn" data-coverage-jump="${escapeHtml(jump)}" data-kind="${kind}"
-                style="--col-height:${Math.max(14, Math.round((count / tallest) * 100))}%"
+                data-style="--col-height:${Math.max(14, Math.round((count / tallest) * 100))}%"
                 aria-label="${escapeHtml(label)}, ${count.toLocaleString()} files — open in Findings">
           <span class="col-value">${count.toLocaleString()}</span>
           <span class="col-bar"></span>
@@ -8102,7 +8122,7 @@ function openAllDataClasses() {
         const share = Math.max(4, Math.round((item.count / max) * 100));
         return `
         <button type="button" class="class-row plain-btn" data-inventory-search="${escapeHtml(item.type)}"
-                data-cat="${escapeHtml(kind.cat)}" style="--plot-share:${share}%"
+                data-cat="${escapeHtml(kind.cat)}" data-style="--plot-share:${share}%"
                 aria-label="${escapeHtml(item.type)}, ${item.count} files — open in Findings">
           ${coin(kind.glyph, kind.cat)}
           <span class="class-row-name">${escapeHtml(item.type)}</span>
@@ -8192,7 +8212,7 @@ const SEVERITY_CLIMB = ["low", "medium", "high", "critical"];
 function buildStack(entry) {
   const present = SEVERITY_CLIMB.filter((sev) => entry[sev]);
   const segments = present
-    .map((sev) => `<i data-sev="${sev}" style="flex-grow:${entry[sev]}" title="${entry[sev].toLocaleString()} ${sev}"></i>`)
+    .map((sev) => `<i data-sev="${sev}" data-style="flex-grow:${entry[sev]}" title="${entry[sev].toLocaleString()} ${sev}"></i>`)
     .join("");
   // Colour is never the only channel: the mix is spelled out for a screen
   // reader and in the row's own title.
@@ -8219,7 +8239,7 @@ function renderFrameworksCard() {
         return `
         <button type="button" class="fw-row plain-btn" data-framework-jump="${escapeHtml(entry.id)}"
                 data-mark="${escapeHtml(entry.id)}"
-                style="--fw-share:${Math.max(18, Math.round(entry.total / maxTotal * 100))}%"
+                data-style="--fw-share:${Math.max(18, Math.round(entry.total / maxTotal * 100))}%"
                 aria-label="${escapeHtml(mark.label)}, ${entry.total} files — open in Findings">
           <span class="mark" data-mark="${escapeHtml(entry.id)}" aria-hidden="true">${glyph(mark.glyph)}</span>
           <span class="fw-row-name">${escapeHtml(mark.label)}</span>
@@ -9254,7 +9274,7 @@ function buildDonutSvg(distribution) {
 function buildDistributionBars(distribution) {
   const total = distribution.reduce((sum, item) => sum + item.count, 0) || 1;
   const stack = distribution
-    .map((item) => `<span class="${item.level}" style="width:${(item.count / total) * 100}%"></span>`)
+    .map((item) => `<span class="${item.level}" data-style="width:${(item.count / total) * 100}%"></span>`)
     .join("");
   return `
     <div class="risk-stack">${stack}</div>
@@ -9296,7 +9316,7 @@ function buildHeatmap(files) {
         .map((item) => {
           const intensity = Math.min(0.32, Math.max(0.06, item.score / Math.max(item.files * 95, 1) * 0.32));
           return `
-            <div class="heat-tile" style="--heat-alpha:${intensity}">
+            <div class="heat-tile" data-style="--heat-alpha:${intensity}">
               <strong>${escapeHtml(item.label)}</strong>
               <span>${item.files} files</span>
               <small>${item.critical} critical</small>
@@ -9460,7 +9480,7 @@ function buildSignalMatrix() {
         .map((item, index) => {
           const size = 96 + Math.round((item.count / max) * 70);
           return `
-            <div class="signal-bubble b${index % 4}" style="--bubble:${size}px">
+            <div class="signal-bubble b${index % 4}" data-style="--bubble:${size}px">
               <strong>${item.count}</strong>
               <span>${escapeHtml(item.type)}</span>
             </div>

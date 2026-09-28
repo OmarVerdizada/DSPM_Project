@@ -533,23 +533,33 @@ async def secure_response_headers(request: Request, call_next):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'self'; script-src 'self'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; "
-        "font-src 'self' data: https://fonts.gstatic.com; connect-src 'self'; "
-        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
-    )
+    response.headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
     if request_scheme(request) == "https" or IS_PRODUCTION:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    if request.url.path.startswith("/api/"):
-        response.headers.setdefault("Cache-Control", "no-store")
-    elif (response.headers.get("content-type") or "").startswith("text/html"):
-        # Operator pages must revalidate on every load so an upgraded install
-        # never serves a stale console shell; the versioned ?v= query strings
-        # keep the JS/CSS assets themselves cache-friendly.
-        response.headers.setdefault("Cache-Control", "no-cache")
+    response.headers.setdefault("Cache-Control", _cache_control(request, response))
     return response
+
+
+# C6: everything the console loads is served by the install itself - fonts included - and
+# no page carries a style attribute or a <style> block, so the policy names no other origin
+# and has no 'unsafe-inline'. Style set from script through the CSSOM is not inline style.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+    "font-src 'self'; connect-src 'self'; object-src 'none'; "
+    "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+)
+
+
+def _cache_control(request: Request, response: Response) -> str:
+    """C6: a file whose URL carries its version (?v=) never changes under that URL, so the
+    browser keeps it for a year; anything else is revalidated every time, so an upgraded
+    install never serves a stale page or asset. The API is never stored."""
+    path = request.url.path
+    if path.startswith("/api/"):
+        return "no-store"
+    if path.startswith("/static/") and request.query_params.get("v") and response.status_code == 200:
+        return "public, max-age=31536000, immutable"
+    return "no-cache"
 
 
 # M13: perimeter body-size limit. Reject a request whose body exceeds the cap

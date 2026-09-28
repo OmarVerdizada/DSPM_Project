@@ -8,299 +8,9 @@
   <!-- Apply saved theme BEFORE CSS so there's no flash -->
   <script src="/static/auth-boot.js?v=1"></script>
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Audiowide&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/fonts/fonts.css?v=1">
+  <link rel="stylesheet" href="/static/login.css?v=1">
 
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body { height: 100%; font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; background: var(--lbg); transition: background .3s; }
-
-    /* ─── LIGHT (default) ─── */
-    :root {
-      --lbg:    #ffffff;
-      --ltxt:   #111827;
-      --lsub:   #6b7280;
-      --lmut:   #9ca3af;
-      --ibg:    #f9fafb;
-      --ibdr:   #e5e7eb;
-      --ifoc:   #2563eb;
-      --itxt:   #111827;
-      --iph:    #9ca3af;
-      --divdr:  #f3f4f6;
-      --lnk:    #2563eb;
-      --rbg:    #1d4ed8;
-      --rglow:  rgba(255,255,255,0.13);
-      --rring:  rgba(255,255,255,0.2);
-      --rnode:  rgba(255,255,255,0.13);
-      --rbdr:   rgba(255,255,255,0.3);
-      --rline:  rgba(255,255,255,0.3);
-      --rtxt:   #ffffff;
-      --rsub:   rgba(255,255,255,0.65);
-      --dotoff: rgba(255,255,255,0.3);
-      --doton:  #ffffff;
-      --cbg:    rgba(255,255,255,0.15);
-      --cbdr:   rgba(255,255,255,0.25);
-      --ctxt:   #ffffff;
-      --cmut:   rgba(255,255,255,0.6);
-      --tbg:    #f3f4f6;
-      --tbdr:   #e5e7eb;
-      --tico:   #374151;
-    }
-
-    /* ─── DARK ─── */
-    html[data-theme="dark"] {
-      --lbg:    #0f172a;
-      --ltxt:   #f1f5f9;
-      --lsub:   #94a3b8;
-      --lmut:   #475569;
-      --ibg:    #1e293b;
-      --ibdr:   #334155;
-      --ifoc:   #3b82f6;
-      --itxt:   #f1f5f9;
-      --iph:    #475569;
-      --divdr:  #1e293b;
-      --lnk:    #60a5fa;
-      --rbg:    #060914;
-      --rglow:  rgba(37,99,235,0.15);
-      --rring:  rgba(37,99,235,0.2);
-      --rnode:  rgba(10,14,26,0.95);
-      --rbdr:   rgba(56,189,248,0.3);
-      --rline:  rgba(56,189,248,0.28);
-      --rtxt:   #e9f1ff;
-      --rsub:   rgba(148,163,184,0.7);
-      --dotoff: rgba(56,189,248,0.2);
-      --doton:  #38bdf8;
-      --cbg:    rgba(10,14,26,0.92);
-      --cbdr:   rgba(37,99,235,0.3);
-      --ctxt:   #e9f1ff;
-      --cmut:   rgba(148,163,184,0.6);
-      --tbg:    #1e293b;
-      --tbdr:   #334155;
-      --tico:   #94a3b8;
-    }
-
-    /* ─── LAYOUT ─── */
-    .page { display: flex; height: 100vh; overflow: hidden; }
-
-    /* Theme toggle */
-    .theme-btn {
-      position: fixed; top: 1rem; right: 1rem; z-index: 999;
-      width: 40px; height: 40px; border-radius: 50%;
-      border: 1.5px solid var(--tbdr);
-      background: var(--tbg); color: var(--tico);
-      font-size: 1.05rem; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 2px 8px rgba(0,0,0,.12);
-      transition: transform .2s, background .3s, border-color .3s;
-    }
-    .theme-btn:hover { transform: rotate(20deg) scale(1.1); }
-
-    /* ─── LEFT ─── */
-    .left {
-      flex: 0 0 500px;
-      background: var(--lbg);
-      display: flex; align-items: center; justify-content: center;
-      padding: 3rem;
-      overflow-y: auto;
-      transition: background .3s;
-    }
-
-    .form-box { width: 100%; max-width: 360px; }
-
-    /* Logo */
-    .logo-row { display: flex; align-items: center; gap: .8rem; margin-bottom: 2.5rem; }
-    .logo-name {
-      font-family: 'Audiowide', sans-serif;
-      font-size: 1.15rem; letter-spacing: .1em;
-      color: var(--ltxt); transition: color .3s;
-    }
-    /* Light mode: same mechanism as the dashboard sidebar logo — the pale blade
-       gradient swaps to deep indigo so the mark stays legible on white. */
-    html:not([data-theme="dark"]) .logo-row svg .login-blades,
-    html:not([data-theme="dark"]) .logo-row svg .login-blades path {
-      fill: url(#s2i);
-    }
-
-    /* Heading */
-    .form-title {
-      font-size: 1.75rem; font-weight: 700; letter-spacing: -.025em;
-      color: var(--ltxt); margin-bottom: .4rem; transition: color .3s;
-    }
-    .form-desc { font-size: .84rem; color: var(--lsub); margin-bottom: 1.75rem; transition: color .3s; }
-
-    /* Fields */
-    .field { margin-bottom: .9rem; }
-    .fw { position: relative; }
-    .fi {
-      position: absolute; left: .85rem; top: 50%; transform: translateY(-50%);
-      color: var(--iph); pointer-events: none; transition: color .3s;
-    }
-    .finput {
-      width: 100%; height: 48px;
-      padding: 0 .9rem 0 2.55rem;
-      background: var(--ibg); border: 1.5px solid var(--ibdr);
-      border-radius: 8px;
-      color: var(--itxt); font-family: 'Inter', sans-serif; font-size: .88rem;
-      outline: none; transition: border-color .2s, box-shadow .2s, background .3s, color .3s;
-    }
-    .finput:focus { border-color: var(--ifoc); box-shadow: 0 0 0 3px rgba(37,99,235,.1); }
-    .finput::placeholder { color: var(--iph); }
-    .finput.pw { padding-right: 2.75rem; }
-
-    .eye-btn {
-      position: absolute; right: .85rem; top: 50%; transform: translateY(-50%);
-      background: none; border: none; cursor: pointer;
-      color: var(--iph); padding: 4px;
-      display: flex; align-items: center; justify-content: center;
-      border-radius: 4px; transition: color .2s;
-    }
-    .eye-btn:hover { color: var(--ifoc); }
-
-    /* Sign in button */
-    .btn-sign {
-      display: block; width: 100%; height: 48px;
-      background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
-      color: #fff; border: none; border-radius: 8px;
-      font-family: 'Inter', sans-serif; font-size: .92rem; font-weight: 600;
-      cursor: pointer; margin-top: 1.25rem;
-      transition: box-shadow .2s, transform .15s;
-    }
-    .btn-sign:hover { box-shadow: 0 6px 20px rgba(37,99,235,.38); transform: translateY(-1px); }
-    .btn-sign:active { transform: none; }
-
-    .status-msg {
-      font-size: .73rem; color: var(--lmut); text-align: center;
-      margin-top: .7rem; min-height: 1.1em; transition: color .3s;
-    }
-
-    .reg-row {
-      text-align: center; margin-top: 1.4rem;
-      padding-top: 1.25rem; border-top: 1.5px solid var(--divdr);
-      font-size: .82rem; color: var(--lsub);
-      transition: color .3s, border-color .3s;
-    }
-    .reg-row a { color: var(--lnk); text-decoration: none; font-weight: 500; }
-    .reg-row a:hover { text-decoration: underline; }
-
-    /* ─── RIGHT ─── */
-    .right {
-      flex: 1; background: var(--rbg); position: relative;
-      overflow: hidden; display: flex; align-items: center; justify-content: center;
-      transition: background .3s;
-    }
-
-    #cvs { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-
-    .vis {
-      position: relative; z-index: 1;
-      display: flex; flex-direction: column; align-items: center; gap: 2rem; padding: 2rem;
-    }
-
-    /* Big circle */
-    .big-circle {
-      width: 380px; height: 380px; border-radius: 50%;
-      background: var(--rglow); border: 1px solid var(--rring);
-      display: flex; align-items: center; justify-content: center;
-      position: relative; transition: background .3s, border-color .3s;
-    }
-    .big-circle::before {
-      content: ''; position: absolute; inset: 28px; border-radius: 50%;
-      border: 1px solid var(--rring); opacity: .4; transition: border-color .3s;
-    }
-
-    /* Diagram */
-    .diag { width: 320px; height: 320px; position: relative; display: flex; align-items: center; justify-content: center; }
-
-    /* Center orb */
-    .orb {
-      width: 82px; height: 82px; border-radius: 50%;
-      background: var(--rnode); border: 1.5px solid var(--rbdr);
-      display: flex; align-items: center; justify-content: center;
-      position: absolute; z-index: 2;
-      animation: orbpulse 3s ease-in-out infinite;
-      transition: background .3s, border-color .3s;
-    }
-    @keyframes orbpulse {
-      0%,100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
-      50%      { box-shadow: 0 0 0 14px rgba(255,255,255,.05); }
-    }
-
-    /* Satellite nodes */
-    .sat {
-      position: absolute; width: 60px; height: 60px; border-radius: 50%;
-      background: var(--rnode); border: 1.5px solid var(--rbdr);
-      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-      animation: satglow 4s ease-in-out infinite; z-index: 2;
-      transition: background .3s, border-color .3s;
-    }
-    .sat.n { top: 10px; left: 50%; transform: translateX(-50%); }
-    .sat.e { top: 50%; right: 0; transform: translateY(-50%); animation-delay: .8s; }
-    .sat.s { bottom: 10px; left: 50%; transform: translateX(-50%); animation-delay: 1.6s; }
-    .sat.w { top: 50%; left: 0; transform: translateY(-50%); animation-delay: 2.4s; }
-    @keyframes satglow {
-      0%,100% { border-color: var(--rbdr); }
-      50%      { border-color: rgba(255,255,255,.55); box-shadow: 0 0 12px rgba(255,255,255,.1); }
-    }
-    .sat-lbl { font-size: .44rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--rsub); margin-top: 1px; transition: color .3s; }
-
-    /* Flow lines SVG */
-    .dsvg { position: absolute; inset: 0; width: 100%; height: 100%; }
-    .fl { stroke-dasharray: 4 7; animation: flowdash 2s linear infinite; }
-    .fl:nth-child(2) { animation-delay: -.5s; }
-    .fl:nth-child(3) { animation-delay: -1s; }
-    .fl:nth-child(4) { animation-delay: -1.5s; }
-    @keyframes flowdash { to { stroke-dashoffset: -22; } }
-
-    /* Dashboard card */
-    .dc {
-      position: absolute; right: -10px; top: 50%; transform: translateY(-50%);
-      width: 168px; background: var(--cbg); border: 1px solid var(--cbdr);
-      border-radius: 12px; padding: 10px; backdrop-filter: blur(14px);
-      z-index: 3; transition: background .3s, border-color .3s;
-    }
-    .dc-hdr {
-      font-size: .52rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
-      color: var(--cmut); margin-bottom: 6px; padding-bottom: 5px;
-      border-bottom: 1px solid var(--cbdr); transition: color .3s, border-color .3s;
-    }
-    .dc-row { display: flex; align-items: center; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,.04); }
-    .dc-row:last-child { border: none; }
-    .dc-left { display: flex; align-items: center; gap: 5px; }
-    .dc-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-    .dc-name { font-size: .6rem; font-weight: 500; color: var(--ctxt); transition: color .3s; }
-    .dc-type { font-size: .5rem; color: var(--cmut); transition: color .3s; }
-    .dc-badge { font-size: .48rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 5px; border-radius: 4px; }
-
-    /* Taglines */
-    .taglines { position: relative; height: 54px; overflow: hidden; text-align: center; }
-    .slide { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; opacity: 0; animation: sl 12s ease-in-out infinite; }
-    .slide:nth-child(2) { animation-delay: 4s; }
-    .slide:nth-child(3) { animation-delay: 8s; }
-    @keyframes sl {
-      0%,7%    { opacity: 0; transform: translateY(8px); }
-      13%,31%  { opacity: 1; transform: translateY(0); }
-      37%,100% { opacity: 0; transform: translateY(-8px); }
-    }
-    .sl-main { font-size: 1.05rem; font-weight: 700; color: var(--rtxt); letter-spacing: -.01em; transition: color .3s; }
-    .sl-sub  { font-size: .73rem; color: var(--rsub); transition: color .3s; }
-
-    /* Dots */
-    .dots { display: flex; gap: 7px; }
-    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dotoff); transition: background .3s, transform .3s; }
-    .dot.on { background: var(--doton); transform: scale(1.3); }
-
-    /* Mobile */
-    @media (max-width: 820px) {
-      html, body { overflow: auto; }
-      .page { flex-direction: column; height: auto; }
-      .left { flex: none; }
-      .right { flex: 0 0 360px; }
-      .big-circle { width: 260px; height: 260px; }
-      .diag { width: 220px; height: 220px; }
-      .dc { display: none; }
-    }
-  </style>
 </head>
 <body>
 
@@ -309,13 +19,13 @@
 <div class="page">
 
   <!-- ══════ LEFT ══════ -->
-  <div class="left">
+  <main class="left">
     <div class="form-box">
 
       <!-- Logo: full-colour turbine at 44px + Audiowide wordmark -->
       <div class="logo-row">
         <svg width="44" height="44" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"
-             style="filter:drop-shadow(0 0 10px rgba(74,124,255,.45));flex-shrink:0" aria-label="SENTRO">
+             class="logo-mark" role="img" aria-label="SENTRO">
           <defs>
             <linearGradient id="s1" x1="0" y1="0" x2="1" y2="1">
               <stop offset="0%"   stop-color="#bcd4ff"/>
@@ -357,10 +67,11 @@
         <!-- Username -->
         <div class="field">
           <div class="fw">
-            <svg class="fi" width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <svg class="fi" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
               <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" stroke-width="1.5"/>
               <path d="M2.5 13.5c0-3 2.5-5 5.5-5s5.5 2 5.5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
+            <label class="sr-only" for="login-username">Username</label>
             <input class="finput" id="login-username" name="username"
                    autocomplete="username" placeholder="Username" required/>
           </div>
@@ -369,20 +80,21 @@
         <!-- Password -->
         <div class="field">
           <div class="fw">
-            <svg class="fi" width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <svg class="fi" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
               <rect x="3" y="7" width="10" height="7" rx="2" stroke="currentColor" stroke-width="1.5"/>
               <path d="M5 7V5a3 3 0 0 1 6 0v2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
+            <label class="sr-only" for="login-password">Password</label>
             <input class="finput pw" id="login-password" name="password"
                    type="password" autocomplete="current-password" placeholder="Password" required/>
             <button type="button" class="eye-btn" id="eyeBtn" aria-label="Toggle password visibility">
               <!-- Eye open (default: password hidden, show eye icon) -->
-              <svg id="eyeA" width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <svg id="eyeA" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
                 <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5Z" stroke="currentColor" stroke-width="1.5"/>
                 <circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/>
               </svg>
               <!-- Eye slashed (shown when password is visible) -->
-              <svg id="eyeB" width="16" height="16" viewBox="0 0 16 16" fill="none" style="display:none">
+              <svg id="eyeB" class="is-hidden" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" focusable="false">
                 <path d="M2 2l12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                 <path d="M6.5 6.5a2 2 0 0 0 2.8 2.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                 <path d="M4 4.2C2.4 5.2 1 8 1 8s2.5 5 7 5c1.4 0 2.7-.4 3.8-1.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
@@ -393,17 +105,17 @@
         </div>
 
         <button class="btn-sign" type="submit">Sign in</button>
-        <p id="login-status" class="status-msg"></p>
+        <p id="login-status" class="status-msg" role="status" aria-live="polite"></p>
 
         <div class="reg-row">
           Don't have an account? <a href="/register">Create one</a>
         </div>
       </form>
     </div>
-  </div>
+  </main>
 
   <!-- ══════ RIGHT ══════ -->
-  <div class="right">
+  <aside class="right" aria-hidden="true">
     <canvas id="cvs" aria-hidden="true"></canvas>
 
     <div class="vis">
@@ -450,7 +162,7 @@
           <!-- Center SENTRO orb -->
           <div class="orb">
             <svg width="46" height="46" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"
-                 style="filter:drop-shadow(0 0 12px rgba(255,255,255,.25))">
+                 class="orb-mark" aria-hidden="true">
               <defs>
                 <linearGradient id="r1" x1="0" y1="0" x2="1" y2="1">
                   <stop offset="0%"   stop-color="#bcd4ff"/>
@@ -483,24 +195,24 @@
             <div class="dc-hdr">⬤ &nbsp;Live Scan</div>
             <div class="dc-row">
               <div class="dc-left">
-                <div class="dc-dot" style="background:#f87171"></div>
+                <div class="dc-dot crit"></div>
                 <div><div class="dc-name">prod-db-eu</div><div class="dc-type">PostgreSQL</div></div>
               </div>
-              <span class="dc-badge" style="color:#f87171;background:rgba(248,113,113,.15)">CRIT</span>
+              <span class="dc-badge crit">CRIT</span>
             </div>
             <div class="dc-row">
               <div class="dc-left">
-                <div class="dc-dot" style="background:#fb923c"></div>
+                <div class="dc-dot high"></div>
                 <div><div class="dc-name">s3-finance</div><div class="dc-type">AWS S3</div></div>
               </div>
-              <span class="dc-badge" style="color:#fb923c;background:rgba(251,146,60,.15)">HIGH</span>
+              <span class="dc-badge high">HIGH</span>
             </div>
             <div class="dc-row">
               <div class="dc-left">
-                <div class="dc-dot" style="background:#facc15"></div>
+                <div class="dc-dot med"></div>
                 <div><div class="dc-name">sharepoint</div><div class="dc-type">SharePoint</div></div>
               </div>
-              <span class="dc-badge" style="color:#facc15;background:rgba(250,204,21,.15)">MED</span>
+              <span class="dc-badge med">MED</span>
             </div>
           </div>
 
@@ -529,12 +241,12 @@
         <div class="dot"></div>
       </div>
     </div>
-  </div>
+  </aside>
 
 </div>
 
 <!-- ══ SCRIPTS ══ -->
-<script src="/static/login-fx.js?v=2"></script>
+<script src="/static/login-fx.js?v=4"></script>
 <script src="/static/login.js?v=101"></script>
 </body>
 </html>

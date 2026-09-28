@@ -17720,3 +17720,6 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 }
 #scan-targets-list li > span { flex: 1 1 12rem; min-width: 0; overflow-wrap: anywhere; }
 #scan-targets-list button { margin-top: 0; }
+
+/* C6: the inline SVG sprite sheets (symbols only), without a style attribute. */
+.svg-defs { display: none; }
