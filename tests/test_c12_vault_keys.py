@@ -289,7 +289,10 @@ class ThePreflightTest(unittest.TestCase):
         with mock.patch("backend.identity.directory_settings", return_value={"config": {}}), \
                 mock.patch("backend.identity.bind_password", return_value="pw"), \
                 mock.patch.object(directory, "lookup", return_value=flagged):
-            self.assertEqual(credential_preflight.assess("t-one", "svc-scan")["level"], "excessive")
+            flagged_result = credential_preflight.assess("t-one", "svc-scan")
+        self.assertEqual(flagged_result["level"], "excessive")
+        self.assertTrue(any("adminCount=1" in finding for finding in flagged_result["findings"]),
+                        "the operator is told why, not only that")
         clean = directory.Outcome("no_mapped_group", groups=("CN=File Readers,DC=corp,DC=example",))
         with mock.patch("backend.identity.directory_settings", return_value={"config": {}}), \
                 mock.patch("backend.identity.bind_password", return_value="pw"), \
@@ -336,6 +339,17 @@ class TheCredentialRoutesTest(_Case):
         self.assertEqual(entry["privilege"]["level"], "warning")
         audited = [row for row in store.read_audit_log("t-one", 50) if row["action"] == "credential.stored"]
         self.assertEqual(audited[-1]["detail"]["privilege"], "warning")
+
+    def test_the_directory_service_password_is_changed_only_in_directory_settings(self) -> None:
+        ref = self.vault.store("t-one", "CN=svc-sentro,DC=corp", "Bind-pass-778", "", kind="directory",
+                               label="CN=svc-sentro,DC=corp")
+        listed = {i["credential_ref"]: i for i in self.client.get("/api/credentials", headers=self.admin).json()["credentials"]}
+        self.assertEqual(listed[ref]["kind"], "directory")
+        replaced = self.client.put(f"/api/credentials/{ref}", headers=self.admin,
+                                   json={"username": "x", "password": "Other-pass-779", "domain": "D"})
+        self.assertEqual(replaced.status_code, 400)
+        self.assertEqual(self.client.delete(f"/api/credentials/{ref}", headers=self.admin).status_code, 400)
+        self.assertEqual(self.vault.resolve("t-one", ref)["password"], "Bind-pass-778")
 
     def test_only_a_verified_credential_manager_sees_or_changes_them(self) -> None:
         # the role is read from the account, not the token: a viewer needs its own account
