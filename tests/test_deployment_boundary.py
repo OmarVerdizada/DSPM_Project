@@ -110,7 +110,11 @@ class WhatProductionRefusesTest(unittest.TestCase):
 
 
 def _startup_env(tmp: str, **extra) -> dict:
-    env = {key: value for key, value in os.environ.items() if key != "DSPM_DB_URL"}
+    from backend.config import TEST_ONLY
+
+    # A production process as a host would start it: none of the suite's own switches
+    # (DSPM_PG_TEST_RESET on the PostgreSQL run), which production refuses (C11).
+    env = {key: value for key, value in os.environ.items() if key != "DSPM_DB_URL" and key not in TEST_ONLY}
     env.update({
         "DSPM_DB_PATH": str(Path(tmp) / "boundary.sqlite"),
         "DSPM_ARTIFACT_DIR": str(Path(tmp) / "artifacts"),
