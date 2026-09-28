@@ -76,6 +76,7 @@ class EveryStoreFunctionHasAScopeTest(unittest.TestCase):
         self.assertEqual({table: sorted(purposes) for table, purposes in store.PLATFORM_ACCESS.items()}, {
             "users": ["auth", "platform-admin"],
             "api_keys": ["auth"],
+            "user_mfa": ["auth"],
             "registration_invites": ["auth"],
             "scan_schedules": ["scheduler"],
             "audit_outbox": ["siem"],

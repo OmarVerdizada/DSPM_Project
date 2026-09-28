@@ -186,6 +186,29 @@ def audit_forward(args: argparse.Namespace) -> None:
     raise SystemExit(1 if total["failed"] else 0)
 
 
+def mfa_reset(args: argparse.Namespace) -> int:
+    """Remove an account's second factor from the host (C2 break-glass).
+
+    For the built-in administrator, whose factor the console will not reset, and for any
+    account whose administrators are locked out themselves. Whoever can run this already
+    holds the host, the database and the vault key. The account's sessions end, it sets up
+    a new factor at its next sign-in, and the reset is in the audit trail as done "by host".
+    """
+    from backend.store import audit, delete_user_mfa, get_user, revoke_sessions_for_user
+
+    user = get_user(args.username.strip().lower())
+    if user is None:
+        print(f"No account {args.username!r}.")
+        return 1
+    removed = delete_user_mfa(user["tenant_id"], user["username"])
+    ended = revoke_sessions_for_user(user["username"])
+    audit(user["tenant_id"], "host", "auth.mfa_reset",
+          {"username": user["username"], "by": "host", "had_factor": removed, "sessions_ended": ended})
+    print(f"{user['username']}: second factor {'removed' if removed else 'was not set up'}; "
+          f"{ended} session(s) ended. It is set up again at the next sign-in.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DSPM scanner for AD file-server data discovery.")
     subparsers = parser.add_subparsers(dest="command")
@@ -236,6 +259,12 @@ def build_parser() -> argparse.ArgumentParser:
         "forward", help="Send the audit events waiting for the SIEM (DSPM_SIEM_URL) now, once.")
     forward_parser.set_defaults(func=audit_forward)
 
+    mfa_parser = subparsers.add_parser("mfa", help="Second-factor tools for the host operator.")
+    mfa_commands = mfa_parser.add_subparsers(dest="mfa_command", required=True)
+    reset_parser = mfa_commands.add_parser("reset", help="Remove an account's second factor and end its sessions.")
+    reset_parser.add_argument("username", help="The account key (the built-in administrator is 'admin').")
+    reset_parser.set_defaults(func=mfa_reset)
+
     parser.set_defaults(func=serve)
     return parser
 
@@ -258,12 +287,13 @@ def require_supported_python(version: tuple[int, int] | None = None) -> None:
         )
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     require_supported_python()
     parser = build_parser()
-    args = parser.parse_args()
-    args.func(args)
+    args = parser.parse_args(argv)
+    result = args.func(args)
+    return int(result or 0)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

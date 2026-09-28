@@ -4,6 +4,7 @@ import asyncio
 import base64
 import functools
 import hashlib
+import json
 import hmac
 import ipaddress
 import os
@@ -61,6 +62,9 @@ from backend.finding_contracts import build_nist_finding_detail, get_finding_dis
 from backend.jobs import cancel_job, cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
 from backend.inventory_export import inventory_export_response_metadata, inventory_export_stream
 from backend.security import (
+    create_mfa_challenge,
+    read_mfa_challenge,
+    spend_mfa_challenge,
     REFRESH_COOKIE,
     REFRESH_TTL_SECONDS,
     TOKEN_TTL_SECONDS,
@@ -82,6 +86,13 @@ from backend.security import (
 )
 from backend.security import _token_jti
 from backend.store import (
+    allocate_account_key,
+    delete_directory_settings,
+    delete_user_mfa,
+    find_user_by_login,
+    get_directory_settings,
+    mark_session_mfa,
+    save_directory_settings,
     InventoryReadUnavailable,
     audit,
     clear_login_failures,
@@ -173,6 +184,8 @@ from classification.compliance.nist_catalog import (
 from collectors.file_scanner import normalize_extension_filter, scan_directory
 from collectors.net_guard import resolve_addresses
 from backend import target_scope
+from backend import directory, identity
+from backend.mfa import GATED_PERMISSIONS
 from collectors.win_security import security_for_path
 from collectors.winrm_endpoint_scanner import (
     ENDPOINT_PATH_ALIASES,
@@ -332,6 +345,9 @@ REFRESH_THROTTLE = RouteThrottle(
     "refresh", max(1, int(os.getenv("DSPM_REFRESH_MAX_FAILURES", "30"))), 300)
 # Verifying reads a tenant's whole audit trail (1.4 s at 20,000 rows, measured), so it
 # is counted per tenant: every verification, not only failed ones.
+# C2: a six-digit code is a small space; wrong codes are counted per ACCOUNT, wherever
+# they come from, and a correct one clears the count.
+MFA_THROTTLE = RouteThrottle("mfa", max(1, int(os.getenv("DSPM_MFA_MAX_FAILURES", "5"))), 900)
 AUDIT_VERIFY_THROTTLE = RouteThrottle(
     "audit_verify", max(1, int(os.getenv("DSPM_AUDIT_VERIFY_MAX_PER_HOUR", "20"))), 3600)
 
@@ -1062,8 +1078,11 @@ class LocalWinRMActivationRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=80)
+    # C2: the sign-in name (or, with no workspace, the account key), and the workspace
+    # (tenant) it belongs to - optional, so every existing account signs in as before.
+    username: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=1, max_length=200)
+    workspace: str = Field(default="", max_length=80)
 
 
 class RegisterRequest(BaseModel):
@@ -1737,7 +1756,7 @@ def nist_catalog_export(principal: Principal = Depends(require_permission("expor
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest, request: Request) -> dict:
+def login(payload: LoginRequest, request: Request) -> Response:
     login_key = _login_rate_key(payload.username, request)
     ip_key = _login_ip_rate_key(request)
     # M4: trip on EITHER the per-(IP,username) cap OR the aggregate per-IP cap, so a
@@ -1759,30 +1778,34 @@ def login(payload: LoginRequest, request: Request) -> dict:
             audit(attempt_tenant, attempted or "unknown", "auth.login_blocked",
                   {"username": attempted, "blocked_attempts": blocked, "window_seconds": LOGIN_WINDOW_SECONDS})
         raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
-    principal = authenticate_user(payload.username, payload.password)
-    if principal is None:
+    result = identity.sign_in(payload.username, payload.password, payload.workspace)
+    attempt_tenant = result.tenant_id or attempt_tenant
+    if result.principal is None:
         _record_login_failure(login_key)
         _record_login_failure(ip_key)
-        audit(attempt_tenant, attempted or "unknown", "auth.login_failed", {"username": attempted})
+        detail = {"username": attempted}
+        if result.source == "ldap" or result.failure not in {"", "invalid"}:
+            # C2: why a directory sign-in failed is for the administrator, not the caller.
+            detail.update({"source": result.source, "reason": result.failure})
+        audit(attempt_tenant, attempted or "unknown", "auth.login_failed", detail)
+        if result.failure in {"unavailable", "tls_failure", "misconfigured"}:
+            raise HTTPException(status_code=503, detail="The directory could not complete the sign-in. "
+                                                        "Try again shortly, or sign in with a local account.")
         raise HTTPException(status_code=401, detail="Invalid username or password")
     # Clear this user's counter; the per-IP aggregate is NOT cleared by one success
     # (a sprayer who guesses one valid credential must not reset the IP's history).
     _clear_login_failures(login_key)
-    audit(principal.tenant_id, principal.subject, "auth.login")
-    access = create_token(principal.subject, principal.role, principal.tenant_id)
-    # C1: the access token is short now, and the session is carried by a single-use
-    # refresh token in an HttpOnly cookie - out of reach of any script on the page, and
-    # therefore out of reach of an XSS that can read what the console stores.
-    secret, _family, _expires = issue_refresh_token(principal.subject, _token_jti(access))
-    body = {
-        "access_token": access,
-        "token_type": "bearer",
-        "role": principal.role,
-        "permissions": sorted(principal_permissions(principal)),
-        "tenant_id": principal.tenant_id,
-        "expires_in": TOKEN_TTL_SECONDS,
-    }
-    return _with_refresh_cookie(JSONResponse(body), request, secret)
+    principal = result.principal
+    challenge = _mfa_challenge_for(result.user or get_user(principal.subject) or {"username": principal.subject,
+                                                                                  "role": principal.role,
+                                                                                  "tenant_id": principal.tenant_id})
+    if challenge is not None:
+        # C2: the first factor held; no session exists until the second one does.
+        audit(principal.tenant_id, principal.subject, "auth.mfa_challenged",
+              {"source": result.source, "enrollment": bool(challenge.get("mfa_enrollment_required"))})
+        return JSONResponse(challenge)
+    audit(principal.tenant_id, principal.subject, "auth.login", {"source": result.source} if result.source != "local" else None)
+    return _issue_session(principal, request, mfa_verified=False)
 
 
 def _refresh_cookie_is_secure(request: Request) -> bool:
@@ -1888,19 +1911,326 @@ def register(payload: RegisterRequest, request: Request) -> dict:
     if invite is None and not _valid_registration_code(tenant_id, code):
         REGISTER_THROTTLE.failed(client)
         raise HTTPException(status_code=403, detail="Registration failed")
-    if get_user(username):
+    # C2: a sign-in name is unique within its workspace. Another workspace using the same
+    # name no longer blocks this one - or tells the caller that it exists.
+    key = None if find_user_by_login(tenant_id, username) else allocate_account_key(username, tenant_id)
+    if key is None:
         REGISTER_THROTTLE.failed(client)
         raise HTTPException(status_code=409, detail="Registration failed")
     role = invite["role"] if invite else "viewer"
     pending = bool(invite and invite["requires_approval"])
-    create_user(username, hash_password(payload.password, username=username), role, tenant_id, payload.full_name.strip())
+    create_user(key, hash_password(payload.password, username=username), role, tenant_id, payload.full_name.strip(),
+                login_name=username)
     if pending:
-        update_user_active(username, False)  # M5: admin-approval - inactive until an admin activates
-    detail = {"role": role, "source": "invite" if invite else "registration_code"}
+        update_user_active(key, False)  # M5: admin-approval - inactive until an admin activates
+    detail = {"role": role, "source": "invite" if invite else "registration_code", "login_name": username}
     if invite:
         detail.update({"invite_id": invite["id"], "remaining_uses": invite["remaining_uses"], "pending_approval": pending})
-    audit(tenant_id, username, "user.registered", detail)  # M5: per-redemption audit
-    return {"user": _public_user(get_user(username)), "pending_approval": pending}
+    audit(tenant_id, key, "user.registered", detail)  # M5: per-redemption audit
+    return {"user": _public_user(get_user(key)), "pending_approval": pending}
+
+
+# ---- C2: MFA -------------------------------------------------------------------
+class MfaChallengeRequest(BaseModel):
+    mfa_token: str = Field(min_length=10, max_length=1000)
+    code: str = Field(default="", max_length=12)
+    recovery_code: str = Field(default="", max_length=40)
+
+
+class MfaCodeRequest(BaseModel):
+    code: str = Field(default="", max_length=12)
+    recovery_code: str = Field(default="", max_length=40)
+
+
+def _mfa_challenge_for(user: dict) -> dict | None:
+    """What sign-in answers instead of a session when the account must prove a second
+    factor: a code (enrolled), or an enrollment first (an administrator without one)."""
+    state = identity.mfa_state(user)
+    if state["enabled"]:
+        return {"mfa_required": True, "mfa_token": create_mfa_challenge(user["username"], "verify"),
+                "methods": ["totp", "recovery_code"]}
+    if state["required_at_sign_in"]:
+        return {"mfa_enrollment_required": True, "mfa_token": create_mfa_challenge(user["username"], "enroll")}
+    return None
+
+
+def _issue_session(principal: Principal, request: Request, *, mfa_verified: bool) -> Response:
+    access = create_token(principal.subject, principal.role, principal.tenant_id, mfa_verified=mfa_verified)
+    # C1: the access token is short, and the session is carried by a single-use refresh
+    # token in an HttpOnly cookie - out of reach of any script on the page. C2: both carry
+    # whether the session proved a second factor.
+    secret, _family, _expires = issue_refresh_token(principal.subject, _token_jti(access), mfa_verified=mfa_verified)
+    body = {
+        "access_token": access,
+        "token_type": "bearer",
+        "role": principal.role,
+        "permissions": sorted(principal_permissions(principal)),
+        "tenant_id": principal.tenant_id,
+        "expires_in": TOKEN_TTL_SECONDS,
+        "mfa_verified": mfa_verified,
+    }
+    return _with_refresh_cookie(JSONResponse(body), request, secret)
+
+
+def _challenged_user(token: str, purposes: tuple[str, ...]) -> tuple[dict, dict]:
+    claims = read_mfa_challenge(token, purposes)
+    user = get_user(sanitize_username(str(claims.get("sub") or ""))) if claims else None
+    if claims is None or user is None or not user.get("is_active"):
+        raise HTTPException(status_code=401, detail="This sign-in has expired. Sign in again.")
+    return claims, user
+
+
+def _second_factor_or_refuse(user: dict, code: str, recovery_code: str) -> str:
+    subject = user["username"]
+    if MFA_THROTTLE.exhausted(subject):
+        raise HTTPException(status_code=429, detail="Too many incorrect codes. Try again later.")
+    ok, method, left = identity.verify_second_factor(user, code, recovery_code)
+    if not ok:
+        MFA_THROTTLE.failed(subject)
+        audit(user["tenant_id"], subject, "auth.mfa_failed", {"method": method or "totp"})
+        raise HTTPException(status_code=401, detail="That code is not valid.")
+    MFA_THROTTLE.clear(subject)
+    detail = {"method": method}
+    if method == "recovery_code":
+        detail["recovery_codes_left"] = left
+    audit(user["tenant_id"], subject, "auth.mfa_verified", detail)
+    return method
+
+
+@app.post("/api/auth/mfa/verify")
+def mfa_verify(payload: MfaChallengeRequest, request: Request) -> Response:
+    """Second step of sign-in for an account with MFA: the code, then the session."""
+    claims, user = _challenged_user(payload.mfa_token, ("verify",))
+    method = _second_factor_or_refuse(user, payload.code, payload.recovery_code)
+    if not spend_mfa_challenge(claims):
+        raise HTTPException(status_code=401, detail="This sign-in has expired. Sign in again.")
+    audit(user["tenant_id"], user["username"], "auth.login", {"mfa": method})
+    return _issue_session(Principal(user["username"], user["role"], user["tenant_id"]), request, mfa_verified=True)
+
+
+@app.post("/api/auth/mfa/enroll/start")
+def mfa_enroll_start_at_sign_in(payload: MfaChallengeRequest) -> dict:
+    """An administrator signing in without a second factor sets one up first. The secret
+    is returned this once and is not readable again."""
+    _claims, user = _challenged_user(payload.mfa_token, ("enroll",))
+    audit(user["tenant_id"], user["username"], "auth.mfa_enrollment_started", {"at": "sign-in"})
+    return identity.start_enrollment(user)
+
+
+@app.post("/api/auth/mfa/enroll/confirm")
+def mfa_enroll_confirm_at_sign_in(payload: MfaChallengeRequest, request: Request) -> Response:
+    claims, user = _challenged_user(payload.mfa_token, ("enroll",))
+    if MFA_THROTTLE.exhausted(user["username"]):
+        raise HTTPException(status_code=429, detail="Too many incorrect codes. Try again later.")
+    codes = identity.confirm_enrollment(user, payload.code)
+    if codes is None:
+        MFA_THROTTLE.failed(user["username"])
+        raise HTTPException(status_code=400, detail="That code does not match. Check the authenticator and try again.")
+    if not spend_mfa_challenge(claims):
+        raise HTTPException(status_code=401, detail="This sign-in has expired. Sign in again.")
+    MFA_THROTTLE.clear(user["username"])
+    audit(user["tenant_id"], user["username"], "auth.mfa_enrolled", {"at": "sign-in"})
+    audit(user["tenant_id"], user["username"], "auth.login", {"mfa": "enrolled"})
+    response = _issue_session(Principal(user["username"], user["role"], user["tenant_id"]), request, mfa_verified=True)
+    body = json.loads(response.body)
+    body["recovery_codes"] = codes  # shown once; only their hashes are kept
+    replacement = JSONResponse(body)
+    for header, value in response.headers.items():
+        if header.lower() == "set-cookie":
+            replacement.headers.append("set-cookie", value)
+    return replacement
+
+
+@app.get("/api/profile/mfa")
+def profile_mfa(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
+    user = get_user(principal.subject)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {**identity.mfa_state(user), "session_verified": principal.mfa_verified}
+
+
+@app.post("/api/profile/mfa/enroll/start")
+def profile_mfa_enroll_start(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
+    """Set up (or replace) the second factor from a signed-in session. Replacing one needs
+    a session that proved the current one - a stolen session cannot swap the factor."""
+    user = get_user(principal.subject)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if identity.mfa_state(user)["enabled"] and not principal.mfa_verified:
+        raise HTTPException(status_code=403, detail={"code": "mfa_required",
+                                                     "message": "Confirm your current authenticator code first."})
+    audit(principal.tenant_id, principal.subject, "auth.mfa_enrollment_started", {"at": "profile"})
+    return identity.start_enrollment(user)
+
+
+@app.post("/api/profile/mfa/enroll/confirm")
+def profile_mfa_enroll_confirm(payload: MfaCodeRequest,
+                               principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
+    user = get_user(principal.subject)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if MFA_THROTTLE.exhausted(principal.subject):
+        raise HTTPException(status_code=429, detail="Too many incorrect codes. Try again later.")
+    codes = identity.confirm_enrollment(user, payload.code)
+    if codes is None:
+        MFA_THROTTLE.failed(principal.subject)
+        raise HTTPException(status_code=400, detail="That code does not match. Check the authenticator and try again.")
+    MFA_THROTTLE.clear(principal.subject)
+    mark_session_mfa(principal.session_id)
+    audit(principal.tenant_id, principal.subject, "auth.mfa_enrolled", {"at": "profile"})
+    return {"enabled": True, "recovery_codes": codes, "session_verified": True}
+
+
+@app.post("/api/profile/mfa/verify")
+def profile_mfa_step_up(payload: MfaCodeRequest, principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
+    """Step up a signed-in session: prove the second factor now, and MFA-scoped actions
+    (credentials, administration) open for the rest of this session."""
+    user = get_user(principal.subject)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    _second_factor_or_refuse(user, payload.code, payload.recovery_code)
+    mark_session_mfa(principal.session_id)
+    return {"session_verified": True}
+
+
+@app.post("/api/profile/mfa/recovery-codes")
+def profile_mfa_recovery_codes(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
+    user = get_user(principal.subject)
+    if user is None or not identity.mfa_state(user)["enabled"]:
+        raise HTTPException(status_code=400, detail="Set up an authenticator first.")
+    if not principal.mfa_verified:
+        raise HTTPException(status_code=403, detail={"code": "mfa_required",
+                                                     "message": "Confirm your authenticator code first."})
+    codes = identity.new_recovery_codes(user)
+    audit(principal.tenant_id, principal.subject, "auth.mfa_recovery_codes_replaced")
+    return {"recovery_codes": codes}
+
+
+@app.post("/api/profile/mfa/disable")
+def profile_mfa_disable(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
+    user = get_user(principal.subject)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    state = identity.mfa_state(user)
+    if state["required_at_sign_in"]:
+        raise HTTPException(status_code=400, detail="Your role requires a second factor; it cannot be turned off.")
+    if not principal.mfa_verified:
+        raise HTTPException(status_code=403, detail={"code": "mfa_required",
+                                                     "message": "Confirm your authenticator code first."})
+    delete_user_mfa(user["tenant_id"], user["username"])
+    audit(principal.tenant_id, principal.subject, "auth.mfa_disabled", {"by": "self"})
+    return {"enabled": False}
+
+
+@app.post("/api/users/{username}/mfa/reset")
+def admin_reset_user_mfa(username: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    """For a person who lost their authenticator: remove the factor and end their
+    sessions. They set up a new one at their next sign-in. The built-in administrator is
+    reset only from the host (`python main.py mfa reset`)."""
+    target = sanitize_username(username)
+    if target in PROTECTED_USERS:
+        raise HTTPException(status_code=403, detail="The built-in administrator's factor is reset from the host.")
+    user = get_user(target)
+    if user is None or not _can_manage_tenant(principal, user["tenant_id"]):
+        raise HTTPException(status_code=404, detail="User not found")
+    removed = delete_user_mfa(user["tenant_id"], target)
+    ended = revoke_sessions_for_user(target)
+    audit(principal.tenant_id, principal.subject, "auth.mfa_reset",
+          {"username": target, "tenant_id": user["tenant_id"], "had_factor": removed, "sessions_ended": ended})
+    return {"username": target, "reset": removed, "sessions_ended": ended}
+
+
+# ---- C2: directory sign-in settings ---------------------------------------------
+class DirectoryMapping(BaseModel):
+    group_dn: str = Field(max_length=400)
+    role: str = Field(max_length=64)
+
+
+class DirectorySettingsRequest(BaseModel):
+    enabled: bool | None = None
+    host: str | None = Field(default=None, max_length=253)
+    port: int | None = None
+    security: str | None = Field(default=None, max_length=10)
+    trust: str | None = Field(default=None, max_length=10)
+    ca_pem: str | None = Field(default=None, max_length=65536)
+    ca_name: str | None = Field(default=None, max_length=200)
+    base_dn: str | None = Field(default=None, max_length=400)
+    bind_dn: str | None = Field(default=None, max_length=400)
+    # The service account's password: omitted keeps the stored one, a value replaces
+    # it, remove_bind_password deletes it. It is never sent back.
+    bind_password: str | None = Field(default=None, max_length=500)
+    remove_bind_password: bool = False
+    user_attribute: str | None = Field(default=None, max_length=40)
+    group_search: str | None = Field(default=None, max_length=20)
+    group_base_dn: str | None = Field(default=None, max_length=400)
+    timeout_seconds: int | None = None
+    mappings: list[DirectoryMapping] | None = Field(default=None, max_length=50)
+
+
+class DirectoryTestRequest(BaseModel):
+    login: str = Field(default="", max_length=120)
+
+
+@app.get("/api/settings/directory")
+def directory_settings_view(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    return directory.public_view(get_directory_settings(principal.tenant_id), editable=True)
+
+
+@app.put("/api/settings/directory")
+def directory_settings_save(payload: DirectorySettingsRequest,
+                            principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    tenant_id = principal.tenant_id
+    saved = get_directory_settings(tenant_id)
+    request = payload.model_dump(exclude_none=True, exclude={"bind_password", "remove_bind_password", "enabled"})
+    try:
+        config = directory.validate(request, (saved or {}).get("config"), lambda role: store_module.role_exists(role, tenant_id))
+    except directory.DirectoryError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The directory settings were refused")) from exc
+    ref = (saved or {}).get("bind_secret_ref", "")
+    secret_action = "kept" if ref else "none"
+    if payload.remove_bind_password and ref:
+        vault.delete(tenant_id, ref)
+        ref, secret_action = "", "removed"
+    elif payload.bind_password:
+        new_ref = vault.store(tenant_id, config["bind_dn"], payload.bind_password, "")
+        if ref:
+            vault.delete(tenant_id, ref)
+        secret_action = "replaced" if ref else "set"
+        ref = new_ref
+    enabled = payload.enabled if payload.enabled is not None else bool(saved and saved.get("enabled"))
+    if enabled and not ref:
+        raise HTTPException(status_code=400, detail="Enter the service account's password before turning directory sign-in on.")
+    save_directory_settings(tenant_id, enabled, config, ref, principal.subject)
+    before = (saved or {}).get("config") or {}
+    changed = sorted(key for key in set(before) | set(config) if key != "ca_pem" and before.get(key) != config.get(key))
+    audit(tenant_id, principal.subject, "directory.settings_changed", {
+        "host": config["host"], "security": config["security"], "fields": changed,
+        "bind_password": secret_action, "mappings": len(config["mappings"]), "enabled": enabled})
+    if saved is None or bool(saved.get("enabled")) != enabled:
+        audit(tenant_id, principal.subject, "directory.enabled" if enabled else "directory.disabled")
+    return directory.public_view(get_directory_settings(tenant_id), editable=True)
+
+
+@app.delete("/api/settings/directory")
+def directory_settings_remove(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    saved = get_directory_settings(principal.tenant_id)
+    if saved and saved.get("bind_secret_ref"):
+        vault.delete(principal.tenant_id, saved["bind_secret_ref"])
+    delete_directory_settings(principal.tenant_id)
+    audit(principal.tenant_id, principal.subject, "directory.removed", {"had_settings": saved is not None})
+    return directory.public_view(None, editable=True)
+
+
+@app.post("/api/settings/directory/test")
+def directory_settings_test(payload: DirectoryTestRequest,
+                            principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    saved = get_directory_settings(principal.tenant_id)
+    if saved is None:
+        raise HTTPException(status_code=400, detail="Save the directory settings first.")
+    report = directory.test(saved["config"], identity.bind_password(principal.tenant_id, saved), payload.login.strip())
+    audit(principal.tenant_id, principal.subject, "directory.tested",
+          {"ok": report["ok"], "status": report["status"], "with_user": bool(payload.login.strip())})
+    return report
 
 
 @app.post("/api/auth/change-password")
@@ -1939,6 +2269,8 @@ def profile(principal: Principal = Depends(require_permission(AUTHENTICATED))) -
         # C3: what this account may do, read fresh - the console gates on this, and a
         # role changed since sign-in shows here on the next page load.
         "permissions": sorted(principal_permissions(principal)),
+        # C2: the second factor - whether it is set up, required, and proved this session.
+        "mfa": {**identity.mfa_state(user), "session_verified": principal.mfa_verified},
     }
 
 
@@ -2303,11 +2635,15 @@ def admin_create_user(payload: UserCreateRequest, principal: Principal = Depends
         raise HTTPException(status_code=403, detail="Tenant access denied")
     if not tenant_exists(tenant_id):
         raise HTTPException(status_code=400, detail="Tenant does not exist")
-    if get_user(username):
-        raise HTTPException(status_code=409, detail="Username already exists")
+    # C2: unique within the workspace; the installation-wide account key is allocated.
+    key = None if find_user_by_login(tenant_id, username) else allocate_account_key(username, tenant_id)
+    if key is None:
+        raise HTTPException(status_code=409, detail="That sign-in name is already used in this workspace")
     _require_role_in(payload.role, tenant_id)
-    user = create_user(username, hash_password(payload.password, username=username), payload.role, tenant_id, payload.full_name.strip())
-    audit(principal.tenant_id, principal.subject, "user.created", {"username": username, "role": payload.role, "tenant_id": tenant_id})
+    user = create_user(key, hash_password(payload.password, username=username), payload.role, tenant_id,
+                       payload.full_name.strip(), login_name=username)
+    audit(principal.tenant_id, principal.subject, "user.created",
+          {"username": key, "login_name": username, "role": payload.role, "tenant_id": tenant_id})
     return {"user": _public_user(user)}
 
 
@@ -2347,7 +2683,12 @@ def admin_reset_password(username: str, payload: PasswordResetRequest, principal
         raise HTTPException(status_code=404, detail="User not found")
     if not _can_manage_tenant(principal, current_user["tenant_id"]):
         raise HTTPException(status_code=403, detail="Tenant access denied")
-    user = update_user_password(target, hash_password(payload.password, username=target))
+    if (current_user.get("auth_source") or "local") != "local":
+        # C2: its password is the directory's. A local one would never be used (sign-in
+        # refuses local passwords on directory accounts) and would only mislead.
+        raise HTTPException(status_code=400, detail="This account signs in with the directory; reset its password there.")
+    user = update_user_password(target, hash_password(payload.password,
+                                                      username=current_user.get("login_name") or target))
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
     # C1: an administrator resetting a password is usually doing it because the
@@ -2555,6 +2896,10 @@ def create_api_key(payload: ApiKeyRequest, principal: Principal = Depends(requir
     if not _delegable(role, principal.tenant_id):
         # Machine keys never carry admin - create admins via /api/users.
         raise HTTPException(status_code=400, detail="An API key's role must exist in this tenant and not administer it")
+    if role_permissions_in(role, principal.tenant_id) & GATED_PERMISSIONS:
+        # C2: an API key cannot answer an MFA challenge, so it may not hold what one guards.
+        raise HTTPException(status_code=400, detail="An API key's role may not manage credentials or administer; "
+                                                    "those need a person with a second factor")
     raw, key_hash = generate_api_key()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=payload.ttl_days)).isoformat()
     key_id = create_api_key_record(principal.tenant_id, key_hash, payload.label, role, principal.subject, expires_at)
@@ -2583,7 +2928,8 @@ def revoke_api_key_route(key_id: str, principal: Principal = Depends(require_per
 
 
 @app.post("/api/credentials")
-def store_credentials(payload: CredentialRequest, principal: Principal = Depends(require_permission("scan.run", "credential.manage"))) -> dict:
+def store_credentials(payload: CredentialRequest,
+                      principal: Principal = Depends(require_permission("scan.run", "credential.manage", mfa=True))) -> dict:
     secret_ref = vault.store(
         principal.tenant_id,
         payload.username.strip(),
@@ -3871,6 +4217,9 @@ def _hash_invite_token(token: str) -> str:
 def _public_user(user: dict) -> dict:
     return {
         "username": user["username"],
+        # C2: what the person types, with their workspace; `username` is the account key.
+        "login_name": user.get("login_name") or user["username"],
+        "auth_source": user.get("auth_source") or "local",
         "role": user["role"],
         "tenant_id": user["tenant_id"],
         "full_name": user.get("full_name", ""),

@@ -191,6 +191,8 @@ _PK: dict[str, tuple[str, ...]] = {
     # now does, against the real schema.
     "user_sessions": ("jti",),
     "refresh_tokens": ("token_hash",),
+    # C2: one directory configuration per workspace.
+    "directory_settings": ("tenant_id",),
 }
 
 

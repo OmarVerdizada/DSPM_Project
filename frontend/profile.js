@@ -99,13 +99,18 @@ function authHeaders() {
   };
 }
 
-async function readErrorMessage(response) {
+async function readError(response) {
   const message = await response.text();
   try {
     const data = JSON.parse(message);
-    return typeof data.detail === "string" ? data.detail : "Request failed.";
+    if (typeof data.detail === "string") return { message: data.detail, code: "" };
+    // C2: a refusal can carry a code - "mfa_required" asks for the second factor.
+    if (data.detail && typeof data.detail === "object") {
+      return { message: data.detail.message || "Request failed.", code: data.detail.code || "" };
+    }
+    return { message: "Request failed.", code: "" };
   } catch {
-    return message || "Request failed.";
+    return { message: message || "Request failed.", code: "" };
   }
 }
 
@@ -150,7 +155,13 @@ async function api(path, payload, method = "GET", isRetry = false) {
   if (response.status === 401 && !isRetry && await refreshAccessToken()) {
     return api(path, payload, method, true);
   }
-  if (!response.ok) throw new Error(await readErrorMessage(response));
+  if (!response.ok) {
+    const problem = await readError(response);
+    const error = new Error(problem.message);
+    error.code = problem.code;
+    error.status = response.status;
+    throw error;
+  }
   return response.json();
 }
 
@@ -829,6 +840,506 @@ siemRemoveBtn.addEventListener("click", () => {
     () => "Configuration removed. Forwarding is off.");
 });
 
+/* ── Two-step sign-in (C2) ────────────────────────────────────── */
+// The key is on screen only while it is being set up, and recovery codes only until
+// "I saved them": both live in the DOM for that moment and nowhere else.
+const mfaStateLabel = document.querySelector("#mfa-state");
+const mfaCodesLeft = document.querySelector("#mfa-codes-left");
+const mfaSessionLabel = document.querySelector("#mfa-session");
+const mfaSetupBtn = document.querySelector("#mfa-setup-btn");
+const mfaNewCodesBtn = document.querySelector("#mfa-new-codes-btn");
+const mfaDisableBtn = document.querySelector("#mfa-disable-btn");
+const mfaStepupForm = document.querySelector("#mfa-stepup-form");
+const mfaStepupCode = document.querySelector("#mfa-stepup-code");
+const mfaStepupLabel = document.querySelector("#mfa-stepup-label");
+const mfaStepupRecovery = document.querySelector("#mfa-stepup-recovery");
+const mfaSetupPanel = document.querySelector("#mfa-setup-panel");
+const mfaSetupSecret = document.querySelector("#mfa-setup-secret");
+const mfaSetupForm = document.querySelector("#mfa-setup-form");
+const mfaSetupCode = document.querySelector("#mfa-setup-code");
+const mfaCodesPanel = document.querySelector("#mfa-codes-panel");
+const mfaCodesList = document.querySelector("#mfa-codes-list");
+const mfaStatusLine = document.querySelector("#mfa-status");
+
+let mfaView = null;
+let mfaStepupWithRecovery = false;
+// What to do once the session has proved the factor (the action that asked for it).
+let mfaAfterStepup = null;
+
+function mfaSay(message, isError = false) {
+  mfaStatusLine.classList.toggle("error", Boolean(isError));
+  setStatus(mfaStatusLine, message);
+}
+
+function renderMfa(view) {
+  mfaView = view;
+  const enabled = Boolean(view.enabled);
+  mfaStateLabel.textContent = enabled
+    ? "On"
+    : (view.required_at_sign_in ? "Off - your role requires it at the next sign-in" : "Off");
+  mfaCodesLeft.textContent = enabled ? String(view.recovery_codes_left ?? 0) : "-";
+  mfaSessionLabel.textContent = view.session_verified ? "Confirmed with a code" : (enabled ? "Not confirmed" : "-");
+  mfaSetupBtn.textContent = enabled ? "Replace authenticator" : "Set up authenticator";
+  mfaNewCodesBtn.hidden = !enabled;
+  // A role that requires the factor cannot turn it off; an administrator resets it.
+  mfaDisableBtn.hidden = !enabled || Boolean(view.required_at_sign_in);
+}
+
+async function loadMfa() {
+  try {
+    renderMfa(await api("/api/profile/mfa"));
+  } catch (error) {
+    mfaStateLabel.textContent = "Unavailable";
+    mfaSay(`Could not load two-step sign-in: ${error.message}`, true);
+  }
+}
+
+// Replacing the factor, new codes and turning it off all need this session to have
+// proved the current factor. The server says so; the page asks for a code and carries on.
+async function withStepup(run) {
+  try {
+    return await run();
+  } catch (error) {
+    if (error.code !== "mfa_required") throw error;
+    mfaAfterStepup = run;
+    mfaStepupForm.hidden = false;
+    mfaStepupCode.value = "";
+    mfaStepupCode.focus();
+    mfaSay("Enter a code from your authenticator to continue.");
+    return null;
+  }
+}
+
+mfaStepupRecovery.addEventListener("click", () => {
+  mfaStepupWithRecovery = !mfaStepupWithRecovery;
+  mfaStepupLabel.textContent = mfaStepupWithRecovery ? "Recovery code" : "Authenticator code";
+  mfaStepupCode.inputMode = mfaStepupWithRecovery ? "text" : "numeric";
+  mfaStepupCode.placeholder = mfaStepupWithRecovery ? "XXXX-XXXX-XXXX-XXXX" : "123 456";
+  mfaStepupRecovery.textContent = mfaStepupWithRecovery ? "Use the authenticator app" : "Use a recovery code";
+  mfaStepupCode.value = "";
+  mfaStepupCode.focus();
+});
+
+mfaStepupForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const value = String(mfaStepupCode.value || "");
+  const body = mfaStepupWithRecovery ? { recovery_code: value.trim() } : { code: value.replace(/\s+/g, "") };
+  mfaSay("Checking...");
+  try {
+    await api("/api/profile/mfa/verify", body, "POST");
+  } catch (error) {
+    mfaStepupCode.value = "";
+    mfaSay(error.message, true);
+    return;
+  }
+  mfaStepupForm.hidden = true;
+  mfaStepupCode.value = "";
+  const next = mfaAfterStepup;
+  mfaAfterStepup = null;
+  mfaSay("Confirmed for this session.");
+  await loadMfa();
+  if (next) {
+    try {
+      await next();
+    } catch (error) {
+      mfaSay(error.message, true);
+    }
+  }
+});
+
+async function startMfaSetup() {
+  const data = await api("/api/profile/mfa/enroll/start", {}, "POST");
+  mfaSetupSecret.textContent = String(data.secret || "").replace(/(.{4})/g, "$1 ").trim();
+  mfaSetupPanel.hidden = false;
+  mfaCodesPanel.hidden = true;
+  mfaSetupCode.value = "";
+  mfaSetupCode.focus();
+  mfaSay("Add the key to your authenticator app, then enter the code it shows.");
+  return data;
+}
+
+function closeMfaSetup() {
+  mfaSetupSecret.textContent = "";
+  mfaSetupPanel.hidden = true;
+}
+
+function showRecoveryCodes(codes) {
+  mfaCodesList.replaceChildren(...codes.map((code) => {
+    const item = document.createElement("li");
+    item.textContent = code;
+    return item;
+  }));
+  mfaCodesPanel.hidden = false;
+}
+
+mfaSetupBtn.addEventListener("click", () => {
+  withStepup(startMfaSetup).catch((error) => mfaSay(error.message, true));
+});
+
+document.querySelector("#mfa-setup-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(mfaSetupSecret.textContent.replace(/\s+/g, ""));
+    mfaSay("Key copied.");
+  } catch {
+    mfaSay("Copy is not available here; type the key into the app.");
+  }
+});
+
+document.querySelector("#mfa-setup-cancel").addEventListener("click", () => {
+  closeMfaSetup();
+  mfaSay("Setup cancelled. Nothing changed.");
+});
+
+mfaSetupForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  mfaSay("Checking...");
+  try {
+    const data = await api("/api/profile/mfa/enroll/confirm", { code: String(mfaSetupCode.value || "").replace(/\s+/g, "") }, "POST");
+    closeMfaSetup();
+    showRecoveryCodes(Array.isArray(data.recovery_codes) ? data.recovery_codes : []);
+    mfaSay("Two-step sign-in is on. Save your recovery codes.");
+    await loadMfa();
+  } catch (error) {
+    mfaSetupCode.value = "";
+    mfaSay(error.message, true);
+  }
+});
+
+mfaNewCodesBtn.addEventListener("click", () => {
+  if (!window.confirm("Make new recovery codes? The codes you have now stop working.")) return;
+  withStepup(async () => {
+    const data = await api("/api/profile/mfa/recovery-codes", {}, "POST");
+    showRecoveryCodes(Array.isArray(data.recovery_codes) ? data.recovery_codes : []);
+    mfaSay("New recovery codes made. The old ones no longer work.");
+    await loadMfa();
+  }).catch((error) => mfaSay(error.message, true));
+});
+
+mfaDisableBtn.addEventListener("click", () => {
+  if (!window.confirm("Turn off two-step sign-in? Sign-in will ask for your password only.")) return;
+  withStepup(async () => {
+    await api("/api/profile/mfa/disable", {}, "POST");
+    mfaCodesPanel.hidden = true;
+    mfaCodesList.replaceChildren();
+    mfaSay("Two-step sign-in is off.");
+    await loadMfa();
+  }).catch((error) => mfaSay(error.message, true));
+});
+
+document.querySelector("#mfa-codes-copy").addEventListener("click", async () => {
+  const text = [...mfaCodesList.querySelectorAll("li")].map((item) => item.textContent).join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    mfaSay("Codes copied.");
+  } catch {
+    mfaSay("Copy is not available here; select the codes and copy them.");
+  }
+});
+
+document.querySelector("#mfa-codes-done").addEventListener("click", () => {
+  mfaCodesList.replaceChildren();
+  mfaCodesPanel.hidden = true;
+  mfaSay(" ");
+});
+
+/* ── Directory sign-in (C2) ───────────────────────────────────── */
+// The service account's password is never sent back. The field starts empty every time:
+// left empty, the saved one is kept; typed, it replaces it; "Remove password" deletes it.
+// Nothing here ever sends a mask as a password.
+const directoryCard = document.querySelector("#directory-card");
+const directoryToggle = document.querySelector("#directory-toggle");
+const directoryState = document.querySelector("#directory-state");
+const directoryStateText = document.querySelector("#directory-state-text");
+const directoryPanel = document.querySelector("#directory-panel");
+const directoryForm = document.querySelector("#directory-form");
+const directoryFields = {
+  host: document.querySelector("#directory-host"),
+  security: document.querySelector("#directory-security"),
+  port: document.querySelector("#directory-port"),
+  trust: document.querySelector("#directory-trust"),
+  base_dn: document.querySelector("#directory-base-dn"),
+  bind_dn: document.querySelector("#directory-bind-dn"),
+  user_attribute: document.querySelector("#directory-user-attribute"),
+  group_search: document.querySelector("#directory-group-search"),
+  group_base_dn: document.querySelector("#directory-group-base-dn"),
+};
+const directoryPassword = document.querySelector("#directory-bind-password");
+const directorySecretNote = document.querySelector("#directory-secret-note");
+const directoryCaField = document.querySelector("#directory-ca-field");
+const directoryCaSummary = document.querySelector("#directory-ca-summary");
+const directoryCaFile = document.querySelector("#directory-ca-file");
+const directoryGroupBaseField = document.querySelector("#directory-group-base-field");
+const directoryMappings = document.querySelector("#directory-mappings");
+const directoryTestLogin = document.querySelector("#directory-test-login");
+const directoryRemoveRow = document.querySelector("#directory-remove-row");
+const directoryStatus = document.querySelector("#directory-status");
+const DIRECTORY_PORTS = { ldaps: 636, starttls: 389 };
+
+let directoryView = null;
+let directoryRoles = [];
+let directoryPendingCa = null;
+let directoryRemovePassword = false;
+
+function directorySay(message, isError = false) {
+  directoryStatus.classList.toggle("error", Boolean(isError));
+  setStatus(directoryStatus, message);
+}
+
+function directoryStateFor(view) {
+  if (!view.configured) return ["not_configured", view.enabled ? "On - finish the settings and save." : "Off - not configured."];
+  if (!view.enabled) return ["disabled", "Off - the settings are kept."];
+  // On is not connected: only a test that signed the service account in says that.
+  return ["enabled", `On - ${view.config.security === "starttls" ? "StartTLS" : "LDAPS"} to ${view.config.host}. Test the connection to confirm it answers.`];
+}
+
+function mappingRow(mapping = {}) {
+  const item = document.createElement("li");
+  item.className = "directory-mapping";
+  const group = document.createElement("input");
+  group.className = "directory-map-group";
+  group.placeholder = "CN=Sentro Admins,OU=Groups,DC=corp,DC=local";
+  group.setAttribute("aria-label", "Directory group");
+  group.spellcheck = false;
+  group.value = mapping.group_dn || "";
+  const role = document.createElement("select");
+  role.className = "directory-map-role";
+  role.setAttribute("aria-label", "Role for this group");
+  for (const entry of directoryRoles) {
+    const option = document.createElement("option");
+    option.value = entry.name;
+    option.textContent = entry.label || entry.name;
+    role.append(option);
+  }
+  role.value = mapping.role || "viewer";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "secondary-btn";
+  remove.textContent = "Remove";
+  remove.addEventListener("click", () => item.remove());
+  item.append(group, role, remove);
+  return item;
+}
+
+function syncDirectoryFields() {
+  directoryCaField.hidden = directoryFields.trust.value !== "custom";
+  directoryGroupBaseField.hidden = directoryFields.group_search.value !== "ad_nested";
+  const config = directoryView?.config || {};
+  directoryCaSummary.textContent = directoryPendingCa
+    ? `${directoryPendingCa.name} (not saved yet)`
+    : (config.ca_name ? `${config.ca_name} · ${config.ca_fingerprint || ""}`.trim() : "No certificate uploaded");
+  const saved = Boolean(directoryView?.bind_password_configured);
+  directoryPassword.placeholder = saved && !directoryRemovePassword ? "Saved - leave empty to keep it" : "Enter the password";
+  directorySecretNote.textContent = directoryRemovePassword
+    ? "Will be removed when you save."
+    : (saved ? "Saved. Type a new one to replace it." : "Not set.");
+  if (saved && !directoryRemovePassword) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "link-btn";
+    remove.textContent = "Remove password";
+    remove.addEventListener("click", () => {
+      directoryRemovePassword = true;
+      directoryPassword.value = "";
+      syncDirectoryFields();
+    });
+    directorySecretNote.append(" ", remove);
+  }
+}
+
+function renderDirectory(view, { fillForm = true } = {}) {
+  directoryView = view;
+  const config = view.config || {};
+  directoryToggle.checked = Boolean(view.enabled);
+  directoryToggle.disabled = !view.editable;
+  const [state, line] = directoryStateFor(view);
+  directoryState.dataset.state = state;
+  directoryStateText.textContent = line;
+  const open = Boolean(view.enabled || !view.configured && directoryToggle.checked);
+  directoryPanel.hidden = !open;
+  directoryToggle.setAttribute("aria-expanded", String(open));
+  if (fillForm) {
+    directoryFields.host.value = config.host || "";
+    directoryFields.security.value = config.security || "ldaps";
+    directoryFields.port.value = config.host ? String(config.port || "") : "";
+    directoryFields.trust.value = config.trust || "system";
+    directoryFields.base_dn.value = config.base_dn || "";
+    directoryFields.bind_dn.value = config.bind_dn || "";
+    directoryFields.user_attribute.value = config.user_attribute || "sAMAccountName";
+    directoryFields.group_search.value = config.group_search || "memberof";
+    directoryFields.group_base_dn.value = config.group_base_dn || "";
+    directoryPassword.value = "";
+    directoryPendingCa = null;
+    directoryRemovePassword = false;
+    const mappings = Array.isArray(config.mappings) && config.mappings.length ? config.mappings : [{}];
+    directoryMappings.replaceChildren(...mappings.map(mappingRow));
+  }
+  directoryFields.port.placeholder = String(DIRECTORY_PORTS[directoryFields.security.value] || 636);
+  document.querySelector("#directory-fact-host").textContent = config.host
+    ? `${config.host}:${config.port} (${config.security === "starttls" ? "StartTLS" : "LDAPS"})` : "Not configured";
+  document.querySelector("#directory-fact-ca").textContent = config.trust === "custom"
+    ? (config.ca_name ? `${config.ca_name} · ${config.ca_fingerprint || ""}` : "Missing")
+    : (config.host ? "System trust store" : "-");
+  document.querySelector("#directory-fact-changed").textContent = view.updated_at
+    ? `${new Date(view.updated_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}${view.updated_by ? ` by ${view.updated_by}` : ""}`
+    : "-";
+  directoryRemoveRow.hidden = !(view.editable && view.configured);
+  syncDirectoryFields();
+}
+
+function directoryRequest() {
+  const body = {
+    host: directoryFields.host.value.trim(),
+    security: directoryFields.security.value,
+    port: Number(directoryFields.port.value || DIRECTORY_PORTS[directoryFields.security.value]),
+    trust: directoryFields.trust.value,
+    base_dn: directoryFields.base_dn.value.trim(),
+    bind_dn: directoryFields.bind_dn.value.trim(),
+    user_attribute: directoryFields.user_attribute.value,
+    group_search: directoryFields.group_search.value,
+    group_base_dn: directoryFields.group_base_dn.value.trim(),
+    mappings: [...directoryMappings.querySelectorAll(".directory-mapping")]
+      .map((row) => ({ group_dn: row.querySelector(".directory-map-group").value.trim(), role: row.querySelector(".directory-map-role").value }))
+      .filter((mapping) => mapping.group_dn),
+    enabled: directoryToggle.checked,
+  };
+  if (directoryPendingCa) {
+    body.ca_pem = directoryPendingCa.pem;
+    body.ca_name = directoryPendingCa.name;
+  }
+  // Only what was typed: an empty field keeps the saved password.
+  if (directoryPassword.value) body.bind_password = directoryPassword.value;
+  else if (directoryRemovePassword) body.remove_bind_password = true;
+  return body;
+}
+
+async function loadDirectory() {
+  let permissions = [];
+  try {
+    permissions = JSON.parse(sessionGet("dspm-permissions") || "[]");
+  } catch {
+    permissions = [];
+  }
+  if (!permissions.includes("tenant.admin")) return;
+  try {
+    const [view, roles] = await Promise.all([api("/api/settings/directory"), api("/api/roles")]);
+    directoryRoles = (roles.roles || []).map((role) => ({ name: role.name, label: role.label || role.name }));
+    directoryCard.hidden = false;
+    renderDirectory(view);
+  } catch (error) {
+    if (error.status === 403 && error.code !== "mfa_required") return;
+    directoryCard.hidden = false;
+    directoryState.dataset.state = "unavailable";
+    directoryStateText.textContent = "Status unavailable.";
+    directorySay(error.code === "mfa_required"
+      ? "Confirm a code from your authenticator (Two-step sign-in, above) to manage directory sign-in."
+      : `Could not load the directory settings: ${error.message}`, true);
+  }
+}
+
+async function directoryAction(pending, run, done) {
+  const buttons = directoryCard.querySelectorAll("button");
+  buttons.forEach((button) => { button.disabled = true; });
+  directorySay(pending);
+  try {
+    directorySay(done(await run()));
+  } catch (error) {
+    directorySay(error.message, true);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+directoryToggle.addEventListener("change", () => {
+  const wanted = directoryToggle.checked;
+  if (!directoryView?.configured) {
+    // Nothing to turn on yet: open the form, and Save turns it on.
+    directoryPanel.hidden = !wanted;
+    directoryToggle.setAttribute("aria-expanded", String(wanted));
+    directoryState.dataset.state = "not_configured";
+    directoryStateText.textContent = wanted ? "On once saved - fill in the settings." : "Off - not configured.";
+    if (wanted) directoryFields.host.focus();
+    return;
+  }
+  directoryToggle.disabled = true;
+  directoryAction(wanted ? "Turning directory sign-in on..." : "Turning directory sign-in off...",
+    async () => renderDirectory(await api("/api/settings/directory", { enabled: wanted }, "PUT"), { fillForm: false }),
+    () => (wanted ? "Directory sign-in is on." : "Directory sign-in is off. The settings are kept.")).finally(() => {
+    directoryToggle.disabled = !(directoryView?.editable);
+    directoryToggle.checked = Boolean(directoryView?.enabled);
+  });
+});
+
+directoryFields.security.addEventListener("change", () => {
+  const known = Object.values(DIRECTORY_PORTS).map(String);
+  if (!directoryFields.port.value || known.includes(directoryFields.port.value)) {
+    directoryFields.port.value = String(DIRECTORY_PORTS[directoryFields.security.value]);
+  }
+  directoryFields.port.placeholder = String(DIRECTORY_PORTS[directoryFields.security.value]);
+});
+directoryFields.trust.addEventListener("change", syncDirectoryFields);
+directoryFields.group_search.addEventListener("change", syncDirectoryFields);
+directoryPassword.addEventListener("input", () => {
+  if (directoryPassword.value) directoryRemovePassword = false;
+});
+
+document.querySelector("#directory-add-mapping").addEventListener("click", () => {
+  const row = mappingRow();
+  directoryMappings.append(row);
+  row.querySelector("input").focus();
+});
+
+document.querySelector("#directory-ca-choose").addEventListener("click", () => directoryCaFile.click());
+directoryCaFile.addEventListener("change", async () => {
+  const file = directoryCaFile.files?.[0];
+  directoryCaFile.value = "";
+  if (!file) return;
+  if (file.size > 65536) {
+    directorySay("That file is larger than 64 KB. Upload the CA certificate only.", true);
+    return;
+  }
+  const pem = await file.text();
+  if (/PRIVATE KEY/i.test(pem)) {
+    directorySay("That file contains a private key. Upload the CA's certificate only.", true);
+    return;
+  }
+  if (!pem.includes("-----BEGIN CERTIFICATE-----")) {
+    directorySay("Upload a PEM certificate (-----BEGIN CERTIFICATE-----).", true);
+    return;
+  }
+  directoryPendingCa = { pem, name: file.name };
+  syncDirectoryFields();
+  directorySay(`${file.name} is ready. Save to use it.`);
+});
+
+directoryForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const body = directoryRequest();
+  directoryAction("Saving...", async () => {
+    const view = await api("/api/settings/directory", body, "PUT");
+    renderDirectory(view);
+    return view;
+  }, (view) => (view.enabled ? "Saved. Test the connection to confirm the service account signs in." : "Saved. Directory sign-in is off."));
+});
+
+document.querySelector("#directory-test-btn").addEventListener("click", () => {
+  const login = directoryTestLogin.value.trim();
+  directoryAction("Testing the connection...", async () => {
+    const report = await api("/api/settings/directory/test", { login }, "POST");
+    directoryState.dataset.state = report.ok ? "connected" : "not_connected";
+    directoryStateText.textContent = report.ok
+      ? `Connected - the service account signed in to ${directoryView?.config?.host || "the directory"} just now.`
+      : `Not connected - ${report.message}`;
+    if (!report.ok) throw new Error(report.message);
+    return report.message;
+  }, (message) => message);
+});
+
+document.querySelector("#directory-remove-btn").addEventListener("click", () => {
+  if (!window.confirm("Remove the directory settings and the service account's password? Directory accounts can no longer sign in.")) return;
+  directoryAction("Removing...", async () => renderDirectory(await api("/api/settings/directory", null, "DELETE")),
+    () => "Directory settings removed.");
+});
+
 /* ── Forms ────────────────────────────────────────────────────── */
 profileForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -994,3 +1505,5 @@ activateSection(location.hash.slice(1) || "profile", false);
 renderSessionExpiry();
 loadProfile();
 loadFeatures();
+loadMfa();
+loadDirectory();

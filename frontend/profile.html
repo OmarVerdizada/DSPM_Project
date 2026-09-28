@@ -146,6 +146,172 @@
             </form>
             <p id="password-status" class="settings-hint" role="status">&nbsp;</p>
           </article>
+
+          <!-- C2: the second factor. The key is shown once while it is set up; recovery
+               codes are shown once when they are made. Neither is stored in the page. -->
+          <article class="settings-card" id="mfa-card">
+            <div class="settings-card-copy">
+              <h2>Two-step sign-in</h2>
+              <p>After your password, sign-in asks for a six-digit code from an authenticator app on your phone. Administrators and anyone who manages scan credentials need it.</p>
+            </div>
+            <div class="settings-kv">
+              <div><span>Status</span><strong id="mfa-state">Checking&hellip;</strong></div>
+              <div><span>Recovery codes left</span><strong id="mfa-codes-left">&ndash;</strong></div>
+              <div><span>This session</span><strong id="mfa-session">&ndash;</strong></div>
+            </div>
+            <div class="settings-form-foot mfa-actions">
+              <span class="siem-actions">
+                <button type="button" class="secondary-btn" id="mfa-new-codes-btn" hidden>New recovery codes</button>
+                <button type="button" class="settings-danger-btn" id="mfa-disable-btn" hidden>Turn off</button>
+              </span>
+              <button type="button" id="mfa-setup-btn">Set up authenticator</button>
+            </div>
+
+            <form id="mfa-stepup-form" class="settings-form-row mfa-panel" hidden>
+              <label class="settings-field">
+                <span id="mfa-stepup-label">Authenticator code</span>
+                <input id="mfa-stepup-code" name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="23" spellcheck="false" placeholder="123 456" />
+              </label>
+              <button type="submit" id="mfa-stepup-btn">Confirm</button>
+              <button type="button" class="link-btn" id="mfa-stepup-recovery">Use a recovery code</button>
+            </form>
+
+            <div id="mfa-setup-panel" class="siem-panel mfa-panel" hidden>
+              <p class="settings-hint mfa-lead">In your authenticator app, add an account and enter this key. It is shown only now.</p>
+              <div class="siem-ca-row">
+                <code id="mfa-setup-secret" class="mfa-key mono"></code>
+                <button type="button" class="secondary-btn" id="mfa-setup-copy">Copy key</button>
+              </div>
+              <form id="mfa-setup-form" class="settings-form-row">
+                <label class="settings-field">
+                  Code from the app
+                  <input id="mfa-setup-code" name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="7" spellcheck="false" placeholder="123 456" />
+                </label>
+                <button type="submit" id="mfa-setup-confirm">Turn on</button>
+                <button type="button" class="secondary-btn" id="mfa-setup-cancel">Cancel</button>
+              </form>
+            </div>
+
+            <div id="mfa-codes-panel" class="siem-panel mfa-panel" hidden>
+              <p class="settings-hint mfa-lead">Save these recovery codes somewhere safe. Each one signs you in once if you lose your phone. They are not shown again.</p>
+              <ol id="mfa-codes-list" class="mfa-code-list mono"></ol>
+              <div class="settings-form-foot">
+                <button type="button" class="secondary-btn" id="mfa-codes-copy">Copy codes</button>
+                <button type="button" id="mfa-codes-done">I saved them</button>
+              </div>
+            </div>
+            <p id="mfa-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
+          </article>
+
+          <!-- C2: sign-in with the workspace's directory. The service account's password
+               is kept in the vault and never sent back: the field stays empty, and a
+               saved password is shown only as configured. -->
+          <article class="settings-card" id="directory-card" hidden>
+            <div class="settings-card-copy">
+              <h2>Directory sign-in</h2>
+              <p>Let people in this workspace sign in with their Active Directory or LDAP account. Their groups decide their role, and a removed group takes effect within minutes.</p>
+            </div>
+            <div class="settings-feature-row">
+              <div class="settings-feature-copy">
+                <strong>Sign in with the directory</strong>
+                <span id="directory-state" class="siem-state" data-state="loading"><span class="siem-dot" aria-hidden="true"></span><span id="directory-state-text">Checking&hellip;</span></span>
+              </div>
+              <label class="settings-switch" for="directory-toggle">
+                <input type="checkbox" id="directory-toggle" disabled aria-controls="directory-panel" aria-expanded="false" aria-label="Sign in with the directory" />
+                <span class="settings-switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div id="directory-panel" class="siem-panel" hidden>
+              <form id="directory-form" class="settings-form-grid" novalidate>
+                <label class="settings-field">
+                  Directory host
+                  <input id="directory-host" name="host" autocomplete="off" spellcheck="false" placeholder="dc01.corp.local" />
+                </label>
+                <label class="settings-field">
+                  Connection
+                  <select id="directory-security" name="security">
+                    <option value="ldaps">LDAPS</option>
+                    <option value="starttls">StartTLS</option>
+                  </select>
+                </label>
+                <label class="settings-field">
+                  Port
+                  <input id="directory-port" name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="636" />
+                </label>
+                <label class="settings-field">
+                  Certificate verification
+                  <select id="directory-trust" name="trust">
+                    <option value="system">System trust store</option>
+                    <option value="custom">Private CA</option>
+                  </select>
+                </label>
+                <div class="settings-field siem-ca-field" id="directory-ca-field" hidden>
+                  <span>CA certificate</span>
+                  <div class="siem-ca-row">
+                    <span id="directory-ca-summary" class="siem-ca-summary">No certificate uploaded</span>
+                    <input type="file" id="directory-ca-file" accept=".pem,.crt,.cer" hidden />
+                    <button type="button" class="secondary-btn" id="directory-ca-choose">Upload certificate</button>
+                  </div>
+                </div>
+                <label class="settings-field directory-wide">
+                  User search base
+                  <input id="directory-base-dn" name="base_dn" autocomplete="off" spellcheck="false" placeholder="OU=Staff,DC=corp,DC=local" />
+                </label>
+                <label class="settings-field directory-wide">
+                  Service account
+                  <input id="directory-bind-dn" name="bind_dn" autocomplete="off" spellcheck="false" placeholder="CN=svc-sentro,OU=Service,DC=corp,DC=local" />
+                </label>
+                <div class="settings-field">
+                  <label for="directory-bind-password">Service account password</label>
+                  <input id="directory-bind-password" name="bind_password" type="password" autocomplete="new-password" spellcheck="false" />
+                  <span class="settings-hint directory-secret-note" id="directory-secret-note">Not set.</span>
+                </div>
+                <label class="settings-field">
+                  Find people by
+                  <select id="directory-user-attribute" name="user_attribute">
+                    <option value="sAMAccountName">sAMAccountName</option>
+                    <option value="userPrincipalName">userPrincipalName</option>
+                    <option value="uid">uid</option>
+                    <option value="mail">mail</option>
+                  </select>
+                </label>
+                <label class="settings-field">
+                  Read groups from
+                  <select id="directory-group-search" name="group_search">
+                    <option value="memberof">memberOf</option>
+                    <option value="ad_nested">Nested groups (Active Directory)</option>
+                  </select>
+                </label>
+                <label class="settings-field directory-wide" id="directory-group-base-field" hidden>
+                  Group search base
+                  <input id="directory-group-base-dn" name="group_base_dn" autocomplete="off" spellcheck="false" placeholder="OU=Groups,DC=corp,DC=local" />
+                </label>
+                <div class="settings-field directory-wide">
+                  <span>Groups and roles</span>
+                  <span class="settings-hint directory-map-note">A person gets the role of the first group on this list that they belong to. Anyone in none of them cannot sign in.</span>
+                  <ol id="directory-mappings" class="directory-mappings"></ol>
+                  <div><button type="button" class="secondary-btn" id="directory-add-mapping">Add group</button></div>
+                </div>
+                <div class="settings-form-foot">
+                  <span class="siem-actions directory-test">
+                    <input id="directory-test-login" class="directory-test-login" autocomplete="off" spellcheck="false" placeholder="Optional: a person's sign-in name" aria-label="Sign-in name to test" />
+                    <button type="button" class="secondary-btn" id="directory-test-btn">Test connection</button>
+                  </span>
+                  <button type="submit" id="directory-save-btn">Save</button>
+                </div>
+              </form>
+              <div class="settings-kv siem-facts">
+                <div><span>Directory</span><strong id="directory-fact-host" class="mono">&ndash;</strong></div>
+                <div><span>Certificate</span><strong id="directory-fact-ca" class="mono">&ndash;</strong></div>
+                <div><span>Last changed</span><strong id="directory-fact-changed">&ndash;</strong></div>
+              </div>
+            </div>
+            <div class="siem-remove-row" id="directory-remove-row" hidden>
+              <span class="settings-hint">Removing deletes these settings and the service account's password. Directory accounts can no longer sign in; local accounts are not affected.</span>
+              <button type="button" class="settings-danger-btn" id="directory-remove-btn">Remove configuration</button>
+            </div>
+            <p id="directory-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
+          </article>
         </section>
 
         
@@ -296,6 +462,6 @@
       </div>
     </div>
 
-    <script src="/static/profile.js?v=105"></script>
+    <script src="/static/profile.js?v=106"></script>
   </body>
 </html>

@@ -36,6 +36,10 @@ cryptography==50.0.1
 # Async HTTP client used by outbound integrations
 httpx==0.28.1
 
+# C2: directory sign-in (Active Directory / LDAP over LDAPS or StartTLS). Pure Python,
+# LGPL-3.0; its one dependency, pyasn1, is already in the tree (via pysmb).
+ldap3==2.9.1
+
 # Local .env loading. Currently declared but not imported anywhere; all config
 # is read via os.getenv(). Retained for backward compatibility with existing
 # deployment environments - safe to drop once confirmed unused by operators.

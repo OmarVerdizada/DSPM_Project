@@ -450,6 +450,10 @@ def add_tenant_rls(conn) -> None:
 PLATFORM_ACCESS: dict[str, frozenset] = {
     "users": frozenset({"auth", "platform-admin"}),
     "api_keys": frozenset({"auth"}),
+    # C2: an account's MFA state is read while it signs in, before its tenant is known.
+    # Directory settings are read by tenant (the workspace named at sign-in), so they
+    # need no platform purpose at all.
+    "user_mfa": frozenset({"auth"}),
     "registration_invites": frozenset({"auth"}),
     "scan_schedules": frozenset({"scheduler"}),
     "audit_outbox": frozenset({"siem"}),
@@ -1019,6 +1023,75 @@ def deny_unscoped_tenant_access(conn) -> None:
     and each table admits only the purposes that need it (PLATFORM_ACCESS). Re-running
     revision 0004 rebuilds every tenant table's policy with that predicate.
     """
+    add_tenant_rls(conn)
+
+
+_DIRECTORY_SETTINGS_DDL = """CREATE TABLE IF NOT EXISTS directory_settings (
+            tenant_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            bind_secret_ref TEXT NOT NULL DEFAULT '',
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );"""
+
+_USER_MFA_DDL = """CREATE TABLE IF NOT EXISTS user_mfa (
+            username TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            secret_ciphertext TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 0,
+            confirmed_at TEXT,
+            last_step INTEGER NOT NULL DEFAULT 0,
+            recovery_hashes TEXT NOT NULL DEFAULT '[]',
+            pending_ciphertext TEXT NOT NULL DEFAULT '',
+            pending_expires_at INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );"""
+
+
+def _identity_ddl(conn) -> None:
+    """Idempotent DDL for revision 0026, also run by the convergent baseline."""
+    columns = db.table_columns(conn, "users")
+    for column, ddl in (("login_name", "TEXT NOT NULL DEFAULT ''"), ("auth_source", "TEXT NOT NULL DEFAULT 'local'"),
+                        ("external_id", "TEXT NOT NULL DEFAULT ''"), ("directory_synced_at", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {column} {ddl}")
+    conn.execute("UPDATE users SET login_name = username WHERE login_name = ''")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_login ON users (tenant_id, login_name)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external ON users (tenant_id, auth_source, external_id) "
+                 "WHERE external_id <> ''")
+    conn.execute(_DIRECTORY_SETTINGS_DDL)
+    conn.execute(_USER_MFA_DDL)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_user_mfa_tenant ON user_mfa (tenant_id)")
+    for table in ("user_sessions", "refresh_tokens"):
+        if "mfa_verified" not in db.table_columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN mfa_verified INTEGER NOT NULL DEFAULT 0")
+
+
+def add_tenant_scoped_identities(conn) -> None:
+    """Revision 0026: an account is found by its workspace and its sign-in name (C2).
+
+    `users.username` was the only name an account had, unique across the installation,
+    so two tenants could not each have an "alice" and registering one told the caller
+    the other existed. It stays the internal account key - the session subject, the
+    audit actor, the key every other table uses - and gains:
+
+    * `login_name`, what the person types, unique per tenant (backfilled from the key,
+      so every existing account signs in exactly as before);
+    * `auth_source` ('local' or 'ldap') and `external_id` (the directory's own stable
+      identifier), so a directory account is recognised after a rename and can never
+      be signed into with a local password;
+    * `directory_synced_at`, when its groups were last read - the bound on how long a
+      removed group can keep its privilege.
+
+    It also adds each tenant's directory settings, each account's MFA state, and the
+    MFA-verified flag on sessions and refresh chains. Both new tables are tenant
+    tables: revisions 0003 and 0004 are re-run for their keys and row-level security.
+    Rollback: restore the pre-upgrade backup (the upgrade command takes one); the new
+    columns are additive, so older code ignores them but would not enforce MFA.
+    """
+    _identity_ddl(conn)
+    add_tenant_integrity(conn)
     add_tenant_rls(conn)
 
 
@@ -2136,6 +2209,7 @@ def apply_baseline_schema(conn) -> None:
                 "rerun scripts/provision_postgres.py as the PostgreSQL admin"
             )
 
+    _identity_ddl(conn)  # C2 (revision 0026)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -8619,6 +8693,8 @@ _TENANT_ERASURE_TABLES = (
     "scan_partitions",
     "partitioned_scans",
     "scan_jobs",
+    # C2: the workspace's directory sign-in settings (their password is in `secrets`).
+    "directory_settings",
 )
 
 
@@ -8714,6 +8790,8 @@ def delete_tenant_with_data(tenant_id: str) -> dict:
     # transaction to the target so RLS permits exactly these rows.
     with _lock, db.tenant_scope(tenant_id):
         with _connect() as conn:
+            # C2: an account's second factor is part of the account.
+            conn.execute("DELETE FROM user_mfa WHERE tenant_id = ?", (tenant_id,))
             conn.execute("DELETE FROM users WHERE tenant_id = ?", (tenant_id,))
             _delete_tenant_scoped_data(conn, tenant_id)
             conn.execute("DELETE FROM tenants WHERE tenant_id = ?", (tenant_id,))
@@ -8770,6 +8848,8 @@ def reset_default_tenant_data() -> dict:
             # findings, paths, owners - readable on disk, which is the same
             # remanence bug the tenant-erasure path had before Phase 5b.
             usage["artifacts_removed"] = _erase_tenant_artifacts(tenant_id)
+            # The built-in admin keeps its second factor, as it keeps its password.
+            conn.execute("DELETE FROM user_mfa WHERE tenant_id = ? AND username <> ?", (tenant_id, "admin"))
             conn.execute(
                 "DELETE FROM users WHERE tenant_id = ? AND username <> ?",
                 (tenant_id, "admin"),
@@ -9118,7 +9198,11 @@ def role_holders(tenant_id: str, name: str) -> dict:
     return {"users": int(users), "api_keys": int(keys), "invites": int(invites)}
 
 
-def create_user(username: str, password_hash: str, role: str, tenant_id: str = "default", full_name: str = "") -> dict:
+def create_user(username: str, password_hash: str, role: str, tenant_id: str = "default", full_name: str = "",
+                *, login_name: str = "", auth_source: str = "local", external_id: str = "",
+                directory_synced_at: int = 0) -> dict:
+    """`username` is the installation-unique account key; `login_name` (default: the key)
+    is what the person types, unique within the tenant (C2)."""
     _require_known_role(role, tenant_id)
     now = datetime.now(timezone.utc).isoformat()
     with _lock:
@@ -9126,10 +9210,12 @@ def create_user(username: str, password_hash: str, role: str, tenant_id: str = "
             conn.execute(
                 """
                 INSERT INTO users
-                    (username, password_hash, role, tenant_id, full_name, is_active, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    (username, password_hash, role, tenant_id, full_name, is_active, created_at, updated_at,
+                     login_name, auth_source, external_id, directory_synced_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
                 """,
-                (username, password_hash, role, tenant_id, full_name, now, now),
+                (username, password_hash, role, tenant_id, full_name, now, now, login_name or username,
+                 auth_source, external_id, int(directory_synced_at)),
             )
     user = get_user(username)
     if user is None:
@@ -9164,6 +9250,11 @@ def token_state(jti: str, username: str) -> tuple[bool, dict | None]:
             "SELECT 1 FROM revoked_tokens WHERE jti = ? AND expires_at >= ?", (jti, int(time.time()))
         ).fetchone() is not None
         user = None if revoked else _read_user(conn, username)
+        if user is not None:
+            # C2: whether THIS session proved a second factor - read in the same
+            # connection, so the MFA gate costs no extra round trip.
+            session = conn.execute("SELECT mfa_verified FROM user_sessions WHERE jti = ?", (jti,)).fetchone()
+            user["session_mfa_verified"] = bool(session and session["mfa_verified"])
     if revoked and ttl:
         with _revocation_cache_lock:
             if len(_revocation_cache) >= _REVOCATION_CACHE_MAX:
@@ -9176,7 +9267,8 @@ def _read_user(conn, username: str) -> dict | None:
     row = conn.execute(
         """
         SELECT username, password_hash, role, tenant_id, full_name, is_active,
-               created_at, updated_at, last_login_at, avatar
+               created_at, updated_at, last_login_at, avatar,
+               login_name, auth_source, external_id, directory_synced_at
         FROM users
         WHERE username = ?
         """,
@@ -9195,6 +9287,10 @@ def _read_user(conn, username: str) -> dict | None:
         "updated_at": row["updated_at"],
         "last_login_at": row["last_login_at"],
         "avatar": row["avatar"] or "",
+        "login_name": row["login_name"] or row["username"],
+        "auth_source": row["auth_source"] or "local",
+        "external_id": row["external_id"] or "",
+        "directory_synced_at": int(row["directory_synced_at"] or 0),
     }
 
 
@@ -9207,7 +9303,8 @@ def list_users(tenant_id: str | None = None) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT username, role, tenant_id, full_name, is_active, created_at, updated_at, last_login_at
+            SELECT username, role, tenant_id, full_name, is_active, created_at, updated_at, last_login_at,
+                   login_name, auth_source
             FROM users
             {where}
             ORDER BY tenant_id, username
@@ -9224,6 +9321,8 @@ def list_users(tenant_id: str | None = None) -> list[dict]:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "last_login_at": row["last_login_at"],
+            "login_name": row["login_name"] or row["username"],
+            "auth_source": row["auth_source"] or "local",
         }
         for row in rows
     ]
@@ -9313,6 +9412,10 @@ def delete_user(username: str) -> dict | None:
         return None
     with _lock:
         with _connect() as conn:
+            # C2: the second factor goes with the account. Left behind, it would be
+            # waiting for the next account given the same key - someone else's
+            # authenticator on a new person's sign-in.
+            conn.execute("DELETE FROM user_mfa WHERE username = ?", (username,))
             conn.execute("DELETE FROM users WHERE username = ?", (username,))
     return user
 
@@ -9379,7 +9482,7 @@ def _max_sessions_per_user() -> int:
         return 16
 
 
-def record_session(jti: str, username: str, issued_at: int, expires_at: int) -> None:
+def record_session(jti: str, username: str, issued_at: int, expires_at: int, mfa_verified: bool = False) -> None:
     """Remember a token that was just issued, and hold the account to its cap.
 
     The cap is what stops a stolen credential quietly accumulating sessions, and what
@@ -9395,9 +9498,9 @@ def record_session(jti: str, username: str, issued_at: int, expires_at: int) -> 
         with _connect() as conn:
             conn.execute("DELETE FROM user_sessions WHERE expires_at < ?", (now,))
             conn.execute(
-                "INSERT OR REPLACE INTO user_sessions (jti, username, issued_at, expires_at, last_seen_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (jti, username, int(issued_at), int(expires_at), now),
+                "INSERT OR REPLACE INTO user_sessions (jti, username, issued_at, expires_at, last_seen_at, mfa_verified) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (jti, username, int(issued_at), int(expires_at), now, 1 if mfa_verified else 0),
             )
             surplus = []
             if cap:
@@ -9490,7 +9593,7 @@ def revoke_sessions_for_user(username: str, *, keep_jti: str = "") -> int:
 
 
 def issue_refresh_token(token_hash: str, family_id: str, username: str,
-                        session_jti: str, issued_at: int, expires_at: int) -> None:
+                        session_jti: str, issued_at: int, expires_at: int, mfa_verified: bool = False) -> None:
     """Record a refresh token. Only its hash is stored - the secret itself lives in the
     caller's cookie, so a copy of this table is not a set of working credentials."""
     if not token_hash or not family_id or not username:
@@ -9500,9 +9603,10 @@ def issue_refresh_token(token_hash: str, family_id: str, username: str,
             conn.execute("DELETE FROM refresh_tokens WHERE expires_at < ?", (int(time.time()),))
             conn.execute(
                 "INSERT OR REPLACE INTO refresh_tokens "
-                "(token_hash, family_id, username, session_jti, issued_at, expires_at, used_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0)",
-                (token_hash, family_id, username, session_jti, int(issued_at), int(expires_at)),
+                "(token_hash, family_id, username, session_jti, issued_at, expires_at, used_at, mfa_verified) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, ?)",
+                (token_hash, family_id, username, session_jti, int(issued_at), int(expires_at),
+                 1 if mfa_verified else 0),
             )
 
 
@@ -9525,7 +9629,7 @@ def consume_refresh_token(token_hash: str) -> dict:
     with _lock:
         with _connect() as conn:
             row = conn.execute(
-                "SELECT token_hash, family_id, username, session_jti, issued_at, expires_at, used_at "
+                "SELECT token_hash, family_id, username, session_jti, issued_at, expires_at, used_at, mfa_verified "
                 "FROM refresh_tokens WHERE token_hash = ?",
                 (token_hash,),
             ).fetchone()
@@ -9722,6 +9826,193 @@ def update_user_active(username: str, is_active: bool) -> dict | None:
 #   names. tests/test_platform_scope.py fails on a database-touching function that is
 #   in neither group and not in NO_TENANT_TABLES (it touches only tables without
 #   tenant rows: sessions, refresh tokens, revocations, settings, throttles).
+
+# ---- C2: accounts found by workspace and sign-in name; directory settings; MFA ----
+
+def find_user_by_login(tenant_id: str, login_name: str) -> dict | None:
+    """The account this workspace knows by this sign-in name (revision 0026)."""
+    with _connect() as conn:
+        row = conn.execute("SELECT username FROM users WHERE tenant_id = ? AND login_name = ?",
+                           (tenant_id, login_name)).fetchone()
+        return _read_user(conn, row["username"]) if row else None
+
+
+def find_directory_user(tenant_id: str, external_id: str) -> dict | None:
+    """The account a directory entry was provisioned as, by the directory's own id."""
+    if not external_id:
+        return None
+    with _connect() as conn:
+        row = conn.execute("SELECT username FROM users WHERE tenant_id = ? AND auth_source = 'ldap' AND external_id = ?",
+                           (tenant_id, external_id)).fetchone()
+        return _read_user(conn, row["username"]) if row else None
+
+
+def allocate_account_key(login_name: str, tenant_id: str) -> str | None:
+    """An installation-unique account key for a new account: the sign-in name itself when
+    no account anywhere holds it, else `name@workspace`. None when both are taken. The
+    key is internal - a person signs in with their workspace and sign-in name - so a
+    name used in another workspace no longer blocks, or reveals, anything."""
+    candidates = [login_name, f"{login_name}@{tenant_id}"[:80]]
+    with _connect() as conn:
+        for candidate in candidates:
+            if conn.execute("SELECT 1 FROM users WHERE username = ?", (candidate,)).fetchone() is None:
+                return candidate
+    return None
+
+
+def update_directory_account(username: str, *, role: str, login_name: str, full_name: str,
+                             synced_at: int, active: bool = True) -> dict | None:
+    """Bring a directory account in line with what the directory said at `synced_at`."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE users SET role = ?, login_name = ?, full_name = ?, directory_synced_at = ?, is_active = ?, "
+                "updated_at = ? WHERE username = ? AND auth_source = 'ldap'",
+                (role, login_name, full_name, int(synced_at), 1 if active else 0, now, username),
+            )
+            return _read_user(conn, username)
+
+
+def get_directory_settings(tenant_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT tenant_id, enabled, config_json, bind_secret_ref, updated_by, updated_at "
+            "FROM directory_settings WHERE tenant_id = ?", (tenant_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        config = json.loads(row["config_json"] or "{}")
+    except (TypeError, ValueError):
+        config = {}
+    return {"tenant_id": row["tenant_id"], "enabled": bool(row["enabled"]), "config": config,
+            "bind_secret_ref": row["bind_secret_ref"] or "", "updated_by": row["updated_by"],
+            "updated_at": row["updated_at"]}
+
+
+def save_directory_settings(tenant_id: str, enabled: bool, config: dict, bind_secret_ref: str, updated_by: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO directory_settings "
+                "(tenant_id, enabled, config_json, bind_secret_ref, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (tenant_id, 1 if enabled else 0, json.dumps(config, sort_keys=True), bind_secret_ref or "",
+                 updated_by, now),
+            )
+
+
+def delete_directory_settings(tenant_id: str) -> None:
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM directory_settings WHERE tenant_id = ?", (tenant_id,))
+
+
+def get_user_mfa(username: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT username, tenant_id, secret_ciphertext, enabled, confirmed_at, last_step, recovery_hashes, "
+            "pending_ciphertext, pending_expires_at, updated_at FROM user_mfa WHERE username = ?", (username,)
+        ).fetchone()
+    if row is None:
+        return None
+    record = {key: row[key] for key in row.keys()}
+    record["enabled"] = bool(record["enabled"])
+    try:
+        record["recovery_hashes"] = list(json.loads(record["recovery_hashes"] or "[]"))
+    except (TypeError, ValueError):
+        record["recovery_hashes"] = []
+    return record
+
+
+def begin_mfa_enrollment(tenant_id: str, username: str, pending_ciphertext: str, pending_expires_at: int) -> None:
+    """Hold a new secret until the person proves they captured it. An enabled factor
+    stays in force until the new one is confirmed."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            existing = conn.execute("SELECT 1 FROM user_mfa WHERE username = ?", (username,)).fetchone()
+            if existing:
+                conn.execute("UPDATE user_mfa SET pending_ciphertext = ?, pending_expires_at = ?, updated_at = ? "
+                             "WHERE username = ? AND tenant_id = ?",
+                             (pending_ciphertext, int(pending_expires_at), now, username, tenant_id))
+            else:
+                conn.execute("INSERT INTO user_mfa (username, tenant_id, pending_ciphertext, pending_expires_at, "
+                             "updated_at) VALUES (?, ?, ?, ?, ?)",
+                             (username, tenant_id, pending_ciphertext, int(pending_expires_at), now))
+
+
+def confirm_mfa_enrollment(tenant_id: str, username: str, secret_ciphertext: str, recovery_hashes: list[str],
+                           step: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "UPDATE user_mfa SET secret_ciphertext = ?, enabled = 1, confirmed_at = ?, last_step = ?, "
+                "recovery_hashes = ?, pending_ciphertext = '', pending_expires_at = 0, updated_at = ? "
+                "WHERE username = ? AND tenant_id = ?",
+                (secret_ciphertext, now, int(step), json.dumps(recovery_hashes), now, username, tenant_id),
+            )
+
+
+def replace_recovery_hashes(tenant_id: str, username: str, recovery_hashes: list[str]) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute("UPDATE user_mfa SET recovery_hashes = ?, updated_at = ? WHERE username = ? AND tenant_id = ?",
+                         (json.dumps(recovery_hashes), now, username, tenant_id))
+
+
+def delete_user_mfa(tenant_id: str, username: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute("DELETE FROM user_mfa WHERE username = ? AND tenant_id = ?", (username, tenant_id))
+    return bool(result.rowcount)
+
+
+def consume_mfa_step(username: str, step: int) -> bool:
+    """Accept a TOTP time step at most once, and never one older than the last accepted:
+    a code seen over a shoulder or in a proxy log cannot be played again (RFC 6238 §5.2).
+    One conditional UPDATE, so two sign-ins racing with the same code cannot both win."""
+    with _lock:
+        with _connect() as conn:
+            result = conn.execute("UPDATE user_mfa SET last_step = ? WHERE username = ? AND enabled = 1 AND last_step < ?",
+                                  (int(step), username, int(step)))
+    return result.rowcount == 1
+
+
+def consume_recovery_code(username: str, code_hash: str) -> int | None:
+    """Spend one recovery code. Returns how many remain, or None when it was not one."""
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute("SELECT recovery_hashes FROM user_mfa WHERE username = ? AND enabled = 1",
+                               (username,)).fetchone()
+            if row is None:
+                return None
+            try:
+                hashes = list(json.loads(row["recovery_hashes"] or "[]"))
+            except (TypeError, ValueError):
+                return None
+            if code_hash not in hashes:
+                return None
+            hashes.remove(code_hash)
+            result = conn.execute("UPDATE user_mfa SET recovery_hashes = ? WHERE username = ? AND recovery_hashes = ?",
+                                  (json.dumps(hashes), username, row["recovery_hashes"]))
+            if result.rowcount != 1:
+                return None  # spent by a concurrent sign-in
+    return len(hashes)
+
+
+def mark_session_mfa(jti: str) -> None:
+    """The session proved a second factor (a step-up after sign-in)."""
+    if not jti:
+        return
+    with _lock:
+        with _connect() as conn:
+            conn.execute("UPDATE user_sessions SET mfa_verified = 1 WHERE jti = ?", (jti,))
+            conn.execute("UPDATE refresh_tokens SET mfa_verified = 1 WHERE session_jti = ? AND used_at = 0", (jti,))
+
+
 ALL_TENANTS_PURPOSE = {
     "list_users": "platform-admin",
     "list_tenants": "platform-admin",
@@ -9740,6 +10031,8 @@ PLATFORM_FUNCTIONS = {
     "update_user_active": "auth", "update_user_avatar": "auth", "update_user_password": "auth",
     "update_user_profile": "auth", "update_user_role": "auth", "token_state": "auth",
     "get_active_api_key": "auth", "touch_api_key": "auth",
+    "allocate_account_key": "auth", "update_directory_account": "auth", "get_user_mfa": "auth",
+    "consume_mfa_step": "auth", "consume_recovery_code": "auth",
     "claim_due_schedules": "scheduler",
     "claim_audit_outbox": "siem", "delete_audit_outbox": "siem", "retry_audit_outbox": "siem",
     "audit_outbox_status": "siem", "reset_audit_outbox_backoff": "siem",
@@ -9760,6 +10053,7 @@ NO_TENANT_TABLES = {
     "revoke_refresh_family", "revoke_refresh_tokens_for_user", "count_sessions_for_user",
     "forget_session", "record_session", "session_last_seen", "touch_session",
     "revoke_sessions_for_user", "get_app_setting", "set_app_setting", "get_search_reconciliation",
+    "mark_session_mfa",
     "save_search_reconciliation", "tenant_isolation_coverage", "tenants_under_legal_hold",
 }
 

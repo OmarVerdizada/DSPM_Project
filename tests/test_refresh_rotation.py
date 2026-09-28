@@ -417,8 +417,9 @@ class TheUpgradeCarriesExistingSessionsTest(_RefreshCase):
         migrations.upgrade()
         with store._connect() as conn:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(refresh_tokens)")}
+        # Revision 26 (C2), re-run with it, adds whether the chain proved a second factor.
         self.assertEqual(columns, {"token_hash", "family_id", "username", "session_jti",
-                                   "issued_at", "expires_at", "used_at"})
+                                   "issued_at", "expires_at", "used_at", "mfa_verified"})
         # Revision 19 is recorded; later revisions (C3's 20) are not this test's concern.
         with store._connect() as conn:
             recorded = {int(row["revision"]) for row in conn.execute("SELECT revision FROM schema_migrations")}

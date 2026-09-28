@@ -43,6 +43,11 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("POST", "/api/auth/login"): PUBLIC,
     ("POST", "/api/auth/refresh"): PUBLIC,
     ("POST", "/api/auth/register"): PUBLIC,
+    # C2: the second step of sign-in. The five-minute challenge token from the password
+    # step is the credential; without one, each answers 401.
+    ("POST", "/api/auth/mfa/verify"): PUBLIC,
+    ("POST", "/api/auth/mfa/enroll/start"): PUBLIC,
+    ("POST", "/api/auth/mfa/enroll/confirm"): PUBLIC,
     ("GET", "/api/health"): PUBLIC,
     ("GET", "/api/ready"): PUBLIC,
     # self-service: an account's own profile, password and sign-out
@@ -52,6 +57,13 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("GET", "/api/profile"): AUTH,
     ("PUT", "/api/profile"): AUTH,
     ("PUT", "/api/profile/avatar"): AUTH,
+    # C2: an account's own second factor
+    ("GET", "/api/profile/mfa"): AUTH,
+    ("POST", "/api/profile/mfa/enroll/start"): AUTH,
+    ("POST", "/api/profile/mfa/enroll/confirm"): AUTH,
+    ("POST", "/api/profile/mfa/verify"): AUTH,
+    ("POST", "/api/profile/mfa/recovery-codes"): AUTH,
+    ("POST", "/api/profile/mfa/disable"): AUTH,
     ("GET", "/api/settings/features"): AUTH,
     # reading the estate
     ("GET", "/api/compliance-keywords"): "inventory.view",
@@ -150,6 +162,12 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("POST", "/api/users/{username}/delete"): "tenant.admin",
     ("POST", "/api/users/{username}/reset-password"): "tenant.admin",
     ("PUT", "/api/users/{username}/role"): "tenant.admin",
+    ("POST", "/api/users/{username}/mfa/reset"): "tenant.admin",
+    # C2: the workspace's directory sign-in
+    ("GET", "/api/settings/directory"): "tenant.admin",
+    ("PUT", "/api/settings/directory"): "tenant.admin",
+    ("DELETE", "/api/settings/directory"): "tenant.admin",
+    ("POST", "/api/settings/directory/test"): "tenant.admin",
     # the installation: every tenant at once
     ("GET", "/api/admin/db-activity"): "platform.admin",
     ("GET", "/api/admin/db-metrics"): "platform.admin",

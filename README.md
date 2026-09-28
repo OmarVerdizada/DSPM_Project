@@ -57,6 +57,22 @@ A tenant administrator can also define **custom roles** (Security ops, or `POST/
 
 **Evidence** - file previews and the matched values behind a finding - is returned only to a role with `evidence.view`. Everyone else sees the same findings, counts, locations and risk, with the evidence left out and the response marked `evidence_hidden`.
 
+## Sign-in: workspaces, two-step sign-in and the directory
+
+**Workspaces.** A sign-in name is unique within its workspace (tenant), so two workspaces can each have an `alice`. The sign-in page has an optional **Workspace** field; with it, the name is looked up in that workspace only. Without it, the name is read as the account key, so every account created before this change signs in exactly as before. Where a name is taken elsewhere, the new account's key becomes `name@workspace`; the person still types `name`. Registering a name another workspace uses neither fails nor says the other exists.
+
+**Two-step sign-in (TOTP).** Administrators (`tenant.admin`, and the installation's administrator) set up an authenticator app at their first sign-in and give a code at every sign-in after; no session exists until they do. Anyone who stores scan credentials (`credential.manage`, or vaulting a password for a scan) is asked for a code once per session, and sets up an authenticator the first time from **Settings → Security → Two-step sign-in**. Codes are RFC 6238 (30 seconds, 6 digits, one step of clock skew), each accepted once. Ten single-use recovery codes are shown once at setup; only their hashes are kept, and the authenticator key is stored encrypted with the vault key. Wrong codes are limited per account (`DSPM_MFA_MAX_FAILURES`, 5 in 15 minutes). An API key cannot answer a code, so it cannot hold a permission that needs one. There is no SMS, e-mail or cloud service involved.
+
+A person who lost their phone uses a recovery code, or a workspace administrator uses **Reset 2-step** on the user list (their sessions end; they set up again at the next sign-in). The installation's built-in administrator is reset only from the host:
+
+```powershell
+python main.py mfa reset admin
+```
+
+**Directory sign-in (Active Directory / LDAP).** A workspace administrator configures it in **Settings → Security → Directory sign-in**: the directory host over LDAPS or StartTLS (plain LDAP is refused), the system trust store or an uploaded CA certificate (always verified), the user search base, a read-only service account, and an ordered list of *group → role* mappings - a person gets the role of the first listed group they belong to, and someone in none of them cannot sign in. The service account's password is kept in the vault and never shown again: leave the field empty to keep it, type a new one to replace it, or use **Remove password**. **Test connection** signs the service account in and, given a name, says which role that person would get.
+
+People sign in with their directory name and their workspace (with no workspace named, the `default` workspace's directory is asked). The first directory sign-in creates the account (it has no local password, so it can never be signed into with one). Groups are read again at session renewal once `DSPM_DIRECTORY_REVALIDATE_SECONDS` (900) have passed: a changed group changes the role, and a removed group, a disabled directory account or a vanished one ends every session of that account. If the directory cannot be reached, sign-in answers that it is unavailable and renewal is refused - it fails closed. Local accounts are never affected, so the local administrator can always sign in during an outage. Every directory sign-in, failure (with its reason), role change and settings change is in the audit trail; no password is.
+
 ## Quick Start
 
 Install dependencies:

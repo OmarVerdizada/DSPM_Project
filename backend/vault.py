@@ -77,6 +77,16 @@ def _fernet():
         raise RuntimeError(_KEY_HELP) from exc
 
 
+def encrypt_text(plaintext: str) -> str:
+    """A secret that is not a scan credential (an MFA seed) sealed with the vault key, so
+    the vault's key lifecycle (C12) covers it too."""
+    return _fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
+
+
+def decrypt_text(ciphertext: str) -> str:
+    return _fernet().decrypt(ciphertext.encode("ascii")).decode("utf-8")
+
+
 def validate_vault_key() -> None:
     """Startup format-check (M3): fail CLOSED if the vault key is missing (prod) or
     not a valid Fernet key, so a bad key breaks startup rather than the first

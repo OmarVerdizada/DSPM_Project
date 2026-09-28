@@ -32,6 +32,8 @@ REQUIRED_ISOLATED = {
     "audit_outbox", "suppression_rules", "scan_schedules", "partitioned_scans", "secrets", "custom_roles",
     "api_keys", "registration_invites", "derived_cache", "alert_events", "finding_index", "scan_jobs",
     "scan_object_baselines", "scan_partitions", "scan_profiles", "users", "scan_targets",
+    # C2: a workspace's directory sign-in settings, and each account's second factor.
+    "directory_settings", "user_mfa",
 }
 
 
@@ -126,6 +128,8 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
         store.derived_store(tenant, "iso-key", 1, "{}", 60)
         store.save_alerts(tenant, f"{tenant}-scan", [{"kind": "seed"}])
         store.add_scan_target(tenant, "network", "10.20.0.0/16", "seed", "tester")
+        store.save_directory_settings(tenant, False, {"host": "dc.example.test"}, "", "tester")
+        store.begin_mfa_enrollment(tenant, f"{tenant}-user", "pending-ciphertext", 2_000_000_000)
 
     def _tenant_tables(self) -> list[str]:
         with db.platform_scope("migration"), store._connect() as conn:

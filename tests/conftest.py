@@ -39,6 +39,8 @@ from backend import db
 # The database backend.store opened when this session first imported it. pytest_configure
 # records it, and tests/test_suite_isolation.py checks it was never the developer's own.
 STORE_IMPORTED_WITH: pathlib.Path | None = None
+# The session's own directory (its database, artifacts and keys), removed at the end.
+_SESSION_ROOT: pathlib.Path | None = None
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -89,6 +91,8 @@ def pytest_configure(config: pytest.Config) -> None:
         from pathlib import Path as _Path
         _session_root = _Path(tempfile.mkdtemp(prefix="sentro-test-session-"))
         _session_db = _session_root / "suite.sqlite"
+        global _SESSION_ROOT
+        _SESSION_ROOT = _session_root
         # All of this BEFORE the store is imported. Importing backend.store
         # reads DSPM_DB_PATH and converges that database's schema on the spot
         # (ensure_schema_ready), so an import that came first migrated the
@@ -116,6 +120,26 @@ def pytest_configure(config: pytest.Config) -> None:
         except Exception:
             pass
         _security.ensure_default_admin()
+    # C2: a session must prove a second factor before it may use an MFA-scoped permission
+    # (tenant.admin, platform.admin, credential.manage). The suite's tests mint sessions
+    # directly with create_token for every role, so here - and only here - a minted token
+    # counts as MFA-verified unless the test says otherwise; production callers always
+    # state it (sign-in, MFA completion, refresh), and tests/test_c2_mfa.py passes
+    # mfa_verified=False to prove the gate.
+    from backend import security as _minting
+    _minting.create_token.__kwdefaults__["mfa_verified"] = True
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    """Remove the session directory. Found 2026-09-28: every run left its ~24 MB behind -
+    687 of them, on a disk with under 4 GB free. DSPM_TEST_KEEP_DB keeps it for debugging."""
+    if _SESSION_ROOT is None or os.getenv("DSPM_TEST_KEEP_DB"):
+        return
+    with suppress(Exception):
+        db.release_sqlite_anchor()
+    import shutil
+
+    shutil.rmtree(_SESSION_ROOT, ignore_errors=True)
 
 
 # Every application table (single TRUNCATE; there are no FK constraints between
@@ -125,7 +149,7 @@ _APP_TABLES = (
     "finding_index", "finding_occurrences", "findings", "asset_versions",
     "scan_object_baselines", "assets", "scan_runs", "scan_partitions", "partitioned_scans", "scan_schedules", "suppression_rules", "derived_cache", "scan_jobs", "alert_events", "audit_events",
     "secrets", "scan_reports", "scan_profiles", "registration_invites", "api_keys",
-    "login_failures", "revoked_tokens", "user_sessions", "refresh_tokens", "custom_roles", "scan_targets", "audit_chain_heads", "audit_outbox", "users", "tenants",
+    "login_failures", "revoked_tokens", "user_sessions", "refresh_tokens", "custom_roles", "scan_targets", "audit_chain_heads", "audit_outbox", "user_mfa", "directory_settings", "users", "tenants",
     # Install-wide settings: the SIEM receiver, feature flags, housekeeping's last run.
     "app_settings",
 )

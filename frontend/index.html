@@ -1820,6 +1820,40 @@
       </div>
     </div>
 
+    <!-- C2: an action that needs the second factor (credentials, administration) asks
+         for it here, once per session - in the shape every other panel in the console
+         uses. The code is sent and never kept. -->
+    <div id="mfa-stepup-modal" class="asset-detail-modal mfa-modal hidden" role="dialog" aria-modal="true" aria-labelledby="mfa-stepup-title">
+      <div class="asset-detail-backdrop" data-close-mfa-stepup></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Two-step sign-in</span>
+            <h3 id="mfa-stepup-title">Confirm it is you</h3>
+          </div>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-mfa-stepup title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <form id="mfa-stepup-form" class="sheet-body mfa-stepup-sheet" novalidate>
+          <div id="mfa-stepup-enter" class="mfa-stepup-body">
+            <p class="mfa-stepup-note">This action needs a code from your authenticator app. You are asked once per session.</p>
+            <label class="mfa-stepup-field"><span id="mfa-stepup-label">Authenticator code</span><input id="mfa-stepup-code" name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="23" spellcheck="false" placeholder="123 456" /></label>
+            <button type="button" class="secondary-btn mfa-stepup-toggle" id="mfa-stepup-toggle">Use a recovery code</button>
+          </div>
+          <div id="mfa-stepup-setup" class="mfa-stepup-body" hidden>
+            <p class="mfa-stepup-note">This action needs two-step sign-in, and your account does not have an authenticator yet. Set one up in Settings &rarr; Security, then try again.</p>
+            <a class="secondary-btn mfa-stepup-link" href="/profile#security">Open Security settings</a>
+          </div>
+          <p class="mfa-stepup-error" data-mfa-stepup-error aria-live="polite"></p>
+          <div class="mfa-stepup-actions">
+            <button type="button" class="secondary-btn" data-close-mfa-stepup>Cancel</button>
+            <button type="submit" id="mfa-stepup-submit">Confirm</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
