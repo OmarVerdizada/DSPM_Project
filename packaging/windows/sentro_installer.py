@@ -215,7 +215,8 @@ def place_release(package: Path, layout: Layout, runner: Runner) -> Path:
     label = manifest["label"]
     release = layout.releases / label
     if release.exists():
-        say(f"Replacing an incomplete copy of {label}.")
+        # A release kept for rollback, or one a failed run left: placed again from the package.
+        say(f"Replacing the existing copy of {label} with the package's.")
         shutil.rmtree(release)
     python_dir = release / "python"
     python_dir.mkdir(parents=True)
@@ -529,19 +530,21 @@ def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None
         raise InstallError(f"Release {manifest['label']} is already installed.")
     # Maintenance runs with the NEW release: its migrate/backup commands open the
     # database without converging it, and the running release needs none of them.
+    existed = (layout.releases / manifest["label"]).exists()
     new_release = place_release(package, layout, runner)
     product(layout, new_release, runner, "config", "check")  # nothing is stopped yet
     status = product_json(layout, new_release, runner, "migrate", "status", "--json")
     try:
         kind = decide_upgrade(state, manifest, int(status["applied_revision"]), restore_manifest)
     except InstallError:
-        shutil.rmtree(new_release, ignore_errors=True)
+        if not existed:  # never delete a release that was there before this run
+            shutil.rmtree(new_release, ignore_errors=True)
         raise
     say(f"{kind}: {state['release']} -> {manifest['label']} (database at revision {status['applied_revision']}).")
 
     services.stop(layout.worker)
     services.stop(layout.backend)
-    say("Services stopped. Taking an encrypted backup with the running release.")
+    say("Services stopped. Taking and verifying an encrypted backup.")
     try:
         backup = product_json(layout, new_release, runner, "backup", "create", "--verify", "--json")
     except InstallError:
@@ -569,7 +572,14 @@ def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None
         product(layout, new_release, runner, "backup", "restore", backup["manifest"], "--yes")
         _start(services, layout)
         wait_ready(int(state["port"]))
-        raise InstallError(f"Upgrade rolled back: {failure}. {old_release.name} is running on the restored backup.")
+        shutil.rmtree(new_release, ignore_errors=True)
+        history = list(state.get("history", []))
+        history.append({"at": now(), "action": "rollback", "from": state["release"], "to": manifest["label"],
+                        "backup": backup["manifest"], "reason": str(failure)[:300]})
+        state["history"] = history[-50:]
+        write_state(layout, state)
+        raise InstallError(f"Upgrade rolled back ({str(failure).rstrip('.')}). {old_release.name} is running "
+                           f"on the restored backup.")
     history = list(state.get("history", []))
     history.append({"at": now(), "action": kind, "from": state["release"], "to": manifest["label"],
                     "backup": backup["manifest"]})

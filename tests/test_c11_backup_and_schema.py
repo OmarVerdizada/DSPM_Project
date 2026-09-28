@@ -124,6 +124,25 @@ class TheBackupCommandTest(unittest.TestCase):
         restored = _run(["backup", "restore", str(manifest), "--yes"], self.config)
         self.assertNotEqual(restored.returncode, 0, "an unverified backup is never restored")
 
+    def test_a_substituted_backup_is_refused_although_it_decrypts(self) -> None:
+        # Another backup set's payload, encrypted with the same key, under this manifest:
+        # Fernet accepts it, so only the recorded digests and counts can tell - and
+        # restoring it would silently put a different database in place.
+        first = Path(json.loads(_run(["backup", "create", "--json"], self.config).stdout.strip().splitlines()[-1])["manifest"])
+        conn = sqlite3.connect(self.db)
+        conn.execute("DELETE FROM tenants WHERE tenant_id = 'c11-tenant'")
+        conn.commit()
+        conn.close()
+        second = Path(json.loads(_run(["backup", "create", "--json"], self.config).stdout.strip().splitlines()[-1])["manifest"])
+        payload = lambda manifest: manifest.parent / json.loads(manifest.read_text(encoding="utf-8"))["file"]  # noqa: E731
+        shutil.copyfile(payload(second), payload(first))
+        verified = _run(["backup", "verify", str(first), "--json"], self.config)
+        self.assertEqual(verified.returncode, 1, verified.stdout)
+        before = self.db.read_bytes()
+        restored = _run(["backup", "restore", str(first), "--yes"], self.config)
+        self.assertNotEqual(restored.returncode, 0, "a set that does not match its manifest is never restored")
+        self.assertEqual(self.db.read_bytes(), before, "and the database is left exactly as it was")
+
     def test_the_manifest_holds_no_secret(self) -> None:
         created = json.loads(_run(["backup", "create", "--json"], self.config).stdout.strip().splitlines()[-1])
         text = Path(created["manifest"]).read_text(encoding="utf-8")

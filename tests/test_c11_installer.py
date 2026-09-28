@@ -167,6 +167,45 @@ class TheServiceDefinitionTest(_LayoutCase):
         self.assertEqual(self.layout.service_account("SentroTBackend"), "NT SERVICE\\SentroTBackend")
 
 
+class ARefusedUpgradeTest(_LayoutCase):
+    """The installer places the new release before it can read the database's revision, so
+    a refusal must not delete a release that was there before - the one kept for rollback."""
+
+    def _upgrade(self, keep_existing: bool) -> Path:
+        import json
+        from unittest import mock
+
+        package = self.tmp / "package"
+        package.mkdir()
+        (package / "manifest.json").write_text(json.dumps(_manifest("older1", 1000, 25)), encoding="utf-8")
+        self.layout.data_root.mkdir(parents=True)
+        installer.write_state(self.layout, {**TheUpgradeDecisionTest.INSTALLED, "port": 8000, "history": []})
+        running = self.layout.releases / "r26-aaaaaa"
+        running.mkdir(parents=True)
+        release = self.layout.releases / "r25-older1"
+        if keep_existing:
+            release.mkdir()
+            (release / "kept.txt").write_text("the rollback copy", encoding="utf-8")
+
+        def place(package_dir, layout, runner):
+            release.mkdir(exist_ok=True)
+            return release
+
+        with (mock.patch.object(installer, "current_release", return_value=running),
+              mock.patch.object(installer, "place_release", side_effect=place),
+              mock.patch.object(installer, "product"),
+              mock.patch.object(installer, "product_json", return_value={"applied_revision": 26})):
+            with self.assertRaises(installer.InstallError):
+                installer.upgrade(package, self.layout, runner=installer.Runner())
+        return release
+
+    def test_a_release_that_was_already_there_survives_the_refusal(self) -> None:
+        self.assertTrue(self._upgrade(keep_existing=True).exists())
+
+    def test_a_release_placed_only_for_this_run_is_removed(self) -> None:
+        self.assertFalse(self._upgrade(keep_existing=False).exists())
+
+
 class TheUninstallTest(_LayoutCase):
 
     def test_removing_data_needs_the_prefix_typed_back(self) -> None:
