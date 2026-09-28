@@ -50,7 +50,7 @@ function Test-SentroPackage {
                "file but cannot prove who built it. Check the package's SHA-256 against the value published " +
                "with the release, then run again with -AllowUnsigned.")
     } else {
-        Write-Warning 'Installing an UNSIGNED package (-AllowUnsigned): HELD FOR CODE-SIGNING CERTIFICATE.'
+        Write-Warning 'Running an UNSIGNED package (-AllowUnsigned): HELD FOR CODE-SIGNING CERTIFICATE.'
     }
 
     # Read as text, never run: nothing from the package executes before it is verified.

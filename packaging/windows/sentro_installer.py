@@ -239,6 +239,11 @@ def place_release(package: Path, layout: Layout, runner: Runner) -> Path:
                 "--no-warn-script-location", "-r", package / "wheelhouse" / "install-requirements.txt"])
     shutil.rmtree(pip_dir, ignore_errors=True)
     shutil.copy2(package / "manifest.json", release / "manifest.json")
+    # pip builds each package in a folder under the installing administrator's %TEMP% and
+    # moves it into place, and a move keeps the source's protected ACL (SYSTEM,
+    # Administrators, owner): the service accounts could list site-packages but read none
+    # of it ("cannot import name ... (unknown location)"). The release inherits instead.
+    runner.run(["icacls", release, "/reset", "/T", "/C", "/Q"])
     return release
 
 
@@ -448,8 +453,8 @@ def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file:
         folder.mkdir(parents=True, exist_ok=True)
     lock_down(layout, runner)
     if state is not None:
-        say(f"Reusing the data, keys and configuration in {layout.data_root} (installed before: "
-            f"{state.get('release')}).")
+        say(f"Reusing the data, keys and configuration in {layout.data_root} (last release there: "
+            f"{state.get('release') or state.get('history', [{}])[-1].get('release') or 'none recorded'}).")
     created = init_secrets(layout, db_url_file)
     if created:
         say(f"Created {len(created)} secret file(s) in {layout.secrets}: {', '.join(created)}.")
@@ -480,7 +485,8 @@ def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file:
         "schema_revision": migrated["applied_revision"], "history": history[-50:],
     })
     say(f"Installed. {layout.backend} and {layout.worker} are running and set to start automatically; "
-        f"/api/ready answers {ready.get('status')}.")
+        f"/api/ready answers ready at schema revision {migrated['applied_revision']}"
+        f"{' with warnings: ' + '; '.join(ready['warnings']) if ready.get('warnings') else ''}.")
     if "admin_password" in created:
         say(f"The first administrator password is in {layout.secrets / 'admin_password'} (Administrators "
             f"only). Sign in as admin, set up two-step sign-in, and change the password.")
