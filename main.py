@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
 
-import uvicorn
+# C11: the one configuration source (DSPM_CONFIG_FILE, or --config) is applied before any
+# product module is imported - several read their settings when they load. A refused
+# configuration stops every command here, except `config check`, which exists to show it.
+if __name__ == "__main__":
+    from backend import config as _config
 
-from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
-from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
-from scripts.logger import get_logger
-from scripts.report import generate_report
+    if _config.command_from_argv(sys.argv[1:]) != "config":
+        try:
+            _config.bootstrap(_config.config_path_from_argv(sys.argv[1:]))
+        except _config.ConfigError as _refused:
+            print(_refused, file=sys.stderr)
+            raise SystemExit(2)
+
+import uvicorn  # noqa: E402
+
+from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids  # noqa: E402
+from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig  # noqa: E402
+from scripts.logger import get_logger  # noqa: E402
+from scripts.report import generate_report  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -76,6 +90,11 @@ def _disable_per_process_caches(logger) -> None:
 
 
 def serve(args: argparse.Namespace) -> None:
+    from backend import logging_setup
+
+    # C11: one set of handlers - rotating file when DSPM_LOG_DIR is set, standard error
+    # always - and every line through the redacting filter, uvicorn's included.
+    logging_setup.configure("backend")
     is_production = os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}
     if args.reload and is_production:
         raise SystemExit("--reload is disabled when DSPM_ENV=production")
@@ -107,6 +126,9 @@ def serve(args: argparse.Namespace) -> None:
         # whatever DSPM_TRUSTED_PROXIES says - so behind a proxy on this host any local
         # program could name its own address. The app decides (backend/client_address).
         proxy_headers=False,
+        # C11: uvicorn keeps the handlers configured above (with --reload its server runs
+        # in a child process that has none, so there it keeps its own).
+        **({} if args.reload else {"log_config": None}),
     )
 
 
@@ -121,8 +143,9 @@ def work(args: argparse.Namespace) -> None:
     from backend.partition_worker import default_worker_id, run_worker
     from backend.work_queue import work_queue_from_env
 
-    from backend import db, store
+    from backend import db, logging_setup, store
 
+    logging_setup.configure("worker")
     queue = work_queue_from_env()
     worker_id = args.worker_id or default_worker_id()
     logger.info("Partition worker %s is taking work from the %s", worker_id, type(queue).__name__)
@@ -209,8 +232,100 @@ def mfa_reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def config_check(args: argparse.Namespace) -> int:
+    """Validate the configuration and show the effective settings - each with where it came
+    from, a secret only as "(set)" - and every warning and refusal. Exit 1 when refused."""
+    from backend import config
+
+    raw = args.config or os.environ.get(config.CONFIG_ENV) or ""
+    effective = config.resolve(os.environ, Path(raw) if raw else None)
+    print(f"configuration: {raw or '(environment only)'}")
+    print(f"mode:          {'production' if effective.production else 'local / evaluation'}")
+    rows = effective.describe(show_defaults=args.all)
+    width = max((len(row[0]) for row in rows), default=12)
+    for name, shown, source in rows:
+        print(f"  {name:<{width}}  {shown:<24}  {source}")
+    for warning in effective.warnings:
+        print(f"warning: {warning}")
+    for error in effective.errors:
+        print(f"REFUSED: {error}")
+    if effective.errors:
+        print("configuration is NOT valid")
+        return 1
+    print("configuration is valid")
+    return 0
+
+
+def migrate_command(args: argparse.Namespace) -> int:
+    """Schema revisions. The database is opened without converging it (what `migrations`
+    does on its own), so `status` reads what is there and `upgrade` is the only writer."""
+    os.environ["DSPM_MIGRATIONS_CLI"] = "1"
+    from backend import migrations
+
+    if args.migrate_command == "upgrade":
+        migrations.upgrade()
+    info = migrations.status()
+    summary = {"backend": info["backend"], "applied_revision": info["applied_revision"],
+               "expected_revision": info["expected_revision"],
+               "pending": [item["revision"] for item in info["pending"]]}
+    if args.json:
+        print(json.dumps(summary))
+    else:
+        print(f"{info['backend']}: schema at revision {info['applied_revision']}, "
+              f"this build expects {info['expected_revision']}"
+              + (f"; pending {summary['pending']}" if summary["pending"] else ""))
+    return 0
+
+
+def backup_command(args: argparse.Namespace) -> int:
+    """Encrypted backups of the database and the artifact store (C11; C0.3's first half)."""
+    os.environ["DSPM_MIGRATIONS_CLI"] = "1"
+    from backend import backup
+
+    def emit(document: dict, text: str) -> None:
+        print(json.dumps(document) if args.json else text)
+
+    if args.backup_command == "create":
+        manifest = backup.create_backup()
+        document = {"manifest": str(manifest),
+                    "schema_revision": json.loads(manifest.read_text(encoding="utf-8")).get("schema_revision")}
+        if args.verify:
+            report = backup.verify_backup(manifest)
+            document.update({"verified": report["ok"], "problems": report["problems"]})
+        if args.keep:
+            document["pruned"] = backup.prune_backups(keep=args.keep)
+        emit(document, f"backup {manifest}" + ("" if not args.verify else
+                                                (" - verified" if document["verified"] else
+                                                 " - VERIFY FAILED: " + "; ".join(document["problems"]))))
+        return 0 if document.get("verified", True) else 1
+    if args.backup_command == "verify":
+        report = backup.verify_backup(Path(args.manifest))
+        emit(report, ("verified: " if report["ok"] else "FAILED: ") + (", ".join(report["problems"]) or args.manifest))
+        return 0 if report["ok"] else 1
+    if args.backup_command == "restore":
+        if not args.yes:
+            print("Restoring replaces the database (the current one is kept beside it). Add --yes to do it.")
+            return 2
+        from backend import store
+
+        result = backup.restore_sqlite_backup(Path(args.manifest), Path(store.DB_PATH))
+        emit(result, f"restored {result['restored']} at schema revision {result['schema_revision']}; "
+                     f"the previous database is {result['previous_database']}")
+        return 0
+    rows = []
+    for path in backup.list_manifests():
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        rows.append({"manifest": str(path), "created_at": manifest.get("created_at"), "kind": manifest.get("kind"),
+                     "schema_revision": manifest.get("schema_revision")})
+    emit({"backups": rows}, "\n".join(f"{row['created_at']}  {row['kind']:<8} rev {row['schema_revision']}  {row['manifest']}"
+                                      for row in rows) or "no backups")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DSPM scanner for AD file-server data discovery.")
+    parser.add_argument("--config", default=None,
+                        help="The configuration file (TOML, [settings]); default: DSPM_CONFIG_FILE.")
     subparsers = parser.add_subparsers(dest="command")
 
     scan_parser = subparsers.add_parser("scan", help="Run a one-time discovery scan.")
@@ -264,6 +379,35 @@ def build_parser() -> argparse.ArgumentParser:
     reset_parser = mfa_commands.add_parser("reset", help="Remove an account's second factor and end its sessions.")
     reset_parser.add_argument("username", help="The account key (the built-in administrator is 'admin').")
     reset_parser.set_defaults(func=mfa_reset)
+
+    config_parser = subparsers.add_parser("config", help="The configuration file and settings (C11).")
+    config_commands = config_parser.add_subparsers(dest="config_command", required=True)
+    check_parser = config_commands.add_parser("check", help="Validate it and show the effective settings.")
+    check_parser.add_argument("--all", action="store_true", help="Show the defaults too.")
+    check_parser.set_defaults(func=config_check)
+
+    migrate_parser = subparsers.add_parser("migrate", help="Database schema revisions.")
+    migrate_commands = migrate_parser.add_subparsers(dest="migrate_command", required=True)
+    for name, text in (("status", "Show the applied and expected revision."),
+                       ("upgrade", "Apply the pending revisions (the services should be stopped).")):
+        command = migrate_commands.add_parser(name, help=text)
+        command.add_argument("--json", action="store_true")
+        command.set_defaults(func=migrate_command)
+
+    backup_parser = subparsers.add_parser("backup", help="Encrypted backups of the database and artifacts.")
+    backup_commands = backup_parser.add_subparsers(dest="backup_command", required=True)
+    create_parser = backup_commands.add_parser("create", help="Take a backup (SQLite or PostgreSQL).")
+    create_parser.add_argument("--verify", action="store_true", help="Decrypt it and check it before reporting.")
+    create_parser.add_argument("--keep", type=int, default=0, help="Then keep only the newest N backup sets.")
+    verify_backup_parser = backup_commands.add_parser("verify", help="Check a backup set against its manifest.")
+    verify_backup_parser.add_argument("manifest")
+    restore_parser = backup_commands.add_parser("restore", help="Put a SQLite backup in place of the database.")
+    restore_parser.add_argument("manifest")
+    restore_parser.add_argument("--yes", action="store_true", help="Confirm replacing the database.")
+    list_parser = backup_commands.add_parser("list", help="The backup sets in DSPM_BACKUP_DIR.")
+    for command in (create_parser, verify_backup_parser, restore_parser, list_parser):
+        command.add_argument("--json", action="store_true")
+        command.set_defaults(func=backup_command)
 
     parser.set_defaults(func=serve)
     return parser

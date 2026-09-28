@@ -1,0 +1,230 @@
+"""C11: the installer's decisions, without touching Windows services.
+
+The real install, upgrade, downgrade refusal and uninstall ran on this host against an
+isolated prefix (roadmap C11 status); these pin what that run depends on: which way an
+upgrade goes and when it is refused, that secret files are generated in the product's own
+formats and never overwritten, that no secret reaches the configuration file or a service
+definition, and that data removal needs the prefix typed back.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PACKAGING = ROOT / "packaging" / "windows"
+_spec = importlib.util.spec_from_file_location("sentro_installer", PACKAGING / "sentro_installer.py")
+installer = importlib.util.module_from_spec(_spec)
+sys.modules["sentro_installer"] = installer
+_spec.loader.exec_module(installer)
+
+
+def _manifest(commit: str, when: int, revision: int) -> dict:
+    return {"commit": commit, "commit_time": when, "schema_revision": revision, "label": f"r{revision}-{commit[:6]}"}
+
+
+class TheUpgradeDecisionTest(unittest.TestCase):
+    INSTALLED = {"commit": "aaaaaa", "commit_time": 2000, "release": "r26-aaaaaa", "data_root": r"C:\Data"}
+
+    def test_a_newer_build_upgrades(self) -> None:
+        self.assertEqual(installer.decide_upgrade(self.INSTALLED, _manifest("bbbbbb", 3000, 27), 26, None), "upgrade")
+
+    def test_the_same_build_is_refused(self) -> None:
+        with self.assertRaises(installer.InstallError):
+            installer.decide_upgrade(self.INSTALLED, _manifest("aaaaaa", 2000, 26), 26, None)
+
+    def test_an_older_build_at_an_older_schema_is_refused_and_says_how_to_go_back(self) -> None:
+        with self.assertRaises(installer.InstallError) as refused:
+            installer.decide_upgrade(self.INSTALLED, _manifest("cccccc", 1000, 25), 26, None)
+        message = str(refused.exception)
+        self.assertIn("revision 25", message)
+        self.assertIn("-RestoreBackup", message)
+
+    def test_an_older_build_at_the_same_schema_downgrades(self) -> None:
+        self.assertEqual(installer.decide_upgrade(self.INSTALLED, _manifest("dddddd", 1000, 26), 26, None), "downgrade")
+
+    def test_going_back_needs_a_backup_at_the_package_schema(self) -> None:
+        with self.assertRaises(installer.InstallError):
+            installer.decide_upgrade(self.INSTALLED, _manifest("cccccc", 1000, 25), 26, {"schema_revision": 26})
+        self.assertEqual(installer.decide_upgrade(self.INSTALLED, _manifest("cccccc", 1000, 25), 26,
+                                                  {"schema_revision": 25}), "restore-downgrade")
+
+    def test_a_newer_build_expecting_an_older_schema_is_refused_too(self) -> None:
+        # Ordering by time never overrides the schema: the database decides what can run on it.
+        with self.assertRaises(installer.InstallError):
+            installer.decide_upgrade(self.INSTALLED, _manifest("eeeeee", 9000, 24), 26, None)
+
+
+class _LayoutCase(unittest.TestCase):
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.layout = installer.Layout(self.tmp / "install", self.tmp / "data", "SentroT")
+
+
+class TheSecretsTest(_LayoutCase):
+
+    def test_keys_are_in_the_products_formats_and_never_overwritten(self) -> None:
+        from cryptography.fernet import Fernet
+
+        created = installer.init_secrets(self.layout, None)
+        self.assertEqual(sorted(created), sorted(filename for filename, _ in installer.SECRET_FILES.values()))
+        for filename in ("vault_key", "artifact_key", "backup_key"):
+            Fernet((self.layout.secrets / filename).read_text(encoding="utf-8").strip().encode())
+        self.assertGreaterEqual(len((self.layout.secrets / "secret_key").read_text(encoding="utf-8").strip()), 32)
+        before = {path.name: path.read_bytes() for path in self.layout.secrets.iterdir()}
+        self.assertEqual(installer.init_secrets(self.layout, None), [], "a reinstall creates nothing")
+        self.assertEqual({path.name: path.read_bytes() for path in self.layout.secrets.iterdir()}, before)
+
+    def test_the_first_administrator_password_meets_the_password_policy(self) -> None:
+        from backend import security
+
+        for _ in range(50):
+            security.validate_password_strength(installer.admin_password(), username="admin")  # raises if refused
+
+    def test_the_database_url_file_is_copied_and_checked(self) -> None:
+        source = self.tmp / "url.txt"
+        source.write_text("mysql://nope\n", encoding="utf-8")
+        with self.assertRaises(installer.InstallError):
+            installer.init_secrets(self.layout, source)
+        source.write_text("postgresql://sentro_app:pw-77@db01/sentro?sslmode=verify-full\n", encoding="utf-8")
+        installer.init_secrets(self.layout, source)
+        self.assertEqual((self.layout.secrets / "db_url").read_text(encoding="utf-8").strip(),
+                         "postgresql://sentro_app:pw-77@db01/sentro?sslmode=verify-full")
+
+
+class TheConfigurationItWritesTest(_LayoutCase):
+
+    def test_production_configuration_is_valid_and_holds_no_secret(self) -> None:
+        from backend import config
+
+        installer.init_secrets(self.layout, None)
+        (self.layout.secrets / "db_url").write_text("postgresql://sentro_app:pw-77@127.0.0.1/sentro\n", encoding="utf-8")
+        text = installer.render_config(self.layout, "production", 8000, "sentro.corp.example")
+        for path in self.layout.secrets.iterdir():
+            self.assertNotIn(path.read_text(encoding="utf-8").strip(), text)
+        self.layout.config_file.parent.mkdir(parents=True, exist_ok=True)
+        self.layout.config_file.write_text(text, encoding="utf-8")
+        effective = config.resolve({}, self.layout.config_file)
+        self.assertEqual(effective.errors, [])
+        self.assertTrue(effective.production)
+        self.assertEqual(effective.get("DSPM_TRUSTED_HOSTS"), "sentro.corp.example")
+
+    def test_evaluation_configuration_uses_sqlite_and_the_dev_admin_password_file(self) -> None:
+        from backend import config
+
+        installer.init_secrets(self.layout, None)
+        text = installer.render_config(self.layout, "evaluation", 8000)
+        self.layout.config_file.parent.mkdir(parents=True, exist_ok=True)
+        self.layout.config_file.write_text(text, encoding="utf-8")
+        effective = config.resolve({}, self.layout.config_file)
+        self.assertEqual(effective.errors, [])
+        self.assertFalse(effective.production)
+        self.assertTrue(effective.get("DSPM_DB_PATH").endswith("dspm.sqlite"))
+        # a local install otherwise prints a generated one-time password to its log
+        self.assertEqual(effective.values["DSPM_DEV_ADMIN_PASSWORD"].source, "secret file")
+
+    def test_production_needs_a_public_host_and_a_database(self) -> None:
+        package = self.tmp / "package"
+        package.mkdir()
+        (package / "manifest.json").write_text('{"label": "x", "commit": "c", "commit_time": 1}', encoding="utf-8")
+
+        class NoServices(installer.Runner):
+            def run(self, args, **kwargs):
+                return subprocess.CompletedProcess(args, 1, "", "")
+
+        with self.assertRaises(installer.InstallError) as refused:
+            installer.install(package, self.layout, port=8000, mode="production", db_url_file=None,
+                              runner=NoServices())
+        self.assertIn("-PublicHostName", str(refused.exception))
+        with self.assertRaises(installer.InstallError) as refused:
+            installer.install(package, self.layout, port=8000, mode="production", db_url_file=None,
+                              public_host="sentro.corp.example", runner=NoServices())
+        self.assertIn("PostgreSQL", str(refused.exception))
+
+
+class TheServiceDefinitionTest(_LayoutCase):
+
+    def test_it_names_paths_and_a_port_only(self) -> None:
+        xml = installer.service_xml(self.layout, "SentroTBackend", "backend", "serve --host 127.0.0.1 --port 8000")
+        self.assertIn("<startmode>Automatic</startmode>", xml)
+        self.assertIn('<env name="DSPM_CONFIG_FILE"', xml)
+        self.assertEqual(xml.count("<env "), 1, "the configuration file's path is the only environment")
+        self.assertIn('<onfailure action="restart"', xml)
+        self.assertIn('<log mode="roll-by-size">', xml)
+        for word in ("PASSWORD", "KEY=", "postgresql://", "SECRET"):
+            self.assertNotIn(word, xml.upper() if word.isupper() else xml)
+
+    def test_each_service_runs_as_its_own_virtual_account(self) -> None:
+        self.assertEqual(self.layout.service_account("SentroTBackend"), "NT SERVICE\\SentroTBackend")
+
+
+class TheUninstallTest(_LayoutCase):
+
+    def test_removing_data_needs_the_prefix_typed_back(self) -> None:
+        self.layout.data_root.mkdir(parents=True)
+        with self.assertRaises(installer.InstallError):
+            installer.uninstall(self.layout, remove_data=True, confirm="yes")
+        self.assertTrue(self.layout.data_root.exists())
+
+    def test_by_default_the_data_stays(self) -> None:
+        class Missing(installer.Runner):
+            def run(self, args, **kwargs):
+                return subprocess.CompletedProcess(args, 1060, "", "")  # no such service
+
+        (self.layout.data_root / "secrets").mkdir(parents=True)
+        (self.layout.data_root / "secrets" / "vault_key").write_text("k", encoding="utf-8")
+        installer.write_state(self.layout, {"release": "r26-x", "history": []})
+        installer.uninstall(self.layout, runner=Missing())
+        self.assertTrue((self.layout.data_root / "secrets" / "vault_key").exists())
+        self.assertIsNone(installer.read_state(self.layout)["release"])
+        self.assertEqual(installer.read_state(self.layout)["history"][-1]["action"], "uninstall")
+
+
+class ThePowerShellEntryPointsTest(unittest.TestCase):
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows PowerShell")
+    def test_every_script_parses(self) -> None:
+        for name in ("SentroPackage.psm1", "install.ps1", "upgrade.ps1", "uninstall.ps1"):
+            script = (f"$e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile("
+                      f"'{PACKAGING / name}', [ref]$null, [ref]$e); $e.Count")
+            out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            self.assertEqual(out, "0", name)
+
+    def test_nothing_from_the_package_runs_before_it_is_verified(self) -> None:
+        module = (PACKAGING / "SentroPackage.psm1").read_text(encoding="utf-8")
+        self.assertNotIn(". $digestPath", module, "the digest file is read as text, never dot-sourced")
+        for name in ("install.ps1", "upgrade.ps1", "uninstall.ps1"):
+            text = (PACKAGING / name).read_text(encoding="utf-8")
+            self.assertLess(text.index("Test-SentroPackage"), text.index("Expand-SentroRuntime"), name)
+            self.assertLess(text.index("Expand-SentroRuntime"), text.index("Invoke-SentroInstaller"), name)
+
+    def test_an_unsigned_package_needs_the_operator_to_say_so(self) -> None:
+        module = (PACKAGING / "SentroPackage.psm1").read_text(encoding="utf-8")
+        self.assertIn("HELD FOR CODE-SIGNING CERTIFICATE", module)
+        self.assertIn("elseif (-not $AllowUnsigned)", module)
+
+
+class ThePinsTest(unittest.TestCase):
+
+    def test_every_third_party_file_is_pinned_by_digest(self) -> None:
+        import json
+
+        pins = json.loads((PACKAGING / "pins.json").read_text(encoding="utf-8"))
+        for name in ("python", "winsw", "pip"):
+            self.assertRegex(pins[name]["sha256"], r"^[0-9a-f]{64}$", name)
+        self.assertEqual(pins["winsw"]["license"], "MIT")
+        self.assertEqual(pins["python"]["authenticode_signer"], "Python Software Foundation")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -146,11 +146,23 @@ class TheInstallRefusesToStartTest(unittest.TestCase):
         self.assertIn("production", run.stderr.strip().splitlines()[-1])
 
     def test_serve_refuses_to_listen_off_loopback_or_without_its_proxy(self) -> None:
+        # C11: `main.py` checks the whole production configuration before anything starts,
+        # so without its keys serve is refused for those, every one named...
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            run = subprocess.run([sys.executable, "main.py", "serve", "--host", "127.0.0.1", "--port", "1"],
+                                 cwd=ROOT, capture_output=True, text=True, timeout=180, env=_startup_env(tmp))
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("DSPM_VAULT_KEY (or DSPM_VAULT_KEY_FILE) must be set in production", run.stderr)
+        # ...and with them, on the boundary.
+        keys = {"DSPM_SECRET_KEY": "k" * 48, "DSPM_VAULT_KEY": "v" * 44, "DSPM_ARTIFACT_KEY": "a" * 44,
+                "DSPM_BACKUP_KEY": "b" * 44, "DSPM_EVIDENCE_HMAC_KEY": "e" * 48,
+                "DSPM_ADMIN_PASSWORD": "Kestrel-boundary-771", "DSPM_DB_URL": "postgresql://app:pw@127.0.0.1:1/none"}
         for host, extra, reason in (("0.0.0.0", {}, "not loopback"),
                                     ("127.0.0.1", {"DSPM_TRUSTED_PROXIES": ""}, "DSPM_TRUSTED_PROXIES does not name it")):
             with self.subTest(host=host), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
                 run = subprocess.run([sys.executable, "main.py", "serve", "--host", host, "--port", "1"],
-                                     cwd=ROOT, capture_output=True, text=True, timeout=180, env=_startup_env(tmp, **extra))
+                                     cwd=ROOT, capture_output=True, text=True, timeout=180,
+                                     env=_startup_env(tmp, **keys, **extra))
                 self.assertNotEqual(run.returncode, 0)
                 self.assertIn(reason, run.stderr)
 

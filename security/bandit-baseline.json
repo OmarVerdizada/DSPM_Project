@@ -305,13 +305,6 @@
     {
       "file": "backend/store.py",
       "test_id": "B608",
-      "code": "rows = conn.execute( f\"\"\" SELECT username, role, tenant_id, full_name, is_active, created_at, updated_at, last_login_at FROM users {where} ORDER BY tenant_id, username \"\"\", params,",
-      "reviewed": "2026-09-28",
-      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
-    },
-    {
-      "file": "backend/store.py",
-      "test_id": "B608",
       "code": "rows = conn.execute( f\"\"\" WITH selected_tenants AS ( SELECT tenant_id, display_name, registration_code, created_at, updated_at FROM tenants {selected_where} ), latest_ranked AS ( SELECT sr.tenant_id, sr.scan_id, sr.timestamp, sr.source, sr.summary_json, ROW_NUMBER() OVER ( PARTITION BY sr.tenant_id ORDER BY sr.created_at DESC, sr.scan_id DESC ) AS row_number FROM scan_reports AS sr JOIN selected_tenants AS st ON st.tenant_id = sr.tenant_id ), scan_counts AS ( SELECT sr.tenant_id, COUNT(*) AS n FROM scan_reports AS sr JOIN selected_tenants AS st ON st.tenant_id = sr.tenant_id GROUP BY sr.tenant_id ), audit_counts AS ( SELECT ae.tenant_id, COUNT(*) AS n FROM audit_events AS ae JOIN selected_tenants AS st ON st.tenant_id = ae.tenant_id GROUP BY ae.tenant_id ), alert_counts AS ( SELECT ae.tenant_id, COUNT(*) AS n FROM alert_events AS ae JOIN selected_tenants AS st ON st.tenant_id = ae.tenant_id GROUP BY ae.tenant_id ), baseline_counts AS ( SELECT b.tenant_id, COUNT(*) AS n FROM scan_object_baselines AS b JOIN selected_tenants AS st ON st.tenant_id = b.tenant_id GROUP BY b.tenant_id ) SELECT st.tenant_id, st.display_name, st.registration_code, st.created_at, st.updated_at, lr.scan_id AS latest_scan_id, lr.timestamp AS latest_timestamp, lr.source AS latest_source, lr.summary_json AS latest_summary_json, COALESCE(sc.n, 0) AS scan_count, COALESCE(ac.n, 0) AS audit_count, COALESCE(alc.n, 0) AS alert_count, COALESCE(bc.n, 0) AS baseline_count FROM selected_tenants AS st LEFT JOIN latest_ranked AS lr ON lr.tenant_id = st.tenant_id AND lr.row_number = 1 LEFT JOIN scan_counts AS sc ON sc.tenant_id = st.tenant_id LEFT JOIN audit_counts AS ac ON ac.tenant_id = st.tenant_id LEFT JOIN alert_counts AS alc ON alc.tenant_id = st.tenant_id LEFT JOIN baseline_counts AS bc ON bc.tenant_id = st.tenant_id ORDER BY st.tenant_id \"\"\", params,",
       "reviewed": "2026-09-28",
       "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
@@ -455,6 +448,20 @@
       "code": "work = conn.execute( \"SELECT COUNT(DISTINCT CASE WHEN exposure IN ('PUBLIC', 'BROAD_INTERNAL', 'WRITABLE_INTERNAL') \" \"THEN asset_id END) AS exposed, \" f\"SUM(CASE WHEN status IN ({active}) THEN 1 ELSE 0 END) AS active_n, \" f\"SUM(CASE WHEN status IN ({active}) AND COALESCE(sla_due, '') <> '' \" \"AND sla_due < ? THEN 1 ELSE 0 END) AS overdue_n \" \"FROM findings WHERE tenant_id = ? AND is_current = 1\", (*REMEDIATION_ACTIVE_STATUSES, *REMEDIATION_ACTIVE_STATUSES, now, tenant_id),",
       "reviewed": "2026-09-28",
       "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/backup.py",
+      "test_id": "B608",
+      "code": "\"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name\")] counts = {table: conn.execute(f'SELECT COUNT(*) FROM \"{table}\"').fetchone()[0] for table in tables} revision = None",
+      "reviewed": "2026-09-28",
+      "reason": "C11 backup verification counts the rows of every table the SQLite snapshot's own sqlite_master lists, quoted as identifiers; no outside input reaches the SQL."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"\"\" SELECT username, role, tenant_id, full_name, is_active, created_at, updated_at, last_login_at, login_name, auth_source FROM users {where} ORDER BY tenant_id, username \"\"\", params,",
+      "reviewed": "2026-09-28",
+      "reason": "list_users: interpolates a WHERE fragment assembled from code-owned SQL text (C2 added login_name and auth_source to the column list). Every value is a bound parameter."
     }
   ]
 }

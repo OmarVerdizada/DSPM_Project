@@ -535,6 +535,52 @@ app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 app.include_router(reporting_router)
 
 
+# C0.4: a database moved to a newer schema while this process runs (another install's
+# upgrade, a manual migration) is noticed within DSPM_SCHEMA_CHECK_SECONDS, and from then
+# on this build answers its data routes with 503 and the reason instead of writing rows in
+# a shape the newer code does not expect. Health and readiness keep answering - readiness
+# already reports the mismatch - so the operator sees why.
+_SCHEMA_GUARD = {"checked": float("-inf"), "problem": ""}
+_SCHEMA_GUARD_OPEN = {"/api/health", "/api/ready"}
+
+
+def _schema_check_seconds() -> float:
+    try:
+        return max(1.0, float(os.getenv("DSPM_SCHEMA_CHECK_SECONDS", "30")))
+    except ValueError:
+        return 30.0
+
+
+def schema_problem() -> str:
+    """Why this build must not serve data now ("" when it may). Cached for the interval."""
+    now = time.monotonic()
+    if now - _SCHEMA_GUARD["checked"] < _schema_check_seconds():
+        return _SCHEMA_GUARD["problem"]
+    _SCHEMA_GUARD["checked"] = now
+    revision = _schema_revision_or_none()
+    problem = ""
+    if revision is not None and revision["applied"] > revision["expected"]:
+        problem = (f"The database schema is at revision {revision['applied']}, newer than this build's "
+                   f"{revision['expected']}: another Sentro release has upgraded it. This server stops "
+                   f"serving data until the matching release is running.")
+    if problem and not _SCHEMA_GUARD["problem"]:
+        from scripts.logger import get_logger
+
+        get_logger("backend.app").error(problem)
+    _SCHEMA_GUARD["problem"] = problem
+    return problem
+
+
+@app.middleware("http")
+async def schema_guard(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in _SCHEMA_GUARD_OPEN:
+        problem = schema_problem()
+        if problem:
+            return JSONResponse(status_code=503, content={"detail": problem})
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def secure_response_headers(request: Request, call_next):
     # Before the handler runs, so anything it audits carries the origin.
@@ -1295,6 +1341,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "service": "dspm-discovery",
+        # C0.4/C11: which build is answering - the package label and commit, or "development".
+        "build": _build_info(),
         "ocr": ocr_status(),
         "search": search_health(),
         # C4: whether audit events are reaching the SIEM - a count and an age, never content.
@@ -1440,6 +1488,18 @@ def database_activity(principal: Principal = Depends(require_permission("platfor
         "applicable": bool(result.get("applicable")),
     })
     return result
+
+
+@functools.lru_cache(maxsize=1)
+def _build_info() -> dict:
+    """What the offline package wrote into app/BUILD.json; a source checkout has none."""
+    path = Path(__file__).resolve().parents[1] / "BUILD.json"
+    try:
+        build = json.loads(path.read_text(encoding="utf-8"))
+        return {"label": str(build.get("label", "")), "commit": str(build.get("commit", ""))[:12],
+                "schema_revision": build.get("schema_revision")}
+    except (OSError, ValueError):
+        return {"label": "development", "commit": "", "schema_revision": None}
 
 
 def _schema_revision_or_none():

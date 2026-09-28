@@ -84,3 +84,6 @@ enterprise_test_data_repro/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# C11: offline Windows packages built by packaging/windows/build_package.py
+/dist/

@@ -95,6 +95,33 @@ def _maintain(queue: PartitionQueue, rebuild: Callable[[dict], object], worker_i
     return queue.reclaim(worker_id, idle_seconds=lease)
 
 
+_SCHEMA_STATE = {"checked": float("-inf"), "newer": False}
+
+
+def _schema_is_newer() -> bool:
+    """True while the database's schema revision is ahead of this build's (checked at most
+    every DSPM_SCHEMA_CHECK_SECONDS)."""
+    try:
+        interval = max(1.0, float(os.getenv("DSPM_SCHEMA_CHECK_SECONDS", "30")))
+    except ValueError:
+        interval = 30.0
+    if time.monotonic() - _SCHEMA_STATE["checked"] < interval:
+        return _SCHEMA_STATE["newer"]
+    _SCHEMA_STATE["checked"] = time.monotonic()
+    try:
+        from backend import migrations, store
+
+        with store._connect() as conn:
+            newer = migrations.current_revision(conn) > migrations.expected_revision()
+    except Exception:
+        newer = False  # an unreachable database is the queue's problem, handled below
+    if newer and not _SCHEMA_STATE["newer"]:
+        logger.error("The database schema is newer than this worker's build; taking no work until "
+                     "the matching release runs.")
+    _SCHEMA_STATE["newer"] = newer
+    return newer
+
+
 def run_worker(
     queue: PartitionQueue,
     rebuild: Callable[[dict], object],
@@ -118,6 +145,11 @@ def run_worker(
     handled = 0
     last_maintenance = float("-inf")
     while not stop.is_set():
+        # C0.4: a database upgraded under this worker is not written by it until the
+        # matching release runs; the partitions wait in the ledger, leased by no one.
+        if _schema_is_newer():
+            stop.wait(max(idle_seconds, 5.0))
+            continue
         try:
             deliveries: list[Delivery] = []
             if time.monotonic() - last_maintenance >= lease / 3:

@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import struct
 import subprocess
 from datetime import datetime, timezone
@@ -279,6 +280,9 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
     manifest_path = directory / f"sentro_{stamp}{MANIFEST_SUFFIX}"
 
     counts = capture_table_counts(dsn)
+    revision = _pg_schema_revision(dsn)
+    # C11: the password goes to pg_dump through its environment, not its command line.
+    conninfo, tool_env = pg_tool_environment(dsn)
     # The try starts BEFORE pg_dump, not after it. The finally below was already
     # here, but a dump that succeeded and then failed the returncode check - or
     # timed out after writing part of a file - left an unencrypted copy of the
@@ -286,9 +290,9 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
     # this tree next to seven encrypted ones.
     try:
         completed = subprocess.run(
-            [_pg_bin("pg_dump"), "--format=custom", "--no-password", f"--dbname={dsn}",
+            [_pg_bin("pg_dump"), "--format=custom", "--no-password", f"--dbname={conninfo}",
              "--file", str(plain)],
-            capture_output=True, text=True, timeout=3600,
+            capture_output=True, text=True, timeout=3600, env=tool_env,
         )
         if completed.returncode != 0:
             raise RuntimeError(f"pg_dump failed: {completed.stderr.strip()[:400]}")
@@ -302,6 +306,7 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
             "ciphertext_bytes": encrypted.stat().st_size,
             "plaintext_sha256": plain_sha,
             "ciphertext_sha256": cipher_sha,
+            "schema_revision": revision,
             "table_counts": counts,
             "artifacts": capture_artifacts(directory / f"sentro_{stamp}.artifacts.tar"),
         }
@@ -342,3 +347,223 @@ def prune_backups(keep: int = 7, directory: Path | None = None) -> int:
         manifest_path.unlink(missing_ok=True)
         removed += 1
     return removed
+
+
+# ---------------------------------------------------------------------------
+# C11: the backup an upgrade takes first - for both backends - and its proof.
+# ---------------------------------------------------------------------------
+
+
+def pg_tool_environment(dsn: str) -> tuple[str, dict]:
+    """(connection string without its password, environment carrying it).
+
+    `pg_dump --dbname=<url with password>` put the database password on the process's
+    command line, where any user of the host can read it. The password now travels in
+    the child's environment (PGPASSWORD), which only the same account and
+    Administrators can read.
+    """
+    env = dict(os.environ)
+    try:
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        parts = conninfo_to_dict(dsn)
+        password = parts.pop("password", None)
+        if password:
+            env["PGPASSWORD"] = str(password)
+        return make_conninfo(**parts), env
+    except ImportError:  # no psycopg: a URL is still parsed by hand
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(dsn)
+        if parts.password:
+            env["PGPASSWORD"] = parts.password
+            netloc = parts.hostname or ""
+            if parts.username:
+                netloc = f"{parts.username}@{netloc}"
+            if parts.port:
+                netloc = f"{netloc}:{parts.port}"
+            dsn = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        return dsn, env
+
+
+def _pg_schema_revision(dsn: str) -> int | None:
+    import psycopg
+
+    with psycopg.connect(dsn, connect_timeout=15) as conn:
+        row = conn.execute("SELECT to_regclass('schema_migrations')").fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(conn.execute("SELECT COALESCE(MAX(revision), 0) FROM schema_migrations").fetchone()[0])
+
+
+def _sqlite_facts(path: Path) -> dict:
+    """Integrity, schema revision and per-table row counts of a SQLite file."""
+    import sqlite3
+
+    conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    try:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        tables = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+        counts = {table: conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in tables}
+        revision = None
+        if "schema_migrations" in tables:
+            revision = conn.execute("SELECT COALESCE(MAX(revision), 0) FROM schema_migrations").fetchone()[0]
+        return {"integrity": integrity, "table_counts": counts, "schema_revision": revision}
+    finally:
+        conn.close()
+
+
+def create_sqlite_backup(db_path: Path, out_dir: Path | None = None) -> Path:
+    """SQLite's online backup -> integrity check -> encrypt -> manifest. The snapshot is
+    consistent while the database is in use; its plaintext never outlives this call."""
+    import sqlite3
+
+    directory = out_dir or backup_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    snapshot = directory / f"sentro_sqlite_{stamp}.sqlite"
+    encrypted = directory / f"sentro_sqlite_{stamp}.sqlite.enc"
+    manifest_path = directory / f"sentro_sqlite_{stamp}{MANIFEST_SUFFIX}"
+    if not Path(db_path).exists():
+        raise RuntimeError(f"There is no database at {db_path} to back up.")
+    try:
+        source = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+        target = sqlite3.connect(snapshot)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
+        facts = _sqlite_facts(snapshot)
+        if facts["integrity"] != "ok":
+            raise RuntimeError(f"The database failed its integrity check: {facts['integrity']}")
+        plain_sha, cipher_sha = encrypt_file(snapshot, encrypted)
+        manifest = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "kind": "sqlite",
+            "format": "sqlite-online-backup+chunked-fernet",
+            "file": encrypted.name,
+            "plaintext_bytes": snapshot.stat().st_size,
+            "ciphertext_bytes": encrypted.stat().st_size,
+            "plaintext_sha256": plain_sha,
+            "ciphertext_sha256": cipher_sha,
+            "schema_revision": facts["schema_revision"],
+            "table_counts": facts["table_counts"],
+            "artifacts": capture_artifacts(directory / f"sentro_sqlite_{stamp}.artifacts.tar"),
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    finally:
+        snapshot.unlink(missing_ok=True)
+    return manifest_path
+
+
+def create_backup(out_dir: Path | None = None) -> Path:
+    """The backup of whichever database this install is configured for."""
+    dsn = os.getenv("DSPM_DB_URL", "").strip()
+    if dsn:
+        return create_logical_backup(dsn, out_dir)
+    from backend import store
+
+    return create_sqlite_backup(Path(store.DB_PATH), out_dir)
+
+
+def verify_backup(manifest_path: Path) -> dict:
+    """Decrypt a backup set into a temporary folder and check it against its manifest:
+    every digest, and for SQLite the integrity check and every table's row count; for
+    PostgreSQL that pg_restore can read the archive's table of contents. Nothing is kept."""
+    import tempfile
+
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    problems: list[str] = []
+    payload = manifest_path.parent / str(manifest.get("file") or "")
+    if not payload.exists():
+        return {"ok": False, "manifest": str(manifest_path), "problems": [f"{payload.name} is missing"]}
+    if sha256_file(payload) != manifest.get("ciphertext_sha256"):
+        problems.append(f"{payload.name} does not match its recorded digest")
+    with tempfile.TemporaryDirectory(prefix="sentro-verify-") as scratch:
+        plain = Path(scratch) / "payload"
+        try:
+            plain_sha = decrypt_file(payload, plain)
+        except Exception as exc:  # wrong key, truncation, tampering
+            problems.append(f"{payload.name} cannot be decrypted with this install's backup key ({type(exc).__name__})")
+            plain_sha = None
+        if plain_sha is not None and plain_sha != manifest.get("plaintext_sha256"):
+            problems.append("the decrypted database does not match its recorded digest")
+        if plain_sha is not None and manifest.get("kind") == "sqlite":
+            facts = _sqlite_facts(plain)
+            if facts["integrity"] != "ok":
+                problems.append(f"integrity check: {facts['integrity']}")
+            if facts["table_counts"] != manifest.get("table_counts"):
+                problems.append("row counts differ from the ones recorded at backup time")
+            if facts["schema_revision"] != manifest.get("schema_revision"):
+                problems.append("the schema revision differs from the recorded one")
+        elif plain_sha is not None:
+            listed = subprocess.run([_pg_bin("pg_restore"), "--list", str(plain)], capture_output=True, text=True)
+            if listed.returncode != 0:
+                problems.append(f"pg_restore cannot read the archive: {listed.stderr.strip()[:300]}")
+        artifacts = manifest.get("artifacts") or {}
+        if artifacts.get("file"):
+            archive = manifest_path.parent / artifacts["file"]
+            if not archive.exists():
+                problems.append(f"{archive.name} is missing")
+            else:
+                restored = restore_artifacts(archive, Path(scratch) / "artifacts")
+                if restored["objects"] != artifacts.get("objects") or \
+                        restored["inventory_sha256"] != artifacts.get("inventory_sha256"):
+                    problems.append("the artifact archive does not hold the objects recorded")
+    return {"ok": not problems, "manifest": str(manifest_path), "kind": manifest.get("kind"),
+            "schema_revision": manifest.get("schema_revision"), "problems": problems}
+
+
+def restore_sqlite_backup(manifest_path: Path, db_path: Path, artifact_dir: Path | None = None) -> dict:
+    """Put a verified SQLite backup in place of the database. The database it replaces
+    is kept beside it (…pre-restore-<stamp>), never deleted. The artifact store gains the
+    backup's objects; objects are content-addressed and never change, so none is lost."""
+    import tempfile
+
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("kind") != "sqlite":
+        raise RuntimeError("This is a PostgreSQL backup: restore it with pg_restore (docs/DEPLOYMENT_WINDOWS.md).")
+    report = verify_backup(manifest_path)
+    if not report["ok"]:
+        raise RuntimeError("The backup did not verify, so nothing was restored: " + "; ".join(report["problems"]))
+    db_path = Path(db_path)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    kept = None
+    staged = db_path.with_name(db_path.name + f".restoring-{stamp}")
+    decrypt_file(manifest_path.parent / manifest["file"], staged)
+    if db_path.exists():
+        kept = db_path.with_name(db_path.name + f".pre-restore-{stamp}")
+        os.replace(db_path, kept)
+    for suffix in ("-wal", "-shm"):
+        side = db_path.with_name(db_path.name + suffix)
+        if side.exists() and kept is not None:
+            os.replace(side, kept.with_name(kept.name + suffix))
+    os.replace(staged, db_path)
+    restored_objects = 0
+    artifacts = manifest.get("artifacts") or {}
+    if artifacts.get("file"):
+        from backend import artifacts as _artifacts
+
+        target = Path(artifact_dir) if artifact_dir else _artifacts.artifact_root()
+        with tempfile.TemporaryDirectory(prefix="sentro-restore-") as scratch:
+            restore_artifacts(manifest_path.parent / artifacts["file"], Path(scratch))
+            for item in Path(scratch).rglob(f"*{_artifacts.OBJECT_SUFFIX}"):
+                destination = target / item.relative_to(scratch)
+                if not destination.exists():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, destination)
+                    restored_objects += 1
+    return {"restored": str(db_path), "previous_database": str(kept) if kept else None,
+            "schema_revision": manifest.get("schema_revision"), "artifact_objects_added": restored_objects}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
