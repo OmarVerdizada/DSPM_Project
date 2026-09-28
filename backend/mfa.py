@@ -38,7 +38,10 @@ SIGN_IN_PERMISSIONS = frozenset({"tenant.admin", "platform.admin"})
 # And no session may use one of these without having passed MFA - including a role
 # that only manages credentials, which does not force MFA at sign-in but is refused
 # here until the session steps up.
-GATED_PERMISSIONS = frozenset({"tenant.admin", "platform.admin", "credential.manage"})
+GATED_PERMISSIONS = frozenset({"tenant.admin", "platform.admin", "credential.manage",
+                               # C13: a raw value is revealed only to a session that proved
+                               # the factor - and so never to an API key.
+                               "evidence.reveal"})
 
 
 def generate_secret() -> str:

@@ -15133,6 +15133,14 @@ body.sidebar-collapsed .app-shell > .sidebar .brand.logo-lockup {
   .directory-test-login { width: 100%; }
 }
 
+/* C13: reveal buttons under a finding's evidence, and the revealed value in its dialog. */
+.reveal-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.reveal-result { display: grid; gap: var(--space-1); }
+.reveal-result[hidden] { display: none; }
+.reveal-value { padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel, var(--card));
+  font-size: var(--text-md); letter-spacing: .04em; overflow-wrap: anywhere; user-select: all; }
+.mfa-stepup-field textarea { font: inherit; font-weight: 400; }
+
 /* C12: saved scan credentials - a compact table in the settings card, badges for
    privilege and a due password change, the replace form under it. */
 .credentials-table-wrap { overflow-x: auto; }

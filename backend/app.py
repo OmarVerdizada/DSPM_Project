@@ -3717,6 +3717,39 @@ def finding_detail(finding_id: str, principal: Principal = Depends(require_permi
     return {"finding": finding, "framework": framework, "detail": detail}
 
 
+class RevealRequest(BaseModel):
+    fingerprint: str = Field(min_length=8, max_length=64)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+# C13: reveals are counted per account, successful or not: a reveal reads a file from its
+# source and returns a raw value, and a burst of them is exactly what a stolen session does.
+REVEAL_THROTTLE = RouteThrottle("reveal", max(1, int(os.getenv("DSPM_REVEAL_MAX_PER_HOUR", "20"))), 3600)
+
+
+@app.post("/api/findings/{finding_id}/reveal")
+def reveal_finding_value(finding_id: str, payload: RevealRequest, request: Request,
+                         principal: Principal = Depends(require_permission("evidence.reveal", mfa=True))) -> dict:
+    """One raw value behind a finding, read again from its source now, never stored."""
+    if REVEAL_THROTTLE.exhausted(principal.subject):
+        raise HTTPException(status_code=429, detail="Too many reveals in the last hour. Try again later.")
+    REVEAL_THROTTLE.failed(principal.subject)
+    from backend import evidence_reveal
+
+    detail = {"finding_id": finding_id, "fingerprint": payload.fingerprint,
+              "reason": " ".join(payload.reason.split())[:500]}
+    try:
+        result = evidence_reveal.reveal(principal.tenant_id, finding_id, payload.fingerprint, payload.reason)
+    except evidence_reveal.RevealRefused as refused:
+        audit(principal.tenant_id, principal.subject, "evidence.reveal_refused", {**detail, "result": refused.code})
+        raise HTTPException(status_code=refused.status, detail={"code": refused.code, "message": str(refused)}) from refused
+    location = result["location"]
+    audit(principal.tenant_id, principal.subject, "evidence.revealed",
+          {**detail, "result": "revealed", "type": result["type"], "source": location.get("source"),
+           "target": location.get("path"), "share": location.get("share") or ""})
+    return {key: result[key] for key in ("finding_id", "type", "fingerprint", "value", "masked")}
+
+
 @app.post("/api/findings/detail")
 def finding_detail_preview(payload: dict, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     _ = principal
@@ -4429,6 +4462,26 @@ def export_dlp_policy(payload: ScanRequest, principal: Principal = Depends(requi
     }
 
 
+def _record_scan_source(tenant_id: str, scan_id: str, payload) -> None:
+    """C13: how this scan reached its files - never a password, only whether one was
+    typed, and a saved credential's reference - so a finding's value can be read again."""
+    if not scan_id:
+        return
+    endpoint = isinstance(payload, EndpointScanRequest)
+    server = str(getattr(payload, "host", "") if endpoint else getattr(payload, "server", "") or "").strip()
+    ref = str(getattr(payload, "credential_ref", "") or "").strip()
+    typed = bool(str(getattr(payload, "password", "") or ""))
+    kind = "saved" if ref else ("typed" if typed else "none")
+    source = "endpoint-winrm" if endpoint else ("smb" if server and not _is_local_endpoint_host(server) else "local")
+    try:
+        store_module.record_scan_source(tenant_id, scan_id, source, server, kind, ref)
+    except Exception as exc:  # a lost record only makes the scan unrevealable
+        from scripts.logger import get_logger
+
+        get_logger("backend.app").warning("Could not record how scan %s reached its files: %s", scan_id,
+                                          type(exc).__name__)
+
+
 def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, principal: Principal) -> None:
     # The scan's operator-facing name travels with the report so every asset it
     # produces can be filtered by that name in Data Inventory.
@@ -4437,6 +4490,7 @@ def _persist_scan(data: dict, payload: ScanRequest | EndpointScanRequest, princi
         data["scan_label"] = label
     scan_id = save_scan_history(principal.tenant_id, data)
     data["scan_id"] = scan_id
+    _record_scan_source(principal.tenant_id, scan_id, payload)
     warnings: list[dict] = []
     try:
         data["alerts"] = evaluate_alerts(principal.tenant_id, data)
@@ -4646,6 +4700,7 @@ def _scheduled_scan_payload(schedule: dict, config: ScanConfig, payload: ScanReq
 
 def _finish_partitioned_scan_payload(data: dict, payload, principal: Principal) -> dict:
     """What a partitioned scan does once its report is written: alerts, and saying what it could not do."""
+    _record_scan_source(principal.tenant_id, str(data.get("scan_id") or ""), payload)
     warnings: list[dict] = []
     try:
         data["alerts"] = evaluate_alerts(principal.tenant_id, data)

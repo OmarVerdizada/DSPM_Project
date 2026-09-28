@@ -77,6 +77,8 @@ ATTEMPTS = [
     ("PUT", "/api/credentials/{secret_ref}", {"username": "u", "password": "a-foreign-pass-9", "domain": "D"}),
     ("DELETE", "/api/credentials/{secret_ref}", None),
     ("POST", "/api/credentials/{secret_ref}/preflight", None),
+    ("POST", "/api/findings/{finding_id}/reveal", {"fingerprint": "[redacted:000000000000]",
+                                                     "reason": "a cross-tenant attempt to read a value"}),
     ("GET", "/api/v1/reports/artifacts/{artifact_id}", None),
     ("PUT", "/api/roles/{name}", {"permissions": ["export"]}),
     ("DELETE", "/api/roles/{name}", None),

@@ -475,7 +475,7 @@ const BUILTIN_ROLE_PERMISSIONS = {
   scan_operator: ["inventory.view", "scan.run"],
   analyst: ["inventory.view", "evidence.view", "findings.triage", "scan.run", "credential.manage",
     "rules.manage", "export", "report.create"],
-  admin: ["inventory.view", "evidence.view", "findings.triage", "scan.run", "credential.manage",
+  admin: ["inventory.view", "evidence.view", "evidence.reveal", "findings.triage", "scan.run", "credential.manage",
     "rules.manage", "export", "report.create", "audit.view", "tenant.admin"],
 };
 
@@ -4875,8 +4875,130 @@ function renderFindingEvidenceSections(finding) {
       const listValues = Array.isArray(values) ? values : [values];
       return `<div class="detail-evidence"><span>${escapeHtml(label)}</span><code>${escapeHtml(listValues.join(", "))}</code></div>`;
     })
-    .join("");
+    .join("") + renderRevealButtons(finding);
 }
+
+// C13: reveal - one raw value behind a finding, read again from its source by the server.
+// The value lives in the dialog's text and nowhere else: not a URL, not browser storage,
+// not a variable that outlives the dialog. It clears itself after REVEAL_SHOW_SECONDS and
+// whenever the dialog closes.
+const REVEAL_SHOW_SECONDS = 60;
+let revealTimer = null;
+let revealTarget = null;
+
+function renderRevealButtons(finding) {
+  if (!can("evidence.reveal") || !finding?.finding_id) return "";
+  const occurrences = Array.isArray(finding.occurrences) && finding.occurrences.length
+    ? finding.occurrences.map((item) => ({ fingerprint: item.secure_fingerprint, sample: item.redacted_sample }))
+    : (finding.secure_value_fingerprints || []).map((fingerprint, index) => ({ fingerprint, sample: (finding.samples || [])[index] }));
+  const usable = occurrences.filter((item) => String(item.fingerprint || "").startsWith("[redacted:"));
+  if (!usable.length) return "";
+  const buttons = usable.map((item) => `<button type="button" class="secondary-btn reveal-btn"
+      data-reveal-finding="${escapeHtml(finding.finding_id)}" data-reveal-fingerprint="${escapeHtml(item.fingerprint)}"
+      data-reveal-sample="${escapeHtml(item.sample || "")}">Reveal ${escapeHtml(item.sample || "value")}</button>`).join("");
+  return `<div class="detail-evidence reveal-values"><span>Reveal a value</span><div class="reveal-buttons">${buttons}</div></div>`;
+}
+
+function revealParts() {
+  const modal = document.querySelector("#reveal-modal");
+  return modal && {
+    modal,
+    form: modal.querySelector("#reveal-form"),
+    sample: modal.querySelector("#reveal-sample"),
+    reason: modal.querySelector("#reveal-reason"),
+    result: modal.querySelector("#reveal-result"),
+    value: modal.querySelector("#reveal-value"),
+    countdown: modal.querySelector("#reveal-countdown"),
+    error: modal.querySelector("[data-reveal-error]"),
+    submit: modal.querySelector("#reveal-submit"),
+  };
+}
+
+function clearRevealedValue() {
+  const parts = revealParts();
+  if (revealTimer) window.clearInterval(revealTimer);
+  revealTimer = null;
+  if (!parts) return;
+  const revealValue = parts.value;
+  revealValue.textContent = "";
+  parts.countdown.textContent = "";
+  parts.result.hidden = true;
+}
+
+function closeReveal() {
+  const parts = revealParts();
+  clearRevealedValue();
+  revealTarget = null;
+  if (!parts) return;
+  parts.reason.value = "";
+  parts.error.textContent = "";
+  parts.modal.classList.remove("open");
+  parts.modal.classList.add("hidden");
+}
+
+function openReveal(findingId, fingerprint, sample) {
+  const parts = revealParts();
+  if (!parts) return;
+  clearRevealedValue();
+  revealTarget = { findingId, fingerprint };
+  parts.sample.textContent = sample || "this value";
+  parts.reason.value = "";
+  parts.error.textContent = "";
+  parts.submit.disabled = false;
+  parts.modal.classList.remove("hidden");
+  parts.modal.getBoundingClientRect();
+  parts.modal.classList.add("open");
+  window.requestAnimationFrame(() => parts.reason.focus());
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-reveal-fingerprint]");
+  if (button) {
+    openReveal(button.dataset.revealFinding, button.dataset.revealFingerprint, button.dataset.revealSample);
+    return;
+  }
+  if (event.target.closest("[data-close-reveal]")) closeReveal();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && revealTarget) closeReveal();
+});
+
+document.querySelector("#reveal-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const parts = revealParts();
+  if (!parts || !revealTarget) return;
+  const reason = parts.reason.value.trim();
+  if (reason.length < 12) {
+    parts.error.textContent = "Say why you need the value (at least 12 characters). It is recorded in the audit trail.";
+    parts.reason.focus();
+    return;
+  }
+  parts.error.textContent = "";
+  parts.submit.disabled = true;
+  try {
+    const data = await api(`/api/findings/${encodeURIComponent(revealTarget.findingId)}/reveal`,
+      { fingerprint: revealTarget.fingerprint, reason });
+    parts.value.textContent = data.value;
+    parts.result.hidden = false;
+    let left = REVEAL_SHOW_SECONDS;
+    parts.countdown.textContent = `Hidden again in ${left} s.`;
+    revealTimer = window.setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        clearRevealedValue();
+        parts.error.textContent = "The value is hidden again. Reveal it again if you still need it.";
+        return;
+      }
+      parts.countdown.textContent = `Hidden again in ${left} s.`;
+    }, 1000);
+  } catch (error) {
+    parts.error.textContent = String(error.message || error).replace(/^\d+:\s*/, "");
+  } finally {
+    parts.submit.disabled = false;
+  }
+});
+// C13: end of reveal
 
 function compactEvidence(values) {
   return values.filter(Boolean).map(String);
@@ -10472,6 +10594,8 @@ const AUDIT_ACTIONS = {
   "directory.tested": "Tested the directory connection",
   "directory.removed": "Removed the directory sign-in settings",
   "credential.rotated": "Replaced a saved credential's password",
+  "evidence.revealed": "Revealed a value behind a finding (read again from its source)",
+  "evidence.reveal_refused": "Asked to reveal a value - refused",
   "credential.deleted": "Deleted a saved credential",
   "credential.preflight": "Checked a saved credential's privilege",
   "vault.key_rotated": "Rotated the vault key",

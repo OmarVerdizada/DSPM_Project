@@ -1089,6 +1089,33 @@ def _vault_ddl(conn) -> None:
             conn.execute(f"ALTER TABLE secrets ADD COLUMN {column} {ddl}")
 
 
+_SCAN_SOURCES_DDL = """CREATE TABLE IF NOT EXISTS scan_sources (
+            tenant_id TEXT NOT NULL,
+            scan_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL DEFAULT '',
+            server TEXT NOT NULL DEFAULT '',
+            credential_kind TEXT NOT NULL DEFAULT 'none',
+            credential_ref TEXT NOT NULL DEFAULT '',
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, scan_id)
+        );"""
+
+
+def add_scan_sources(conn) -> None:
+    """Revision 0028: how each scan reached its files (C13).
+
+    A value behind a finding is revealed by reading the file again, so the product must
+    know how the scan read it: the source kind, the server, and whether the credential
+    was a saved one (its vault reference - never a password) or a password typed at scan
+    time, which is kept nowhere and makes the scan's files unrevealable. A tenant table:
+    revisions 0003 and 0004 are re-run for its key and row-level security. Rollback:
+    restore the pre-upgrade backup; older code ignores the table.
+    """
+    conn.execute(_SCAN_SOURCES_DDL)
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def add_vault_key_lifecycle(conn) -> None:
     """Revision 0027: what a saved credential is, and its dates (C12).
 
@@ -2247,6 +2274,7 @@ def apply_baseline_schema(conn) -> None:
 
     _identity_ddl(conn)  # C2 (revision 0026)
     _vault_ddl(conn)  # C12 (revision 0027)
+    conn.execute(_SCAN_SOURCES_DDL)  # C13 (revision 0028)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -8732,6 +8760,8 @@ _TENANT_ERASURE_TABLES = (
     "scan_jobs",
     # C2: the workspace's directory sign-in settings (their password is in `secrets`).
     "directory_settings",
+    # C13: how each scan reached its files.
+    "scan_sources",
 )
 
 
@@ -9025,6 +9055,44 @@ def set_secret_privilege(tenant_id: str, secret_id: str, privilege: dict) -> Non
     with _connect() as conn:
         conn.execute("UPDATE secrets SET privilege_json = ? WHERE tenant_id = ? AND secret_id = ?",
                      (json.dumps(privilege, separators=(",", ":")), tenant_id, secret_id))
+
+
+def record_scan_source(tenant_id: str, scan_id: str, source_kind: str, server: str, credential_kind: str,
+                       credential_ref: str = "") -> None:
+    """C13: how a scan reached its files. A saved credential is recorded by reference; a
+    typed password is recorded only as having been typed."""
+    if credential_kind != "saved":
+        credential_ref = ""
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO scan_sources (tenant_id, scan_id, source_kind, server, credential_kind, "
+                "credential_ref, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, scan_id, source_kind, server, credential_kind, credential_ref,
+                 datetime.now(timezone.utc).isoformat()))
+
+
+def get_scan_source(tenant_id: str, scan_id: str) -> dict | None:
+    if not scan_id:
+        return None
+    with _connect() as conn:
+        row = conn.execute("SELECT source_kind, server, credential_kind, credential_ref FROM scan_sources "
+                           "WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id)).fetchone()
+    return dict(row) if row else None
+
+
+def finding_location(tenant_id: str, finding_id: str) -> dict | None:
+    """C13: the asset a finding belongs to, and the newest scan that saw it."""
+    with _connect() as conn:
+        row = conn.execute("SELECT asset_id, scan_id FROM findings WHERE tenant_id = ? AND id = ?",
+                           (tenant_id, finding_id)).fetchone()
+    if row is None:
+        return None
+    location = {"asset_id": row["asset_id"], "scan_id": row["scan_id"]}
+    latest = get_finding(tenant_id, finding_id)
+    if latest and latest.get("scan_id"):
+        location["scan_id"] = latest["scan_id"]
+    return location
 
 
 def list_secret_metadata(tenant_id: str) -> list[dict]:

@@ -27,6 +27,10 @@ AUTHENTICATED = "authenticated"
 PERMISSIONS: dict[str, str] = {
     "inventory.view": "See the inventory, findings, dashboards and scan history",
     "evidence.view": "See evidence: file previews and the matched values behind a finding",
+    # C13: no built-in role but the tenant administrator holds it; grant it through a
+    # custom role to the few people whose work needs a raw value.
+    "evidence.reveal": "Reveal one raw value behind a finding - read again from its source, with a stated "
+                       "reason, audited",
     "findings.triage": "Assign, comment on, validate, resolve, suppress and reopen findings",
     "scan.run": "Configure, schedule and run scans, test connections and prepare endpoints",
     "credential.manage": "Save credentials in the vault for scans to use",

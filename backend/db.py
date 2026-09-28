@@ -193,6 +193,8 @@ _PK: dict[str, tuple[str, ...]] = {
     "refresh_tokens": ("token_hash",),
     # C2: one directory configuration per workspace.
     "directory_settings": ("tenant_id",),
+    # C13: one record per scan of how it reached its files.
+    "scan_sources": ("tenant_id", "scan_id"),
 }
 
 

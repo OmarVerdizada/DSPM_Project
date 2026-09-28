@@ -1854,6 +1854,36 @@
       </div>
     </div>
 
+    <!-- C13: reveal one value behind a finding. The server reads the file again; the value
+         is shown here only, and cleared when this closes or after a minute. -->
+    <div id="reveal-modal" class="asset-detail-modal mfa-modal hidden" role="dialog" aria-modal="true" aria-labelledby="reveal-title">
+      <div class="asset-detail-backdrop" data-close-reveal></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Reveal a value</span>
+            <h3 id="reveal-title">See the value behind <span id="reveal-sample" class="mono"></span></h3>
+          </div>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-reveal title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <form id="reveal-form" class="sheet-body mfa-stepup-sheet" novalidate>
+          <p class="mfa-stepup-note">The file is read again from where the scan found it. If it has changed since, nothing is shown. The value appears here only, for a minute, and your reason is recorded in the audit trail.</p>
+          <label class="mfa-stepup-field">Why do you need it?<textarea id="reveal-reason" rows="3" maxlength="500" spellcheck="true"></textarea></label>
+          <div id="reveal-result" class="reveal-result" hidden>
+            <code id="reveal-value" class="reveal-value"></code>
+            <span id="reveal-countdown" class="mfa-stepup-note"></span>
+          </div>
+          <p class="mfa-stepup-error" data-reveal-error aria-live="polite"></p>
+          <div class="mfa-stepup-actions">
+            <button type="button" class="secondary-btn" data-close-reveal>Close</button>
+            <button type="submit" id="reveal-submit">Reveal</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 

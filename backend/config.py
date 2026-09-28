@@ -171,6 +171,7 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_ALLOW_DL_TOKEN_QUERY", "bool"),
     ("DSPM_ARTIFACT_DL_TOKEN_TTL_SECONDS", "int", {"minimum": 10}),
     ("DSPM_AUDIT_VERIFY_MAX_PER_HOUR", "int", {"minimum": 1}),
+    ("DSPM_REVEAL_MAX_PER_HOUR", "int", {"default": "20", "minimum": 1, "maximum": 1000}),
     # SIEM, alerts, search
     ("DSPM_SIEM_URL", "str"),
     ("DSPM_SIEM_CA_FILE", "path"),

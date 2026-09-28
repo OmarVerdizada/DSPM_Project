@@ -165,6 +165,8 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("POST", "/api/users/{username}/mfa/reset"): "tenant.admin",
     # C12: saved credentials - listed, replaced, checked and deleted by a credential manager
     ("GET", "/api/credentials"): "credential.manage",
+    # C13: one raw value, read again from its source
+    ("POST", "/api/findings/{finding_id}/reveal"): "evidence.reveal",
     ("PUT", "/api/credentials/{secret_ref}"): "credential.manage",
     ("DELETE", "/api/credentials/{secret_ref}"): "credential.manage",
     ("POST", "/api/credentials/{secret_ref}/preflight"): "credential.manage",

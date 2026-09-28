@@ -70,6 +70,7 @@ def _revisions() -> list[tuple[int, str, object]]:
         (25, "deny_unscoped_tenant_access", store.deny_unscoped_tenant_access),
         (26, "tenant_scoped_identities", store.add_tenant_scoped_identities),
     (27, "vault_key_lifecycle", store.add_vault_key_lifecycle),
+    (28, "scan_sources", store.add_scan_sources),
     ]
 
 
