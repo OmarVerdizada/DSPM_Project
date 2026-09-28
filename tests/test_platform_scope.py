@@ -92,7 +92,7 @@ class EveryStoreFunctionHasAScopeTest(unittest.TestCase):
             "assets": ["housekeeping", "search-indexer"],
         })
         every = {purpose for purposes in store.PLATFORM_ACCESS.values() for purpose in purposes}
-        self.assertLessEqual(every | {"migration"}, set(db.PLATFORM_PURPOSES))
+        self.assertLessEqual(every | {"migration", "backup"}, set(db.PLATFORM_PURPOSES))
 
     def test_an_unknown_purpose_is_refused_and_a_tenant_inside_one_wins(self) -> None:
         with self.assertRaises(ValueError):
@@ -176,7 +176,8 @@ class UnscopedSqlIsDeniedTest(unittest.TestCase):
                 # The live policy admits exactly the purposes the code says - a map changed
                 # without a revision to rebuild the policies shows here.
                 admitted = set(re.findall(r"'([a-z-]+)'::text", row["qual"]))
-                expected = set(store.PLATFORM_ACCESS.get(row["tablename"], frozenset())) | {"migration"}
+                # every table admits a migration and a whole-database backup (revision 0030)
+                expected = set(store.PLATFORM_ACCESS.get(row["tablename"], frozenset())) | {"migration", "backup"}
                 self.assertEqual(admitted & set(db.PLATFORM_PURPOSES), expected)
 
 

@@ -466,9 +466,9 @@
     {
       "file": "backend/store.py",
       "test_id": "B608",
-      "code": "values.extend(str(row[\"v\"]) for row in conn.execute( f\"SELECT {column} AS v FROM {table} WHERE {column} <> ''\").fetchall())  # noqa: S608 - fixed names return values",
+      "code": "for row in conn.execute( f\"SELECT {', '.join(keys)}, {column} AS v FROM {table} WHERE {column} <> ''\").fetchall():  # noqa: S608 - fixed names rows.append((table, {key: row[key] for key in keys}, str(row[\"v\"])))",
       "reviewed": "2026-09-28",
-      "reason": "C12 vault re-seal: table and column names come from the fixed _SEALED_COLUMNS constant; every value, including the compared sealed value, is a bound parameter."
+      "reason": "C12 vault key operations (M3 exit review: rows with their identifiers): table and column names come from the fixed _SEALED_COLUMNS constant; no value is interpolated."
     },
     {
       "file": "backend/store.py",

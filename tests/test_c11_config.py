@@ -198,14 +198,59 @@ class ProductionTest(_Case):
                      "DSPM_EVIDENCE_HMAC_KEY", "DSPM_ADMIN_PASSWORD", "DSPM_DB_URL"):
             self.assertTrue(any(error.startswith(name) for error in effective.errors), name)
 
-    def test_a_remote_database_without_tls_is_refused(self) -> None:
+    def _with_db_url(self, value: str) -> config.Effective:
         url = self.tmp / "remote_url"
-        url.write_text("postgresql://app:pw@db01.corp.example:5432/sentro?sslmode=disable", encoding="utf-8")
+        url.write_text(value, encoding="utf-8")
         text = self.production_file().read_text(encoding="utf-8").replace(
             str(self.tmp / "dspm_db_url"), str(url))
-        effective = config.resolve({}, self.write(text, "remote.toml"))
-        self.assertTrue(any("without requiring TLS" in error for error in effective.errors), effective.errors)
-        self.assertNotIn("pw@", repr(effective.errors), "the refusal does not quote the URL")
+        return config.resolve({}, self.write(text, "remote.toml"))
+
+    def test_a_remote_database_without_a_verified_certificate_is_refused(self) -> None:
+        # No sslmode is libpq's "prefer" (plaintext when refused); "require" takes any
+        # certificate; a host in the query string is as remote as one in the authority.
+        for url in ("postgresql://app:pw@db01.corp.example:5432/sentro?sslmode=disable",
+                    "postgresql://app:pw@db01.corp.example:5432/sentro",
+                    "postgresql://app:pw@db01.corp.example:5432/sentro?sslmode=require",
+                    "postgresql://app:pw@/sentro?host=db01.corp.example&sslmode=disable",
+                    "postgresql://app:pw@127.0.0.1,db02.corp.example/sentro?sslmode=prefer"):
+            effective = self._with_db_url(url)
+            self.assertTrue(any("without verifying its certificate" in error for error in effective.errors),
+                            (url, effective.errors))
+            self.assertNotIn("pw@", repr(effective.errors), "the refusal does not quote the URL")
+
+    def test_a_verified_or_local_database_is_accepted(self) -> None:
+        for url in ("postgresql://app:pw@db01.corp.example:5432/sentro?sslmode=verify-full&sslrootcert=ca.pem",
+                    "postgresql://app:pw@db01.corp.example/sentro?sslmode=verify-ca",
+                    "postgresql://app:pw@127.0.0.1:5432/sentro",
+                    "postgresql://app:pw@localhost/sentro?sslmode=disable"):
+            effective = self._with_db_url(url)
+            self.assertFalse(any("certificate" in error for error in effective.errors), (url, effective.errors))
+
+    def test_the_backup_and_migration_urls_are_held_to_the_same_rule(self) -> None:
+        secret = self.tmp / "backup_url"
+        secret.write_text("postgresql://b:pw@backup.corp.example/sentro?sslmode=require", encoding="utf-8")
+        effective = config.resolve({"DSPM_BACKUP_DB_URL_FILE": str(secret)}, self.production_file())
+        self.assertTrue(any(error.startswith("DSPM_BACKUP_DB_URL reaches a remote PostgreSQL")
+                            for error in effective.errors), effective.errors)
+
+    def test_a_key_ring_replaces_the_single_vault_key(self) -> None:
+        ring = self.tmp / "vault_keyring.json"
+        ring.write_text("{}", encoding="utf-8")
+        text = self.production_file().read_text(encoding="utf-8")
+        without_key = "\n".join(line for line in text.splitlines() if not line.startswith("DSPM_VAULT_KEY"))
+        without_key += f'\nDSPM_VAULT_KEYRING = "{ring.as_posix()}"\n'
+        effective = config.resolve({}, self.write(without_key, "ring.toml"))
+        self.assertFalse(any(error.startswith("DSPM_VAULT_KEY ") for error in effective.errors), effective.errors)
+        ring.unlink()
+        effective = config.resolve({}, self.write(without_key, "ring.toml"))
+        self.assertTrue(any(error.startswith("DSPM_VAULT_KEY ") for error in effective.errors),
+                        "a ring that does not exist yet is no key at all")
+
+    def test_a_test_suites_key_is_never_shown(self) -> None:
+        effective = config.resolve({"DSPM_MEILISEARCH_LIVE_KEY": "meili-live-key-8812"}, None)
+        shown = dict((name, value) for name, value, _source in effective.describe())
+        self.assertEqual(shown.get("DSPM_MEILISEARCH_LIVE_KEY"), "(set)")
+        self.assertIn("meili-live-key-8812", config.secret_values({"DSPM_MEILISEARCH_LIVE_KEY": "meili-live-key-8812"}))
 
     def test_production_through_the_environment_is_held_to_the_same_rules(self) -> None:
         effective = config.resolve({"DSPM_ENV": "production", "DSPM_SYNC_BUILTIN_ADMIN": "1"}, None)

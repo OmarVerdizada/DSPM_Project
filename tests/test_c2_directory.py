@@ -458,5 +458,42 @@ class TheSettingsTest(_Case):
         self.assertTrue(self._audit("directory.removed"))
 
 
+class ExitReviewDirectorySignInTest(_Case):
+    """M3 exit review: what a failed or a suspended directory sign-in may change."""
+
+    def test_a_name_that_only_sanitizes_to_an_account_does_not_end_it(self) -> None:
+        self._configure()
+        self.assertEqual(self._login("bob", "Bob-pass-12").status_code, 200)
+        key = store.find_user_by_login("t-dir", "bob")["username"]
+        # "bob#" finds the account "bob" by its sanitized name, and nothing in the directory
+        self.assertEqual(self._login("bob#", "not-bobs-password").status_code, 401)
+        self.assertTrue(store.get_user(key)["is_active"], "a stranger's typo signs nobody out")
+        self.assertEqual(self._audit("auth.directory_account_disabled"), [])
+        self.assertEqual(self._login("bob", "Bob-pass-12").status_code, 200)
+
+    def test_an_account_an_administrator_suspended_stays_suspended(self) -> None:
+        self._configure()
+        self.assertEqual(self._login("bob", "Bob-pass-12").status_code, 200)
+        key = store.find_user_by_login("t-dir", "bob")["username"]
+        suspended = self.client.put(f"/api/users/{key}/active", json={"is_active": False}, headers=self.admin)
+        self.assertEqual(suspended.status_code, 200, suspended.text)
+        self.assertEqual(self._login("bob", "Bob-pass-12").status_code, 401)
+        self.assertFalse(store.get_user(key)["is_active"], "the directory password does not undo a suspension")
+        self.assertEqual(self._audit("auth.login_failed")[-1]["detail"]["reason"], "inactive")
+        self.client.put(f"/api/users/{key}/active", json={"is_active": True}, headers=self.admin)
+        self.assertEqual(self._login("bob", "Bob-pass-12").status_code, 200, "an administrator brings it back")
+
+    def test_a_name_reused_by_another_person_does_not_inherit_the_account(self) -> None:
+        self._configure()
+        self.assertEqual(self._login("bob", "Bob-pass-12").status_code, 200)
+        key = store.find_user_by_login("t-dir", "bob")["username"]
+        # the account belonged to an earlier "bob" - another directory entry
+        with store._connect() as conn:
+            conn.execute("UPDATE users SET external_id = ? WHERE username = ?", ("guid-earlier-bob", key))
+        self.assertEqual(self._login("bob", "Bob-pass-12").status_code, 401)
+        self.assertEqual(self._audit("auth.login_failed")[-1]["detail"]["reason"], "conflict")
+        self.assertEqual(store.get_user(key)["external_id"], "guid-earlier-bob", "the old account is untouched")
+
+
 if __name__ == "__main__":
     unittest.main()

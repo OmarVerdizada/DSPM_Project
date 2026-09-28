@@ -46,6 +46,21 @@ PCI_DETECTOR_VERSION = "pci-detector-v3"  # A2: one PAN validator, issuer-gated
 PARSER_VERSION = "content-parser-v4"  # A1: credential material (.pem/.key/...) is read as text
 
 
+def product_private_paths() -> list[Path]:
+    """The install's own state, which a local scan never reads as data: the data folder
+    (every workspace's shared server log, the database), the configured database file and
+    its journals, and the per-user key folder. A local scan of "." or "data" otherwise
+    turned other workspaces' log lines into this workspace's findings - and, with C13's
+    reveal, into raw values (M3 exit review)."""
+    paths = [Path(__file__).resolve().parents[1] / "data", Path.home() / ".dspm"]
+    if os.getenv("DSPM_DATA_DIR", "").strip():
+        paths.append(Path(os.environ["DSPM_DATA_DIR"].strip()))
+    database = os.getenv("DSPM_DB_PATH", "").strip()
+    if database:
+        paths.extend(Path(database + suffix) for suffix in ("", "-wal", "-shm", "-journal"))
+    return paths
+
+
 @dataclass(slots=True)
 class ScanConfig:
     tenant_id: str = "default"
@@ -1318,7 +1333,8 @@ class DSPMDiscoveryEngine:
                 reuse_probe=self._reuse_probe,
                 progress_callback=self._collection_progress,
                 record_callback=record_callback,
-                excluded_paths=[self.config.cache_dir] if self.config.persistent_cache_enabled and self.config.cache_dir else [],
+                excluded_paths=([self.config.cache_dir] if self.config.persistent_cache_enabled and self.config.cache_dir
+                                else []) + product_private_paths(),
                 include_names=self.config.local_entry_names,
                 containment_root=self.config.scan_root,
                 resolve_root=not self.config.scan_root,

@@ -167,6 +167,7 @@ class TheRefusalsTest(_ScannedCase):
         with mock.patch.object(app_module, "REVEAL_THROTTLE", throttle):
             codes = [self.reveal().status_code for _ in range(3)]
         self.assertEqual(codes, [200, 200, 429])
+        self.assertEqual(self.audit_rows()[-1]["detail"]["result"], "throttled", "a throttled attempt is on the record")
 
     def test_an_api_key_cannot_hold_it(self) -> None:
         created = self.client.post("/api/api-keys", headers=self.as_("boss", "admin", "t-rev"),
@@ -208,12 +209,19 @@ class TheSourcesTest(_ScannedCase):
         raw = CONTENT.encode("utf-8")
         asset = {"source": "smb", "share": "Finance", "path": "/payroll.txt", "reuse_key": "smb://fs1/Finance/payroll.txt",
                  "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)}
-        seen = {}
+        seen = {"live_size": len(raw)}
+
+        class Share:
+            def getAttributes(self, share, path):
+                return type("Attributes", (), {"file_size": seen["live_size"]})()
+
+            def close(self):
+                seen["closed"] = True
 
         class Scanner:
             def __init__(self, config):
                 seen["config"] = config
-                self.connection = None
+                self.connection = Share()
 
             def connect(self):
                 return True
@@ -234,6 +242,15 @@ class TheSourcesTest(_ScannedCase):
             with self.assertRaises(evidence_reveal.RevealRefused) as refused:
                 evidence_reveal.reread("t-rev", changed, {"credential_kind": "saved", "credential_ref": ref, "server": "fs1"})
         self.assertEqual(refused.exception.code, "file_changed")
+        # a file that GREW since the scan: the share's live size says so before anything is
+        # read (hashing only the recorded number of bytes would have called it unchanged)
+        seen.pop("read", None)
+        seen["live_size"] = len(raw) + 40
+        with mock.patch("collectors.smb_scanner.SMBScanner", Scanner):
+            with self.assertRaises(evidence_reveal.RevealRefused) as grown:
+                evidence_reveal.reread("t-rev", asset, {"credential_kind": "saved", "credential_ref": ref, "server": "fs1"})
+        self.assertEqual(grown.exception.code, "file_changed")
+        self.assertNotIn("read", seen)
 
     def test_a_file_the_scan_kept_no_digest_for_is_not_revealed(self) -> None:
         # Without the scan's digest a changed file could not be told from the one scanned.
@@ -258,6 +275,73 @@ class TheConsoleTest(unittest.TestCase):
             self.assertNotIn(forbidden, block)
         self.assertIn("revealValue.textContent = \"\"", block, "closing the dialog clears the value")
         self.assertIn("REVEAL_SHOW_SECONDS", block, "and it clears itself after a while")
+
+
+class ExitReviewRevealTest(_ScannedCase):
+    """M3 exit review: every attempt is on the record, with where it would have read."""
+
+    def test_a_refusal_names_the_file_it_would_have_read(self) -> None:
+        self.file.write_text(CONTENT + "changed\n", encoding="utf-8")
+        self.assertEqual(self.reveal().status_code, 409)
+        detail = self.audit_rows()[-1]["detail"]
+        self.assertEqual((detail["result"], detail["source"], detail["target"]), ("file_changed", "local", str(self.file)))
+
+    def test_an_unexpected_failure_is_audited_and_reveals_nothing(self) -> None:
+        with mock.patch.object(evidence_reveal, "reread", side_effect=RuntimeError("connection reset by peer")):
+            response = self.reveal()
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.json()["detail"]["code"], "reveal_failed")
+        self.assertNotIn("connection reset", response.text, "no raw exception text")
+        row = self.audit_rows()[-1]
+        self.assertEqual((row["action"], row["detail"]["result"], row["detail"]["error"]),
+                         ("evidence.reveal_refused", "error", "RuntimeError"))
+
+    def test_the_throttle_counts_and_checks_in_one_step(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        from backend import app as app_module
+
+        throttle = app_module.RouteThrottle("reveal-race", 3, 3600)
+        store.clear_login_failures("reveal-race:rita")
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            allowed = list(pool.map(lambda _i: throttle.take("rita"), range(12)))
+        self.assertEqual(sum(allowed), 3, "parallel requests cannot all pass before any is counted")
+
+    def test_sentros_own_data_is_never_a_source(self) -> None:
+        private = self.folder / "install-data"
+        private.mkdir()
+        kept = private / "server.log"
+        kept.write_text(CONTENT, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"DSPM_DATA_DIR": str(private)}):
+            with self.assertRaises(evidence_reveal.RevealRefused) as refused:
+                evidence_reveal.reread("t-rev", {"source": "local", "path": str(kept), "sha256": "ab" * 32, "size": 1},
+                                       {"credential_kind": "none"})
+            self.assertEqual(refused.exception.code, "product_file")
+
+    def test_a_local_scan_does_not_read_sentros_own_data(self) -> None:
+        from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
+
+        private = self.folder / "install-data"
+        private.mkdir()
+        (private / "server.log").write_text(f"another workspace logged {OTHER_CARD}\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"DSPM_DATA_DIR": str(private)}):
+            report = DSPMDiscoveryEngine(ScanConfig(tenant_id="t-rev", local_path=str(self.folder),
+                                                    use_sample_when_empty=True, incremental_enabled=False)).run().to_dict()
+        paths = [str(item.get("path") or "") for item in report.get("files") or []]
+        self.assertTrue(any(path.endswith("payroll.txt") for path in paths), paths)
+        self.assertFalse(any("install-data" in path for path in paths), paths)
+
+
+class ExitReviewConsoleTest(unittest.TestCase):
+
+    def test_a_late_answer_is_never_written_into_the_page(self) -> None:
+        script = Path(__file__).resolve().parents[1].joinpath("frontend", "app.js").read_text(encoding="utf-8")
+        block = script[script.index("// C13: reveal"):script.index("// C13: end of reveal")]
+        answered = block.index("parts.value.textContent = data.value")
+        self.assertIn("if (!stillAsked()) return;", block[:answered], "a closed or reopened dialog drops the answer")
+        self.assertIn("clearRevealedValue();", block[block.index("if (!stillAsked()) return;"):answered],
+                      "the previous countdown is stopped before a new one starts")
+        self.assertIn("if (stillAsked()) parts.error.textContent", block)
 
 
 if __name__ == "__main__":

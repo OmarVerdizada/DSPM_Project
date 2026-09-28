@@ -349,7 +349,7 @@ class TheCredentialRoutesTest(_Case):
                                    json={"username": "x", "password": "Other-pass-779", "domain": "D"})
         self.assertEqual(replaced.status_code, 400)
         self.assertEqual(self.client.delete(f"/api/credentials/{ref}", headers=self.admin).status_code, 400)
-        self.assertEqual(self.vault.resolve("t-one", ref)["password"], "Bind-pass-778")
+        self.assertEqual(self.vault.resolve("t-one", ref, kind="directory")["password"], "Bind-pass-778")
 
     def test_only_a_verified_credential_manager_sees_or_changes_them(self) -> None:
         # the role is read from the account, not the token: a viewer needs its own account
@@ -365,6 +365,8 @@ class TheCredentialRoutesTest(_Case):
         self.assertIsNone(store.read_secret("t-one", ref))
 
 
+@unittest.skipIf(os.getenv("DSPM_DB_URL"), "the CLI runs against its own SQLite configuration file, while this "
+                 "process's store is the suite's PostgreSQL - the credential it saves would not be the CLI's")
 class TheCommandLineTest(unittest.TestCase):
     """`main.py vault ...` as an operator runs it: against the install's configuration file,
     the passphrase from a file, and neither a key nor the passphrase in what it prints."""
@@ -425,6 +427,168 @@ class TheCommandLineTest(unittest.TestCase):
             self.assertNotIn(item["key"], text)
         self.assertNotIn(PASSPHRASE, text)
         self.assertIn('"resealed": 1', text.replace(" ", " "))
+
+
+class ExitReviewKeyOperationsTest(_Case):
+    """Defects the M3 exit review found in the key operations, each pinned."""
+
+    def test_a_second_key_operation_waits_its_turn(self) -> None:
+        # two rotations interleaving could each save a ring the other never saw
+        vault.rotate(actor="test")
+        before = json.loads(self.ring_file.read_text(encoding="utf-8"))
+        with vault_keys.RingLock(self.ring_file):
+            for operation in (lambda: vault.rotate(actor="test"), lambda: vault.rollback(actor="test")):
+                with self.assertRaises(vault_keys.VaultKeyError) as refused:
+                    operation()
+                self.assertIn("Another vault key operation", str(refused.exception))
+        self.assertEqual(json.loads(self.ring_file.read_text(encoding="utf-8")), before, "nothing changed")
+        vault.rotate(actor="test")  # and once it is free, it runs
+        self.assert_everything_opens()
+
+    def test_recovery_refuses_an_escrow_older_than_the_last_rotation(self) -> None:
+        escrow = self.tmp / "escrow.json"
+        vault.export_escrow(escrow, PASSPHRASE, actor="test")
+        vault.rotate(actor="test")
+        self.ring_file.unlink()
+        with self.assertRaises(vault_keys.VaultKeyError) as refused:
+            vault.recover_escrow(escrow, PASSPHRASE, self.ring_file, actor="test")
+        self.assertIn("predates a rotation", str(refused.exception))
+        self.assertFalse(self.ring_file.exists(), "nothing was written")
+        report = vault.recover_escrow(escrow, PASSPHRASE, self.ring_file, accept_missing=True, actor="test")
+        self.assertTrue(report["missing"])
+
+    def test_recovering_over_a_ring_keeps_the_ring_it_replaces(self) -> None:
+        vault.rotate(actor="test")
+        escrow = self.tmp / "escrow.json"
+        vault.export_escrow(escrow, PASSPHRASE, actor="test")
+        replaced = self.ring_file.read_text(encoding="utf-8")
+        report = vault.recover_escrow(escrow, PASSPHRASE, self.ring_file, force=True, actor="test")
+        kept = Path(report["replaced_ring_kept_at"])
+        self.assertTrue(kept.exists())
+        self.assertEqual(kept.parent, self.ring_file.parent, "beside it, in the protected folder")
+        self.assertEqual(kept.read_text(encoding="utf-8"), replaced)
+        vault_keys._CACHE.update({"stamp": None, "ring": None})
+        self.assert_everything_opens()
+
+    def test_a_value_no_key_opens_stops_a_rotation_before_anything_changes(self) -> None:
+        vault.rotate(actor="test")  # the ring file exists from here
+        foreign = Fernet(Fernet.generate_key()).encrypt(b'{"username":"u","password":"p","domain":"D"}').decode()
+        store.save_secret("t-one", "orphan-ref", foreign)
+        ring_before = self.ring_file.read_text(encoding="utf-8")
+        with self.assertRaises(vault_keys.VaultKeyError) as refused:
+            vault.rotate(actor="test")
+        message = str(refused.exception)
+        self.assertIn("secrets tenant_id=t-one secret_id=orphan-ref", message)
+        self.assertIn("Nothing was changed", message)
+        self.assertNotIn(foreign, message)
+        self.assertEqual(self.ring_file.read_text(encoding="utf-8"), ring_before, "no half-started rotation")
+        done = vault.rotate(actor="test", skip_unreadable=True)
+        self.assertEqual(done["left_unreadable"], ["secrets tenant_id=t-one secret_id=orphan-ref"])
+        self.assertEqual(store.read_secret("t-one", "orphan-ref"), foreign, "left exactly as it was")
+        self.assert_everything_opens()
+
+    def test_a_hostile_escrow_cannot_name_an_expensive_key_derivation(self) -> None:
+        escrow = self.tmp / "escrow.json"
+        vault.export_escrow(escrow, PASSPHRASE, actor="test")
+        # p=60000 fits scrypt's 128 MiB limit and would run for most of an hour: the bounds
+        # must refuse it before any derivation starts, so the derivation must never be called.
+        for change in ({"p": 60_000}, {"n": 2 ** 24}, {"n": 3 * 2 ** 14}, {"r": 10 ** 30}):
+            document = json.loads(escrow.read_text(encoding="utf-8"))
+            document["kdf"].update(change)
+            altered = self.tmp / "altered.json"
+            altered.write_text(json.dumps(document), encoding="utf-8")
+            with self.subTest(change=change), \
+                    mock.patch.object(vault_keys, "_derive", side_effect=AssertionError("derived with " + str(change))), \
+                    self.assertRaises(vault_keys.VaultKeyError):
+                vault.verify_escrow(altered, PASSPHRASE)
+
+    def test_a_passphrase_file_with_a_byte_order_mark_is_the_typed_passphrase(self) -> None:
+        with_bom = self.tmp / "passphrase-bom.txt"
+        with_bom.write_text(PASSPHRASE + "\r\n", encoding="utf-8-sig")  # what PowerShell 5.1 writes
+        self.assertEqual(vault_keys.read_passphrase(str(with_bom)), PASSPHRASE)
+        with mock.patch("getpass.getpass", return_value=PASSPHRASE + " "):
+            self.assertEqual(vault_keys.read_passphrase(None), PASSPHRASE, "trimmed the same way as a file")
+
+    def test_verify_opens_what_is_sealed_not_only_its_key_ids(self) -> None:
+        # a value from before key ids names no key; another install's escrow must not pass
+        legacy = Fernet(self.first_key.encode()).encrypt(b'{"username":"u","password":"legacy","domain":"D"}')
+        store.save_secret("t-one", "legacy-ref", legacy.decode())
+        other_key = Fernet.generate_key()
+        other = vault_keys.Ring(vault_keys.key_id(other_key), {vault_keys.key_id(other_key): other_key},
+                                {vault_keys.key_id(other_key): "active"}, {vault_keys.key_id(other_key): ""})
+        foreign = self.tmp / "foreign-escrow.json"
+        foreign.write_text(json.dumps(vault_keys.export_escrow(other, PASSPHRASE)), encoding="utf-8")
+        report = vault.verify_escrow(foreign, PASSPHRASE)
+        self.assertFalse(report["ok"])
+        self.assertGreaterEqual(report["unopenable"], 1)
+
+    def test_a_ring_that_cannot_be_renamed_into_place_leaves_no_key_file_behind(self) -> None:
+        ring = vault.ring()
+        with mock.patch("os.replace", side_effect=PermissionError("in use")), mock.patch("time.sleep"):
+            with self.assertRaises(PermissionError):
+                vault_keys.save_ring(ring, self.tmp / "secrets" / "ring-under-test.json")
+        self.assertEqual([p.name for p in (self.tmp / "secrets").glob("*.tmp")], [])
+
+
+class ExitReviewCredentialKindTest(_Case):
+
+    def test_a_scan_cannot_use_the_directory_service_accounts_password(self) -> None:
+        ref = self.vault.store("t-one", "cn=svc-sentro", "Bind-pass-8812", "", kind="directory")
+        with self.assertRaises(KeyError):
+            self.vault.resolve("t-one", ref)  # what a scan asks for
+        self.assertEqual(self.vault.resolve("t-one", ref, kind="directory")["password"], "Bind-pass-8812")
+        self.assertEqual(self.vault.resolve("t-one", ref, kind=None)["username"], "cn=svc-sentro")
+
+    def test_a_scan_request_naming_it_is_refused(self) -> None:
+        from backend import app as app_module
+
+        ref = self.vault.store("t-one", "cn=svc-sentro", "Bind-pass-8812", "", kind="directory")
+        payload = app_module.ScanRequest(server="files.corp.example", credential_ref=ref)
+        with self.assertRaises(KeyError):
+            app_module._to_config(payload, "t-one")
+
+    def test_revision_29_marks_a_bind_password_saved_before_credential_kinds(self) -> None:
+        ref = self.vault.store("t-one", "cn=svc-sentro", "Bind-pass-8812", "")  # the old default: scan
+        store.save_directory_settings("t-one", True, {"base_dn": "dc=corp,dc=example"}, ref, "test")
+        with store._connect() as conn:
+            store.classify_directory_secrets(conn)
+            store.classify_directory_secrets(conn)  # and again: idempotent
+        self.assertEqual(store.read_secret_record("t-one", ref)["kind"], "directory")
+        with self.assertRaises(KeyError):
+            self.vault.resolve("t-one", ref)
+        others = {item["credential_ref"]: item["kind"] for item in store.list_secret_metadata("t-one")}
+        self.assertEqual(sorted(kind for key, kind in others.items() if key != ref), ["scan", "scan"])
+
+
+class ExitReviewPreflightDomainTest(unittest.TestCase):
+
+    def test_an_account_of_another_domain_is_not_looked_up_in_this_one(self) -> None:
+        from backend import directory
+
+        settings = {"config": {"base_dn": "DC=corp,DC=example"}}
+        with mock.patch("backend.identity.directory_settings", return_value=settings), \
+                mock.patch("backend.identity.bind_password", return_value="pw"), \
+                mock.patch.object(directory, "lookup", side_effect=AssertionError("looked up in the wrong domain")):
+            for account, domain in (("OTHERDOM\\svc-scan", ""), ("svc-scan@other.example", ""),
+                                    ("svc-scan", "OTHERDOM"), ("FILESRV01\\svc-scan", "")):
+                with self.subTest(account=account, domain=domain):
+                    result = credential_preflight.assess("t-one", account, domain)
+                    self.assertNotEqual(result["level"], "ok")
+                    self.assertTrue(any("does not answer for" in finding for finding in result["findings"]))
+
+    def test_this_domains_names_are_still_looked_up(self) -> None:
+        from backend import directory
+
+        settings = {"config": {"base_dn": "DC=corp,DC=example"}}
+        clean = directory.Outcome("no_mapped_group", groups=("CN=File Readers,DC=corp,DC=example",))
+        for account, domain in (("CORP\\svc-scan", ""), ("svc-scan@corp.example", ""), ("svc-scan", "CORP"),
+                                ("svc-scan", "WORKGROUP"), ("svc-scan", "")):
+            with self.subTest(account=account, domain=domain), \
+                    mock.patch("backend.identity.directory_settings", return_value=settings), \
+                    mock.patch("backend.identity.bind_password", return_value="pw"), \
+                    mock.patch.object(directory, "lookup", return_value=clean) as lookup:
+                self.assertEqual(credential_preflight.assess("t-one", account, domain)["level"], "ok")
+                lookup.assert_called_once()
 
 
 if __name__ == "__main__":

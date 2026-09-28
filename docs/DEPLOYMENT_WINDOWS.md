@@ -119,8 +119,17 @@ Production requires PostgreSQL. Provision the database and roles with
 `scripts/provision_postgres.py` and `scripts/db_roles.py` (a migration role that owns the
 schema, an application role without superuser or BYPASSRLS). The URL in
 `-DatabaseUrlFile` is the application role's; for a server on another host it must
-require TLS (`sslmode=verify-full` with the server's CA) - production refuses one that
-does not. The installer runs the schema migrations; the services never change the schema.
+verify the server's certificate (`sslmode=verify-full`, or `verify-ca`, with
+`sslrootcert` naming the server's CA) - production refuses anything less, including no
+`sslmode` at all (libpq then falls back to plaintext) and `require` (which accepts any
+certificate). The same rule holds for `DSPM_BACKUP_DB_URL` and `DSPM_MIGRATE_DEST_URL`.
+The installer runs the schema migrations; the services never change the schema.
+
+Row-level security is FORCEd on every tenant table. Backups and restores name their
+purpose (`app.platform=backup`, admitted on every table since schema revision 30) and run
+with row security on; the rows travel as `INSERT`s, because PostgreSQL does not load
+`COPY` data into a table with row-level security. A PostgreSQL backup taken before
+revision 30 could not be taken at all; take a new one after upgrading.
 
 ## TLS
 
@@ -155,7 +164,13 @@ The services keep running: the new key is active before anything is re-sealed, t
 keeps the old one, and the re-seal is one transaction. The escrow is encrypted with a
 passphrase you type (or give in `--passphrase-file`); keep the escrow and the passphrase
 apart, and both apart from the backups. After losing the secrets folder, `vault escrow
-recover` writes the ring back.
+recover <escrow> --out <DSPM_VAULT_KEYRING>` writes the ring back - and refuses an escrow
+that cannot open what is sealed now (one exported before the last rotation; `--accept-missing`
+recovers it anyway). Recovering over an existing ring needs `--force` and keeps the replaced
+ring beside it. With the ring file present, `DSPM_VAULT_KEY` is no longer required: the ring
+holds the keys. Key operations take a lock, so a second one started meanwhile is refused;
+a value no key in the ring opens stops a rotation before anything changes (`--skip-unreadable`
+leaves such values as they are and names them).
 
 Keep an off-host copy of the secrets folder, held separately from the backups (a backup
 and the key that opens it must not travel together), under the customer's key custody.
@@ -191,9 +206,10 @@ powershell -ExecutionPolicy Bypass -File .\upgrade.ps1 -AllowUnsigned
    `/api/ready`.
 6. If the new release does not become ready, the upgrade rolls back: services stop,
    `current` points at the old release again, the backup from step 3 is restored, and the
-   old release is started. (Automatic restore covers SQLite; on PostgreSQL the services
-   are left stopped with the backup named, and the restore is the documented `pg_restore`
-   procedure, since it replaces the customer's database.)
+   old release is started. On PostgreSQL the restore is one transaction (`pg_restore
+   --clean --single-transaction`); the database's contents it replaces are backed up first.
+   Extensions (`pg_trgm`, `btree_gin`) belong to the database administrator and are left
+   as they are.
 
 The previous release stays under `releases\` for rollback; older ones are removed.
 `<DataRoot>\install.json` records every install, upgrade and uninstall, with the backup

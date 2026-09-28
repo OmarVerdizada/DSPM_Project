@@ -514,6 +514,7 @@ PLATFORM_PURPOSES = {
     "search-indexer": "keeping the optional search index in step with the inventory",
     "migration": "schema revisions and operator data migrations",
     "vault": "re-sealing every tenant's saved credentials and MFA seeds when the vault key rotates (C12)",
+    "backup": "a whole-database backup (pg_dump) and its restore, run by an operator from the host (C11)",
 }
 
 

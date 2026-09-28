@@ -442,8 +442,9 @@ def add_tenant_rls(conn) -> None:
 
 
 # C10: the cross-tenant work each tenant table admits, by purpose (db.PLATFORM_PURPOSES).
-# A table not listed admits only its own tenant's scope - and "migration", which every
-# table admits, because schema revisions and operator data migrations span tenants.
+# A table not listed admits only its own tenant's scope - and "migration" and "backup",
+# which every table admits: schema revisions, operator data migrations and a
+# whole-database backup or restore span tenants by definition.
 # Widening an entry is a security decision; tests/test_platform_scope.py pins this map.
 # The policies are written from it when a revision runs add_tenant_rls, so a change here
 # ships with a revision that re-runs it (the same test compares a live database's policies).
@@ -479,7 +480,8 @@ def tenant_policy_predicate(table: str) -> str:
     scope used to mean everything (C10). NULLIF because a SET LOCAL that ends reverts a
     never-set custom setting to '', not NULL; '*' matches no tenant, so a role default of
     '*' - which db_roles.py once set - grants nothing now."""
-    purposes = sorted(PLATFORM_ACCESS.get(table, frozenset()) | {"migration"})
+    # A whole-database backup and its restore read and write every table, as a migration does.
+    purposes = sorted(PLATFORM_ACCESS.get(table, frozenset()) | {"migration", "backup"})
     listed = ", ".join(f"'{purpose}'" for purpose in purposes)
     return (f"tenant_id = NULLIF(current_setting('app.tenant_id', true), '') "
             f"OR NULLIF(current_setting('app.platform', true), '') IN ({listed})")
@@ -1099,6 +1101,32 @@ _SCAN_SOURCES_DDL = """CREATE TABLE IF NOT EXISTS scan_sources (
             recorded_at TEXT NOT NULL,
             PRIMARY KEY (tenant_id, scan_id)
         );"""
+
+
+def admit_whole_database_backup(conn) -> None:
+    """Revision 0030: the policies admit the "backup" purpose on every tenant table.
+
+    Since C10 FORCEd row-level security, the table owner pg_dump connects as was subject
+    to the policies with no scope - so pg_dump failed on the first table, and a PostgreSQL
+    install could take no backup at all (M3 exit review). The dump and the restore now run
+    with row security on under this purpose, as a migration runs under "migration".
+    Rollback: restore the pre-upgrade backup."""
+    add_tenant_rls(conn)
+
+
+def classify_directory_secrets(conn) -> None:
+    """Revision 0029: the directory service account's password is a directory secret.
+
+    Revision 0027 gave `secrets` a kind with 'scan' as its default, and a bind password
+    saved between revisions 0026 and 0027 kept that default - so a scan could be pointed
+    at a target with it, and a credential manager could replace or delete it (M3 exit
+    review). Every secret a workspace's directory settings name is marked 'directory'.
+    Data only, idempotent; rollback: restore the pre-upgrade backup (older code ignores
+    the kind)."""
+    conn.execute(
+        "UPDATE secrets SET kind = 'directory' WHERE kind <> 'directory' AND EXISTS ("
+        "SELECT 1 FROM directory_settings d WHERE d.tenant_id = secrets.tenant_id "
+        "AND d.bind_secret_ref = secrets.secret_id AND d.bind_secret_ref <> '')")
 
 
 def add_scan_sources(conn) -> None:
@@ -9126,12 +9154,19 @@ _SEALED_COLUMNS = (
 
 def vault_sealed_values() -> list[str]:
     """Every sealed value in every tenant (for the key ring's status and escrow check)."""
-    values: list[str] = []
+    return [value for _table, _keys, value in vault_sealed_rows()]
+
+
+def vault_sealed_rows() -> list[tuple[str, dict, str]]:
+    """Every sealed value with where it lives: (table, its key columns, the value). The key
+    columns identify a row (tenant and reference, or account) - never a secret."""
+    rows: list[tuple[str, dict, str]] = []
     with _connect() as conn:
-        for table, _keys, column in _SEALED_COLUMNS:
-            values.extend(str(row["v"]) for row in conn.execute(
-                f"SELECT {column} AS v FROM {table} WHERE {column} <> ''").fetchall())  # noqa: S608 - fixed names
-    return values
+        for table, keys, column in _SEALED_COLUMNS:
+            for row in conn.execute(
+                    f"SELECT {', '.join(keys)}, {column} AS v FROM {table} WHERE {column} <> ''").fetchall():  # noqa: S608 - fixed names
+                rows.append((table, {key: row[key] for key in keys}, str(row["v"])))
+    return rows
 
 
 def reseal_vault_values(transform) -> int:
@@ -9159,12 +9194,19 @@ def reseal_vault_values(transform) -> int:
 
 
 def read_secret(tenant_id: str, secret_id: str) -> str | None:
+    record = read_secret_record(tenant_id, secret_id)
+    return record["ciphertext"] if record else None
+
+
+def read_secret_record(tenant_id: str, secret_id: str) -> dict | None:
+    """The sealed value and what it is for ("scan", or "directory" - the directory sign-in
+    service account's password)."""
     with _connect() as conn:
         row = conn.execute(
-            "SELECT ciphertext FROM secrets WHERE tenant_id = ? AND secret_id = ?",
+            "SELECT ciphertext, kind FROM secrets WHERE tenant_id = ? AND secret_id = ?",
             (tenant_id, secret_id),
         ).fetchone()
-    return str(row["ciphertext"]) if row else None
+    return {"ciphertext": str(row["ciphertext"]), "kind": str(row["kind"] or "scan")} if row else None
 
 
 def delete_secret(tenant_id: str, secret_id: str) -> None:
@@ -9665,6 +9707,22 @@ def record_login_failure(rate_key: str, window_seconds: int) -> None:
         with _connect() as conn:
             _prune_throttle_rows(conn, rate_key, cutoff)
             conn.execute("INSERT INTO login_failures (rate_key, timestamp) VALUES (?, ?)", (rate_key, now))
+
+
+def take_throttle_slot(rate_key: str, window_seconds: int, limit: int) -> bool:
+    """Count an attempt and answer whether it is within `limit`, in one locked step (the
+    check and the record, apart, let parallel requests through together)."""
+    now = time.time()
+    cutoff = now - max(1, int(window_seconds))
+    with _lock:
+        with _connect() as conn:
+            _prune_throttle_rows(conn, rate_key, cutoff)
+            used = int(conn.execute("SELECT COUNT(*) FROM login_failures WHERE rate_key = ? AND timestamp >= ?",
+                                    (rate_key, cutoff)).fetchone()[0])
+            if used >= limit:
+                return False
+            conn.execute("INSERT INTO login_failures (rate_key, timestamp) VALUES (?, ?)", (rate_key, now))
+    return True
 
 
 def clear_login_failures(rate_key: str) -> None:
@@ -10233,7 +10291,7 @@ PLATFORM_FUNCTIONS = {
     "allocate_account_key": "auth", "update_directory_account": "auth", "get_user_mfa": "auth",
     "consume_mfa_step": "auth", "consume_recovery_code": "auth",
     "claim_due_schedules": "scheduler",
-    "vault_sealed_values": "vault", "reseal_vault_values": "vault",
+    "vault_sealed_values": "vault", "vault_sealed_rows": "vault", "reseal_vault_values": "vault",
     "claim_audit_outbox": "siem", "delete_audit_outbox": "siem", "retry_audit_outbox": "siem",
     "audit_outbox_status": "siem", "reset_audit_outbox_backoff": "siem",
     "_prune_audit_chains": "housekeeping", "prune_event_tables": "housekeeping",
@@ -10248,7 +10306,7 @@ SCOPED_INSIDE = {"record_job", "reset_default_tenant_data", "delete_tenant_with_
 
 NO_TENANT_TABLES = {
     "_connect", "claim_housekeeping_run", "clear_login_failures", "count_login_failures",
-    "record_login_failure", "consume_one_time_token", "is_token_revoked", "revoke_token_jti",
+    "record_login_failure", "take_throttle_slot", "consume_one_time_token", "is_token_revoked", "revoke_token_jti",
     "consume_refresh_token", "count_refresh_tokens_for_user", "issue_refresh_token",
     "revoke_refresh_family", "revoke_refresh_tokens_for_user", "count_sessions_for_user",
     "forget_session", "record_session", "session_last_seen", "touch_session",

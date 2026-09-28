@@ -39,6 +39,8 @@ class RevealRefused(Exception):
         super().__init__(message)
         self.code = code
         self.status = status
+        # where the value would have come from, once known - for the audit row
+        self.location: dict = {}
 
 
 def _refuse(code: str, message: str, status: int = 409):
@@ -65,14 +67,39 @@ def _identity(asset: dict) -> tuple[str, int]:
     return digest, size
 
 
+def _is_product_file(path: Path) -> bool:
+    from discovery.discovery_engine import product_private_paths
+
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return True
+    for private in product_private_paths():
+        try:
+            root = private.resolve()
+        except OSError:
+            continue
+        if resolved == root or root in resolved.parents:
+            return True
+    return False
+
+
 def _read_local(asset: dict) -> tuple[str, str, int]:
     from collectors.file_scanner import read_text_preview_and_sha256
 
     path = Path(str(asset.get("path") or ""))
+    if _is_product_file(path):
+        # The install's own data (the shared server log, the database, keys) is never a
+        # source a value is revealed from, whatever an older scan recorded.
+        _refuse("product_file", "Values are not revealed from Sentro's own data folder.")
     if not path.is_file():
         _refuse("source_missing", "The file is no longer where the scan found it.")
-    text, digest = read_text_preview_and_sha256(path)
-    return text, digest, path.stat().st_size
+    try:
+        size = path.stat().st_size
+        text, digest = read_text_preview_and_sha256(path)
+    except FileNotFoundError:
+        _refuse("source_missing", "The file is no longer where the scan found it.")
+    return text, digest, size
 
 
 def _read_smb(tenant_id: str, asset: dict, source: dict) -> tuple[str, str, int]:
@@ -94,7 +121,16 @@ def _read_smb(tenant_id: str, asset: dict, source: dict) -> tuple[str, str, int]
     try:
         if not scanner.connect():
             _refuse("source_unreachable", "The file server could not be reached with the scan's saved credential.")
-        _identity_digest, size = _identity(asset)
+        try:
+            # The size the share reports NOW: reading the size the scan recorded would hash
+            # only that many bytes, and a file that grew since would pass as unchanged.
+            size = int(getattr(scanner.connection.getAttributes(share, path), "file_size", -1))
+        except Exception:
+            _refuse("source_missing", "The file is no longer where the scan found it on the share.")
+        _identity_digest, recorded = _identity(asset)
+        if recorded and size != recorded:
+            _refuse("file_changed", "The file has changed since the scan. Scan it again; nothing is revealed from a "
+                                    "file that is not the one the finding came from.")
         data = scanner._acquire_file_data(share, path, detect_extension(Path(path)), size)
     finally:
         try:
@@ -172,11 +208,18 @@ def reveal(tenant_id: str, finding_id: str, fingerprint: str, reason: str) -> di
     if asset is None:
         _refuse("asset_gone", "The file this finding came from is no longer in the inventory.")
     source = store.get_scan_source(tenant_id, location.get("scan_id") or "")
-    text = reread(tenant_id, asset, source)
-    for rule_name, value, candidate in candidates(text):
-        if candidate == fingerprint:
-            return {"finding_id": finding_id, "type": finding.get("type") or rule_name, "fingerprint": fingerprint,
-                    "value": value, "masked": mask(value, str(finding.get("data_class") or "generic")),
-                    "location": {"source": asset.get("source"), "path": asset.get("path"), "share": asset.get("share")}}
-    _refuse("not_found_again", "The file is unchanged, but the value was not found in it again; nothing is revealed.")
+    where = {"source": asset.get("source") or (source or {}).get("source_kind") or "",
+             "server": (source or {}).get("server") or _server_from_reuse_key(str(asset.get("reuse_key") or "")),
+             "share": asset.get("share") or "", "path": asset.get("path") or ""}
+    try:
+        text = reread(tenant_id, asset, source)
+        for rule_name, value, candidate in candidates(text):
+            if candidate == fingerprint:
+                return {"finding_id": finding_id, "type": finding.get("type") or rule_name, "fingerprint": fingerprint,
+                        "value": value, "masked": mask(value, str(finding.get("data_class") or "generic")),
+                        "location": where}
+        _refuse("not_found_again", "The file is unchanged, but the value was not found in it again; nothing is revealed.")
+    except RevealRefused as refused:
+        refused.location = where
+        raise
     return {}  # unreachable

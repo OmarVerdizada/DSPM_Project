@@ -4976,9 +4976,15 @@ document.querySelector("#reveal-form")?.addEventListener("submit", async (event)
   }
   parts.error.textContent = "";
   parts.submit.disabled = true;
+  // The dialog this request belongs to. A response that arrives after it closed, or after
+  // it was reopened for another value, is dropped - never written into the page.
+  const asked = revealTarget;
+  const stillAsked = () => revealTarget === asked && !parts.modal.classList.contains("hidden");
   try {
-    const data = await api(`/api/findings/${encodeURIComponent(revealTarget.findingId)}/reveal`,
-      { fingerprint: revealTarget.fingerprint, reason });
+    const data = await api(`/api/findings/${encodeURIComponent(asked.findingId)}/reveal`,
+      { fingerprint: asked.fingerprint, reason });
+    if (!stillAsked()) return;
+    clearRevealedValue();
     parts.value.textContent = data.value;
     parts.result.hidden = false;
     let left = REVEAL_SHOW_SECONDS;
@@ -4993,7 +4999,7 @@ document.querySelector("#reveal-form")?.addEventListener("submit", async (event)
       parts.countdown.textContent = `Hidden again in ${left} s.`;
     }, 1000);
   } catch (error) {
-    parts.error.textContent = String(error.message || error).replace(/^\d+:\s*/, "");
+    if (stillAsked()) parts.error.textContent = String(error.message || error).replace(/^\d+:\s*/, "");
   } finally {
     parts.submit.disabled = false;
   }

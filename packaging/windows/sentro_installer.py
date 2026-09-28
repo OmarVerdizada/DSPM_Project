@@ -399,9 +399,46 @@ def _grants(entries: list[str]) -> list[str]:
     return [item for entry in entries for item in ("/grant:r", entry)]
 
 
+# Who may own a folder the installer finds already there: Administrators, SYSTEM,
+# TrustedInstaller - or the administrator running the install (Windows gives objects an
+# elevated member of Administrators creates to that account on some editions).
+_TRUSTED_OWNER_SIDS = {"S-1-5-32-544", "S-1-5-18",
+                       "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"}
+
+
+def folder_owner(folder: Path, runner: Runner) -> tuple[str, str]:
+    """(the folder's owner SID, the SID running the installer). The path goes through the
+    environment, never into the command text."""
+    script = ("(Get-Acl -LiteralPath $env:SENTRO_OWNER_OF).GetOwner("
+              "[System.Security.Principal.SecurityIdentifier]).Value; "
+              "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value")
+    completed = runner.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                           env={**os.environ, "SENTRO_OWNER_OF": str(folder)})
+    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    return (lines + ["", ""])[0], (lines + ["", ""])[1]
+
+
+def refuse_foreign_folders(layout: Layout, runner: Runner) -> None:
+    """A standard user may create folders under ProgramData. One who created the data root
+    (or the install root) before the install would still own it afterwards - and an owner
+    can always change a folder's permissions, then read the secrets or plant a key. Such a
+    folder is refused, never adopted (M3 exit review)."""
+    for folder in (layout.data_root, layout.install_root):
+        if not folder.exists():
+            continue
+        owner, installing = folder_owner(folder, runner)
+        if owner not in _TRUSTED_OWNER_SIDS and owner != installing:
+            raise InstallError(
+                f"{folder} already exists and is owned by {owner or 'an unknown account'}, not by Administrators "
+                f"or SYSTEM: someone other than an administrator created it, and could change its permissions "
+                f"after the install. Check what it holds, remove it, and install again.")
+
+
 def lock_down(layout: Layout, runner: Runner) -> None:
     """Before any secret is written: the data root belongs to Administrators and SYSTEM
-    alone - nothing inherited from ProgramData, where every user may read."""
+    alone - owned by Administrators, nothing inherited from ProgramData, where every user
+    may read."""
+    runner.run(["icacls", layout.data_root, "/setowner", _ADMINS, "/T", "/C", "/Q"])
     for folder in (layout.data_root, layout.data_root / "config", layout.secrets):
         runner.run(["icacls", folder, "/inheritance:r", *_grants(_OWNERS)])
 
@@ -453,6 +490,7 @@ def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file:
     if mode == "production" and db_url_file is None and not (layout.secrets / "db_url").exists():
         raise InstallError("A production install needs PostgreSQL: pass -DatabaseUrlFile with a file holding "
                            "the application role's URL (sslmode=verify-full for a remote server).")
+    refuse_foreign_folders(layout, runner)
     for folder in [layout.install_root, layout.releases, layout.bin, *layout.data_dirs()]:
         folder.mkdir(parents=True, exist_ok=True)
     lock_down(layout, runner)

@@ -29,7 +29,6 @@ This module imports nothing from the product: it runs before the rest is importe
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, MutableMapping
@@ -288,9 +287,14 @@ REMOVED = {
 }
 
 
+# Test-suite switches that hold a credential: never shown by `config check`, redacted
+# from logs like any other secret.
+TEST_ONLY_SECRETS = {"DSPM_MEILISEARCH_LIVE_KEY"}
+
+
 def is_secret(name: str) -> bool:
     setting = SETTINGS.get(name)
-    return bool(setting and setting.kind == "secret")
+    return bool(setting and setting.kind == "secret") or name in TEST_ONLY_SECRETS
 
 
 def is_production_value(value: str | None) -> bool:
@@ -479,32 +483,63 @@ def production_problems(effective: Effective) -> list[str]:
     for name in sorted(TEST_ONLY):
         if effective.values.get(name) and effective.values[name].value:
             problems.append(f"{name} is a test-suite switch and is refused in production.")
+    keyring = str(get("DSPM_VAULT_KEYRING") or "").strip()
     for name in ("DSPM_SECRET_KEY", "DSPM_VAULT_KEY", "DSPM_ARTIFACT_KEY", "DSPM_BACKUP_KEY",
                  "DSPM_EVIDENCE_HMAC_KEY", "DSPM_ADMIN_PASSWORD", "DSPM_DB_URL"):
+        if name == "DSPM_VAULT_KEY" and keyring and Path(keyring).exists():
+            continue  # C12: the key ring holds the vault's keys; the single key is not read
         if not get(name):
             problems.append(f"{name} (or {name}{SECRET_FILE_SUFFIX}) must be set in production.")
     origins = [item.strip() for item in (get("DSPM_CORS_ORIGINS") or "").split(",") if item.strip()]
     if "*" in origins:
         problems.append("DSPM_CORS_ORIGINS=* is refused in production: name the console's origin.")
     url = get("DSPM_DB_URL") or ""
-    if url:
-        if not url.startswith(("postgres://", "postgresql://")):
-            problems.append("DSPM_DB_URL must be a PostgreSQL URL in production.")
-        else:
-            host = _url_host(url)
-            if not _loopback(host) and re.search(r"sslmode=(disable|allow|prefer)\b", url):
-                problems.append("DSPM_DB_URL reaches a remote PostgreSQL without requiring TLS "
-                                "(sslmode=require, verify-ca or verify-full).")
+    if url and not url.startswith(("postgres://", "postgresql://")):
+        problems.append("DSPM_DB_URL must be a PostgreSQL URL in production.")
+    for name in ("DSPM_DB_URL", "DSPM_BACKUP_DB_URL", "DSPM_MIGRATE_DEST_URL"):
+        value = get(name) or ""
+        if value.startswith(("postgres://", "postgresql://")) and _remote_without_verified_tls(value):
+            problems.append(f"{name} reaches a remote PostgreSQL without verifying its certificate: set "
+                            "sslmode=verify-full (or verify-ca) with sslrootcert naming the server's CA.")
     return problems
 
 
-def _url_host(url: str) -> str:
-    from urllib.parse import urlsplit
+def _url_hosts(url: str) -> list[str]:
+    """Every host a PostgreSQL URL may connect to: the authority (one or several,
+    comma-separated) and any host/hostaddr query parameter - libpq honours both."""
+    from urllib.parse import parse_qs, urlsplit
 
     try:
-        return (urlsplit(url).hostname or "").lower()
+        parts = urlsplit(url)
     except ValueError:
-        return ""
+        return ["(unparseable)"]
+    hosts: list[str] = []
+    for item in parts.netloc.rsplit("@", 1)[-1].split(","):
+        item = item.strip()
+        host = item[1:].split("]", 1)[0] if item.startswith("[") else item.split(":", 1)[0]
+        if host:
+            hosts.append(host.lower())
+    query = parse_qs(parts.query)
+    for key in ("host", "hostaddr"):
+        for value in query.get(key, []):
+            hosts.extend(item.strip().lower() for item in value.split(",") if item.strip())
+    return hosts
+
+
+def _remote_without_verified_tls(url: str) -> bool:
+    """A host that is neither loopback nor a local socket directory, reached with anything
+    less than a verified certificate. No sslmode means libpq's `prefer`, which falls back to
+    plaintext; `require` encrypts but accepts any certificate."""
+    from urllib.parse import parse_qs, urlsplit
+
+    remote = [host for host in _url_hosts(url) if not (_loopback(host) or host.startswith("/"))]
+    if not remote:
+        return False
+    try:
+        mode = (parse_qs(urlsplit(url).query).get("sslmode") or [""])[-1].strip().lower()
+    except ValueError:
+        mode = ""
+    return mode not in {"verify-ca", "verify-full"}
 
 
 def apply(effective: Effective, environ: MutableMapping[str, str]) -> None:
@@ -572,4 +607,5 @@ def secret_values(environ: Mapping[str, str] | None = None) -> list[str]:
     """The configured secret values (for log redaction), longest first."""
     env = os.environ if environ is None else environ
     found = {str(env.get(name) or "").strip() for name, setting in SETTINGS.items() if setting.kind == "secret"}
+    found |= {str(env.get(name) or "").strip() for name in TEST_ONLY_SECRETS}
     return sorted((value for value in found if len(value) >= 6), key=len, reverse=True)

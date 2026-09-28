@@ -306,9 +306,7 @@ def backup_command(args: argparse.Namespace) -> int:
         if not args.yes:
             print("Restoring replaces the database (the current one is kept beside it). Add --yes to do it.")
             return 2
-        from backend import store
-
-        result = backup.restore_sqlite_backup(Path(args.manifest), Path(store.DB_PATH))
+        result = backup.restore_backup(Path(args.manifest))
         emit(result, f"restored {result['restored']} at schema revision {result['schema_revision']}; "
                      f"the previous database is {result['previous_database']}")
         return 0
@@ -333,17 +331,19 @@ def vault_command(args: argparse.Namespace) -> int:
         if args.vault_command == "status":
             result = vault.status()
         elif args.vault_command == "rotate":
-            result = vault.rotate(resume=args.resume)
+            result = vault.rotate(resume=args.resume, skip_unreadable=args.skip_unreadable)
         elif args.vault_command == "rollback":
-            result = vault.rollback()
+            result = vault.rollback(skip_unreadable=args.skip_unreadable)
         elif getattr(args, "escrow_command", "") == "export":
             result = vault.export_escrow(Path(args.out), vault_keys.read_passphrase(args.passphrase_file, confirm=True))
         elif getattr(args, "escrow_command", "") == "verify":
             result = vault.verify_escrow(Path(args.file), vault_keys.read_passphrase(args.passphrase_file))
         else:
             result = vault.recover_escrow(Path(args.file), vault_keys.read_passphrase(args.passphrase_file),
-                                          Path(args.out), force=args.force)
-    except vault_keys.VaultKeyError as refused:
+                                          Path(args.out), force=args.force, accept_missing=args.accept_missing)
+    except (vault_keys.VaultKeyError, OSError) as refused:
+        # OSError: an unreadable escrow or passphrase file. The message names the file,
+        # never its content.
         print(f"REFUSED: {refused}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=None if args.json else 2))
@@ -427,7 +427,10 @@ def build_parser() -> argparse.ArgumentParser:
     vault_commands.add_parser("status", help="The active key, the keys held, and what each seals.")
     rotate_parser = vault_commands.add_parser("rotate", help="Make a new key active and re-seal everything with it.")
     rotate_parser.add_argument("--resume", action="store_true", help="Finish a rotation that stopped part-way.")
-    vault_commands.add_parser("rollback", help="Make the previous key active again and re-seal with it.")
+    rollback_parser = vault_commands.add_parser("rollback", help="Make the previous key active again and re-seal with it.")
+    for command in (rotate_parser, rollback_parser):
+        command.add_argument("--skip-unreadable", action="store_true",
+                             help="Leave values no key in the ring opens as they are (they stay unreadable).")
     escrow_parser = vault_commands.add_parser("escrow", help="The key ring, encrypted with a passphrase.")
     escrow_commands = escrow_parser.add_subparsers(dest="escrow_command", required=True)
     escrow_export = escrow_commands.add_parser("export", help="Write an escrow of the key ring.")
@@ -437,11 +440,13 @@ def build_parser() -> argparse.ArgumentParser:
     escrow_recover = escrow_commands.add_parser("recover", help="Write the key ring back from an escrow.")
     escrow_recover.add_argument("file")
     escrow_recover.add_argument("--out", required=True, help="The key ring file to write (DSPM_VAULT_KEYRING).")
-    escrow_recover.add_argument("--force", action="store_true", help="Replace an existing key ring.")
+    escrow_recover.add_argument("--force", action="store_true", help="Replace an existing key ring (it is kept beside).")
+    escrow_recover.add_argument("--accept-missing", action="store_true",
+                                help="Recover an escrow that cannot open everything sealed now.")
     for command in (escrow_export, escrow_verify, escrow_recover):
         command.add_argument("--passphrase-file", default=None,
                              help="A file whose first line is the passphrase (else it is asked for).")
-    for command in (vault_commands.choices["status"], rotate_parser, vault_commands.choices["rollback"],
+    for command in (vault_commands.choices["status"], rotate_parser, rollback_parser,
                     escrow_export, escrow_verify, escrow_recover):
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=vault_command)
@@ -453,7 +458,8 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--keep", type=int, default=0, help="Then keep only the newest N backup sets.")
     verify_backup_parser = backup_commands.add_parser("verify", help="Check a backup set against its manifest.")
     verify_backup_parser.add_argument("manifest")
-    restore_parser = backup_commands.add_parser("restore", help="Put a SQLite backup in place of the database.")
+    restore_parser = backup_commands.add_parser(
+        "restore", help="Put a backup in place of the database (SQLite, or PostgreSQL in one transaction).")
     restore_parser.add_argument("manifest")
     restore_parser.add_argument("--yes", action="store_true", help="Confirm replacing the database.")
     list_parser = backup_commands.add_parser("list", help="The backup sets in DSPM_BACKUP_DIR.")

@@ -438,6 +438,13 @@ def _token_jti(token: str) -> str:
         return ""
 
 
+# The only header an access token has. verify_token requires it byte for byte: the MFA
+# challenge ("mfa.<payload>") and the download token ("artifact_dl.<payload>") are
+# signed with the same key over "<prefix>.<payload>", so without this check either one,
+# given its prefix back as a header, verified as a session (M3 exit review).
+_TOKEN_HEADER = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
+
+
 def create_token(subject: str, role: str, tenant_id: str, *, mfa_verified: bool = False) -> str:
     """An access token and its session row. `mfa_verified` records that the session proved a
     second factor; every production caller states it (sign-in, MFA completion, refresh)."""
@@ -450,9 +457,8 @@ def create_token(subject: str, role: str, tenant_id: str, *, mfa_verified: bool 
         "exp": now + TOKEN_TTL_SECONDS,
         "jti": secrets.token_hex(8),
     }
-    header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     payload = _b64url(json.dumps(claims, separators=(",", ":")).encode())
-    message = f"{header}.{payload}"
+    message = f"{_TOKEN_HEADER}.{payload}"
     # C1: every issued token is a session row, so the idle timeout survives a restart,
     # a password change can end all of them, and the per-account cap has something to
     # count. The token itself is unchanged - an install upgrading mid-session keeps
@@ -467,6 +473,8 @@ def verify_token(token: str) -> Principal:
         if len(parts) != 3:
             raise ValueError("malformed token")
         header, payload, signature = parts
+        if not hmac.compare_digest(header, _TOKEN_HEADER):
+            raise ValueError("not an access token")
         message = f"{header}.{payload}"
         if not hmac.compare_digest(_sign(message), signature):
             raise ValueError("bad signature")
@@ -700,9 +708,15 @@ def read_mfa_challenge(token: str, purposes: tuple[str, ...]) -> dict | None:
         return None
     if int(claims.get("exp", 0)) < int(time.time()) or not claims.get("jti"):
         return None
-    if is_token_revoked(f"mfa:{claims['jti']}"):
+    if is_token_revoked(_spent_challenge_key(claims["jti"])):
         return None
     return claims
+
+
+def _spent_challenge_key(jti: str) -> str:
+    # consume_one_time_token files a spent id under "dl:<id>"; the check must read the
+    # same key, or a spent challenge reads as unspent (M3 exit review).
+    return f"dl:mfa:{jti}"
 
 
 def spend_mfa_challenge(claims: dict) -> bool:

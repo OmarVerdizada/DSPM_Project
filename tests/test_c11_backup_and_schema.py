@@ -179,6 +179,139 @@ class TheDumpPasswordTest(unittest.TestCase):
         self.assertEqual(env.get("PGPASSWORD"), "S3cret-pw")
 
 
+class ARestoredArtifactStoreTest(unittest.TestCase):
+    """M3 exit review: the archive names an object <tenant>/<id>; the store keeps it under a
+    fan-out folder. A restore copied objects back without it - where nothing reads them."""
+
+    def test_restored_objects_are_where_the_store_reads_them(self) -> None:
+        from cryptography.fernet import Fernet
+
+        from backend import artifacts
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        environment = {"DSPM_ARTIFACT_DIR": str(tmp / "store"), "DSPM_ARTIFACT_KEY": Fernet.generate_key().decode(),
+                       "DSPM_BACKUP_KEY": Fernet.generate_key().decode()}
+        with mock.patch.dict(os.environ, environment):
+            ref = artifacts.put_bytes("c11-tenant", b"a report the recovery must bring back")
+            captured = backup.capture_artifacts(tmp / "set.artifacts.tar")
+            manifest = tmp / "set.manifest.json"
+            manifest.write_text(json.dumps({"artifacts": captured}), encoding="utf-8")
+            shutil.move(str(tmp / captured["file"]), str(tmp / "kept.enc"))
+            shutil.rmtree(tmp / "store")  # the disaster: the store is gone
+            shutil.move(str(tmp / "kept.enc"), str(tmp / captured["file"]))
+            added = backup._add_artifact_objects(manifest, json.loads(manifest.read_text(encoding="utf-8")), None)
+            self.assertEqual(added, 1)
+            self.assertTrue(artifacts.object_path("c11-tenant", ref.content_id).exists())
+            self.assertEqual(artifacts.get_bytes("c11-tenant", ref.content_id), b"a report the recovery must bring back")
+
+
+class APostgresBackupUnderRowSecurityTest(unittest.TestCase):
+    """M3 exit review: C10 FORCEd row-level security on tables the application role owns, so
+    pg_dump - connecting as that owner - was refused at the first table, and the row counts
+    read 0 in every tenant table. The dump and restore now run with row security ON under a
+    named purpose the policies admit, and the rows travel as INSERTs (PostgreSQL refuses
+    COPY FROM into a table with row-level security)."""
+
+    def _calls(self, function, *args):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((list(command), kwargs.get("env") or {}))
+            raise RuntimeError("stop after the call")
+
+        with mock.patch.object(backup, "capture_table_counts", return_value={}), \
+                mock.patch.object(backup, "_pg_schema_revision", return_value=30), \
+                mock.patch.object(backup, "verify_backup", return_value={"ok": True, "problems": []}), \
+                mock.patch.object(backup, "create_logical_backup", wraps=backup.create_logical_backup), \
+                mock.patch.object(backup, "decrypt_file", return_value="digest"), \
+                mock.patch.object(backup.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(RuntimeError):
+                function(*args)
+        return calls
+
+    def test_the_dump_names_the_backup_purpose_and_writes_inserts(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            command, env = self._calls(backup.create_logical_backup, "postgresql://app:pw@db01/sentro", Path(out))[0]
+        self.assertIn("--enable-row-security", command)
+        self.assertIn("--inserts", command)
+        self.assertIn("-c app.platform=backup", env.get("PGOPTIONS", ""))
+
+    def test_a_backup_written_as_copy_data_is_refused_before_anything_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as out:
+            manifest = Path(out) / "old.manifest.json"
+            manifest.write_text(json.dumps({"kind": "logical", "format": "pg_dump-custom+chunked-fernet",
+                                            "file": "x.enc"}), encoding="utf-8")
+            with mock.patch.object(backup.subprocess, "run", side_effect=AssertionError("nothing may run")):
+                with self.assertRaises(RuntimeError) as refused:
+                    backup.restore_postgres_backup(manifest, "postgresql://app:pw@127.0.0.1/sentro")
+        self.assertIn("COPY data", str(refused.exception))
+
+    def test_the_counts_are_read_under_the_backup_purpose(self) -> None:
+        import sys as _sys
+        import types
+
+        seen = []
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+            def execute(self, sql, params=None):
+                seen.append((sql, params))
+                rows = [("assets",)] if "pg_tables" in sql else [(7,)]
+                return types.SimpleNamespace(fetchall=lambda: rows, fetchone=lambda: rows[0])
+
+        fake = types.SimpleNamespace(connect=lambda *a, **k: Connection())
+        with mock.patch.dict(_sys.modules, {"psycopg": fake}):
+            counts = backup.capture_table_counts("postgresql://app:pw@127.0.0.1/sentro")
+        self.assertEqual(counts, {"assets": 7})
+        self.assertEqual(seen[0], ("SELECT set_config('app.platform', %s, false)", ("backup",)),
+                         "the purpose is named before any table is counted")
+
+    def test_every_tenant_table_admits_the_backup(self) -> None:
+        for table in ("assets", "audit_events", "secrets", "scan_sources", "user_mfa"):
+            self.assertIn("'backup'", store.tenant_policy_predicate(table), table)
+
+
+@unittest.skipUnless(os.getenv("DSPM_DB_URL", "").endswith("/sentro_test"), "the disposable PostgreSQL test database")
+class APostgresBackupRestoresTest(unittest.TestCase):
+    """The drill on the disposable sentro_test database: back up, change, restore, and the
+    rows are the backup's - with FORCEd row-level security still on."""
+
+    def test_backup_change_restore(self) -> None:
+        import psycopg
+
+        from backend import db
+
+        url = os.environ["DSPM_DB_URL"]
+        store.create_tenant("c11-pg-drill", "drill")
+        store.audit("c11-pg-drill", "drill", "drill.kept", {"n": 1})
+        out = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, out, True)
+        with mock.patch.dict(os.environ, {"DSPM_BACKUP_DIR": str(out)}):
+            manifest = backup.create_logical_backup(url, out)
+            self.assertTrue(backup.verify_backup(manifest)["ok"])
+            recorded = json.loads(manifest.read_text(encoding="utf-8"))["table_counts"]
+            self.assertGreaterEqual(recorded["audit_events"], 1, "counts are read under the purpose, not as 0")
+            store.audit("c11-pg-drill", "drill", "drill.after", {"n": 2})
+            result = backup.restore_postgres_backup(manifest, url, out / "artifacts")
+        self.assertEqual(result["tables_differing"], [])
+        self.assertTrue(Path(result["previous_database"]).exists(), "the replaced contents are backed up first")
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute("SELECT set_config('app.platform', 'backup', false)")
+            actions = {row[0] for row in conn.execute(
+                "SELECT action FROM audit_events WHERE tenant_id = 'c11-pg-drill'").fetchall()}
+            forced = conn.execute("SELECT relforcerowsecurity FROM pg_class WHERE relname = 'audit_events'").fetchone()[0]
+        self.assertIn("drill.kept", actions)
+        self.assertNotIn("drill.after", actions)
+        self.assertTrue(forced, "row-level security is still FORCEd")
+        del db
+
+
 class TheRunningSchemaGuardTest(unittest.TestCase):
     """C0.4: a process started at revision N refuses a live N+1 database within one check."""
 

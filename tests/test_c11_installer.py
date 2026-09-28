@@ -151,6 +151,52 @@ class TheConfigurationItWritesTest(_LayoutCase):
         self.assertIn("PostgreSQL", str(refused.exception))
 
 
+class AFolderSomeoneElseCreatedTest(_LayoutCase):
+    """A standard user may create folders under ProgramData; one who pre-created the data
+    root would own it after the install and could open its secrets (M3 exit review)."""
+
+    def _runner(self, owner: str, installing: str = "S-1-5-21-10-20-30-500"):
+        issued: list[list[str]] = []
+
+        class Answers(installer.Runner):
+            def run(self, args, **kwargs):
+                issued.append([str(arg) for arg in args])
+                if str(args[0]) == "powershell":
+                    return subprocess.CompletedProcess(args, 0, f"{owner}\n{installing}\n", "")
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+        return Answers(), issued
+
+    def test_a_data_root_owned_by_a_user_is_refused(self) -> None:
+        self.layout.data_root.mkdir(parents=True)
+        runner, _issued = self._runner("S-1-5-21-10-20-30-1001")
+        with self.assertRaises(installer.InstallError) as refused:
+            installer.refuse_foreign_folders(self.layout, runner)
+        self.assertIn("owned by S-1-5-21-10-20-30-1001", str(refused.exception))
+
+    def test_administrators_system_or_the_installing_account_may_own_it(self) -> None:
+        self.layout.data_root.mkdir(parents=True)
+        for owner in ("S-1-5-32-544", "S-1-5-18", "S-1-5-21-10-20-30-500"):
+            runner, _issued = self._runner(owner)
+            installer.refuse_foreign_folders(self.layout, runner)
+
+    def test_nothing_is_asked_about_folders_that_do_not_exist(self) -> None:
+        runner, issued = self._runner("S-1-5-21-10-20-30-1001")
+        installer.refuse_foreign_folders(self.layout, runner)
+        self.assertEqual(issued, [])
+
+    def test_the_lock_down_makes_administrators_the_owner_of_everything_first(self) -> None:
+        runner, issued = self._runner("S-1-5-32-544")
+        installer.lock_down(self.layout, runner)
+        self.assertEqual(issued[0][:4], ["icacls", str(self.layout.data_root), "/setowner", "*S-1-5-32-544"])
+        self.assertIn("/T", issued[0])
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows ACLs")
+    def test_the_owner_query_reads_a_real_folder(self) -> None:
+        owner, installing = installer.folder_owner(self.tmp, installer.Runner())
+        self.assertTrue(owner.startswith("S-1-") and installing.startswith("S-1-"), (owner, installing))
+
+
 class TheServiceDefinitionTest(_LayoutCase):
 
     def test_it_names_paths_and_a_port_only(self) -> None:

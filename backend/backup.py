@@ -168,14 +168,27 @@ def _pg_bin(tool: str) -> str:
     return str(candidate) if candidate.exists() else tool
 
 
+# C10's policies admit a whole-database backup by name, as they admit a migration: the
+# dump, the restore and the row counts run with row security ON under this purpose.
+# Without it the table owner is itself subject to the FORCEd policies - pg_dump refused
+# the first COPY, and the counts read 0 rows in every tenant table (M3 exit review).
+BACKUP_PURPOSE = "backup"
+
+
+def _backup_session(env: dict) -> dict:
+    """The environment a pg_dump / pg_restore runs in: its session names the backup purpose."""
+    env = dict(env)
+    env["PGOPTIONS"] = (str(env.get("PGOPTIONS") or "") + f" -c app.platform={BACKUP_PURPOSE}").strip()
+    return env
+
+
 def capture_table_counts(dsn: str) -> dict[str, int]:
     """Per-table row counts at dump time - the drill's reconciliation basis."""
-    from backend import db as _db  # local import to honour the caller's env
-
     counts: dict[str, int] = {}
     import psycopg
 
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
+    with psycopg.connect(dsn, connect_timeout=15, autocommit=True) as conn:
+        conn.execute("SELECT set_config('app.platform', %s, false)", (BACKUP_PURPOSE,))
         tables = [
             r[0] for r in conn.execute(
                 "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
@@ -289,10 +302,13 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
     # whole database in the backup directory. One was sitting in data/backups on
     # this tree next to seven encrypted ones.
     try:
+        # Row security stays on and the session names the backup purpose. The data is
+        # written as INSERTs: PostgreSQL refuses COPY FROM into a table with row-level
+        # security, so a COPY-format dump could not be restored under FORCEd policies.
         completed = subprocess.run(
-            [_pg_bin("pg_dump"), "--format=custom", "--no-password", f"--dbname={conninfo}",
-             "--file", str(plain)],
-            capture_output=True, text=True, timeout=3600, env=tool_env,
+            [_pg_bin("pg_dump"), "--format=custom", "--no-password", "--enable-row-security",
+             "--inserts", "--rows-per-insert=500", f"--dbname={conninfo}", "--file", str(plain)],
+            capture_output=True, text=True, timeout=3600, env=_backup_session(tool_env),
         )
         if completed.returncode != 0:
             raise RuntimeError(f"pg_dump failed: {completed.stderr.strip()[:400]}")
@@ -300,7 +316,7 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
         manifest = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "kind": "logical",
-            "format": "pg_dump-custom+chunked-fernet",
+            "format": INSERT_FORMAT,
             "file": encrypted.name,
             "plaintext_bytes": plain.stat().st_size,
             "ciphertext_bytes": encrypted.stat().st_size,
@@ -517,6 +533,99 @@ def verify_backup(manifest_path: Path) -> dict:
             "schema_revision": manifest.get("schema_revision"), "problems": problems}
 
 
+INSERT_FORMAT = "pg_dump-custom-inserts+chunked-fernet"
+
+
+def restore_postgres_backup(manifest_path: Path, dsn: str, artifact_dir: Path | None = None) -> dict:
+    """Put a verified PostgreSQL backup in place of the database's contents, in ONE
+    transaction: pg_restore --clean --single-transaction, row security on, the session
+    naming the backup purpose. The database it replaces is backed up first and that
+    backup's manifest returned, never discarded. Extensions are the database
+    administrator's (the application role cannot create or drop them), so they are
+    left as they are."""
+    import re
+    import tempfile
+
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("kind") != "logical":
+        raise RuntimeError("This is a SQLite backup; it restores into a SQLite install.")
+    if manifest.get("format") != INSERT_FORMAT:
+        raise RuntimeError("This backup holds its rows as COPY data, which PostgreSQL does not load into tables with "
+                           "row-level security. Take a new backup with this release and restore that one.")
+    report = verify_backup(manifest_path)
+    if not report["ok"]:
+        raise RuntimeError("The backup did not verify, so nothing was restored: " + "; ".join(report["problems"]))
+    previous = create_logical_backup(dsn, manifest_path.parent)
+    conninfo, tool_env = pg_tool_environment(dsn)
+    with tempfile.TemporaryDirectory(prefix="sentro-restore-") as scratch:
+        plain = Path(scratch) / "restore.dump"
+        decrypt_file(manifest_path.parent / manifest["file"], plain)
+        listed = subprocess.run([_pg_bin("pg_restore"), "--list", str(plain)], capture_output=True, text=True)
+        if listed.returncode != 0:
+            raise RuntimeError(f"pg_restore cannot read the archive: {listed.stderr.strip()[:300]}")
+        entries = [line for line in listed.stdout.splitlines() if not re.search(r"\bEXTENSION\b", line)]
+        order = Path(scratch) / "restore.list"
+        order.write_text("\n".join(entries) + "\n", encoding="utf-8")
+        completed = subprocess.run(
+            [_pg_bin("pg_restore"), "--clean", "--if-exists", "--no-owner", "--single-transaction", "--exit-on-error",
+             "--enable-row-security", "--no-password", "--use-list", str(order), f"--dbname={conninfo}", str(plain)],
+            capture_output=True, text=True, timeout=3600, env=_backup_session(tool_env),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"pg_restore failed; the transaction rolled back and nothing changed: "
+                               f"{completed.stderr.strip()[:400]}")
+    counts = capture_table_counts(dsn)
+    recorded = manifest.get("table_counts") or {}
+    differ = sorted(table for table, rows in recorded.items() if counts.get(table) != rows)
+    return {"restored": str(manifest_path), "previous_database": str(previous),
+            "schema_revision": _pg_schema_revision(dsn), "tables_differing": differ,
+            "artifact_objects_added": _add_artifact_objects(manifest_path, manifest, artifact_dir)}
+
+
+def _add_artifact_objects(manifest_path: Path, manifest: dict, artifact_dir: Path | None) -> int:
+    """The backup's artifact objects that the store lacks. Objects are content-addressed
+    and never change, so adding them loses nothing."""
+    import tempfile
+
+    added = 0
+    artifacts = manifest.get("artifacts") or {}
+    if not artifacts.get("file"):
+        return 0
+    from backend import artifacts as _artifacts
+
+    target = Path(artifact_dir) if artifact_dir else _artifacts.artifact_root()
+    with tempfile.TemporaryDirectory(prefix="sentro-restore-") as scratch:
+        restore_artifacts(manifest_path.parent / artifacts["file"], Path(scratch))
+        for item in Path(scratch).rglob(f"*{_artifacts.OBJECT_SUFFIX}"):
+            # The archive names an object <tenant>/<content id>; the store keeps it under
+            # one fan-out level, <tenant>/<first two hex>/<content id> (artifacts.object_path).
+            # Copied back without that level it sat where nothing reads it (M3 exit review).
+            tenant = item.relative_to(scratch).parts[0]
+            content_id = item.name[: -len(_artifacts.OBJECT_SUFFIX)]
+            destination = target / tenant / content_id[:2] / item.name
+            if not destination.exists():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(item, destination)
+                added += 1
+    return added
+
+
+def restore_backup(manifest_path: Path) -> dict:
+    """Restore whichever kind of backup this is, into the database this install uses."""
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    dsn = os.getenv("DSPM_DB_URL", "").strip()
+    if manifest.get("kind") == "logical":
+        if not dsn:
+            raise RuntimeError("This is a PostgreSQL backup, and this install is configured for SQLite.")
+        return restore_postgres_backup(Path(manifest_path), dsn)
+    if dsn:
+        raise RuntimeError("This is a SQLite backup, and this install is configured for PostgreSQL.")
+    from backend import store
+
+    return restore_sqlite_backup(Path(manifest_path), Path(store.DB_PATH))
+
+
 def restore_sqlite_backup(manifest_path: Path, db_path: Path, artifact_dir: Path | None = None) -> dict:
     """Put a verified SQLite backup in place of the database. The database it replaces
     is kept beside it (…pre-restore-<stamp>), never deleted. The artifact store gains the
@@ -526,7 +635,7 @@ def restore_sqlite_backup(manifest_path: Path, db_path: Path, artifact_dir: Path
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("kind") != "sqlite":
-        raise RuntimeError("This is a PostgreSQL backup: restore it with pg_restore (docs/DEPLOYMENT_WINDOWS.md).")
+        raise RuntimeError("This is a PostgreSQL backup; it restores into a PostgreSQL install.")
     report = verify_backup(manifest_path)
     if not report["ok"]:
         raise RuntimeError("The backup did not verify, so nothing was restored: " + "; ".join(report["problems"]))
@@ -543,20 +652,7 @@ def restore_sqlite_backup(manifest_path: Path, db_path: Path, artifact_dir: Path
         if side.exists() and kept is not None:
             os.replace(side, kept.with_name(kept.name + suffix))
     os.replace(staged, db_path)
-    restored_objects = 0
-    artifacts = manifest.get("artifacts") or {}
-    if artifacts.get("file"):
-        from backend import artifacts as _artifacts
-
-        target = Path(artifact_dir) if artifact_dir else _artifacts.artifact_root()
-        with tempfile.TemporaryDirectory(prefix="sentro-restore-") as scratch:
-            restore_artifacts(manifest_path.parent / artifacts["file"], Path(scratch))
-            for item in Path(scratch).rglob(f"*{_artifacts.OBJECT_SUFFIX}"):
-                destination = target / item.relative_to(scratch)
-                if not destination.exists():
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(item, destination)
-                    restored_objects += 1
+    restored_objects = _add_artifact_objects(manifest_path, manifest, artifact_dir)
     return {"restored": str(db_path), "previous_database": str(kept) if kept else None,
             "schema_revision": manifest.get("schema_revision"), "artifact_objects_added": restored_objects}
 

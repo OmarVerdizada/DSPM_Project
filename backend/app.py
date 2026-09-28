@@ -116,6 +116,7 @@ from backend.store import (
     compact_scan_report,
     recover_interrupted_jobs,
     record_login_failure,
+    take_throttle_slot,
     rotate_registration_code,
     create_registration_invite,
     redeem_registration_invite,
@@ -197,7 +198,7 @@ from collectors.winrm_endpoint_scanner import (
     normalize_endpoint_target_paths,
 )
 from collectors.winrm_endpoint_scanner import _winrm_ssl_required as winrm_ssl_required
-from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
+from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig, product_private_paths
 from discovery.incremental import (
     apply_reuse_snapshot,
     incremental_scope_key,
@@ -324,6 +325,11 @@ class RouteThrottle:
 
     def failed(self, who: str) -> None:
         record_login_failure(self._key(who), self.window_seconds)
+
+    def take(self, who: str) -> bool:
+        """Count one attempt and say whether it is within the limit - as ONE step, so
+        parallel requests cannot all pass the check before any of them is counted."""
+        return take_throttle_slot(self._key(who), self.window_seconds, self.limit)
 
     def clear(self, who: str) -> None:
         clear_login_failures(self._key(who))
@@ -3047,7 +3053,7 @@ def replace_credential(secret_ref: str, payload: CredentialRequest,
 @app.post("/api/credentials/{secret_ref}/preflight")
 def check_credential_privilege(secret_ref: str, principal: Principal = Depends(require_permission("credential.manage"))) -> dict:
     _own_credential(principal.tenant_id, secret_ref)
-    account = vault.resolve(principal.tenant_id, secret_ref)
+    account = vault.resolve(principal.tenant_id, secret_ref, kind=None)  # only the account name is read
     privilege = _credential_privilege(principal.tenant_id, secret_ref, account.get("username", ""),
                                       account.get("domain", ""))
     audit(principal.tenant_id, principal.subject, "credential.preflight",
@@ -3730,23 +3736,37 @@ REVEAL_THROTTLE = RouteThrottle("reveal", max(1, int(os.getenv("DSPM_REVEAL_MAX_
 @app.post("/api/findings/{finding_id}/reveal")
 def reveal_finding_value(finding_id: str, payload: RevealRequest, request: Request,
                          principal: Principal = Depends(require_permission("evidence.reveal", mfa=True))) -> dict:
-    """One raw value behind a finding, read again from its source now, never stored."""
-    if REVEAL_THROTTLE.exhausted(principal.subject):
-        raise HTTPException(status_code=429, detail="Too many reveals in the last hour. Try again later.")
-    REVEAL_THROTTLE.failed(principal.subject)
+    """One raw value behind a finding, read again from its source now, never stored.
+    Every attempt past the permission check is audited - revealed, refused, throttled or
+    failed - with where the value would have come from once that is known."""
     from backend import evidence_reveal
 
     detail = {"finding_id": finding_id, "fingerprint": payload.fingerprint,
               "reason": " ".join(payload.reason.split())[:500]}
+
+    def where(location: dict) -> dict:
+        return {"source": location.get("source") or "", "server": location.get("server") or "",
+                "share": location.get("share") or "", "target": location.get("path") or ""}
+
+    if not REVEAL_THROTTLE.take(principal.subject):
+        audit(principal.tenant_id, principal.subject, "evidence.reveal_refused", {**detail, "result": "throttled"})
+        raise HTTPException(status_code=429, detail="Too many reveals in the last hour. Try again later.")
     try:
         result = evidence_reveal.reveal(principal.tenant_id, finding_id, payload.fingerprint, payload.reason)
     except evidence_reveal.RevealRefused as refused:
-        audit(principal.tenant_id, principal.subject, "evidence.reveal_refused", {**detail, "result": refused.code})
+        audit(principal.tenant_id, principal.subject, "evidence.reveal_refused",
+              {**detail, **where(refused.location), "result": refused.code})
         raise HTTPException(status_code=refused.status, detail={"code": refused.code, "message": str(refused)}) from refused
-    location = result["location"]
+    except Exception as exc:
+        # A lost SMB session, an unreadable credential, a database error: nothing was
+        # revealed, and the attempt is still on the record.
+        audit(principal.tenant_id, principal.subject, "evidence.reveal_refused",
+              {**detail, "result": "error", "error": type(exc).__name__})
+        raise HTTPException(status_code=502, detail={
+            "code": "reveal_failed",
+            "message": "The file could not be read again; nothing was revealed. The attempt is in the audit trail."}) from exc
     audit(principal.tenant_id, principal.subject, "evidence.revealed",
-          {**detail, "result": "revealed", "type": result["type"], "source": location.get("source"),
-           "target": location.get("path"), "share": location.get("share") or ""})
+          {**detail, **where(result["location"]), "result": "revealed", "type": result["type"]})
     return {key: result[key] for key in ("finding_id", "type", "fingerprint", "value", "masked")}
 
 
@@ -5242,6 +5262,8 @@ def _collect_and_persist_local_endpoint(
                     config.host or socket.gethostname(),
                     item,
                 ),
+                # the install's own data folder, database and key folder are never data here
+                excluded_paths=product_private_paths(),
             )
         except (FileNotFoundError, OSError) as exc:
             scan_errors.append(f"{path}: {exc}")

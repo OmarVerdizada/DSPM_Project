@@ -364,5 +364,34 @@ class TheHostResetTest(_Case):
         self.assertEqual(rows[-1]["detail"]["by"], "host")
 
 
+class ExitReviewTokensAreOnlyWhatTheyAreTest(_Case):
+    """M3 exit review: the MFA challenge and the download token are signed with the same key
+    as an access token, over "<prefix>.<payload>". Given their prefix back as a header, both
+    verified as a session - a first factor alone reached every non-gated admin permission."""
+
+    def test_an_mfa_challenge_is_not_a_session(self) -> None:
+        token = self._login("boss")["mfa_token"]
+        for bearer in (f"mfa.{token}", token):
+            response = self.client.get("/api/profile", headers=self._bearer(bearer))
+            self.assertEqual(response.status_code, 401, bearer[:12])
+
+    def test_a_download_token_is_not_a_session(self) -> None:
+        token = security.create_artifact_download_token("artifact-1", "t-mfa", "ana", "analyst")
+        response = self.client.get("/api/profile", headers=self._bearer(f"artifact_dl.{token}"))
+        self.assertEqual(response.status_code, 401)
+
+    def test_an_access_token_still_is(self) -> None:
+        token = security.create_token("ana", "analyst", "t-mfa")
+        self.assertEqual(self.client.get("/api/profile", headers=self._bearer(token)).status_code, 200)
+
+    def test_a_spent_challenge_reads_as_spent(self) -> None:
+        token = security.create_mfa_challenge("boss", "enroll")
+        claims = security.read_mfa_challenge(token, ("enroll",))
+        self.assertIsNotNone(claims)
+        self.assertTrue(security.spend_mfa_challenge(claims))
+        self.assertIsNone(security.read_mfa_challenge(token, ("enroll",)),
+                          "a spent enrolment challenge must not reach enroll/confirm again")
+
+
 if __name__ == "__main__":
     unittest.main()

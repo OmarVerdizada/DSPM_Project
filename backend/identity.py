@@ -18,7 +18,9 @@ Precedence, and why:
 
 A directory account that is disabled, deleted or out of every mapped group is
 deactivated and its sessions end, at its next sign-in attempt or the next refresh of an
-existing session (`revalidate_directory_account`).
+existing session (`revalidate_directory_account`). A deactivated account - by the
+directory or by a workspace administrator - stays so until an administrator reactivates
+it: the directory password alone never brings it back.
 """
 
 from __future__ import annotations
@@ -77,7 +79,7 @@ def bind_password(tenant_id: str, settings: dict) -> str:
     if not ref:
         return ""
     try:
-        return str(CredentialVault().resolve(tenant_id, ref).get("password") or "")
+        return str(CredentialVault().resolve(tenant_id, ref, kind="directory").get("password") or "")
     except (KeyError, ValueError):
         return ""
 
@@ -114,15 +116,30 @@ def sign_in(username: str, password: str, workspace_id: str = "") -> SignIn:
         return _refuse(tenant_id, login, "ldap" if user else "local", failure,
                        "Directory sign-in is turned off for this workspace." if user else "")
     config = settings["config"]
-    outcome = directory.authenticate(config, bind_password(tenant_id, settings), username.strip(), password)
+    typed = username.strip()
+    outcome = directory.authenticate(config, bind_password(tenant_id, settings), typed, password)
     now = int(time.time())
     existing = store.find_directory_user(tenant_id, outcome.external_id) if outcome.external_id else None
-    existing = existing or (user if user is not None and user.get("auth_source") == "ldap" else None)
+    if existing is None and user is not None and user.get("auth_source") == "ldap" and not (
+            outcome.external_id and user.get("external_id") and outcome.external_id != user["external_id"]):
+        # The account the name found is this directory entry unless the directory says it
+        # is another one: a name reused by a new person does not inherit the old account.
+        existing = user
     if not outcome.ok:
-        if existing is not None and outcome.status in {"disabled", "no_mapped_group", "not_found"} \
+        # Only the directory's word about THIS account ends it - the entry carries its
+        # identifier, or the name searched is exactly its name. A typed name that merely
+        # sanitizes to someone else's ("alice#") must not sign them out (M3 exit review).
+        about_this_account = existing is not None and (
+            (outcome.external_id and outcome.external_id == existing.get("external_id"))
+            or typed.casefold() == str(existing.get("login_name") or "").casefold())
+        if about_this_account and outcome.status in {"disabled", "no_mapped_group", "not_found"} \
                 and existing.get("is_active"):
             _end_directory_account(existing, outcome.status)
         return _refuse(tenant_id, login, "ldap", outcome.status, outcome.detail)
+    if existing is not None and not existing.get("is_active"):
+        # Suspended in Sentro - by an administrator, or by the directory earlier. The
+        # directory password does not undo that; an administrator reactivates the account.
+        return _refuse(tenant_id, login, "ldap", "inactive", "This account is suspended in this workspace.")
 
     display = outcome.display_name or login
     if existing is not None:

@@ -177,17 +177,78 @@ def load_ring(single_key: Callable[[], bytes]) -> Ring:
 
 
 def save_ring(ring: Ring, path: Path) -> None:
-    """Write the ring atomically: a reader sees the old file or the new, never half."""
+    """Write the ring atomically: a reader sees the old file or the new, never half.
+
+    The temporary file holds every key, so it never outlives this call. On Windows the
+    rename fails while a service has the ring open for its (brief) re-read; it is retried
+    for up to five seconds rather than leaving the old ring in force."""
+    import time
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{_secrets.token_hex(4)}.tmp")
     data = json.dumps(ring.document(), indent=2) + "\n"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(50):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.1)
+    finally:
+        temporary.unlink(missing_ok=True)
     ring.path = path
     _CACHE["stamp"] = None
+
+
+class RingLock:
+    """One key operation at a time, across processes: two rotations interleaving could
+    each save a ring the other never saw, and every value would end up under a key no
+    file holds. The operating system releases the lock if the process dies."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path.with_name(path.name + ".lock")
+        self._handle = None
+
+    def __enter__(self) -> "RingLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self.path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            raise VaultKeyError("Another vault key operation is running on this install; wait for it to finish "
+                                "and run this again.") from exc
+        self._handle = handle
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        finally:
+            handle.close()
 
 
 def new_key() -> bytes:
@@ -219,6 +280,22 @@ def export_escrow(ring: Ring, passphrase: str) -> dict:
     }
 
 
+# What an escrow file may ask the KDF to do. The parameters are read from the file, so a
+# hostile one could otherwise name a cost that runs for hours (scrypt's p is not bounded by
+# its memory limit).
+_KDF_BOUNDS = {"n": (2 ** 14, 2 ** 20), "r": (1, 32), "p": (1, 16)}
+
+
+def _kdf_params(kdf: dict) -> dict:
+    params = {name: int(kdf[name]) for name in _KDF_BOUNDS}
+    for name, (low, high) in _KDF_BOUNDS.items():
+        if not low <= params[name] <= high:
+            raise ValueError(f"escrow KDF parameter {name} out of range")
+    if params["n"] & (params["n"] - 1):
+        raise ValueError("escrow KDF parameter n is not a power of two")
+    return params
+
+
 def open_escrow(document: dict, passphrase: str) -> Ring:
     from cryptography.fernet import InvalidToken
 
@@ -226,21 +303,24 @@ def open_escrow(document: dict, passphrase: str) -> Ring:
         raise VaultKeyError("This file is not a Sentro vault escrow.")
     kdf = document.get("kdf") or {}
     try:
-        key = _derive(passphrase, base64.b64decode(kdf["salt"]), {"n": int(kdf["n"]), "r": int(kdf["r"]), "p": int(kdf["p"])})
+        key = _derive(passphrase, base64.b64decode(kdf["salt"]), _kdf_params(kdf))
         plain = _fernet(key).decrypt(str(document["ring"]).encode("ascii"))
-    except (InvalidToken, KeyError, ValueError) as exc:
+    except (InvalidToken, KeyError, ValueError, TypeError, OverflowError) as exc:
         raise VaultKeyError("The passphrase does not open this escrow (or the file was altered).") from exc
     return ring_from_document(json.loads(plain.decode("utf-8")))
 
 
 def read_passphrase(path: str | None, *, confirm: bool = False) -> str:
-    """From a file (first line), or asked for - never taken from a command line."""
+    """From a file (first line), or asked for - never taken from a command line. Both are
+    trimmed the same way, and a file's byte-order mark (PowerShell 5.1 writes one) is not
+    part of it: a passphrase set from a file must be the one typed at the prompt later."""
     if path:
-        return Path(path).read_text(encoding="utf-8").splitlines()[0].strip()
+        lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+        return (lines[0] if lines else "").strip()
     import getpass
 
-    first = getpass.getpass("Escrow passphrase: ")
-    if confirm and getpass.getpass("Again: ") != first:
+    first = getpass.getpass("Escrow passphrase: ").strip()
+    if confirm and getpass.getpass("Again: ").strip() != first:
         raise VaultKeyError("The two passphrases differ.")
     return first
 

@@ -109,8 +109,13 @@ def decrypt_text(ciphertext: str) -> str:
 def validate_vault_key() -> None:
     """Startup format-check (M3): fail CLOSED if the vault key is missing (prod) or
     not a valid Fernet key, so a bad key breaks startup rather than the first
-    credential operation."""
-    _fernet()
+    credential operation. With a key ring file present the ring is the key - its
+    entries are checked as it loads - and DSPM_VAULT_KEY is not needed (C12)."""
+    from backend import vault_keys
+
+    path = vault_keys.ring_path()
+    if path is None or not path.exists():
+        _fernet()
     ring()
 
 
@@ -160,12 +165,17 @@ class CredentialVault:
         save_secret(tenant_id, secret_id, _seal(payload), kind=kind, label=label or _label(username, domain))
         return secret_id
 
-    def resolve(self, tenant_id: str, secret_ref: str) -> dict:
-        from backend.store import read_secret, touch_secret_used
+    def resolve(self, tenant_id: str, secret_ref: str, *, kind: str | None = "scan") -> dict:
+        """The credential behind a reference. `kind` is what the caller may use: a scan
+        resolves only scan credentials, so the directory service account's password -
+        which only a tenant administrator manages - can never be pointed at a target
+        (M3 exit review). None means any kind (the privilege check reads the account name)."""
+        from backend.store import read_secret_record, touch_secret_used
 
-        ciphertext = read_secret(tenant_id, secret_ref)
-        if ciphertext is None:
+        record = read_secret_record(tenant_id, secret_ref)
+        if record is None or (kind is not None and record["kind"] != kind):
             raise KeyError("Credential reference not found")
+        ciphertext = record["ciphertext"]
         value = json.loads(_open(ciphertext))
         touch_secret_used(tenant_id, secret_ref)
         return value
@@ -199,9 +209,11 @@ def _ring_file() -> Path:
     path = vault_keys.ring_path()
     if path is None:
         raise vault_keys.VaultKeyError(
-            "Key rotation needs a key ring: set DSPM_VAULT_KEYRING to a file in the protected secrets folder "
-            "(for example C:\\ProgramData\\Sentro\\secrets\\vault_keyring.json) and run it again; the ring starts "
-            "from the current key.")
+            "Key rotation needs a key ring: set DSPM_VAULT_KEYRING in the services' configuration file "
+            "([settings] in sentro.toml - not only in this shell, or the services never read the new ring) to a "
+            "file in the protected secrets folder (for example C:\\ProgramData\\Sentro\\secrets\\"
+            "vault_keyring.json), restart the services, and run this with --config pointing at that file. The "
+            "ring starts from the current key.")
     return path
 
 
@@ -212,11 +224,13 @@ def _audit(actor: str, action: str, detail: dict) -> None:
 
 
 def _current_ring_for_change():
-    """The ring to change: the file when it exists, else a new ring holding the single
-    configured key (so the first rotation needs no separate step)."""
+    """The ring to change, read from disk now (another process may have changed it): the
+    file when it exists, else a new ring holding the single configured key (so the first
+    rotation needs no separate step). Called with the ring lock held."""
     from backend import vault_keys
 
     path = _ring_file()
+    vault_keys._CACHE.update({"stamp": None, "ring": None})
     ring_now = ring()
     if not path.exists():
         vault_keys.save_ring(ring_now, path)
@@ -224,86 +238,128 @@ def _current_ring_for_change():
     return vault_keys.load_ring(_vault_key), path
 
 
-def _reseal_to(target_kid: str, ring_now) -> int:
-    """Re-seal every value not under `target_kid` with it - one transaction."""
+def _unreadable(ring_now) -> list[str]:
+    """Where a sealed value does not open with the ring: "table key=value" identifiers,
+    never the value."""
+    from cryptography.fernet import InvalidToken
+
+    from backend import store
+    from backend.vault_keys import VaultKeyError
+
+    where = []
+    for table, keys, value in store.vault_sealed_rows():
+        try:
+            ring_now.open(value)
+        except (InvalidToken, VaultKeyError, ValueError):
+            where.append(f"{table} " + " ".join(f"{name}={keys[name]}" for name in keys))
+    return where
+
+
+def _reseal_to(target_kid: str, ring_now, *, skip_unreadable: bool = False) -> tuple[int, list[str]]:
+    """Re-seal every value not under `target_kid` with it - one transaction. A value no key
+    in the ring opens stops it before anything is written (nothing could re-seal it), unless
+    `skip_unreadable`: then it is left exactly as it is, and named."""
     from cryptography.fernet import Fernet
 
     from backend import store
-    from backend.vault_keys import PREFIX
+    from backend.vault_keys import PREFIX, VaultKeyError
 
+    unreadable = _unreadable(ring_now)
+    if unreadable and not skip_unreadable:
+        shown = "; ".join(unreadable[:10]) + (f"; and {len(unreadable) - 10} more" if len(unreadable) > 10 else "")
+        raise VaultKeyError(
+            f"{len(unreadable)} sealed value(s) open with no key in the ring ({shown}). Nothing was changed. Recover "
+            "the missing key from its escrow, or run again with --skip-unreadable to leave those values as they are "
+            "(they stay unreadable; replace or delete them).")
     target = Fernet(ring_now.keys[target_kid])
 
     def transform(value: str) -> str | None:
         if ring_now.key_of(value) == target_kid:
             return None
-        return f"{PREFIX}{target_kid}.{target.encrypt(ring_now.open(value)).decode('ascii')}"
+        try:
+            plain = ring_now.open(value)
+        except Exception:
+            if skip_unreadable:
+                return None
+            raise
+        return f"{PREFIX}{target_kid}.{target.encrypt(plain).decode('ascii')}"
 
-    return store.reseal_vault_values(transform)
+    return store.reseal_vault_values(transform), unreadable
 
 
-def rotate(*, resume: bool = False, actor: str = "host") -> dict:
+def rotate(*, resume: bool = False, actor: str = "host", skip_unreadable: bool = False) -> dict:
     """Add a key, make it active, re-seal everything with it; or finish one that stopped."""
     from backend import vault_keys
 
-    ring_now, path = _current_ring_for_change()
-    rotation = dict(ring_now.rotation or {})
-    if rotation.get("state") == "rekeying":
-        if not resume:
-            # An unfinished rotation is finished before another begins.
-            resume = True
-        source, target = rotation["from"], rotation["to"]
-    else:
-        if resume:
-            raise vault_keys.VaultKeyError("There is no unfinished rotation to resume.")
-        key = vault_keys.new_key()
-        target = vault_keys.key_id(key)
-        source = ring_now.active
-        ring_now.keys[target] = key
-        ring_now.created[target] = vault_keys.now()
-        ring_now.states[source] = "retired"
-        ring_now.states[target] = "active"
-        ring_now.active = target
-        ring_now.rotation = {"state": "rekeying", "from": source, "to": target, "started_at": vault_keys.now(),
-                             "kind": "rotation"}
-        vault_keys.save_ring(ring_now, path)  # new values are sealed with the new key from here on
-    resealed = _reseal_to(target, vault_keys.load_ring(_vault_key))
-    ring_now = vault_keys.load_ring(_vault_key)
-    ring_now.rotation = {"state": "idle", "last": {"from": source, "to": target, "resealed": resealed,
-                                                   "finished_at": vault_keys.now(),
-                                                   "kind": rotation.get("kind", "rotation")}}
-    vault_keys.save_ring(ring_now, path)
+    with vault_keys.RingLock(_ring_file()):
+        ring_now, path = _current_ring_for_change()
+        rotation = dict(ring_now.rotation or {})
+        if rotation.get("state") == "rekeying":
+            if not resume:
+                # An unfinished rotation is finished before another begins.
+                resume = True
+            source, target = rotation["from"], rotation["to"]
+        else:
+            if resume:
+                raise vault_keys.VaultKeyError("There is no unfinished rotation to resume.")
+            # Checked before the new key is written, so a ring that cannot finish a
+            # rotation is never left half-way through one.
+            unreadable = _unreadable(ring_now)
+            if unreadable and not skip_unreadable:
+                _reseal_to(ring_now.active, ring_now)  # raises, naming them
+            key = vault_keys.new_key()
+            target = vault_keys.key_id(key)
+            source = ring_now.active
+            ring_now.keys[target] = key
+            ring_now.created[target] = vault_keys.now()
+            ring_now.states[source] = "retired"
+            ring_now.states[target] = "active"
+            ring_now.active = target
+            ring_now.rotation = {"state": "rekeying", "from": source, "to": target, "started_at": vault_keys.now(),
+                                 "kind": "rotation"}
+            vault_keys.save_ring(ring_now, path)  # new values are sealed with the new key from here on
+        resealed, skipped = _reseal_to(target, vault_keys.load_ring(_vault_key), skip_unreadable=skip_unreadable)
+        ring_now = vault_keys.load_ring(_vault_key)
+        ring_now.rotation = {"state": "idle", "last": {"from": source, "to": target, "resealed": resealed,
+                                                       "finished_at": vault_keys.now(),
+                                                       "kind": rotation.get("kind", "rotation")}}
+        vault_keys.save_ring(ring_now, path)
     action = "vault.key_rotation_resumed" if resume else "vault.key_rotated"
     if rotation.get("kind") == "rollback":
         action = "vault.key_rolled_back"
-    _audit(actor, action, {"from": source, "to": target, "resealed": resealed})
-    return {"from": source, "to": target, "resealed": resealed, "resumed": resume}
+    _audit(actor, action, {"from": source, "to": target, "resealed": resealed, "left_unreadable": len(skipped)})
+    return {"from": source, "to": target, "resealed": resealed, "resumed": resume, "left_unreadable": skipped}
 
 
-def rollback(*, actor: str = "host") -> dict:
+def rollback(*, actor: str = "host", skip_unreadable: bool = False) -> dict:
     """Make the previous key active again and re-seal everything with it."""
     from backend import vault_keys
 
-    ring_now, path = _current_ring_for_change()
-    if (ring_now.rotation or {}).get("state") == "rekeying":
-        raise vault_keys.VaultKeyError("A rotation is unfinished; resume it (vault rotate --resume) before rolling back.")
-    last = (ring_now.rotation or {}).get("last") or {}
-    previous = last.get("from") if last.get("to") == ring_now.active else None
-    if not previous or previous not in ring_now.keys:
-        raise vault_keys.VaultKeyError("There is no previous key in the ring to roll back to.")
-    current = ring_now.active
-    ring_now.states[current] = "retired"
-    ring_now.states[previous] = "active"
-    ring_now.active = previous
-    ring_now.rotation = {"state": "rekeying", "from": current, "to": previous, "started_at": vault_keys.now(),
-                         "kind": "rollback"}
-    vault_keys.save_ring(ring_now, path)
-    resealed = _reseal_to(previous, vault_keys.load_ring(_vault_key))
-    ring_now = vault_keys.load_ring(_vault_key)
-    ring_now.rotation = {"state": "idle", "last": {"from": current, "to": previous, "resealed": resealed,
-                                                   "finished_at": vault_keys.now(), "kind": "rollback"}}
-    vault_keys.save_ring(ring_now, path)
-    _audit(actor, "vault.key_rolled_back", {"from": current, "to": previous, "resealed": resealed})
-    return {"from": current, "to": previous, "resealed": resealed}
+    with vault_keys.RingLock(_ring_file()):
+        ring_now, path = _current_ring_for_change()
+        if (ring_now.rotation or {}).get("state") == "rekeying":
+            raise vault_keys.VaultKeyError("A rotation is unfinished; resume it (vault rotate --resume) before rolling back.")
+        last = (ring_now.rotation or {}).get("last") or {}
+        previous = last.get("from") if last.get("to") == ring_now.active else None
+        if not previous or previous not in ring_now.keys:
+            raise vault_keys.VaultKeyError("There is no previous key in the ring to roll back to.")
+        if not skip_unreadable and _unreadable(ring_now):
+            _reseal_to(previous, ring_now)  # raises, naming them
+        current = ring_now.active
+        ring_now.states[current] = "retired"
+        ring_now.states[previous] = "active"
+        ring_now.active = previous
+        ring_now.rotation = {"state": "rekeying", "from": current, "to": previous, "started_at": vault_keys.now(),
+                             "kind": "rollback"}
+        vault_keys.save_ring(ring_now, path)
+        resealed, skipped = _reseal_to(previous, vault_keys.load_ring(_vault_key), skip_unreadable=skip_unreadable)
+        ring_now = vault_keys.load_ring(_vault_key)
+        ring_now.rotation = {"state": "idle", "last": {"from": current, "to": previous, "resealed": resealed,
+                                                       "finished_at": vault_keys.now(), "kind": "rollback"}}
+        vault_keys.save_ring(ring_now, path)
+    _audit(actor, "vault.key_rolled_back", {"from": current, "to": previous, "resealed": resealed,
+                                            "left_unreadable": len(skipped)})
+    return {"from": current, "to": previous, "resealed": resealed, "left_unreadable": skipped}
 
 
 def status() -> dict:
@@ -332,26 +388,56 @@ def export_escrow(out: Path, passphrase: str, *, actor: str = "host") -> dict:
     return {"escrow": str(out), "kids": document["kids"], "active": document["active"]}
 
 
-def verify_escrow(path: Path, passphrase: str, *, actor: str = "host") -> dict:
-    """The escrow opens with the passphrase and holds every key a sealed value names."""
+def _coverage(recovered) -> dict:
+    """What a recovered ring would open of what is sealed now: key ids in use it lacks, and
+    how many values - with a key id or from before key ids - open with none of its keys."""
     from backend import store, vault_keys
 
-    recovered = vault_keys.open_escrow(json.loads(Path(path).read_text(encoding="utf-8")), passphrase)
     in_use = vault_keys.kids_in(store.vault_sealed_values()) - {""}
-    missing = sorted(in_use - set(recovered.keys))
-    report = {"ok": not missing, "kids": sorted(recovered.keys), "missing": missing}
-    _audit(actor, "vault.escrow_verified", {"ok": report["ok"], "missing": missing})
+    return {"missing": sorted(in_use - set(recovered.keys)), "unopenable": len(_unreadable(recovered))}
+
+
+def verify_escrow(path: Path, passphrase: str, *, actor: str = "host") -> dict:
+    """The escrow opens with the passphrase, and its ring opens every value sealed now."""
+    from backend import vault_keys
+
+    recovered = vault_keys.open_escrow(json.loads(Path(path).read_text(encoding="utf-8")), passphrase)
+    coverage = _coverage(recovered)
+    report = {"ok": not coverage["missing"] and not coverage["unopenable"], "kids": sorted(recovered.keys),
+              **coverage}
+    _audit(actor, "vault.escrow_verified", {"ok": report["ok"], "missing": coverage["missing"],
+                                            "unopenable": coverage["unopenable"]})
     return report
 
 
-def recover_escrow(path: Path, passphrase: str, out: Path, *, force: bool = False, actor: str = "host") -> dict:
-    """Write the key ring back from its escrow. An existing ring is replaced only with force."""
+def recover_escrow(path: Path, passphrase: str, out: Path, *, force: bool = False, accept_missing: bool = False,
+                   actor: str = "host") -> dict:
+    """Write the key ring back from its escrow. An existing ring is replaced only with
+    force, and is kept beside it first. An escrow that cannot open what is sealed now (one
+    exported before the last rotation) is refused unless `accept_missing`."""
+    from datetime import datetime, timezone
+
     from backend import vault_keys
 
     out = Path(out)
-    if out.exists() and not force:
-        raise vault_keys.VaultKeyError(f"{out} exists; recovering over a key ring needs --force.")
-    recovered = vault_keys.open_escrow(json.loads(Path(path).read_text(encoding="utf-8")), passphrase)
-    vault_keys.save_ring(recovered, out)
-    _audit(actor, "vault.escrow_recovered", {"kids": sorted(recovered.keys), "active": recovered.active})
-    return {"keyring": str(out), "kids": sorted(recovered.keys), "active": recovered.active}
+    with vault_keys.RingLock(out):
+        if out.exists() and not force:
+            raise vault_keys.VaultKeyError(f"{out} exists; recovering over a key ring needs --force.")
+        recovered = vault_keys.open_escrow(json.loads(Path(path).read_text(encoding="utf-8")), passphrase)
+        coverage = _coverage(recovered)
+        if (coverage["missing"] or coverage["unopenable"]) and not accept_missing:
+            raise vault_keys.VaultKeyError(
+                f"This escrow cannot open what is sealed now: key(s) in use it lacks {coverage['missing'] or 'none'}, "
+                f"{coverage['unopenable']} value(s) it cannot open. It predates a rotation - find a newer escrow. "
+                "Nothing was written (--accept-missing recovers it anyway).")
+        kept = ""
+        if out.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup = out.with_name(f"{out.stem}.replaced-{stamp}{out.suffix}")
+            out.replace(backup)
+            kept = str(backup)
+        vault_keys.save_ring(recovered, out)
+    _audit(actor, "vault.escrow_recovered", {"kids": sorted(recovered.keys), "active": recovered.active,
+                                             "replaced_ring_kept": bool(kept), **coverage})
+    return {"keyring": str(out), "kids": sorted(recovered.keys), "active": recovered.active,
+            "replaced_ring_kept_at": kept, **coverage}
