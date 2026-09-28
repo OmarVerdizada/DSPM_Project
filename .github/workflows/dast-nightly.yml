@@ -1,0 +1,64 @@
+name: DAST baseline (nightly)
+
+# C7: an OWASP ZAP baseline scan of a disposable instance, every night. The instance is
+# this commit, in development mode, on a throwaway SQLite database with a random admin
+# password - nothing real is scanned. The report is uploaded as an artifact for review;
+# the job does not fail on findings (a baseline scan's warnings need a person to judge),
+# and no issue is filed automatically. Evidence exists only once a run has produced an
+# artifact and someone has reviewed it.
+on:
+  schedule:
+    - cron: "30 2 * * *" # 02:30 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dast-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zap-baseline:
+    name: ZAP baseline against a disposable instance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the runtime from the hash-verified lock
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.lock
+
+      - name: Start a disposable instance
+        run: |
+          export DSPM_ENV=local
+          export DSPM_DB_PATH="$RUNNER_TEMP/dast.sqlite"
+          export DSPM_ARTIFACT_DIR="$RUNNER_TEMP/artifacts"
+          export DSPM_SCAN_CACHE_DIR="$RUNNER_TEMP/scan_cache"
+          export DSPM_ADMIN_PASSWORD="$(python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+          nohup python main.py serve --host 127.0.0.1 --port 8000 > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8000/api/ready >/dev/null && exit 0
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: http://127.0.0.1:8000
+          cmd_options: "-a -j"
+          allow_issue_writing: false
+          fail_action: false
+          artifact_name: zap-baseline-report
+
+      - name: Server log
+        if: always()
+        run: tail -n 200 "$RUNNER_TEMP/server.log" || true

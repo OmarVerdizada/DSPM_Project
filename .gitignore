@@ -26,6 +26,9 @@ coverage.xml
 # produced fresh in CI, and requirements.lock.ci is a CI verification temp.
 sbom.json
 requirements.lock.ci
+# C7: Semgrep's own virtualenv (requirements-semgrep.txt) and seeded-gate test copies.
+.semgrep-venv/
+frontend/.gate-seed-*/
 
 # ---------------------------------------------------------------------------
 # Node / frontend-landing

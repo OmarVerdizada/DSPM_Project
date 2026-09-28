@@ -3333,11 +3333,13 @@ function writeRowsInChunks(rowsHtml, tailHtml, whenDone = () => {}) {
     // A newer render owns the table now; this one stops where it is.
     if (token !== rowChunkToken) return;
     if (next >= rowsHtml.length) {
-      resultsBody.insertAdjacentHTML("beforeend", tailHtml);
+      // Reviewed (C7): the same escaped row templates innerHTML takes above, appended in
+      // chunks so a long table does not block a frame.
+      resultsBody.insertAdjacentHTML("beforeend", tailHtml); // nosemgrep: security.js-dangerous-dom-sink
       whenDone();
       return;
     }
-    resultsBody.insertAdjacentHTML("beforeend", rowsHtml.slice(next, next + ROW_CHUNK_SIZE).join(""));
+    resultsBody.insertAdjacentHTML("beforeend", rowsHtml.slice(next, next + ROW_CHUNK_SIZE).join("")); // nosemgrep: security.js-dangerous-dom-sink
     next += ROW_CHUNK_SIZE;
     scheduleRowChunk(step);
   };

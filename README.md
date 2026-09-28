@@ -426,6 +426,28 @@ npm run build
 
 `backend/app.py` serves the resulting `frontend-landing/dist/` at `/` and `/login` when it exists, so that directory is currently a committed deployment artifact. Rebuild and commit it whenever `frontend-landing/src/` changes, or the deployed landing page will silently diverge from source.
 
+### Static analysis gates
+
+CI's `Static analysis` job runs `scripts/static_gate.py`, and it runs the same way locally. The job fails on:
+
+- a name the console uses and nothing defines (ESLint `no-undef`, the pinned copy in `frontend/node_modules`);
+- an undefined Python name (Ruff `F82`);
+- a type error in the security modules (mypy);
+- a medium-or-higher Bandit finding missing from the reviewed baseline, `security/bandit-baseline.json`;
+- a match for the offline Semgrep rules in `security/semgrep.yml`.
+
+A reviewed exception is marked on its own line (`# nosemgrep: <rule>` with a reason), never file-wide.
+
+```powershell
+pip install -r requirements-static.txt
+python -m venv .semgrep-venv; .semgrep-venv\Scripts\pip install -r requirements-semgrep.txt
+cd frontend; npm ci; cd ..
+$env:SEMGREP_BIN = ".semgrep-venv\Scripts\semgrep.exe"
+python scripts/static_gate.py            # or one gate: ruff | mypy | bandit | semgrep | eslint
+```
+
+`.github/workflows/dast-nightly.yml` runs an OWASP ZAP baseline scan every night against a disposable instance on a throwaway database. It never fails on findings: the report is uploaded as an artifact for a person to review.
+
 Optional tooling:
 
 - Git is required only for committing and pushing changes to GitHub.

@@ -28,6 +28,9 @@ def _send_webhook(alerts: list[dict]) -> None:
     url = os.getenv("DSPM_ALERT_WEBHOOK_URL")
     if not url:
         return
+    # C7: urlopen also reads file: and ftp: URLs; a webhook is only ever http(s).
+    if not url.strip().lower().startswith(("https://", "http://")):
+        return
     payload = json.dumps({"alerts": alerts}).encode()
     req = request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     try:

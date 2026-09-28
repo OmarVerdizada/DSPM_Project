@@ -151,7 +151,7 @@ def target_from(config: dict) -> dict:
 
 
 # ── Validating ─────────────────────────────────────────────────────────────────────
-def validate_host(value: str) -> str:
+def validate_host(value: str | None) -> str:
     host = str(value or "").strip()
     if not host:
         raise SiemSettingsError("Enter the receiver's host name or IP address.")
