@@ -212,7 +212,7 @@ def scan(source: DatabaseSource, *, connection=None, cancel_check=None) -> tuple
                    "sample_rows_limit": source.sample_rows, "max_tables": source.max_tables,
                    "max_columns": source.max_columns, "max_value_chars": source.max_value_chars,
                    "statement_timeout_ms": source.statement_timeout_ms, "tables": 0, "columns": 0,
-                   "tables_skipped": 0, "errors": []}
+                   "tables_skipped": 0, "columns_skipped": 0, "errors": []}
     try:
         cursor = conn.cursor()
         sql, params = dialect.tables_sql(source.schemas)
@@ -229,12 +229,21 @@ def scan(source: DatabaseSource, *, connection=None, cancel_check=None) -> tuple
                 diagnostics["cancelled"] = True
                 break
             try:
-                records.extend(_scan_table(cursor, dialect, source, schema, table))
+                records.extend(_scan_table(cursor, dialect, source, schema, table, diagnostics))
                 diagnostics["tables"] += 1
             except Exception as exc:
                 # The table is named in the report; the error only by its type.
                 diagnostics["errors"].append({"table": f"{schema}.{table}", "error": type(exc).__name__})
         diagnostics["columns"] = len(records)
+        # What was in scope and not read - a table that failed, tables or columns past the
+        # limits, a cancelled scan - makes the scan incomplete, in the engine's own markers:
+        # a named, complete scan prunes what it did not see, and these were not looked at.
+        if diagnostics["errors"]:
+            diagnostics["scan_errors"] = len(diagnostics["errors"])
+        if diagnostics["tables_skipped"] or diagnostics["columns_skipped"]:
+            diagnostics["record_limit_reached"] = True
+        if diagnostics.get("cancelled"):
+            diagnostics["scan_aborted_reason"] = "cancelled"
     finally:
         if connection is None:
             try:
@@ -245,10 +254,13 @@ def scan(source: DatabaseSource, *, connection=None, cancel_check=None) -> tuple
     return records, diagnostics
 
 
-def _scan_table(cursor, dialect: Dialect, source: DatabaseSource, schema: str, table: str) -> list[dict]:
+def _scan_table(cursor, dialect: Dialect, source: DatabaseSource, schema: str, table: str,
+                diagnostics: dict | None = None) -> list[dict]:
     cursor.execute(dialect.columns_sql(), (schema, table))
     text_types = TEXT_TYPES[source.engine]
     columns = [(str(name), str(kind)) for name, kind in cursor.fetchall() if str(kind).lower() in text_types]
+    if len(columns) > source.max_columns and diagnostics is not None:
+        diagnostics["columns_skipped"] += len(columns) - source.max_columns
     columns = columns[:source.max_columns]
     if not columns:
         return []

@@ -165,6 +165,17 @@ class TheSamplerTest(unittest.TestCase):
         records, diagnostics = database_scanner.scan(source(), connection=Broken(tables))
         self.assertEqual(diagnostics["errors"], [{"table": "public.empty_things", "error": "RuntimeError"}])
         self.assertNotIn("4111", json.dumps(diagnostics))
+        self.assertEqual(diagnostics.get("scan_errors"), 1, "a table not read leaves the scan incomplete")
+
+    def test_what_was_not_read_leaves_the_scan_incomplete(self) -> None:
+        complete = database_scanner.scan(source(), connection=FakeConnection(seeded_tables()))[1]
+        self.assertFalse(any(complete.get(key) for key in ("scan_errors", "record_limit_reached", "scan_aborted_reason")))
+        tables = database_scanner.scan(source(max_tables=1), connection=FakeConnection(seeded_tables()))[1]
+        self.assertEqual((tables["tables_skipped"], tables.get("record_limit_reached")), (3, True))
+        columns = database_scanner.scan(source(max_columns=1), connection=FakeConnection(seeded_tables()))[1]
+        self.assertEqual((columns["columns_skipped"], columns.get("record_limit_reached")), (2, True))
+        stopped = database_scanner.scan(source(), connection=FakeConnection(seeded_tables()), cancel_check=lambda: True)[1]
+        self.assertEqual(stopped.get("scan_aborted_reason"), "cancelled")
 
 
 class TheEngineTest(unittest.TestCase):
@@ -196,6 +207,14 @@ class TheEngineTest(unittest.TestCase):
         for card in CARDS:
             self.assertNotIn(card, text, "no raw card number in the report or the logs")
         self.assertNotIn("customer0@example.com", text, "no raw address either")
+        self.assertTrue(report["scan_diagnostics"]["incremental"]["complete"])
+
+    def test_a_scan_that_missed_a_table_is_not_complete_so_nothing_is_pruned(self) -> None:
+        config = ScanConfig(tenant_id="default", compliance_enabled=False)
+        report = DatabaseDiscoveryEngine(config, source(max_tables=2),
+                                         connection=FakeConnection(seeded_tables())).run().to_dict()
+        # The store prunes a named scan's unseen assets only when this is true.
+        self.assertFalse(report["scan_diagnostics"]["incremental"]["complete"])
 
 
 class TheRouteTest(unittest.TestCase):
