@@ -1192,3 +1192,12 @@ button.ledger-cell:hover { background: var(--band-wash); }
   color: var(--ink-muted);
   font-weight: var(--weight-regular);
 }
+
+
+/* A field's one-line explanation under its input (the scan wizard's Shares). */
+.field-hint {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-text);
+}

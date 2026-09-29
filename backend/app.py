@@ -824,6 +824,16 @@ class ConnectionRequest(BaseModel):
     system_filter_enabled: bool = False
     include_admin_shares: bool = False
     inspect_archives: bool = False
+    # D1: read the server over SMB 3.1.1 with the session encrypted - required, never
+    # downgraded - naming the shares (they cannot be listed over that transport).
+    smb_encryption: bool = False
+    smb_shares: list[str] = Field(default_factory=list, max_length=200)
+
+    @field_validator("smb_shares")
+    @classmethod
+    def _clean_share_names(cls, values: list[str]) -> list[str]:
+        names = [re.sub(r"[\x00-\x1f\x7f\\/]", "", str(value or "")).strip()[:80] for value in values]
+        return [name for name in names if name]
 
     @field_validator("server", "username", "domain", "credential_ref")
     @classmethod
@@ -5025,8 +5035,9 @@ def _record_scan_source(tenant_id: str, scan_id: str, payload) -> None:
     ref = str(getattr(payload, "credential_ref", "") or "").strip()
     typed = bool(str(getattr(payload, "password", "") or ""))
     kind = "saved" if ref else ("typed" if typed else "none")
+    smb = "smb3" if _smb_encryption_required(payload) else "smb"
     source = ("endpoint-winrm" if endpoint else "database" if database
-              else ("smb" if server and not _is_local_endpoint_host(server) else "local"))
+              else (smb if server and not _is_local_endpoint_host(server) else "local"))
     try:
         store_module.record_scan_source(tenant_id, scan_id, source, server, kind, ref)
     except Exception as exc:  # a lost record only makes the scan unrevealable
@@ -6141,6 +6152,12 @@ def _endpoint_analysis_engine(
     )
 
 
+def _smb_encryption_required(payload) -> bool:
+    """D1: this scan asked for it, or the installation requires it of every SMB scan."""
+    configured = os.getenv("DSPM_SMB_REQUIRE_ENCRYPTION", "0").strip().lower() in {"1", "true", "yes", "on"}
+    return bool(getattr(payload, "smb_encryption", False)) or configured
+
+
 def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
     username = payload.username.strip()
     password = payload.password
@@ -6156,6 +6173,14 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         password = secret.get("password", "")
         domain = secret.get("domain", domain)
 
+    shares = tuple(getattr(payload, "smb_shares", None) or ())
+    if server and getattr(payload, "smb_encryption", False) and not shares:
+        # D1: smbprotocol cannot list a server's shares, so a scan that asks for encryption
+        # names them - said here, where the caller reads it (a model error's text is not
+        # returned). An installation-wide DSPM_SMB_REQUIRE_ENCRYPTION is refused by the
+        # collector with the same reason.
+        raise HTTPException(status_code=400, detail="Name the shares to scan: an SMB 3 encrypted scan cannot "
+                                                    "list a server's shares.")
     incremental_enabled = bool(getattr(payload, "incremental_enabled", True))
     scope_key = _file_scan_scope(payload, server, allowed_extensions, extension_filter_enabled)
 
@@ -6175,6 +6200,8 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         system_filter_enabled=payload.system_filter_enabled,
         include_admin_shares=payload.include_admin_shares,
         inspect_archives=payload.inspect_archives,
+        smb_shares=shares or None,
+        smb_require_encryption=_smb_encryption_required(payload),
         compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),
         compliance_frameworks=list(getattr(payload, "compliance_frameworks", []) or []),
         asset_overrides=[

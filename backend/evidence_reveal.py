@@ -116,8 +116,11 @@ def _read_smb(tenant_id: str, asset: dict, source: dict) -> tuple[str, str, int]
         account = CredentialVault().resolve(tenant_id, str(source["credential_ref"]))
     except KeyError:
         _refuse("credential_gone", "The saved credential this scan used has been deleted.")
+    # D1: a file the scan read over encrypted SMB 3 is read again the same way, never in the clear.
+    encrypted = str(source.get("source_kind") or "") == "smb3"
     scanner = SMBScanner(SMBConfig(server=server, tenant_id=tenant_id, username=account.get("username", ""),
-                                   password=account.get("password", ""), domain=account.get("domain", "WORKGROUP")))
+                                   password=account.get("password", ""), domain=account.get("domain", "WORKGROUP"),
+                                   require_encryption=encrypted, allowed_shares=(share,) if encrypted else None))
     try:
         if not scanner.connect():
             _refuse("source_unreachable", "The file server could not be reached with the scan's saved credential.")
@@ -146,7 +149,7 @@ def reread(tenant_id: str, asset: dict, source: dict | None) -> str:
     kind = str(asset.get("source") or (source or {}).get("source_kind") or "").lower()
     if kind.startswith("endpoint"):
         _refuse("unsupported_source", "Values found on endpoint (WinRM) scans cannot be revealed yet.")
-    if kind == "smb":
+    if kind in {"smb", "smb3"}:
         if source is None:
             _refuse("no_scan_record", "This scan was run before reveal was possible and did not record its "
                                       "credential. Scan the share again with a saved credential.")

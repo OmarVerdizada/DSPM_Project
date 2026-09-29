@@ -177,6 +177,8 @@ Password: <file-server-local-admin-password>
 Scan admin disk shares like C$: checked when testing C$ or D$
 ```
 
+**Shares** narrows a scan to the shares it names (comma-separated; case does not matter). **SMB 3 encryption** reads the server over SMB 3.1.1 with the session encrypted and signed - required, never downgraded: a server that cannot encrypt is refused with that reason, and nothing is read in the clear. It is what a share that requires encryption (`EncryptData`) needs, and it keeps every file's bytes off the wire in the clear on any other server. The transport (`smbprotocol`, from `requirements-connectors.txt`) cannot list a server's shares, so an encrypted scan names them. The walker, filters, ACLs, archives, reuse, partitions and resume are the same code for both transports, and a value revealed from an encrypted scan's finding is read again encrypted. `DSPM_SMB_REQUIRE_ENCRYPTION=1` requires it of every SMB scan; `DSPM_SMB_ALLOW_SERVICE_IDENTITY=1` lets an encrypted scan given no account use the backend service's own Windows identity (no password handled).
+
 ## Windows Endpoint Scans
 
 Endpoint scans use WinRM to inspect selected paths on a target workstation. The credential entered in the target or endpoint form is used only against that target host, and it should be a local administrator on that workstation.
@@ -475,6 +477,7 @@ Requirements are split by purpose:
 | `requirements-dev.txt` | Adds the test runner. Use `pip install -r requirements.txt -r requirements-dev.txt` for development. |
 | `requirements-ml.txt` | Optional spaCy-based ML/NER classification. See the caveat below. |
 | `requirements-postgres.txt` | Optional PostgreSQL backend (psycopg). Only needed when `DSPM_DB_URL` is set. |
+| `requirements-connectors.txt` | Optional source connectors: `smbprotocol` for encrypted SMB 3 scans. The offline Windows package installs them (`requirements-connectors.lock`, hash-pinned). |
 
 SQLite does not need a separate package because the app uses Python's built-in `sqlite3` module. WinRM endpoint scanning uses the existing `pywinrm` dependency; no extra package is needed for the GPO-based target preparation flow.
 

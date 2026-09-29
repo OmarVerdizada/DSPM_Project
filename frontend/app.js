@@ -1103,6 +1103,8 @@ function readPayload() {
     system_filter_enabled: selectedExtensions.includes("__system__"),
     include_admin_shares: Boolean(data.get("include_admin_shares")),
     inspect_archives: Boolean(data.get("inspect_archives")),
+    smb_encryption: Boolean(data.get("smb_encryption")),
+    smb_shares: String(data.get("smb_shares") || "").split(/[,;]/).map((name) => name.trim()).filter(Boolean),
     async_scan: Boolean(data.get("async_scan")),
     incremental_enabled: Boolean(data.get("incremental_enabled")),
     asset_overrides: assetRules,
@@ -12831,6 +12833,7 @@ function profileChips(profile) {
     chips.push({ label: `Depth ${config.max_depth ?? 4}` });
     if (config.incremental_enabled) chips.push({ label: "Incremental", on: true });
     if (config.inspect_archives) chips.push({ label: "ZIP" });
+    if (config.smb_encryption) chips.push({ label: "SMB 3", on: true });
   }
   if (config.compliance_enabled && (config.compliance_frameworks || []).length) {
     chips.push({ label: `Compliance ${(config.compliance_frameworks || []).length}`, on: true });
@@ -13211,6 +13214,8 @@ function applyFileServerProfile(profile) {
   document.querySelector("#incremental_enabled").checked = config.incremental_enabled ?? true;
   document.querySelector("#inspect_archives").checked = Boolean(config.inspect_archives);
   document.querySelector("#include_admin_shares").checked = Boolean(config.include_admin_shares);
+  document.querySelector("#smb_encryption").checked = Boolean(config.smb_encryption);
+  document.querySelector("#smb_shares").value = (config.smb_shares || []).join(", ");
   applyExtensionUiState("file-server", profile ? ui : { ext_preset: "recommended" });
   applyComplianceState("file-server", config.compliance_enabled, config.compliance_frameworks);
   document.dispatchEvent(new Event("scan-form-updated"));

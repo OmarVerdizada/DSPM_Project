@@ -211,6 +211,7 @@ def plan_share_partitions(config: ScanConfig, *, stop_check=None) -> dict | None
         domain=config.domain,
         include_admin_shares=config.include_admin_shares,
         allowed_shares=config.smb_shares,
+        require_encryption=config.smb_require_encryption,
     ))
     groups = scanner.plan_share_groups(stop_check)
     if not groups or len(groups) < 2:

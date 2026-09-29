@@ -107,6 +107,8 @@ class ScanConfig:
     # An SMB partition is a group of shares (B2.3): the collector walks only these,
     # in the order the server lists them. None walks every share.
     smb_shares: tuple[str, ...] | None = None
+    # D1: read SMB servers over SMB 3.1.1 with encryption required.
+    smb_require_encryption: bool = False
     # What an analyst has told this tenant's scans not to report again (B6). Read
     # when the scan's configuration is built and compiled once per engine, so a rule
     # written while a scan runs cannot change what it has already reported. A
@@ -370,6 +372,8 @@ class DSPMDiscoveryEngine:
                 include_admin_shares=self.config.include_admin_shares,
                 inspect_archives=self.config.inspect_archives,
                 cancel_check=self.config.cancel_check,
+                allowed_shares=self.config.smb_shares,
+                require_encryption=self.config.smb_require_encryption,
             )
         )
         return scanner.test_connection()
@@ -1329,6 +1333,7 @@ class DSPMDiscoveryEngine:
                     # resolved I/O worker budget the pipeline uses.
                     io_workers=self._parallelism().io_workers,
                     allowed_shares=self.config.smb_shares,
+                    require_encryption=self.config.smb_require_encryption,
                 )
             )
             records = scanner.scan()

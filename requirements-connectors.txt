@@ -1,0 +1,17 @@
+# Optional source connectors (roadmap M4). The base install stays lean: a collector
+# imports its library only when a scan asks for that source.
+#
+#   pip install -r requirements.txt -r requirements-connectors.txt
+#
+# The offline Windows package installs this beside requirements.lock with
+# --require-hashes (requirements-connectors.lock). Regenerate the lock with pip-tools,
+# constrained to requirements.lock's pins, so the two never disagree on a shared package:
+#
+#    pip-compile --allow-unsafe --generate-hashes --strip-extras
+#        --constraint=<the name==version lines of requirements.lock>
+#        --output-file=requirements-connectors.lock requirements-connectors.txt
+
+# D1: SMB 3.1.1 with encryption required (collectors/smb3_transport.py). pysmb speaks
+# SMB 1/2 only and cannot encrypt, so a server or share requiring encryption refuses it.
+# MIT. Its dependencies, cryptography and pyspnego, are already in requirements.lock.
+smbprotocol==1.17.0

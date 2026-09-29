@@ -213,6 +213,10 @@ SETTINGS: dict[str, Setting] = _settings(
     # D11: log lines as JSON for a shipper; when the installation's own alerts are checked,
     # and how long a queued scan may wait before it is "stuck".
     ("DSPM_LOG_FORMAT", "enum", {"default": "text", "choices": ("text", "json")}),
+    # D1: every SMB scan over SMB 3.1.1 with encryption required; and whether an SMB 3 scan
+    # given no account may use the backend service's own Windows identity.
+    ("DSPM_SMB_REQUIRE_ENCRYPTION", "bool"),
+    ("DSPM_SMB_ALLOW_SERVICE_IDENTITY", "bool"),
     ("DSPM_OPS_ALERT_INTERVAL_SECONDS", "int", {"minimum": 30}),
     ("DSPM_QUEUE_STUCK_MINUTES", "int", {"minimum": 0}),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),

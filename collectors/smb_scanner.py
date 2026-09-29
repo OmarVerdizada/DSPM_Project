@@ -193,6 +193,9 @@ class SMBConfig:
     # SMB scan gives each partition a group of shares that cannot overlap any share
     # outside the group, so the overlapping-share collapse stays inside one partition.
     allowed_shares: tuple[str, ...] | None = None
+    # D1: SMB 3.1.1 with the session encrypted, and required (collectors.smb3_transport).
+    # pysmb cannot encrypt; a server or share that requires encryption resets it.
+    require_encryption: bool = False
 
 
 
@@ -289,10 +292,16 @@ class SMBScanner:
         return f"smb://{server}/{share_name}{remote_path}"
 
     def connect(self) -> bool:
+        encrypted = bool(self.config.require_encryption)
         try:
-            from smb.SMBConnection import SMBConnection
+            if encrypted:
+                from collectors.smb3_transport import EncryptionUnavailable, Smb3Connection
+            else:
+                from smb.SMBConnection import SMBConnection
         except ModuleNotFoundError as exc:
-            raise RuntimeError("Missing dependency 'pysmb'. Install requirements.txt before SMB scans.") from exc
+            package, needs = ("smbprotocol", "requirements-connectors.txt") if encrypted else ("pysmb", "requirements.txt")
+            raise RuntimeError(f"Missing dependency '{package}'. Install {needs} before SMB scans.") from exc
+        self._encryption_refused = ""
 
         reached_server = False
         self._target_refused = ""
@@ -309,6 +318,26 @@ class SMBScanner:
                 self._target_refused = str(exc)
                 continue
             for username, domain, label in self._credential_candidates():
+                if encrypted:
+                    conn = Smb3Connection(username, self.config.password, self.config.client_name, remote_name,
+                                          domain=domain, shares=list(self.config.allowed_shares or ()))
+                    try:
+                        if conn.connect(pinned_ip, self.config.port, timeout=self.config.timeout):
+                            self.connection = conn
+                            self.credential_used = label
+                            self.server_used = server
+                            return True
+                        reached_server = True
+                    except (EncryptionUnavailable, PermissionError) as exc:
+                        # Said, not retried with the next credential: no account makes the
+                        # server encrypt, and the service identity was not allowed.
+                        self._encryption_refused = str(exc)
+                        conn.close()
+                        return False
+                    except Exception as exc:  # noqa: BLE001 - as the pysmb path: try the next credential
+                        logger.warning("SMB 3 connection to %s failed: %s", server, type(exc).__name__)
+                        conn.close()
+                    continue
                 conn = SMBConnection(
                     username,
                     self.config.password,
@@ -410,6 +439,8 @@ class SMBScanner:
         if not self.connect():
             if getattr(self, "_target_refused", ""):
                 raise ConnectionError(f"SMB target refused (network guard): {self._target_refused}")
+            if getattr(self, "_encryption_refused", ""):
+                raise ConnectionError(f"SMB 3 encryption required: {self._encryption_refused}")
             if getattr(self, "_auth_rejected", False):
                 raise ConnectionError(
                     f"SMB authentication was rejected by {self.config.server} for user "
@@ -1278,8 +1309,11 @@ class SMBScanner:
         return "/" + str(value or "").replace("\\", "/").strip("/")
 
     def _share_selected(self, share_name: str) -> bool:
-        """Whether this scan walks a share: every share, unless ``allowed_shares`` names some (B2.3)."""
-        return self.config.allowed_shares is None or share_name in self.config.allowed_shares
+        """Whether this scan walks a share: every share, unless ``allowed_shares`` names some
+        (B2.3). A person names them too (D1), and Windows share names ignore case."""
+        if self.config.allowed_shares is None:
+            return True
+        return share_name.casefold() in {name.casefold() for name in self.config.allowed_shares}
 
     def plan_share_groups(self, stop_check: Callable[[], str | None] | None = None) -> list[list[str]] | None:
         """The shares a scan walks, in its order, cut into groups no overlap crosses (B2.3).

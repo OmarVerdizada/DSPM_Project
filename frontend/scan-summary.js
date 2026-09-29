@@ -9,6 +9,7 @@
     async: "async_scan",
     zip: "inspect_archives",
     admin: "include_admin_shares",
+    smb3: "smb_encryption",
     compliance: "compliance-enabled",
   };
   function fieldValue(id, fallback) {
@@ -35,7 +36,7 @@
     var server = fieldValue("server", "");
     setText("scan-summary-target", server || "Local dataset");
     setText("scan-summary-domain", fieldValue("domain", "—"));
-    setText("scan-summary-path", server ? "\\\\" + server + "\\*" : fieldValue("local_path", "—"));
+    setText("scan-summary-path", server ? "\\\\" + server + "\\" + fieldValue("smb_shares", "*") : fieldValue("local_path", "—"));
     setText("scan-summary-depth", fieldValue("max_depth", "—"));
     setText("scan-summary-policy", policyLabel());
     Object.keys(optionInputs).forEach(function (key) {

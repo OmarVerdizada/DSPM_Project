@@ -9,7 +9,7 @@
     <link rel="stylesheet" href="/static/styles/tokens.css?v=10" />
     <link rel="stylesheet" href="/static/styles.css?v=260" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
-    <link rel="stylesheet" href="/static/styles/pages.css?v=21" />
+    <link rel="stylesheet" href="/static/styles/pages.css?v=22" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
     <link rel="stylesheet" href="/static/styles/reports.css?v=6" />
     <link rel="stylesheet" href="/static/styles/history.css?v=1" />
@@ -306,6 +306,11 @@
                       <span class="scan-option-copy">Admin shares</span>
                       <span class="scan-option-check" aria-hidden="true"></span>
                     </label>
+                    <label class="checkbox-row option-tile" title="SMB 3.1.1 with the session encrypted. A server that cannot encrypt is refused, never read in the clear.">
+                      <input id="smb_encryption" name="smb_encryption" type="checkbox" aria-describedby="smb-shares-hint" />
+                      <span class="scan-option-copy">SMB 3 encryption</span>
+                      <span class="scan-option-check" aria-hidden="true"></span>
+                    </label>
                   </div>
                   <div class="wizard-behavior-fields">
                     <label>
@@ -315,6 +320,11 @@
                     <label>
                       Local sample path
                       <input id="local_path" name="local_path" value="enterprise_test_data" />
+                    </label>
+                    <label>
+                      Shares
+                      <input id="smb_shares" name="smb_shares" autocomplete="off" placeholder="All shares" aria-describedby="smb-shares-hint" />
+                      <small id="smb-shares-hint" class="field-hint">Comma-separated. Required with SMB 3 encryption, which cannot list a server's shares.</small>
                     </label>
                   </div>
                 </section>
@@ -435,6 +445,7 @@
                           <li data-summary-option="async" class="on">Async queue</li>
                           <li data-summary-option="zip">ZIP inspection</li>
                           <li data-summary-option="admin">Admin shares</li>
+                          <li data-summary-option="smb3">SMB 3 encryption</li>
                           <li data-summary-option="compliance">Compliance mapping</li>
                         </ul>
                       </div>
@@ -1930,9 +1941,9 @@
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
-    <script src="/static/app.js?v=252"></script>
+    <script src="/static/app.js?v=253"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
-    <script src="/static/scan-summary.js?v=1"></script>
+    <script src="/static/scan-summary.js?v=2"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
     <script src="/static/sentro-fx.js?v=16" defer></script>
   </body>

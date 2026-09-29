@@ -4,7 +4,8 @@
 
 Produces dist/sentro-<label>-win64/ and the same as a .zip, holding everything an install
 needs with no Internet: the product source at --ref (tracked files only), the pinned
-embeddable Python, every wheel of requirements.lock and requirements-postgres.lock, the
+embeddable Python, every wheel of requirements.lock, requirements-postgres.lock and
+requirements-connectors.lock (M4's optional source connectors), the
 WinSW service wrapper, and the installer. Every third-party file is checked against
 packaging/windows/pins.json and every wheel against the locks' hashes before it is copied.
 
@@ -41,9 +42,10 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 PRODUCT_PATHS = ("backend", "frontend", "classification", "discovery", "collectors", "permissions", "risk",
                  "scripts", "main.py", "pyproject.toml", "requirements.txt", "requirements.lock",
-                 "requirements-postgres.txt", "requirements-postgres.lock", ".env.example", "README.md",
+                 "requirements-postgres.txt", "requirements-postgres.lock", "requirements-connectors.txt",
+                 "requirements-connectors.lock", ".env.example", "README.md",
                  "deploy/reverse-proxy")
-LOCKS = ("requirements.lock", "requirements-postgres.lock")
+LOCKS = ("requirements.lock", "requirements-postgres.lock", "requirements-connectors.lock")
 INSTALLER_FILES = ("install.ps1", "upgrade.ps1", "uninstall.ps1")
 UNSIGNED_NOTE = ("HELD FOR CODE-SIGNING CERTIFICATE: no certificate was configured (SENTRO_SIGNING_CERT_THUMBPRINT). "
                  "SHA256SUMS detects a damaged file, not a deliberate substitution; verify the package's own "
