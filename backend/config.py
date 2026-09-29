@@ -199,6 +199,10 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_INDEXER_PRINCIPALS", "str"),
     # D2: how many reference values a workspace's exact-match sets may hold in all
     ("DSPM_EDM_MAX_ROWS", "int", {"minimum": 1}),
+    # D3: how often the alert deliverer looks for due work, and how often an open ticket
+    # is asked whether it is done.
+    ("DSPM_ALERT_DELIVERY_INTERVAL_SECONDS", "int", {"minimum": 1}),
+    ("DSPM_TICKET_SYNC_SECONDS", "int", {"minimum": 30}),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),
     ("DSPM_PARTITION_MAX_ATTEMPTS", "int", {"minimum": 1}),
     ("DSPM_PARTITION_MAX_FILES", "int", {"minimum": 1}),

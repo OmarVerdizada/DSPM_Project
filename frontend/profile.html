@@ -449,6 +449,293 @@
             </div>
             <p id="siem-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
           </article>
+          <!-- D3: where this workspace's alerts and tickets go. Delivery - the queue, retries,
+               signatures, TLS - is the server's; this is its configuration. A secret is typed
+               to set or replace it and is never shown or sent back. -->
+          <article class="settings-card" id="integrations-card" hidden>
+            <div class="settings-card-copy">
+              <h2>Alerts &amp; tickets</h2>
+              <p>Where this workspace&rsquo;s alerts are sent, and the ticket system findings can be sent to. A delivery that fails is retried until it is accepted.</p>
+            </div>
+            <div class="integration" data-channel="webhook">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>Webhook</strong>
+                  <span>POST each alert as JSON to an HTTPS endpoint, signed with a secret only it and Sentro hold.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="Webhook" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field directory-wide">
+                    Endpoint address (https://)
+                    <input name="url" autocomplete="off" spellcheck="false" placeholder="hooks.corp.local/sentro" />
+                  </label>
+                  <label class="settings-field">
+                    Send alerts from
+                    <select name="min_severity">
+                      <option value="CRITICAL">Critical</option>
+                      <option value="HIGH">High and above</option>
+                      <option value="MEDIUM">Medium and above</option>
+                      <option value="LOW">Every alert</option>
+                    </select>
+                  </label>
+                  <div class="settings-field directory-wide">
+                    <span>Signing secret</span>
+                    <span class="settings-hint" data-role="signing-note">Made when you save. Every delivery is signed with it (X-Sentro-Signature).</span>
+                    <div class="siem-ca-row" data-role="shown-secret" hidden>
+                      <input class="mono" readonly data-role="shown-secret-value" aria-label="Signing secret" />
+                      <button type="button" class="secondary-btn" data-action="copy">Copy</button>
+                    </div>
+                    <div><button type="button" class="secondary-btn" data-action="rotate" hidden>Make a new secret</button></div>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the endpoint and its signing secret. Alerts waiting for it are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+            <div class="integration" data-channel="email">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>E-mail</strong>
+                  <span>Mail each alert through your relay. The message says what was found and where, never a value.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="E-mail" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field">
+                    Mail relay
+                    <input name="host" autocomplete="off" spellcheck="false" placeholder="smtp.corp.local" />
+                  </label>
+                  <label class="settings-field">
+                    Connection
+                    <select name="security">
+                      <option value="starttls">STARTTLS</option>
+                      <option value="tls">TLS</option>
+                      <option value="none">None (no password)</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    Port
+                    <input name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="587" />
+                  </label>
+                  <label class="settings-field">
+                    Send alerts from
+                    <select name="min_severity">
+                      <option value="CRITICAL">Critical</option>
+                      <option value="HIGH">High and above</option>
+                      <option value="MEDIUM">Medium and above</option>
+                      <option value="LOW">Every alert</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    From
+                    <input name="sender" autocomplete="off" spellcheck="false" placeholder="sentro@corp.local" />
+                  </label>
+                  <label class="settings-field">
+                    To (comma-separated)
+                    <input name="recipients" autocomplete="off" spellcheck="false" placeholder="soc@corp.local" />
+                  </label>
+                  <label class="settings-field">
+                    User name (optional)
+                    <input name="username" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="settings-field">
+                    <label>Password<input name="password" type="password" autocomplete="new-password" spellcheck="false" data-secret /></label>
+                    <span class="settings-hint" data-role="secret-note">Not set.</span>
+                    <button type="button" class="secondary-btn" data-action="remove-secret" hidden>Remove saved password</button>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the relay settings and its password. Alerts waiting for it are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+            <div class="integration" data-channel="jira">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>Jira</strong>
+                  <span>Send a finding to Jira as an issue; closing the issue resolves the finding here.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="Jira" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field directory-wide">
+                    Jira address (https://)
+                    <input name="base_url" autocomplete="off" spellcheck="false" placeholder="corp.atlassian.net" />
+                  </label>
+                  <label class="settings-field">
+                    Project key
+                    <input name="project_key" autocomplete="off" spellcheck="false" placeholder="SEC" />
+                  </label>
+                  <label class="settings-field">
+                    Issue type
+                    <input name="issue_type" autocomplete="off" spellcheck="false" placeholder="Task" />
+                  </label>
+                  <label class="settings-field">
+                    Account e-mail (empty for a Data Center token)
+                    <input name="username" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="settings-field">
+                    <label>API token<input name="token" type="password" autocomplete="new-password" spellcheck="false" data-secret /></label>
+                    <span class="settings-hint" data-role="secret-note">Not set.</span>
+                    <button type="button" class="secondary-btn" data-action="remove-secret" hidden>Remove saved api token</button>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the Jira settings and its token. Tickets not yet created are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+            <div class="integration" data-channel="servicenow">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>ServiceNow</strong>
+                  <span>Send a finding to ServiceNow as an incident; resolving it resolves the finding here.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="ServiceNow" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field directory-wide">
+                    ServiceNow instance (https://)
+                    <input name="instance_url" autocomplete="off" spellcheck="false" placeholder="corp.service-now.com" />
+                  </label>
+                  <label class="settings-field">
+                    User name
+                    <input name="username" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="settings-field">
+                    Assignment group (optional)
+                    <input name="assignment_group" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="settings-field">
+                    <label>Password<input name="password" type="password" autocomplete="new-password" spellcheck="false" data-secret /></label>
+                    <span class="settings-hint" data-role="secret-note">Not set.</span>
+                    <button type="button" class="secondary-btn" data-action="remove-secret" hidden>Remove saved password</button>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the ServiceNow settings and its password. Tickets not yet created are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+          </article>
         </section>
 
         <!-- ── Session ─────────────────────────────────────────── -->

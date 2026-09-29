@@ -78,6 +78,8 @@ ATTEMPTS = [
     ("DELETE", "/api/credentials/{secret_ref}", None),
     ("POST", "/api/credentials/{secret_ref}/preflight", None),
     ("DELETE", "/api/exact-match/sets/{set_id}", None),
+    ("POST", "/api/alerts/{alert_id}/acknowledge", None),
+    ("POST", "/api/findings/{finding_id}/ticket", {"system": "jira"}),
     ("POST", "/api/findings/{finding_id}/reveal", {"fingerprint": "[redacted:000000000000]",
                                                      "reason": "a cross-tenant attempt to read a value"}),
     ("GET", "/api/v1/reports/artifacts/{artifact_id}", None),
@@ -90,6 +92,13 @@ ATTEMPTS = [
 EXCUSED = {
     ("GET", "/api/nist/catalog/rules/{rule_id}"):
         "the NIST catalogue is one shared, vendor-maintained baseline, not any tenant's data",
+    # D3: a channel is a fixed name (webhook, email, jira, servicenow), not an identifier:
+    # the route always acts on the caller's own workspace's channel.
+    ("PUT", "/api/integrations/{channel}"): "a channel name; the caller's own workspace's channel",
+    ("PUT", "/api/integrations/{channel}/enabled"): "a channel name; the caller's own workspace's channel",
+    ("POST", "/api/integrations/{channel}/test"): "a channel name; the caller's own workspace's channel",
+    ("POST", "/api/integrations/{channel}/retry"): "a channel name; the caller's own workspace's channel",
+    ("DELETE", "/api/integrations/{channel}"): "a channel name; the caller's own workspace's channel",
 }
 
 
@@ -165,6 +174,7 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
         edm_set = self._ok(self.client.post("/api/exact-match/sets", headers=boss, json={
             "name": "Customers", "entity_type": "EMAIL_ADDRESS", "values": ["ana@example.com"]}))
         artifact = self._ok(self.client.post("/api/v1/reports", headers=analyst, json={}))
+        [alert_id] = store.save_alerts(A, data["scan_id"], [{"severity": "CRITICAL", "title": "seeded"}])
         job = jobs.create_job(A, lambda _job: {"ok": True})
         for _ in range(100):
             if jobs.get_job(job.id).status in {"completed", "failed"}:
@@ -181,6 +191,7 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
             "entry_id": targets["entries"][0]["entry_id"],
             "secret_ref": credential["credential_ref"],
             "set_id": edm_set["set_id"],
+            "alert_id": alert_id,
         }
 
     def _state_of_a(self) -> str:
@@ -200,6 +211,8 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
             "scan_targets": self._ok(self.client.get("/api/scan-targets", headers=boss))["entries"],
             "credentials": self._ok(self.client.get("/api/credentials", headers=boss))["credentials"],
             "exact_match_sets": self._ok(self.client.get("/api/exact-match/sets", headers=boss))["sets"],
+            "alerts": self._ok(self.client.get("/api/alerts", headers=analyst))["alerts"],
+            "tickets": self._ok(self.client.get("/api/tickets", headers=analyst))["tickets"],
             "tenant": store.get_tenant(A),
             "legal_hold": store.get_legal_hold(A),
             "password": store.get_user("a-member")["password_hash"],

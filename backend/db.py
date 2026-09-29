@@ -515,6 +515,7 @@ PLATFORM_PURPOSES = {
     "migration": "schema revisions and operator data migrations",
     "vault": "re-sealing every tenant's saved credentials and MFA seeds when the vault key rotates (C12)",
     "backup": "a whole-database backup (pg_dump) and its restore, run by an operator from the host (C11)",
+    "delivery": "delivering every workspace's alerts and creating and following its tickets (D3)",
 }
 
 

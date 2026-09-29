@@ -151,6 +151,7 @@ const PAGES = {
   scan_targets: "loadScanTargets()",
   scan_profiles: "loadScanProfiles()",
   hash_changes: "loadHashComparison()",
+  alerts: "loadAlerts()",
 };
 
 (async () => {

@@ -17820,3 +17820,21 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
 
 /* C6: the inline SVG sprite sheets (symbols only), without a style attribute. */
 .svg-defs { display: none; }
+
+/* D3: Alerts & tickets - four channels, each the SIEM row and its panel, one under the
+   other; and the open-alert count beside the sidebar's Alerts link. */
+.integration + .integration { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.integration [data-role="shown-secret"] input { flex: 1 1 280px; font-family: var(--font-data); }
+.nav-badge {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--sev-critical);
+  color: var(--paper);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  text-align: center;
+}
+.nav-badge[hidden] { display: none; }

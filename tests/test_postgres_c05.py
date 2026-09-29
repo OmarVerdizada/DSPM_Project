@@ -40,6 +40,8 @@ REQUIRED_ISOLATED = {
     "asset_access",
     # D2: exact-data-match reference sets.
     "edm_sets", "edm_fingerprints",
+    # D3: where alerts go, what is waiting for them, and findings' tickets.
+    "alert_channels", "alert_deliveries", "finding_tickets",
 }
 
 
@@ -133,7 +135,10 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
         store.create_registration_invite(tenant, uuid4().hex, "viewer", 1,
                                          (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(), False, "tester")
         store.derived_store(tenant, "iso-key", 1, "{}", 60)
+        store.save_alert_channel(tenant, "webhook", enabled=True, config={"url": "https://hooks.example.test/x",
+                                 "min_severity": "LOW"}, secret_ref="", actor="tester")
         store.save_alerts(tenant, f"{tenant}-scan", [{"kind": "seed"}])
+        store.create_finding_ticket(tenant, f"{tenant}-ticket", f"{tenant}-finding", "jira", {"summary": "seed"}, "tester")
         store.add_scan_target(tenant, "network", "10.20.0.0/16", "seed", "tester")
         store.save_directory_settings(tenant, False, {"host": "dc.example.test"}, "", "tester")
         store.begin_mfa_enrollment(tenant, f"{tenant}-user", "pending-ciphertext", 2_000_000_000)

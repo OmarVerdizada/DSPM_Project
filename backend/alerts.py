@@ -1,8 +1,12 @@
-from __future__ import annotations
+"""What a scan raises (D3).
 
-import json
-import os
-from urllib import request
+An alert is recorded, written to the audit trail (and so to the SIEM when one is set),
+and queued for each of the workspace's channels in one transaction (store.save_alerts);
+the deliverer (backend.alert_delivery) sends it. Nothing is sent from inside the scan's
+request, and a receiver that is down delays an alert rather than losing it.
+"""
+
+from __future__ import annotations
 
 from backend.store import save_alerts
 
@@ -19,21 +23,9 @@ def evaluate_alerts(tenant_id: str, report: dict) -> list[dict]:
             }
         )
     if alerts:
-        save_alerts(tenant_id, report.get("scan_id"), alerts)
-        _send_webhook(alerts)
+        for alert, alert_id in zip(alerts, save_alerts(tenant_id, report.get("scan_id"), alerts)):
+            alert["alert_id"] = alert_id
+        from backend.alert_delivery import kick
+
+        kick()
     return alerts
-
-
-def _send_webhook(alerts: list[dict]) -> None:
-    url = os.getenv("DSPM_ALERT_WEBHOOK_URL")
-    if not url:
-        return
-    # C7: urlopen also reads file: and ftp: URLs; a webhook is only ever http(s).
-    if not url.strip().lower().startswith(("https://", "http://")):
-        return
-    payload = json.dumps({"alerts": alerts}).encode()
-    req = request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        request.urlopen(req, timeout=5).read()
-    except Exception:
-        return

@@ -464,6 +464,10 @@ PLATFORM_ACCESS: dict[str, frozenset] = {
     "audit_events": frozenset({"housekeeping", "platform-admin"}),
     "audit_chain_heads": frozenset({"housekeeping"}),
     "alert_events": frozenset({"housekeeping", "platform-admin"}),
+    # D3: one deliverer sends every workspace's alerts and follows every ticket;
+    # retention prunes old deliveries with the alerts.
+    "alert_deliveries": frozenset({"delivery", "housekeeping"}),
+    "finding_tickets": frozenset({"delivery"}),
     "derived_cache": frozenset({"housekeeping"}),
     "scan_reports": frozenset({"housekeeping", "platform-admin"}),
     "scan_jobs": frozenset({"housekeeping", "resume"}),
@@ -1152,6 +1156,113 @@ def add_exact_data_match(conn) -> None:
     add_tenant_rls(conn)
 
 
+# D3 (revision 0033): alerts a person can see and acknowledge, where they are delivered,
+# and the tickets a finding was sent to.
+_ALERT_EVENT_COLUMNS = (
+    ("severity", "TEXT NOT NULL DEFAULT ''"),
+    ("title", "TEXT NOT NULL DEFAULT ''"),
+    ("status", "TEXT NOT NULL DEFAULT 'open'"),
+    ("acknowledged_by", "TEXT NOT NULL DEFAULT ''"),
+    ("acknowledged_at", "TEXT NOT NULL DEFAULT ''"),
+)
+_ALERT_DELIVERY_DDL = (
+    """CREATE TABLE IF NOT EXISTS alert_channels (
+            tenant_id TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            secret_ref TEXT NOT NULL DEFAULT '',
+            status_json TEXT NOT NULL DEFAULT '{}',
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, channel)
+        );""",
+    """CREATE TABLE IF NOT EXISTS alert_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tenant_id TEXT NOT NULL,
+            alert_id INTEGER NOT NULL,
+            channel TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at REAL NOT NULL DEFAULT 0,
+            lease_until REAL NOT NULL DEFAULT 0,
+            lease_owner TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_attempt_at TEXT NOT NULL DEFAULT '',
+            delivered_at TEXT NOT NULL DEFAULT ''
+        );""",
+    "CREATE INDEX IF NOT EXISTS idx_alert_deliveries_due ON alert_deliveries (status, next_attempt_at)",
+    "CREATE INDEX IF NOT EXISTS idx_alert_deliveries_alert ON alert_deliveries (tenant_id, alert_id)",
+    """CREATE TABLE IF NOT EXISTS finding_tickets (
+            tenant_id TEXT NOT NULL,
+            ticket_id TEXT NOT NULL,
+            finding_id TEXT NOT NULL,
+            system TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            payload TEXT NOT NULL DEFAULT '{}',
+            external_id TEXT NOT NULL DEFAULT '',
+            external_key TEXT NOT NULL DEFAULT '',
+            external_url TEXT NOT NULL DEFAULT '',
+            external_status TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            opened_at TEXT NOT NULL DEFAULT '',
+            closed_at TEXT NOT NULL DEFAULT '',
+            last_synced_at TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at REAL NOT NULL DEFAULT 0,
+            lease_until REAL NOT NULL DEFAULT 0,
+            lease_owner TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (tenant_id, ticket_id)
+        );""",
+    "CREATE INDEX IF NOT EXISTS idx_finding_tickets_due ON finding_tickets (status, next_attempt_at)",
+    "CREATE INDEX IF NOT EXISTS idx_finding_tickets_finding ON finding_tickets (tenant_id, finding_id)",
+)
+
+
+def _alert_event_columns(conn) -> None:
+    columns = db.table_columns(conn, "alert_events")
+    for name, ddl in _ALERT_EVENT_COLUMNS:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE alert_events ADD COLUMN {name} {ddl}")  # nosec B608 - fixed names
+
+
+def add_alert_delivery(conn) -> None:
+    """Revision 0033: alerts a person can see, delivered where the workspace says (D3).
+
+    Alerts were stored and never shown, and the one webhook was called inside the scan's
+    request with its failures dropped. `alert_events` gains a severity, a title and an
+    acknowledgement (one row per alert from now on; the rows already there hold one each).
+    `alert_channels` is each workspace's webhook, mail relay and ticket system - their
+    secrets are in the vault, never here. `alert_deliveries` is the outbox an alert is
+    queued in, in the transaction that records it, and retried until it is delivered.
+    `finding_tickets` is the Jira or ServiceNow ticket a finding was sent to, created
+    through the same kind of queue and followed until it closes. Tenant tables: revisions
+    0003 and 0004 are re-run for their keys and row-level security, which also admits
+    the new `delivery` purpose. Rollback: restore the pre-upgrade backup.
+    """
+    _alert_event_columns(conn)
+    for statement in _ALERT_DELIVERY_DDL:
+        # executescript: PostgreSQL needs the identity column and a DOUBLE PRECISION for
+        # the epoch times (db.translate_schema); a plain execute sends SQLite's DDL.
+        conn.executescript(statement)
+    rows = conn.execute("SELECT id, alerts_json FROM alert_events WHERE title = ''").fetchall()
+    for row in rows:
+        try:
+            first = (json.loads(row["alerts_json"] or "[]") or [{}])[0]
+        except (ValueError, IndexError, TypeError):
+            first = {}
+        if not isinstance(first, dict):
+            first = {}
+        conn.execute("UPDATE alert_events SET severity = ?, title = ? WHERE id = ?",
+                     (str(first.get("severity") or "")[:20], str(first.get("title") or "Alert")[:200], row["id"]))
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def add_asset_access(conn) -> None:
     """Revision 0031: who can read each file (D7).
 
@@ -1673,7 +1784,12 @@ def apply_baseline_schema(conn) -> None:
             tenant_id TEXT NOT NULL,
             scan_id TEXT,
             alerts_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',
+            acknowledged_by TEXT NOT NULL DEFAULT '',
+            acknowledged_at TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS login_failures (
@@ -2385,6 +2501,9 @@ def apply_baseline_schema(conn) -> None:
     conn.execute(_ASSET_ACCESS_INDEX)
     for statement in _EDM_DDL:  # D2 (revision 0032)
         conn.execute(statement)
+    _alert_event_columns(conn)  # D3 (revision 0033)
+    for statement in _ALERT_DELIVERY_DDL:
+        conn.executescript(statement)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -4171,6 +4290,7 @@ def recover_interrupted_jobs(*, resuming: bool = True) -> int:
 RETENTION_POLICIES = (
     # (table, timestamp column, environment variable, default days)
     ("alert_events", "created_at", "DSPM_RETAIN_ALERT_DAYS", 365),
+    ("alert_deliveries", "created_at", "DSPM_RETAIN_ALERT_DAYS", 365),
     ("audit_events", "timestamp", "DSPM_RETAIN_AUDIT_DAYS", 730),
 )
 
@@ -8890,6 +9010,10 @@ _TENANT_ERASURE_TABLES = (
     "scan_profiles",
     "scan_reports",
     "audit_events",
+    # D3: where alerts go, what is waiting for them, and findings' tickets.
+    "alert_deliveries",
+    "alert_channels",
+    "finding_tickets",
     "alert_events",
     "secrets",
     "scan_object_baselines",
@@ -9464,45 +9588,351 @@ def delete_secret(tenant_id: str, secret_id: str) -> None:
             )
 
 
-def save_alerts(tenant_id: str, scan_id: str | None, alerts: list[dict]) -> None:
+# --- D3: alerts, where they are delivered, and tickets --------------------------------
+
+ALERT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+def _severity_rank(value: str) -> int:
+    try:
+        return ALERT_SEVERITIES.index(str(value or "").upper())
+    except ValueError:
+        return 0
+
+
+def save_alerts(tenant_id: str, scan_id: str | None, alerts: list[dict]) -> list[int]:
+    """Record a scan's alerts, one row each, and in the same transaction queue each for
+    every channel of the workspace that is on and wants its severity - so an alert is
+    never recorded without being queued, or queued without being recorded. The alert is
+    also written to the audit trail, which carries it to the SIEM when one is set."""
+    now = datetime.now(timezone.utc).isoformat()
+    ids: list[int] = []
+    with _lock:
+        with _connect() as conn:
+            channels = conn.execute(
+                "SELECT channel, config_json FROM alert_channels WHERE tenant_id = ? AND enabled = 1 "
+                "AND channel IN ('webhook', 'email') ORDER BY channel", (tenant_id,)).fetchall()
+            for alert in alerts:
+                severity = str(alert.get("severity") or "").upper()[:20]
+                title = str(alert.get("title") or "Alert")[:200]
+                row = conn.execute(
+                    "INSERT INTO alert_events (tenant_id, scan_id, alerts_json, created_at, severity, title, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'open') RETURNING id",
+                    (tenant_id, scan_id, json.dumps([alert], ensure_ascii=False), now, severity, title),
+                ).fetchone()
+                alert_id = int(row[0])
+                ids.append(alert_id)
+                event = {"id": alert_id, "severity": severity, "title": title,
+                         "message": str(alert.get("message") or "")[:1000], "scan_id": scan_id or "",
+                         "created_at": now}
+                for channel in channels:
+                    try:
+                        wanted = str(json.loads(channel["config_json"] or "{}").get("min_severity") or "HIGH")
+                    except ValueError:
+                        wanted = "HIGH"
+                    if _severity_rank(severity) < _severity_rank(wanted):
+                        continue
+                    conn.execute(
+                        "INSERT INTO alert_deliveries (tenant_id, alert_id, channel, status, payload, created_at) "
+                        "VALUES (?, ?, ?, 'pending', ?, ?)",
+                        (tenant_id, alert_id, channel["channel"], json.dumps(event, ensure_ascii=False), now))
+                _append_audit(conn, tenant_id, now, "sentro", "alert.raised", json.dumps(
+                    {"alert_id": alert_id, "severity": severity, "title": title, "scan_id": scan_id or ""},
+                    ensure_ascii=False))
+    return ids
+
+
+def read_alerts(tenant_id: str, limit: int = 200, *, status: str = "") -> list[dict]:
+    """The workspace's alerts, newest first, each with where it was delivered."""
+    clauses, params = ["tenant_id = ?"], [tenant_id]
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, scan_id, alerts_json, created_at, severity, title, status, acknowledged_by, acknowledged_at "
+            f"FROM alert_events WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",  # nosec B608 - fixed clauses
+            (*params, int(limit))).fetchall()
+        ids = [int(row["id"]) for row in rows]
+        deliveries: dict[int, list[dict]] = {}
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            for item in conn.execute(
+                    "SELECT alert_id, channel, status, attempts, last_error, last_attempt_at, delivered_at, "
+                    f"next_attempt_at FROM alert_deliveries WHERE tenant_id = ? AND alert_id IN ({placeholders}) "  # nosec B608 - placeholders only
+                    "ORDER BY id", (tenant_id, *chunk)).fetchall():
+                deliveries.setdefault(int(item["alert_id"]), []).append({
+                    "channel": item["channel"], "status": item["status"], "attempts": int(item["attempts"] or 0),
+                    "last_error": item["last_error"] or "", "last_attempt_at": item["last_attempt_at"] or "",
+                    "delivered_at": item["delivered_at"] or "",
+                    "next_attempt_at": float(item["next_attempt_at"] or 0)})
+    alerts = []
+    for row in rows:
+        try:
+            first = (json.loads(row["alerts_json"] or "[]") or [{}])[0]
+        except (ValueError, IndexError, TypeError):
+            first = {}
+        first = first if isinstance(first, dict) else {}
+        alerts.append({
+            "alert_id": int(row["id"]), "scan_id": row["scan_id"] or "",
+            "severity": row["severity"] or str(first.get("severity") or ""),
+            "title": row["title"] or str(first.get("title") or "Alert"),
+            "message": str(first.get("message") or ""), "created_at": row["created_at"],
+            "status": row["status"] or "open", "acknowledged_by": row["acknowledged_by"] or "",
+            "acknowledged_at": row["acknowledged_at"] or "", "deliveries": deliveries.get(int(row["id"]), []),
+        })
+    return alerts
+
+
+def count_open_alerts(tenant_id: str) -> int:
+    with _connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM alert_events WHERE tenant_id = ? AND status = 'open'",
+                           (tenant_id,)).fetchone()
+    return int(row["n"] or 0)
+
+
+def acknowledge_alert(tenant_id: str, alert_id: int, actor: str) -> bool:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            return conn.execute(
+                "UPDATE alert_events SET status = 'acknowledged', acknowledged_by = ?, acknowledged_at = ? "
+                "WHERE tenant_id = ? AND id = ? AND status = 'open'",
+                (actor, now, tenant_id, int(alert_id))).rowcount > 0
+
+
+def get_alert_channel(tenant_id: str, channel: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT channel, enabled, config_json, secret_ref, status_json, updated_by, updated_at "
+            "FROM alert_channels WHERE tenant_id = ? AND channel = ?", (tenant_id, channel)).fetchone()
+    if row is None:
+        return None
+    return {"channel": row["channel"], "enabled": bool(row["enabled"]),
+            "config": _json_object(row["config_json"]), "secret_ref": row["secret_ref"] or "",
+            "status": _json_object(row["status_json"]), "updated_by": row["updated_by"] or "",
+            "updated_at": row["updated_at"] or ""}
+
+
+def _json_object(text) -> dict:
+    try:
+        value = json.loads(text or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def save_alert_channel(tenant_id: str, channel: str, *, enabled: bool, config: dict, secret_ref: str,
+                       actor: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            updated = conn.execute(
+                "UPDATE alert_channels SET enabled = ?, config_json = ?, secret_ref = ?, updated_by = ?, updated_at = ? "
+                "WHERE tenant_id = ? AND channel = ?",
+                (int(bool(enabled)), json.dumps(config, ensure_ascii=False), secret_ref, actor, now, tenant_id, channel),
+            ).rowcount
+            if not updated:
+                conn.execute(
+                    "INSERT INTO alert_channels (tenant_id, channel, enabled, config_json, secret_ref, status_json, "
+                    "updated_by, updated_at) VALUES (?, ?, ?, ?, ?, '{}', ?, ?)",
+                    (tenant_id, channel, int(bool(enabled)), json.dumps(config, ensure_ascii=False), secret_ref,
+                     actor, now))
+            if not enabled:
+                # Turned off: what was waiting for it is not sent later, unannounced.
+                conn.execute(
+                    "UPDATE alert_deliveries SET status = 'cancelled', last_error = 'The channel was turned off.' "
+                    "WHERE tenant_id = ? AND channel = ? AND status = 'pending'", (tenant_id, channel))
+
+
+def record_alert_channel_status(tenant_id: str, channel: str, **changes) -> None:
+    """Merge what the last test, delivery or failure showed into the channel's status."""
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute("SELECT status_json FROM alert_channels WHERE tenant_id = ? AND channel = ?",
+                               (tenant_id, channel)).fetchone()
+            if row is None:
+                return
+            status = {**_json_object(row["status_json"]), **changes}
+            conn.execute("UPDATE alert_channels SET status_json = ? WHERE tenant_id = ? AND channel = ?",
+                         (json.dumps(status, ensure_ascii=False), tenant_id, channel))
+
+
+def delete_alert_channel(tenant_id: str, channel: str) -> str | None:
+    """Remove a channel. Returns its vault reference (for the caller to delete), or None
+    when there was no channel. What was waiting for it is cancelled, visibly."""
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute("SELECT secret_ref FROM alert_channels WHERE tenant_id = ? AND channel = ?",
+                               (tenant_id, channel)).fetchone()
+            if row is None:
+                return None
+            conn.execute("DELETE FROM alert_channels WHERE tenant_id = ? AND channel = ?", (tenant_id, channel))
+            conn.execute(
+                "UPDATE alert_deliveries SET status = 'cancelled', last_error = 'The channel was removed.' "
+                "WHERE tenant_id = ? AND channel = ? AND status = 'pending'", (tenant_id, channel))
+            conn.execute(
+                "UPDATE finding_tickets SET status = 'cancelled', last_error = 'The ticket system was removed.' "
+                "WHERE tenant_id = ? AND system = ? AND status = 'pending'", (tenant_id, channel))
+    return row["secret_ref"] or ""
+
+
+def alert_delivery_queue(tenant_id: str, channel: str) -> dict:
+    """What is waiting for one channel: a count, how many are failing, and the oldest."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS pending, SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END) AS failing, "
+            "MIN(created_at) AS oldest FROM alert_deliveries WHERE tenant_id = ? AND channel = ? AND status = 'pending'",
+            (tenant_id, channel)).fetchone()
+    return {"pending": int(row["pending"] or 0), "failing": int(row["failing"] or 0), "oldest": row["oldest"] or ""}
+
+
+def claim_alert_deliveries(*, limit: int, now: float, lease_seconds: float, owner: str) -> list[dict]:
+    """Take up to `limit` due deliveries in every workspace, leased to `owner`."""
+    claimed: list[dict] = []
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT id, tenant_id, alert_id, channel, payload, attempts FROM alert_deliveries "
+                "WHERE status = 'pending' AND next_attempt_at <= ? AND lease_until <= ? ORDER BY id LIMIT ?",
+                (now, now, int(limit))).fetchall()
+            for row in rows:
+                if conn.execute(
+                        "UPDATE alert_deliveries SET lease_until = ?, lease_owner = ? WHERE id = ? AND lease_until <= ? "
+                        "AND status = 'pending'", (now + lease_seconds, owner, row["id"], now)).rowcount:
+                    claimed.append(dict(row))
+    return claimed
+
+
+def finish_alert_delivery(tenant_id: str, delivery_id: int, *, status: str, attempts: int, error: str = "",
+                          next_attempt_at: float = 0.0) -> None:
+    """A delivery's outcome: `delivered`, `cancelled`, or `pending` again with a back-off."""
+    now = datetime.now(timezone.utc).isoformat()
+    delivered_at = now if status == "delivered" else ""
     with _lock:
         with _connect() as conn:
             conn.execute(
-                """
-                INSERT INTO alert_events (tenant_id, scan_id, alerts_json, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    tenant_id,
-                    scan_id,
-                    json.dumps(alerts, ensure_ascii=False),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
+                "UPDATE alert_deliveries SET status = ?, attempts = ?, last_error = ?, next_attempt_at = ?, "
+                "lease_until = 0, lease_owner = '', last_attempt_at = ?, delivered_at = ? "
+                "WHERE tenant_id = ? AND id = ?",
+                (status, int(attempts), str(error)[:300], float(next_attempt_at), now, delivered_at, tenant_id,
+                 int(delivery_id)))
 
 
-def read_alerts(tenant_id: str, limit: int = 200) -> list[dict]:
+def retry_alert_deliveries_now(tenant_id: str, channel: str = "") -> int:
+    """Send what is waiting at the next pass rather than after its back-off."""
+    with _lock:
+        with _connect() as conn:
+            if channel:
+                return conn.execute(
+                    "UPDATE alert_deliveries SET next_attempt_at = 0 WHERE tenant_id = ? AND channel = ? "
+                    "AND status = 'pending'", (tenant_id, channel)).rowcount
+            return conn.execute("UPDATE alert_deliveries SET next_attempt_at = 0 WHERE tenant_id = ? AND status = 'pending'",
+                                (tenant_id,)).rowcount
+
+
+def create_finding_ticket(tenant_id: str, ticket_id: str, finding_id: str, system: str, payload: dict,
+                          created_by: str) -> dict | None:
+    """Queue a ticket for a finding. None when the finding already has one in `system`
+    that is not closed or cancelled."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock:
+        with _connect() as conn:
+            live = conn.execute(
+                "SELECT ticket_id FROM finding_tickets WHERE tenant_id = ? AND finding_id = ? AND system = ? "
+                "AND status IN ('pending', 'open')", (tenant_id, finding_id, system)).fetchone()
+            if live is not None:
+                return None
+            conn.execute(
+                "INSERT INTO finding_tickets (tenant_id, ticket_id, finding_id, system, status, payload, created_by, "
+                "created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)",
+                (tenant_id, ticket_id, finding_id, system, json.dumps(payload, ensure_ascii=False), created_by, now))
+    return get_finding_ticket(tenant_id, ticket_id)
+
+
+_TICKET_COLUMNS = ("ticket_id, finding_id, system, status, payload, external_id, external_key, external_url, "
+                   "external_status, created_by, created_at, opened_at, closed_at, last_synced_at, attempts, "
+                   "next_attempt_at, last_error")
+
+
+def _ticket(row) -> dict:
+    item = dict(row)
+    payload = _json_object(item.pop("payload", "{}"))
+    item["summary"] = str(payload.get("summary") or "")
+    item["attempts"] = int(item.get("attempts") or 0)
+    item["next_attempt_at"] = float(item.get("next_attempt_at") or 0)
+    return item
+
+
+def get_finding_ticket(tenant_id: str, ticket_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(f"SELECT {_TICKET_COLUMNS} FROM finding_tickets WHERE tenant_id = ? AND ticket_id = ?",  # nosec B608 - fixed columns
+                           (tenant_id, ticket_id)).fetchone()
+    return _ticket(row) if row else None
+
+
+def list_finding_tickets(tenant_id: str, *, finding_id: str = "", status: str = "", limit: int = 200) -> list[dict]:
+    clauses, params = ["tenant_id = ?"], [tenant_id]
+    if finding_id:
+        clauses.append("finding_id = ?")
+        params.append(finding_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
     with _connect() as conn:
         rows = conn.execute(
-            """
-            SELECT scan_id, alerts_json, created_at
-            FROM alert_events
-            WHERE tenant_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (tenant_id, limit),
-        ).fetchall()
-    events = [
-        {
-            "tenant_id": tenant_id,
-            "scan_id": row["scan_id"],
-            "alerts": json.loads(row["alerts_json"] or "[]"),
-            "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
-    return list(reversed(events))
+            f"SELECT {_TICKET_COLUMNS} FROM finding_tickets WHERE {' AND '.join(clauses)} "  # nosec B608 - fixed clauses
+            "ORDER BY created_at DESC LIMIT ?", (*params, int(limit))).fetchall()
+    return [_ticket(row) for row in rows]
+
+
+def ticket_payload(tenant_id: str, ticket_id: str) -> dict:
+    with _connect() as conn:
+        row = conn.execute("SELECT payload FROM finding_tickets WHERE tenant_id = ? AND ticket_id = ?",
+                           (tenant_id, ticket_id)).fetchone()
+    return _json_object(row["payload"]) if row else {}
+
+
+def claim_ticket_work(*, limit: int, now: float, lease_seconds: float, owner: str, sync_before: str) -> list[dict]:
+    """Tickets to create (pending and due) and open tickets not checked since `sync_before`,
+    in every workspace, leased to `owner`."""
+    claimed: list[dict] = []
+    with _lock:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT tenant_id, ticket_id, finding_id, system, status, external_id, external_key, attempts "
+                "FROM finding_tickets WHERE lease_until <= ? AND ((status = 'pending' AND next_attempt_at <= ?) "
+                "OR (status = 'open' AND last_synced_at < ?)) ORDER BY created_at LIMIT ?",
+                (now, now, sync_before, int(limit))).fetchall()
+            for row in rows:
+                if conn.execute(
+                        "UPDATE finding_tickets SET lease_until = ?, lease_owner = ? WHERE tenant_id = ? AND ticket_id = ? "
+                        "AND lease_until <= ?", (now + lease_seconds, owner, row["tenant_id"], row["ticket_id"], now)).rowcount:
+                    claimed.append(dict(row))
+    return claimed
+
+
+def open_tickets(tenant_id: str, limit: int = 200) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT tenant_id, ticket_id, finding_id, system, status, external_id, external_key, attempts "
+            "FROM finding_tickets WHERE tenant_id = ? AND status = 'open' ORDER BY created_at LIMIT ?",
+            (tenant_id, int(limit))).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_finding_ticket(tenant_id: str, ticket_id: str, **changes) -> None:
+    """Record what the ticket system said, and release the lease."""
+    allowed = {"status", "external_id", "external_key", "external_url", "external_status", "opened_at", "closed_at",
+               "last_synced_at", "attempts", "next_attempt_at", "last_error"}
+    fields = {key: value for key, value in changes.items() if key in allowed}
+    assignments = ", ".join(f"{key} = ?" for key in fields)
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                f"UPDATE finding_tickets SET {assignments + ', ' if assignments else ''}lease_until = 0, lease_owner = '' "  # nosec B608 - allow-listed columns
+                "WHERE tenant_id = ? AND ticket_id = ?", (*fields.values(), tenant_id, ticket_id))
 
 
 def _require_known_role(role: str, tenant_id: str) -> None:
@@ -10540,6 +10970,7 @@ PLATFORM_FUNCTIONS = {
     "vault_sealed_values": "vault", "vault_sealed_rows": "vault", "reseal_vault_values": "vault",
     "claim_audit_outbox": "siem", "delete_audit_outbox": "siem", "retry_audit_outbox": "siem",
     "audit_outbox_status": "siem", "reset_audit_outbox_backoff": "siem",
+    "claim_alert_deliveries": "delivery", "claim_ticket_work": "delivery",
     "_prune_audit_chains": "housekeeping", "prune_event_tables": "housekeeping",
     "prune_job_records": "housekeeping", "referenced_artifact_ids": "housekeeping",
     "recover_interrupted_jobs": "resume", "list_unfinished_partitioned_scans": "resume",

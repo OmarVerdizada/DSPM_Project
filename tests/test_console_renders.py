@@ -34,7 +34,8 @@ HOSTILE_OWNER = "<b onmouseover=alert(3)>boss</b>"
 # No angle bracket at all: harmless as text, but it leaves a quoted attribute and adds a
 # handler unless the quote itself is escaped.
 HOSTILE_ATTRIBUTE = 'hr" onfocus="alert(4)'
-RAW = ["<img src=x onerror", "<script>alert(2)", "<b onmouseover", '" onfocus="alert(4)']
+HOSTILE_ALERT = "<i onclick=alert(5)>Critical</i>"
+RAW = ["<img src=x onerror", "<script>alert(2)", "<b onmouseover", '" onfocus="alert(4)', "<i onclick"]
 
 
 def _hostile_scan() -> dict:
@@ -61,10 +62,12 @@ class EveryPageRendersTest(unittest.TestCase):
 
     def setUp(self) -> None:
         store.save_scan_history("default", _hostile_scan())
+        store.save_alerts("default", "render-scan", [{"severity": "CRITICAL", "title": HOSTILE_ALERT,
+                                                      "message": "2 critical files found"}])
         headers = {"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"}
         paths = ["/api/history", "/api/executive-dashboard", "/api/inventory/facets", "/api/scan-profiles",
                  "/api/inventory", "/api/audit", "/api/tenants", "/api/findings", "/api/roles", "/api/users",
-                 "/api/scan-targets", "/api/history/hash-changes"]
+                 "/api/scan-targets", "/api/history/hash-changes", "/api/alerts"]
         responses = {}
         for path in paths:
             response = self.client.get(path, headers=headers)
@@ -91,7 +94,7 @@ class EveryPageRendersTest(unittest.TestCase):
         self.assertNotIn("error", result)
         failed = {name: page["error"] for name, page in result["pages"].items() if not page["ok"]}
         self.assertEqual(failed, {})
-        self.assertEqual(len(result["pages"]), 11)
+        self.assertEqual(len(result["pages"]), 12)
         self.assertEqual(result["unanswered"], [], "a page asked for something the fixture does not hold")
         rendered = "\n".join(result["html"])
         self.assertIn("ledger.xlsx", rendered, "the pages drew the scan")
@@ -104,6 +107,7 @@ class EveryPageRendersTest(unittest.TestCase):
         self.assertIn("&lt;img src=x onerror=alert(1)&gt;", rendered, "the hostile name was drawn, escaped")
         self.assertIn("&lt;b onmouseover=alert(3)&gt;", rendered, "the hostile owner was drawn, escaped")
         self.assertIn("hr&quot; onfocus=&quot;alert(4)", rendered, "the hostile folder was drawn, escaped")
+        self.assertIn("&lt;i onclick=alert(5)&gt;Critical&lt;/i&gt;", rendered, "the hostile alert was drawn, escaped")
 
 
 if __name__ == "__main__":

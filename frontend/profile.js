@@ -1684,5 +1684,343 @@ renderSessionExpiry();
 loadProfile();
 loadFeatures();
 loadMfa();
+
+/* ── Alerts & tickets (D3) ────────────────────────────────────── */
+// A workspace's webhook, mail relay, Jira and ServiceNow. The server owns delivery - the
+// queue, retries, signatures and TLS; this is where it is configured and watched. A
+// secret field is always empty: typed, it replaces the saved secret; left empty, the
+// saved one is kept; "Remove saved ..." deletes it. The page never holds a saved secret
+// and never sends a mask back. The webhook's signing secret is made by the server and
+// shown once, when it is made.
+const integrationsCard = document.querySelector("#integrations-card");
+const INTEGRATION_SECRET_FIELD = { email: "password", jira: "token", servicenow: "password" };
+const INTEGRATION_CA_MAX_BYTES = 64 * 1024;
+const integrationDrafts = {};   // channel -> { view, pendingCa, removeCa, removeSecret }
+
+function integrationBlock(channel) {
+  return integrationsCard?.querySelector(`.integration[data-channel="${channel}"]`) || null;
+}
+
+function integrationPart(block, role) {
+  return block.querySelector(`[data-role="${role}"]`);
+}
+
+function integrationDraft(channel) {
+  if (!integrationDrafts[channel]) {
+    integrationDrafts[channel] = { view: null, pendingCa: null, removeCa: false, removeSecret: false };
+  }
+  return integrationDrafts[channel];
+}
+
+// Enabled is never connected: only a delivery or a passed test of these settings is.
+function integrationStateLine(view) {
+  const queue = view.queue || {};
+  const ticket = view.channel === "jira" || view.channel === "servicenow";
+  switch (view.state) {
+    case "disabled":
+      return view.configured ? "Off - the settings are kept." : "Off.";
+    case "not_configured":
+      return "On - not configured yet. Nothing is sent.";
+    case "not_connected":
+      return "On - not connected yet. Test it, or wait for the next delivery.";
+    case "connected":
+      return `Connected - last ${ticket ? "ticket" : "delivery"} ${siemWhen(view.status?.last_delivery_at).toLowerCase()}.`;
+    case "degraded": {
+      const count = Number(queue.pending || 0);
+      return `Delivery degraded - ${count} waiting, retrying.`;
+    }
+    default:
+      return "Checking...";
+  }
+}
+
+function integrationCaText(draft) {
+  if (draft.pendingCa) return `${draft.pendingCa.name} - will be saved`;
+  if (draft.removeCa) return "Will be removed when you save";
+  const ca = draft.view?.config?.ca;
+  return ca ? `${ca.name} · SHA-256 ${String(ca.fingerprint || "").slice(0, 23)}...` : "System trust store";
+}
+
+function integrationSay(block, message, isError = false) {
+  const status = integrationPart(block, "status");
+  status.classList.toggle("error", Boolean(isError));
+  setStatus(status, message);
+}
+
+function renderIntegration(view, { fillForm = true } = {}) {
+  const block = integrationBlock(view.channel);
+  if (!block) return;
+  const draft = integrationDraft(view.channel);
+  draft.view = view;
+  const config = view.config || {};
+  const toggle = integrationPart(block, "toggle");
+  toggle.disabled = false;
+  toggle.checked = Boolean(view.enabled);
+  const open = Boolean(view.enabled);
+  integrationPart(block, "panel").hidden = !open;
+  toggle.setAttribute("aria-expanded", String(open));
+  const state = integrationPart(block, "state");
+  state.dataset.state = view.state;
+  integrationPart(block, "state-text").textContent = integrationStateLine(view);
+  const form = integrationPart(block, "form");
+  if (fillForm) {
+    form.querySelectorAll("input[name], select[name]").forEach((field) => {
+      if (field.hasAttribute("data-secret")) {
+        field.value = "";
+      } else if (field.name === "recipients") {
+        field.value = (config.recipients || []).join(", ");
+      } else if (field.tagName === "SELECT") {
+        field.value = config[field.name] || field.options[field.name === "min_severity" ? 1 : 0].value;
+      } else {
+        field.value = config[field.name] === undefined || config[field.name] === null ? "" : String(config[field.name]);
+      }
+    });
+    draft.pendingCa = null;
+    draft.removeCa = false;
+    draft.removeSecret = false;
+  }
+  const secretField = INTEGRATION_SECRET_FIELD[view.channel];
+  if (secretField) {
+    const saved = Boolean(config[`${secretField}_configured`]);
+    const note = integrationPart(block, "secret-note");
+    note.textContent = draft.removeSecret ? "Will be removed when you save." : (saved ? "Saved - leave empty to keep it." : "Not set.");
+    block.querySelector('[data-action="remove-secret"]').hidden = !saved || draft.removeSecret;
+  }
+  if (view.channel === "webhook") {
+    const rotate = block.querySelector('[data-action="rotate"]');
+    rotate.hidden = !config.signing_secret_configured;
+    integrationPart(block, "signing-note").textContent = config.signing_secret_configured
+      ? "Set. It was shown once, when it was made; make a new one if the receiver lost it."
+      : "Made when you save. Every delivery is signed with it (X-Sentro-Signature).";
+  }
+  integrationPart(block, "ca-summary").textContent = integrationCaText(draft);
+  block.querySelector('[data-action="ca-remove"]').hidden = !(draft.pendingCa || (config.ca && !draft.removeCa));
+  const queue = view.queue || {};
+  const status = view.status || {};
+  block.querySelector('[data-fact="delivery"]').textContent = siemWhen(status.last_delivery_at);
+  block.querySelector('[data-fact="queue"]').textContent = queue.pending
+    ? `${queue.pending} waiting${queue.failing ? `, ${queue.failing} failed at least once` : ""}`
+    : "None";
+  block.querySelector('[data-fact="ca"]').textContent = config.ca ? `${config.ca.name} · ${config.ca.fingerprint}` : "System trust store";
+  block.querySelector('[data-fact="error-row"]').hidden = !(status.last_error && (view.state === "degraded" || view.state === "not_connected"));
+  block.querySelector('[data-fact="error"]').textContent = status.last_error
+    ? `${status.last_error} (${siemWhen(status.last_error_at).toLowerCase()})` : "";
+  block.querySelector('[data-action="retry"]').hidden = !queue.pending;
+  integrationPart(block, "remove-row").hidden = !view.configured;
+}
+
+// What a save sends: the form's fields, a secret only when one was typed, a certificate
+// only when one was chosen here.
+function integrationBody(channel) {
+  const block = integrationBlock(channel);
+  const draft = integrationDraft(channel);
+  const body = {};
+  integrationPart(block, "form").querySelectorAll("input[name], select[name]").forEach((field) => {
+    const value = String(field.value || "").trim();
+    if (field.hasAttribute("data-secret")) {
+      if (field.value) body[field.name] = field.value;
+    } else if (field.name === "recipients") {
+      body.recipients = value.split(",").map((item) => item.trim()).filter(Boolean);
+    } else if (["url", "base_url", "instance_url"].includes(field.name)) {
+      // An address typed without its scheme is an https one: nothing else is called.
+      body[field.name] = value && !/^[a-z][a-z0-9+.-]*:/i.test(value) ? `https:${"//"}${value}` : value;
+    } else if (field.name === "port") {
+      const port = Number(value);
+      if (Number.isInteger(port) && port > 0) body.port = port;
+    } else {
+      body[field.name] = value;
+    }
+  });
+  if (draft.removeSecret && !body[INTEGRATION_SECRET_FIELD[channel]]) body.remove_secret = true;
+  if (draft.pendingCa?.pem) {
+    body.ca_pem = draft.pendingCa.pem;
+    body.ca_name = draft.pendingCa.name || "ca.pem";
+  } else if (draft.removeCa) {
+    body.remove_ca = true;
+  }
+  return body;
+}
+
+function showSigningSecret(block, secret) {
+  const shown = integrationPart(block, "shown-secret");
+  integrationPart(block, "shown-secret-value").value = secret || "";
+  shown.hidden = !secret;
+}
+
+async function integrationAction(block, pending, run, done) {
+  const buttons = block.querySelectorAll("button");
+  buttons.forEach((button) => { button.disabled = true; });
+  integrationSay(block, pending);
+  try {
+    integrationSay(block, done(await run()));
+  } catch (error) {
+    integrationSay(block, error.code === "mfa_required"
+      ? "Confirm a code from your authenticator (Two-step sign-in, above) to change integrations."
+      : error.message, true);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
+async function loadIntegrations() {
+  if (!integrationsCard) return;
+  let permissions = [];
+  try {
+    permissions = JSON.parse(sessionGet("dspm-permissions") || "[]");
+  } catch {
+    permissions = [];
+  }
+  if (!permissions.includes("tenant.admin")) return;
+  try {
+    const data = await api("/api/integrations");
+    integrationsCard.hidden = false;
+    (data.integrations || []).forEach((view) => renderIntegration(view));
+  } catch (error) {
+    if (error.status === 403 && error.code !== "mfa_required") return;
+    integrationsCard.hidden = false;
+    integrationsCard.querySelectorAll(".integration").forEach((block) => {
+      integrationPart(block, "state").dataset.state = "unavailable";
+      integrationPart(block, "state-text").textContent = "Status unavailable.";
+    });
+    const first = integrationsCard.querySelector(".integration");
+    if (first) {
+      integrationSay(first, error.code === "mfa_required"
+        ? "Confirm a code from your authenticator (Two-step sign-in, above) to manage integrations."
+        : `Could not load the integrations: ${error.message}`, true);
+    }
+  }
+}
+
+integrationsCard?.addEventListener("change", async (event) => {
+  const block = event.target.closest(".integration");
+  if (!block) return;
+  const channel = block.dataset.channel;
+  const draft = integrationDraft(channel);
+  if (event.target.matches('[data-role="toggle"]')) {
+    const wanted = event.target.checked;
+    if (!draft.view?.configured) {
+      // Nothing to turn on yet: open the form, and Save turns it on.
+      integrationPart(block, "panel").hidden = !wanted;
+      event.target.setAttribute("aria-expanded", String(wanted));
+      integrationPart(block, "state-text").textContent = wanted ? "On once saved - fill in the settings." : "Off.";
+      return;
+    }
+    await integrationAction(block, wanted ? "Turning it on..." : "Turning it off...", async () => {
+      const view = await api(`/api/integrations/${channel}/enabled`, { enabled: wanted }, "PUT");
+      renderIntegration(view, { fillForm: false });
+      return view;
+    }, () => (wanted ? "On." : "Off. The settings are kept; alerts waiting for it were cancelled."));
+    renderIntegration(draft.view, { fillForm: false });
+    return;
+  }
+  if (event.target.matches('[data-role="ca-file"]')) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > INTEGRATION_CA_MAX_BYTES) {
+      integrationSay(block, "That file is larger than 64 KB. Upload the CA certificate only.", true);
+      return;
+    }
+    const pem = await file.text();
+    if (/PRIVATE KEY/i.test(pem)) {
+      integrationSay(block, "That file contains a private key. Upload the CA's certificate only.", true);
+      return;
+    }
+    if (!pem.includes("-----BEGIN CERTIFICATE-----")) {
+      integrationSay(block, "Upload a PEM certificate (-----BEGIN CERTIFICATE-----).", true);
+      return;
+    }
+    draft.pendingCa = { pem, name: file.name };
+    draft.removeCa = false;
+    integrationPart(block, "ca-summary").textContent = integrationCaText(draft);
+    block.querySelector('[data-action="ca-remove"]').hidden = false;
+    integrationSay(block, `${file.name} is ready. Save to use it.`);
+  }
+});
+
+integrationsCard?.addEventListener("submit", async (event) => {
+  const block = event.target.closest(".integration");
+  if (!block) return;
+  event.preventDefault();
+  const channel = block.dataset.channel;
+  const body = { ...integrationBody(channel), enabled: integrationPart(block, "toggle").checked };
+  await integrationAction(block, "Saving...", async () => {
+    const view = await api(`/api/integrations/${channel}`, body, "PUT");
+    renderIntegration(view);
+    showSigningSecret(block, view.signing_secret);
+    return view;
+  }, (view) => (view.signing_secret
+    ? "Saved. Copy the signing secret into the receiver now - it is not shown again."
+    : "Saved."));
+});
+
+integrationsCard?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-action]");
+  const block = event.target.closest(".integration");
+  if (!button || !block || button.type === "submit") return;
+  const channel = block.dataset.channel;
+  const draft = integrationDraft(channel);
+  switch (button.dataset.action) {
+    case "test":
+      await integrationAction(block, "Testing...", async () => {
+        const result = await api(`/api/integrations/${channel}/test`, null, "POST");
+        renderIntegration(result, { fillForm: false });
+        if (!result.test.ok) throw new Error(result.test.message);
+        return result;
+      }, (result) => result.test.message);
+      break;
+    case "retry":
+      await integrationAction(block, "Sending what is waiting...", async () => {
+        const result = await api(`/api/integrations/${channel}/retry`, null, "POST");
+        renderIntegration(result, { fillForm: false });
+        return result;
+      }, (result) => `${result.made_due} waiting will be sent now.`);
+      break;
+    case "rotate":
+      await integrationAction(block, "Making a new signing secret...", async () => {
+        const view = await api(`/api/integrations/${channel}`, { rotate_secret: true }, "PUT");
+        renderIntegration(view, { fillForm: false });
+        showSigningSecret(block, view.signing_secret);
+        return view;
+      }, () => "A new signing secret is in use. Copy it into the receiver now - it is not shown again.");
+      break;
+    case "copy": {
+      const value = integrationPart(block, "shown-secret-value").value;
+      try {
+        await navigator.clipboard.writeText(value);
+        integrationSay(block, "Copied.");
+      } catch {
+        integrationPart(block, "shown-secret-value").select();
+        integrationSay(block, "Select the secret and copy it.");
+      }
+      break;
+    }
+    case "remove-secret":
+      draft.removeSecret = true;
+      renderIntegration(draft.view, { fillForm: false });
+      break;
+    case "ca-choose":
+      integrationPart(block, "ca-file").click();
+      break;
+    case "ca-remove":
+      draft.pendingCa = null;
+      draft.removeCa = Boolean(draft.view?.config?.ca);
+      renderIntegration(draft.view, { fillForm: false });
+      break;
+    case "remove":
+      if (!window.confirm("Remove these settings and their secret? This cannot be undone.")) return;
+      await integrationAction(block, "Removing...", async () => {
+        const view = await api(`/api/integrations/${channel}`, null, "DELETE");
+        renderIntegration(view);
+        showSigningSecret(block, "");
+        return view;
+      }, () => "Removed.");
+      break;
+    default:
+      break;
+  }
+});
+
 loadDirectory();
 loadCredentials();
+loadIntegrations();

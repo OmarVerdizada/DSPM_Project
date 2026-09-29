@@ -323,6 +323,20 @@ Severity bands:
 
 Until this release the detectors keyed every value fingerprint with the `default` workspace whatever workspace scanned, because the scan's workspace was never passed to them. They are keyed with the scanning workspace now. In a workspace other than `default`, a suppression rule written for one value (`fingerprint`) before the upgrade was keyed the old way and no longer matches: write it again from the finding.
 
+## Alerts, webhooks, e-mail and tickets
+
+A scan that finds critical exposure raises an **alert**. Alerts are listed under **Evidence → Alerts** (`GET /api/alerts`, `inventory.view`) with where each was delivered, and acknowledged there (`POST /api/alerts/{id}/acknowledge`, `findings.triage`). An alert is written to the audit trail when it is raised, so a configured SIEM receives it too (syslog, CEF or JSON - see *Audit trail*).
+
+Each workspace's administrator (`tenant.admin`; changes need a session verified with two-step sign-in) sets where alerts go in **Account → Settings → Features → Alerts & tickets** (`GET/PUT/DELETE /api/integrations/{webhook|email|jira|servicenow}`, `.../enabled`, `.../test`, `.../retry`):
+
+- **Webhook** - an HTTPS POST of the alert as JSON, signed: `X-Sentro-Signature: t=<unix time>,v1=<hex HMAC-SHA256(secret, "<t>.<body>")>`, with `X-Sentro-Event` and `X-Sentro-Delivery`. Sentro makes the signing secret and shows it once, when it is made or rotated; a receiver recomputes the HMAC and refuses a timestamp more than five minutes old (`backend.alert_delivery.verify_signature` is that check).
+- **E-mail** - a plain-text message through the workspace's relay, over STARTTLS or TLS (verified); a relay without TLS may be used only without a password.
+- **Jira** (REST API v2: Cloud with an account e-mail and API token, Data Center with a personal access token) and **ServiceNow** (the incident table) - **Send to Jira/ServiceNow** on a finding (`POST /api/findings/{id}/ticket`, `findings.triage`) creates a ticket; Sentro asks every `DSPM_TICKET_SYNC_SECONDS` (300) whether it is done, and when it is closed there the finding is resolved here, recorded as the ticket's doing (`POST /api/tickets/sync` asks now).
+
+Delivery is a queue: an alert is queued for each channel in the transaction that records it, and a deliverer sends what is due every `DSPM_ALERT_DELIVERY_INTERVAL_SECONDS` (5). A receiver that is down or refuses leaves the alert queued, retried with a back-off that grows to five minutes, and it is marked delivered only when the receiver accepted it (a 2xx answer; a relay that took the message). A ticket is created the same way, and creating it twice is prevented by Sentro's reference on it (a Jira label, a ServiceNow correlation id), looked up before a ticket is made. Turning a channel off or removing it cancels what was waiting for it. Every delivery, a delivery's first failure, every ticket created or closed, and every change, test and removal of a channel is in the audit trail - never a secret.
+
+Every outbound call is checked: only `https://` is called; a name is resolved once and refused if it resolves to a loopback, link-local, multicast or cloud-metadata address, and the connection is made to the address that was checked; the certificate chain and name are always verified, against the system's trust store or a private CA uploaded with the channel; no redirect is followed. The secrets - the signing secret, the relay password, the Jira token, the ServiceNow password - are sealed in the vault and never returned: the settings say only that one is set. A secret left out of a save is kept, a new one replaces it, **Remove saved ...** deletes it, and a mask is refused as a value. `DSPM_ALERT_WEBHOOK_URL`, the old unsigned webhook, is imported once into the `default` workspace as a signed webhook (an `https://` address only); make a new signing secret in the console to give it to the receiver.
+
 ## Remediation Workflow
 
 Each risky file receives remediation metadata:

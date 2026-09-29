@@ -43,6 +43,9 @@ _MEDIUM = {"auth.login_failed", "tenant.deleted", "user.deleted", "role.deleted"
            "settings.siem_test_failed"}
 # Turning the SIEM off, or removing its receiver, is what someone covering tracks does first.
 _HIGH |= {"settings.siem_disabled", "settings.siem_removed"}
+# D3: an alert a scan raised pages the SOC; a channel that stops working is worth a look.
+_HIGH |= {"alert.raised"}
+_MEDIUM |= {"alert.delivery_failed", "ticket.create_failed", "integration.disabled", "integration.removed"}
 
 
 def siem_target(conn=None) -> dict | None:

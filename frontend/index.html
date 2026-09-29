@@ -96,6 +96,7 @@
             <div class="nav-sub-inner">
               <button type="button" class="nav-sub-link" data-tab-jump="reports">Reports</button>
               <button type="button" class="nav-sub-link" data-tab-jump="history">History &amp; audit</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="alerts">Alerts <span class="nav-badge" id="alerts-nav-badge" hidden></span></button>
             </div>
           </div>
           <button type="button" class="tab" data-tab="security" title="Users, tenants, asset rules, risk logic">
@@ -1072,6 +1073,48 @@
 
             <div class="report-preview" id="report-preview" aria-label="Report preview"></div>
           </div>
+        </section>
+
+        <!-- D3: the alerts scans raise, where each was delivered, and who acknowledged it.
+             Delivery is the server's (a queue, retried until the receiver accepts); this
+             page shows it and records the acknowledgement. -->
+        <section id="tab-alerts" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Alerts</h2>
+            </div>
+          </div>
+          <section class="panel history-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Raised by scans</h3>
+                <p class="panel-note" id="alerts-context">Loading alerts&hellip;</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Show</span>
+                  <select id="alerts-filter" title="Which alerts to show">
+                    <option value="open">Open</option>
+                    <option value="">All</option>
+                  </select>
+                </label>
+                <button type="button" id="refresh-alerts-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table" id="alerts-table">
+                <thead>
+                  <tr><th scope="col">Raised</th><th scope="col">Severity</th><th scope="col">Alert</th><th scope="col">Delivered to</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+                </thead>
+                <tbody id="alerts-body">
+                  <tr><td colspan="6" class="empty">Loading alerts&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="panel-foot">An alert is sent to the workspace's webhook and e-mail relay (Account &rarr; Settings &rarr;
+              Features &rarr; Alerts &amp; tickets) and written to the audit trail, which carries it to the SIEM when one is
+              set. A delivery that fails is retried until the receiver accepts it.</p>
+          </section>
         </section>
 
         <section id="tab-history" class="tab-panel">

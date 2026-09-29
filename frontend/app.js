@@ -3929,6 +3929,7 @@ const NAV_DESTINATIONS = {
   risk: "risk",
   reports: "reports",
   history: "reports",
+  alerts: "reports",
   security: "security",
   admin: "security",
   settings: "security",
@@ -4105,6 +4106,9 @@ function switchTab(tabName) {
 
   if (resolvedTab === "risk" && !remediationLoaded) {
     loadRemediationFindings().catch(() => {});
+  }
+  if (resolvedTab === "alerts") {
+    loadAlerts().catch(() => {});
   }
   // The 200-row workspace slice used to be fetched at boot for a tab that was
   // not on screen: 203KB and 9,685 nodes nobody had asked for.
@@ -9275,6 +9279,7 @@ function renderRemediationDrawer(finding = selectedRemediationFinding) {
       <section class="remediation-drawer-section"><h4>Why this matters</h4><p>${escapeHtml(reason)}</p>${factors.length ? `<ul class="remediation-risk-list">${factors.map((factor) => `<li>${escapeHtml(factor)}</li>`).join("")}</ul>` : ""}</section>
       <section class="remediation-drawer-section remediation-recommendation"><h4>Recommended remediation</h4>${recommendations.length ? `<ol class="remediation-recommendation-list">${recommendations.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>` : '<p>No recommendation is available for this finding.</p>'}</section>
       <section class="remediation-drawer-section"><h4>Workflow progress</h4>${remediationWorkflowMarkup(finding)}</section>
+      ${remediationTicketSection(finding)}
       <section class="remediation-drawer-section"><h4>Ownership</h4><div class="remediation-owner-grid">
         <div class="remediation-owner-item"><span>Assigned owner</span><strong>${escapeHtml(remediationOwner(finding))}</strong></div>
         ${finding.team ? `<div class="remediation-owner-item"><span>Team</span><strong>${escapeHtml(finding.team)}</strong></div>` : ""}
@@ -9286,6 +9291,7 @@ function renderRemediationDrawer(finding = selectedRemediationFinding) {
         ${remediationCanManage(finding) ? `<form class="remediation-comment-form" data-remediation-comment-form><input class="input input-sm" name="comment" maxlength="1000" required placeholder="Add comment…" aria-label="Add comment" /><button type="submit" class="btn btn-sm">Send</button></form>` : ""}
       </section>
     </div>${remediationDrawerActions(finding)}`;
+  loadFindingTickets(finding.finding_id).catch(() => {});
 }
 
 async function openRemediationFinding(findingId, { openDrawer = true } = {}) {
@@ -10046,6 +10052,9 @@ async function loadHistory() {
     return;
   }
   const context = captureTenantContext();
+  // D3: the open-alert count in the sidebar follows every history refresh (sign-in,
+  // a finished scan, a workspace switch).
+  loadAlerts().catch(() => {});
   const [history, dashboard, estateFacetResponse] = await Promise.all([
     api("/api/history", null, "GET"),
     api("/api/executive-dashboard", null, "GET"),
@@ -10604,6 +10613,22 @@ const AUDIT_ACTIONS = {
   "evidence.reveal_refused": "Asked to reveal a value - refused",
   "exact_match.set_created": "Added an exact-match reference set (values kept only as fingerprints)",
   "exact_match.set_deleted": "Removed an exact-match reference set",
+  "alert.raised": "A scan raised an alert",
+  "alert.acknowledged": "Acknowledged an alert",
+  "alert.delivered": "Delivered an alert",
+  "alert.delivery_failed": "Could not deliver an alert - retrying",
+  "integration.changed": "Changed an alert or ticket integration",
+  "integration.enabled": "Turned an integration on",
+  "integration.disabled": "Turned an integration off",
+  "integration.removed": "Removed an integration and its secret",
+  "integration.test_succeeded": "Tested an integration - it worked",
+  "integration.test_failed": "Tested an integration - it failed",
+  "integration.retry": "Asked for waiting alerts to be sent now",
+  "ticket.requested": "Asked for a ticket for a finding",
+  "ticket.created": "Created a ticket for a finding",
+  "ticket.create_failed": "Could not create a ticket - retrying",
+  "ticket.closed": "A ticket was closed; its finding was resolved",
+  "ticket.synced": "Checked open tickets",
   "credential.deleted": "Deleted a saved credential",
   "credential.preflight": "Checked a saved credential's privilege",
   "vault.key_rotated": "Rotated the vault key",
@@ -13435,3 +13460,155 @@ function initScanProfileDecks() {
 }
 
 initScanProfileDecks();
+
+
+/* ── Alerts (D3) ──────────────────────────────────────────────── */
+// What scans raised, where each alert went, and who acknowledged it. The server owns
+// delivery - the queue, the retries, the signatures; this page reads it.
+// Looked up when used: history loads (and asks for the count) before this part of the
+// file has run.
+function alertsParts() {
+  return {
+    body: document.querySelector("#alerts-body"),
+    context: document.querySelector("#alerts-context"),
+    filter: document.querySelector("#alerts-filter"),
+    badge: document.querySelector("#alerts-nav-badge"),
+  };
+}
+const ALERT_CHANNEL_LABELS = { webhook: "Webhook", email: "E-mail" };
+const ALERT_DELIVERY_WORDS = { delivered: "delivered", pending: "waiting", cancelled: "cancelled" };
+
+function alertDeliveryText(delivery) {
+  const label = ALERT_CHANNEL_LABELS[delivery.channel] || delivery.channel;
+  if (delivery.status === "pending" && delivery.attempts > 0) {
+    return `${label}: retrying (${delivery.attempts} attempt${delivery.attempts === 1 ? "" : "s"}) - ${delivery.last_error || "not accepted yet"}`;
+  }
+  return `${label}: ${ALERT_DELIVERY_WORDS[delivery.status] || delivery.status}`;
+}
+
+function renderAlerts(alerts, open) {
+  const { body: alertsBody, context: alertsContext, filter: alertsFilter, badge: alertsNavBadge } = alertsParts();
+  if (alertsNavBadge) {
+    alertsNavBadge.hidden = !open;
+    alertsNavBadge.textContent = open ? String(open) : "";
+  }
+  if (alertsContext) {
+    alertsContext.textContent = open
+      ? `${open} open alert${open === 1 ? "" : "s"}. Acknowledge one when it has been looked at.`
+      : "No open alerts.";
+  }
+  if (!alertsBody) return;
+  if (!alerts.length) {
+    alertsBody.innerHTML = `<tr><td colspan="6" class="empty">${alertsFilter?.value === "open" ? "No open alerts." : "No alerts yet. A scan raises one when it finds critical exposure."}</td></tr>`;
+    return;
+  }
+  const mayAcknowledge = can("findings.triage");
+  alertsBody.innerHTML = alerts.map((alert) => {
+    const deliveries = (alert.deliveries || []).map(alertDeliveryText);
+    const status = alert.status === "acknowledged"
+      ? `Acknowledged by ${escapeHtml(alert.acknowledged_by)} ${escapeHtml(getFriendlyTimestamp(alert.acknowledged_at))}`
+      : "Open";
+    const action = alert.status === "open" && mayAcknowledge
+      ? `<button type="button" class="secondary-btn" data-alert-ack="${Number(alert.alert_id)}">Acknowledge</button>`
+      : "";
+    return `<tr>
+      <td>${escapeHtml(getFriendlyTimestamp(alert.created_at))}</td>
+      <td><span class="badge ${escapeHtml(alert.severity || "")}">${escapeHtml(alert.severity || "-")}</span></td>
+      <td><strong>${escapeHtml(alert.title)}</strong><br><span class="muted">${escapeHtml(alert.message)}</span></td>
+      <td>${deliveries.length ? deliveries.map(escapeHtml).join("<br>") : '<span class="muted">No channel set</span>'}</td>
+      <td>${status}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadAlerts() {
+  if (!accessToken) return;
+  const { body: alertsBody, filter: alertsFilter } = alertsParts();
+  const context = captureTenantContext();
+  const status = alertsFilter?.value ?? "open";
+  try {
+    const data = await api(`/api/alerts${status ? `?status=${encodeURIComponent(status)}` : ""}`, null, "GET");
+    if (!isCurrentTenantContext(context)) return;
+    renderAlerts(data.alerts || [], Number(data.open || 0));
+  } catch (error) {
+    if (!isCurrentTenantContext(context)) return;
+    if (alertsBody) alertsBody.innerHTML = `<tr><td colspan="6" class="empty">Alerts unavailable: ${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+alertsParts().filter?.addEventListener("change", () => { loadAlerts(); });
+document.querySelector("#refresh-alerts-btn")?.addEventListener("click", () => { loadAlerts(); });
+alertsParts().body?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-alert-ack]");
+  if (!button) return;
+  button.disabled = true;
+  try {
+    await api(`/api/alerts/${encodeURIComponent(button.dataset.alertAck)}/acknowledge`, null, "POST");
+    showToast("Alert acknowledged", "", "success");
+  } catch (error) {
+    showToast("Could not acknowledge the alert", error.message, "danger");
+  }
+  loadAlerts();
+});
+
+
+/* ── A finding's ticket (D3) ──────────────────────────────────── */
+// Sent to Jira or ServiceNow from the queue; closing the ticket there resolves the
+// finding here. The drawer shows the ticket and, when there is none, a button per
+// ticket system the workspace has turned on.
+const TICKET_SYSTEM_LABELS = { jira: "Jira", servicenow: "ServiceNow" };
+const TICKET_STATUS_WORDS = { pending: "being created", open: "open", closed: "closed", cancelled: "cancelled" };
+
+function remediationTicketSection(finding = {}) {
+  if (!finding.finding_id) return "";
+  return `<section class="remediation-drawer-section" data-ticket-finding="${escapeHtml(finding.finding_id)}"><h4>Ticket</h4><div data-ticket-slot><span class="remediation-cell-secondary">Loading tickets…</span></div></section>`;
+}
+
+function findingTicketMarkup(tickets, systems, findingId, mayRequest) {
+  const lines = tickets.map((ticket) => {
+    const label = TICKET_SYSTEM_LABELS[ticket.system] || ticket.system;
+    const name = ticket.external_key ? `${label} ${ticket.external_key}` : label;
+    const link = ticket.external_url && /^https:\/\//i.test(ticket.external_url)
+      ? `<a href="${escapeHtml(ticket.external_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(name)}</a>`
+      : escapeHtml(name);
+    const state = TICKET_STATUS_WORDS[ticket.status] || ticket.status;
+    const error = ticket.status === "pending" && ticket.last_error ? ` - ${escapeHtml(ticket.last_error)}` : "";
+    const outside = ticket.external_status ? ` (${escapeHtml(ticket.external_status)})` : "";
+    return `<li>${link}: ${escapeHtml(state)}${outside}${error}</li>`;
+  });
+  const live = new Set(tickets.filter((ticket) => ["pending", "open"].includes(ticket.status)).map((ticket) => ticket.system));
+  const buttons = mayRequest
+    ? systems.filter((system) => !live.has(system)).map((system) => `<button type="button" class="btn btn-sm" data-ticket-system="${escapeHtml(system)}" data-finding-id="${escapeHtml(findingId)}">Send to ${escapeHtml(TICKET_SYSTEM_LABELS[system] || system)}</button>`)
+    : [];
+  const empty = !tickets.length && !buttons.length
+    ? `<span class="remediation-cell-secondary">${systems.length || !mayRequest ? "No ticket." : "No ticket system is set up (Account → Settings → Features → Alerts & tickets)."}</span>`
+    : "";
+  return `${lines.length ? `<ul class="remediation-risk-list">${lines.join("")}</ul>` : ""}${buttons.join(" ")}${empty}`;
+}
+
+async function loadFindingTickets(findingId) {
+  if (!findingId || !accessToken) return;
+  const mayRequest = can("findings.triage");
+  const [tickets, systems] = await Promise.all([
+    api(`/api/tickets?finding_id=${encodeURIComponent(findingId)}`, null, "GET").then((data) => data.tickets || []),
+    mayRequest ? api("/api/tickets/systems", null, "GET").then((data) => data.systems || []).catch(() => []) : Promise.resolve([]),
+  ]);
+  const section = [...document.querySelectorAll("[data-ticket-finding]")].find((item) => item.dataset.ticketFinding === String(findingId));
+  const slot = section?.querySelector("[data-ticket-slot]");
+  if (slot) slot.innerHTML = findingTicketMarkup(tickets, systems, findingId, mayRequest);
+}
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-ticket-system]");
+  if (!button) return;
+  button.disabled = true;
+  const system = button.dataset.ticketSystem;
+  try {
+    await api(`/api/findings/${encodeURIComponent(button.dataset.findingId)}/ticket`, { system }, "POST");
+    showToast("Ticket requested", `It is created in ${TICKET_SYSTEM_LABELS[system] || system} from the queue.`, "success");
+  } catch (error) {
+    showToast("Could not request a ticket", error.message, "danger");
+  }
+  loadFindingTickets(button.dataset.findingId).catch(() => {});
+});

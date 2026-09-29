@@ -449,6 +449,13 @@ async def app_lifespan(_: FastAPI):
 
         # C4: audit events to the SIEM, when DSPM_SIEM_URL names one.
         start_siem_forwarder()
+    with suppress(Exception):
+        from backend.alert_delivery import start_alert_deliverer
+        from backend.integrations import import_environment
+
+        # D3: alerts to webhooks and e-mail, tickets to Jira and ServiceNow, from a queue.
+        import_environment()
+        start_alert_deliverer()
     # Runtime feature flags: a persisted admin toggle overrides the env default
     # so the setting survives restarts, and flipping it at runtime needs no
     # restart at all (collectors read the env per call).
@@ -497,6 +504,10 @@ async def app_lifespan(_: FastAPI):
             from backend.siem import stop_siem_forwarder
 
             stop_siem_forwarder()
+        with suppress(Exception):
+            from backend.alert_delivery import stop_alert_deliverer
+
+            stop_alert_deliverer()
         with suppress(Exception):
             from backend.search import stop_search_reconciler
 
@@ -3834,6 +3845,245 @@ class RevealRequest(BaseModel):
 # C13: reveals are counted per account, successful or not: a reveal reads a file from its
 # source and returns a raw value, and a burst of them is exactly what a stolen session does.
 REVEAL_THROTTLE = RouteThrottle("reveal", max(1, int(os.getenv("DSPM_REVEAL_MAX_PER_HOUR", "20"))), 3600)
+
+
+# ── D3: alerts, where they go, and tickets ─────────────────────────────────────────
+class IntegrationRequest(BaseModel):
+    """One channel's settings. A field left out keeps its saved value; a secret left out
+    keeps the saved secret (see backend.integrations)."""
+    enabled: bool | None = None
+    url: str | None = Field(default=None, max_length=2000)
+    min_severity: str | None = Field(default=None, max_length=10)
+    rotate_secret: bool | None = None
+    host: str | None = Field(default=None, max_length=255)
+    port: int | None = None
+    security: str | None = Field(default=None, max_length=10)
+    sender: str | None = Field(default=None, max_length=254)
+    recipients: list[str] | None = Field(default=None, max_length=20)
+    username: str | None = Field(default=None, max_length=254)
+    password: str | None = Field(default=None, max_length=4096)
+    token: str | None = Field(default=None, max_length=4096)
+    remove_secret: bool | None = None
+    base_url: str | None = Field(default=None, max_length=2000)
+    project_key: str | None = Field(default=None, max_length=20)
+    issue_type: str | None = Field(default=None, max_length=60)
+    instance_url: str | None = Field(default=None, max_length=2000)
+    assignment_group: str | None = Field(default=None, max_length=80)
+    ca_pem: str | None = Field(default=None, max_length=70_000)
+    ca_name: str | None = Field(default=None, max_length=200)
+    remove_ca: bool | None = None
+
+
+class IntegrationEnabledRequest(BaseModel):
+    enabled: bool
+
+
+class TicketRequest(BaseModel):
+    system: str | None = Field(default=None, max_length=20)
+
+
+def _integration_channel(channel: str) -> str:
+    from backend import integrations
+
+    if channel not in integrations.CHANNELS:
+        raise HTTPException(status_code=404, detail="Unknown integration.")
+    return channel
+
+
+def _integration_view(tenant_id: str, channel: str) -> dict:
+    from backend import integrations
+
+    return integrations.public_view(channel, store_module.get_alert_channel(tenant_id, channel),
+                                    store_module.alert_delivery_queue(tenant_id, channel))
+
+
+@app.get("/api/alerts")
+def alerts_list(principal: Principal = Depends(require_permission("inventory.view")),
+                status: str = Query(default="", pattern="^(|open|acknowledged)$"),
+                limit: int = Query(default=200, ge=1, le=500)) -> dict:
+    """D3: the workspace's alerts, newest first, each with where it was delivered."""
+    return {"alerts": store_module.read_alerts(principal.tenant_id, limit, status=status),
+            "open": store_module.count_open_alerts(principal.tenant_id)}
+
+
+@app.post("/api/alerts/{alert_id}/acknowledge")
+def alerts_acknowledge(alert_id: int, principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
+    if not store_module.acknowledge_alert(principal.tenant_id, alert_id, principal.subject):
+        raise HTTPException(status_code=404, detail="No open alert with that id.")
+    audit(principal.tenant_id, principal.subject, "alert.acknowledged", {"alert_id": alert_id})
+    return {"alert_id": alert_id, "status": "acknowledged"}
+
+
+@app.get("/api/integrations")
+def integrations_read(principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    """D3: the workspace's webhook, mail relay, Jira and ServiceNow - never a secret."""
+    from backend import integrations
+
+    return {"integrations": [_integration_view(principal.tenant_id, channel) for channel in integrations.CHANNELS]}
+
+
+@app.put("/api/integrations/{channel}")
+def integrations_save(channel: str, payload: IntegrationRequest,
+                      principal: Principal = Depends(require_permission("tenant.admin", mfa=True))) -> dict:
+    from backend import integrations
+
+    channel = _integration_channel(channel)
+    request = payload.model_dump(exclude_none=True)
+    record = store_module.get_alert_channel(principal.tenant_id, channel)
+    saved = (record or {}).get("config") or {}
+    try:
+        config = integrations.merge(channel, saved, request)
+        action, value = integrations.secret_change(channel, request)
+    except integrations.IntegrationError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The integration settings were refused.")) from exc
+    secret_ref = (record or {}).get("secret_ref") or ""
+    # Checked before anything is sealed: sealing a new secret deletes the one it replaces.
+    if channel == "email" and config.get("security") == "none" and (
+            config.get("username") or action == "replace" or (action == "keep" and secret_ref)):
+        raise HTTPException(status_code=400, detail="A mail relay user name and password are only sent over TLS: "
+                            "choose STARTTLS or TLS, or remove them.")
+    shown_secret = ""
+    if channel == "webhook" and (action == "rotate" or not secret_ref):
+        shown_secret = integrations.new_signing_secret()
+        action, value = "replace", shown_secret
+    if action == "replace":
+        secret_ref = integrations.store_secret(principal.tenant_id, channel, value or "", secret_ref)
+    elif action == "remove" and secret_ref:
+        integrations.delete_secret(principal.tenant_id, secret_ref)
+        secret_ref = ""
+    enabled = bool(record and record.get("enabled")) if payload.enabled is None else payload.enabled
+    store_module.save_alert_channel(principal.tenant_id, channel, enabled=enabled, config=config,
+                                    secret_ref=secret_ref, actor=principal.subject)
+    changed = integrations.changed_fields(saved, config)
+    if changed or record is None or action in ("replace", "remove"):
+        audit(principal.tenant_id, principal.subject, "integration.changed", {
+            "channel": channel, "changed": changed, "secret": {"replace": "replaced", "remove": "removed"}.get(action, "kept"),
+            "ca_fingerprint": config.get("ca_fingerprint", "")})
+    if (record is not None and bool(record.get("enabled")) != enabled) or (record is None and enabled):
+        audit(principal.tenant_id, principal.subject, "integration.enabled" if enabled else "integration.disabled",
+              {"channel": channel})
+    view = _integration_view(principal.tenant_id, channel)
+    if shown_secret:
+        # Shown once: it is not stored anywhere Sentro can read it back from for the console.
+        view["signing_secret"] = shown_secret
+    return view
+
+
+@app.put("/api/integrations/{channel}/enabled")
+def integrations_enable(channel: str, payload: IntegrationEnabledRequest,
+                        principal: Principal = Depends(require_permission("tenant.admin", mfa=True))) -> dict:
+    channel = _integration_channel(channel)
+    record = store_module.get_alert_channel(principal.tenant_id, channel)
+    if record is None:
+        raise HTTPException(status_code=400, detail="Save the integration's settings first.")
+    if bool(record["enabled"]) != payload.enabled:
+        store_module.save_alert_channel(principal.tenant_id, channel, enabled=payload.enabled, config=record["config"],
+                                        secret_ref=record["secret_ref"], actor=principal.subject)
+        audit(principal.tenant_id, principal.subject,
+              "integration.enabled" if payload.enabled else "integration.disabled", {"channel": channel})
+    return _integration_view(principal.tenant_id, channel)
+
+
+@app.post("/api/integrations/{channel}/test")
+def integrations_test(channel: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    """Try the saved settings: a signed test event, a test message, or a sign-in to the
+    ticket system. Nothing is queued."""
+    from backend import alert_delivery
+
+    channel = _integration_channel(channel)
+    result = alert_delivery.test_channel(principal.tenant_id, channel)
+    stamp = datetime.now(timezone.utc).isoformat()
+    if result.get("signature"):
+        store_module.record_alert_channel_status(principal.tenant_id, channel, last_test={
+            "at": stamp, "ok": result["ok"], "message": result["message"], "signature": result["signature"]})
+    audit(principal.tenant_id, principal.subject,
+          "integration.test_succeeded" if result["ok"] else "integration.test_failed",
+          {"channel": channel, "message": result["message"]})
+    return {"test": {"ok": result["ok"], "message": result["message"], "at": stamp},
+            **_integration_view(principal.tenant_id, channel)}
+
+
+@app.post("/api/integrations/{channel}/retry")
+def integrations_retry(channel: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
+    """Send what is waiting for this channel now instead of after its back-off."""
+    from backend import alert_delivery
+
+    channel = _integration_channel(channel)
+    made_due = store_module.retry_alert_deliveries_now(principal.tenant_id, channel)
+    audit(principal.tenant_id, principal.subject, "integration.retry", {"channel": channel, "made_due": made_due})
+    alert_delivery.kick()
+    return {"made_due": made_due, **_integration_view(principal.tenant_id, channel)}
+
+
+@app.delete("/api/integrations/{channel}")
+def integrations_remove(channel: str, principal: Principal = Depends(require_permission("tenant.admin", mfa=True))) -> dict:
+    """Delete a channel's settings and its secret. What was waiting for it is cancelled."""
+    from backend import integrations
+
+    channel = _integration_channel(channel)
+    ref = store_module.delete_alert_channel(principal.tenant_id, channel)
+    if ref is None:
+        raise HTTPException(status_code=404, detail="That integration is not configured.")
+    integrations.delete_secret(principal.tenant_id, ref)
+    audit(principal.tenant_id, principal.subject, "integration.removed", {"channel": channel})
+    return _integration_view(principal.tenant_id, channel)
+
+
+@app.post("/api/findings/{finding_id}/ticket")
+def finding_ticket_create(finding_id: str, payload: TicketRequest,
+                          principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
+    """D3: send a finding to Jira or ServiceNow. The ticket is created from the queue - a
+    ticket system that is down delays it, and it is not lost."""
+    from backend import alert_delivery
+
+    finding = store_module.get_finding(principal.tenant_id, finding_id)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Finding not found")
+    enabled = _ticket_systems(principal.tenant_id)
+    system = (payload.system or "").lower() or (enabled[0] if len(enabled) == 1 else "")
+    if system not in enabled:
+        raise HTTPException(status_code=400, detail="Name a ticket system that is turned on: " + (", ".join(enabled) or "none is"))
+    summary, description = alert_delivery.ticket_text(finding, principal.tenant_id, finding_id)
+    ticket = store_module.create_finding_ticket(principal.tenant_id, secrets.token_hex(8), finding_id, system,
+                                                {"summary": summary, "description": description}, principal.subject)
+    if ticket is None:
+        raise HTTPException(status_code=409, detail=f"This finding already has an open {system} ticket.")
+    audit(principal.tenant_id, principal.subject, "ticket.requested",
+          {"ticket_id": ticket["ticket_id"], "finding_id": finding_id, "system": system})
+    alert_delivery.kick()
+    return {"ticket": ticket}
+
+
+def _ticket_systems(tenant_id: str) -> list[str]:
+    from backend import integrations
+
+    return [system for system in integrations.TICKET_SYSTEMS
+            if (store_module.get_alert_channel(tenant_id, system) or {}).get("enabled")]
+
+
+@app.get("/api/tickets/systems")
+def ticket_systems(principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
+    """Which ticket systems a finding can be sent to - names only."""
+    return {"systems": _ticket_systems(principal.tenant_id)}
+
+
+@app.get("/api/tickets")
+def tickets_list(principal: Principal = Depends(require_permission("inventory.view")),
+                 finding_id: str = Query(default="", max_length=128),
+                 status: str = Query(default="", pattern="^(|pending|open|closed|cancelled)$"),
+                 limit: int = Query(default=200, ge=1, le=500)) -> dict:
+    return {"tickets": store_module.list_finding_tickets(principal.tenant_id, finding_id=finding_id,
+                                                         status=status, limit=limit)}
+
+
+@app.post("/api/tickets/sync")
+def tickets_sync(principal: Principal = Depends(require_permission("findings.triage"))) -> dict:
+    """Ask the ticket systems about this workspace's open tickets now."""
+    from backend import alert_delivery
+
+    result = alert_delivery.sync_tenant(principal.tenant_id)
+    audit(principal.tenant_id, principal.subject, "ticket.synced", result)
+    return {"sync": result}
 
 
 @app.post("/api/findings/{finding_id}/reveal")
