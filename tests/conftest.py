@@ -41,6 +41,9 @@ from backend import db
 STORE_IMPORTED_WITH: pathlib.Path | None = None
 # The session's own directory (its database, artifacts and keys), removed at the end.
 _SESSION_ROOT: pathlib.Path | None = None
+# The scan cache this session made (none when DSPM_SCAN_CACHE_DIR was given), removed at
+# the end too. Found 2026-09-29: every run left one behind - hundreds, some over 100 MB.
+_SCAN_CACHE_ROOT: pathlib.Path | None = None
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -59,10 +62,10 @@ def pytest_configure(config: pytest.Config) -> None:
     env inherited would wipe it. Require an explicit DSPM_PG_TEST_RESET=1 opt-in
     to run the destructive suite against Postgres; otherwise abort before any
     test (or fixture) runs. SQLite is always fine (its isolation is a temp file)."""
-    os.environ.setdefault(
-        "DSPM_SCAN_CACHE_DIR",
-        str(pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-scan-cache-")).resolve()),
-    )
+    global _SCAN_CACHE_ROOT
+    if not os.getenv("DSPM_SCAN_CACHE_DIR"):
+        _SCAN_CACHE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-scan-cache-")).resolve()
+        os.environ["DSPM_SCAN_CACHE_DIR"] = str(_SCAN_CACHE_ROOT)
     # C8 raised the production work factor to 600,000 PBKDF2 rounds (~0.34 s a hash on
     # this host). The suite hashes hundreds of fixture passwords, and none of those
     # tests is about the work factor, so it runs at the clamp floor - faster than the
@@ -133,6 +136,10 @@ def pytest_configure(config: pytest.Config) -> None:
 def pytest_unconfigure(config: pytest.Config) -> None:
     """Remove the session directory. Found 2026-09-28: every run left its ~24 MB behind -
     687 of them, on a disk with under 4 GB free. DSPM_TEST_KEEP_DB keeps it for debugging."""
+    import shutil
+
+    if _SCAN_CACHE_ROOT is not None and not os.getenv("DSPM_TEST_KEEP_DB"):
+        shutil.rmtree(_SCAN_CACHE_ROOT, ignore_errors=True)
     if _SESSION_ROOT is None or os.getenv("DSPM_TEST_KEEP_DB"):
         return
     with suppress(Exception):
