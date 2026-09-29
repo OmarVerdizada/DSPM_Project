@@ -3723,6 +3723,77 @@ def finding_detail(finding_id: str, principal: Principal = Depends(require_permi
     return {"finding": finding, "framework": framework, "detail": detail}
 
 
+def _exact_match_for_scan(tenant_id: str) -> dict:
+    """D2: the workspace's reference fingerprints, read once when a scan is configured."""
+    from classification import exact_match
+
+    return store_module.exact_match_index_for_scan(tenant_id, exact_match.key_digest())
+
+
+class ExactMatchSetRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    entity_type: str = Field(min_length=1, max_length=40)
+    values: list[str] = Field(min_length=1, max_length=50_000)
+
+
+def _edm_max_rows() -> int:
+    try:
+        return max(1, int(os.getenv("DSPM_EDM_MAX_ROWS", "250000")))
+    except ValueError:
+        return 250_000
+
+
+@app.post("/api/exact-match/sets")
+def create_exact_match_set(payload: ExactMatchSetRequest,
+                           principal: Principal = Depends(require_permission("rules.manage", mfa=True))) -> dict:
+    """D2: an approved reference set. Its values are fingerprinted with the workspace's key
+    and dropped: only the fingerprints are kept, never a value, and nothing about the
+    values is logged, audited or returned. A GDPR finding whose value is in a set is
+    confirmed from the next scan on."""
+    from classification import exact_match
+
+    entity_type = payload.entity_type.strip().upper()
+    if entity_type not in exact_match.ENTITY_TYPES:
+        raise HTTPException(status_code=400, detail="entity_type must be one of "
+                            + ", ".join(sorted(exact_match.ENTITY_TYPES)))
+    fingerprints = exact_match.fingerprints(entity_type, payload.values, principal.tenant_id)
+    payload.values.clear()
+    if not fingerprints:
+        raise HTTPException(status_code=400, detail="The set holds no usable values.")
+    if store_module.count_edm_rows(principal.tenant_id) + len(fingerprints) > _edm_max_rows():
+        raise HTTPException(status_code=400, detail=f"A workspace's reference sets may hold {_edm_max_rows():,} values "
+                            "(DSPM_EDM_MAX_ROWS); remove a set first.")
+    set_id = secrets.token_hex(8)
+    name = " ".join(payload.name.split())[:80]
+    rows = store_module.create_edm_set(principal.tenant_id, set_id, name, entity_type, fingerprints,
+                                       exact_match.key_digest(), principal.subject)
+    audit(principal.tenant_id, principal.subject, "exact_match.set_created",
+          {"set_id": set_id, "name": name, "entity_type": entity_type, "values": rows})
+    return {"set_id": set_id, "name": name, "entity_type": entity_type, "values": rows}
+
+
+@app.get("/api/exact-match/sets")
+def list_exact_match_sets(principal: Principal = Depends(require_permission("rules.manage"))) -> dict:
+    """D2: the workspace's reference sets - names, types and sizes, never a value or a
+    fingerprint. A set built with a different evidence key matches nothing: `current`."""
+    from classification import exact_match
+
+    current = exact_match.key_digest()
+    return {"sets": [{"set_id": item["set_id"], "name": item["name"], "entity_type": item["entity_type"],
+                      "values": item["row_count"], "created_by": item["created_by"], "created_at": item["created_at"],
+                      "current": item["key_digest"] == current}
+                     for item in store_module.list_edm_sets(principal.tenant_id)],
+            "entity_types": sorted(exact_match.ENTITY_TYPES)}
+
+
+@app.delete("/api/exact-match/sets/{set_id}")
+def delete_exact_match_set(set_id: str, principal: Principal = Depends(require_permission("rules.manage"))) -> dict:
+    if not store_module.delete_edm_set(principal.tenant_id, set_id):
+        raise HTTPException(status_code=404, detail="Reference set not found")
+    audit(principal.tenant_id, principal.subject, "exact_match.set_deleted", {"set_id": set_id})
+    return {"deleted": True, "set_id": set_id}
+
+
 _ACCESS_KINDS = {"", "broad", "privileged", "service"}
 
 
@@ -5628,6 +5699,7 @@ def _endpoint_analysis_engine(
             incremental_scope=scope_key,
             # B6: read once, here, so one scan is explained by one set of rules.
             suppression_rules=suppression_rules_for_scan(principal.tenant_id),
+            exact_match=_exact_match_for_scan(principal.tenant_id),
             baseline_probe=_incremental_probe(
                 principal.tenant_id,
                 scope_key,
@@ -5686,6 +5758,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         incremental_enabled=incremental_enabled,
         incremental_scope=scope_key,
         suppression_rules=suppression_rules_for_scan(tenant_id),
+        exact_match=_exact_match_for_scan(tenant_id),
         baseline_probe=_incremental_probe(tenant_id, scope_key, incremental_enabled),
     )
 

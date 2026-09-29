@@ -197,6 +197,8 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_LOCAL_ACL", "bool", {"default": "1"}),
     # D7: accounts that index or crawl content, flagged like service accounts (comma list)
     ("DSPM_INDEXER_PRINCIPALS", "str"),
+    # D2: how many reference values a workspace's exact-match sets may hold in all
+    ("DSPM_EDM_MAX_ROWS", "int", {"minimum": 1}),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),
     ("DSPM_PARTITION_MAX_ATTEMPTS", "int", {"minimum": 1}),
     ("DSPM_PARTITION_MAX_FILES", "int", {"minimum": 1}),

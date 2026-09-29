@@ -229,13 +229,28 @@ def detect_birth_details(content: str, _: dict) -> list[str]:
     return matches
 
 
+# D2: what may stand directly before an all-letter FIN ("FIN: ABCDEFG", "FIN kodu: ...").
+_FIN_LABEL_RE = re.compile(r"\b(?:fin|pin)(?:\s*(?:code|kodu|kod|no|number|nömrəsi))?\s*[:#=-]?\s*$", re.IGNORECASE)
+
+
 def detect_fin(content: str, _: dict) -> list[str]:
+    """An Azerbaijani FIN: seven letters and digits near an ID keyword.
+
+    D2: an all-letter FIN exists but is rare, and a seven-letter word is not - the
+    labelled corpus found "DETAILS", "PARKING", "NETWORK" and the surname "BABAYEV"
+    reported as FINs at confidence 95. A FIN without a digit now counts only written in
+    capitals directly after its label."""
     matches = []
     for match in FIN_RE.finditer(content):
-        value = match.group(0).upper()
+        raw = match.group(0)
+        value = raw.upper()
         has_alpha = any(char.isalpha() for char in value)
         has_digit = any(char.isdigit() for char in value)
-        if has_alpha and (has_digit or value.isalpha()) and has_keyword_context(content, match.start(), GOVERNMENT_ID_KEYWORDS, window=80):
+        if not has_alpha:
+            continue
+        if not has_digit and (raw != value or not _FIN_LABEL_RE.search(content[max(0, match.start() - 24):match.start()])):
+            continue
+        if has_keyword_context(content, match.start(), GOVERNMENT_ID_KEYWORDS, window=80):
             matches.append(value)
     return matches
 

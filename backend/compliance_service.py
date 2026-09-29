@@ -797,19 +797,10 @@ def _is_pci_scope_finding(finding: dict) -> bool:
 
 
 def _confidence_score(finding: dict) -> int:
-    value = finding.get("detection_confidence")
-    if value is None:
-        value = finding.get("confidence")
-    if isinstance(value, (int, float)):
-        return max(0, min(100, int(value)))
-    normalized = str(value or "").strip().lower()
-    if normalized in {"high", "confirmed", "verified"}:
-        return 90
-    if normalized in {"medium", "review", "needs_review", "probable"}:
-        return 70
-    if normalized in {"low", "context", "context_only", "possible"}:
-        return 40
-    return 70
+    # D2: one reading everywhere (classification.confidence).
+    from classification.confidence import confidence_score
+
+    return confidence_score(finding)
 
 
 def _highest_finding_severity(findings: list[dict]) -> str:

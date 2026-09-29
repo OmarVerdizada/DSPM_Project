@@ -170,6 +170,10 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     # D7: who can read the estate's files
     ("GET", "/api/access/principals"): "inventory.view",
     ("GET", "/api/access/files"): "inventory.view",
+    # D2: exact-data-match reference sets
+    ("POST", "/api/exact-match/sets"): "rules.manage",
+    ("GET", "/api/exact-match/sets"): "rules.manage",
+    ("DELETE", "/api/exact-match/sets/{set_id}"): "rules.manage",
     ("PUT", "/api/credentials/{secret_ref}"): "credential.manage",
     ("DELETE", "/api/credentials/{secret_ref}"): "credential.manage",
     ("POST", "/api/credentials/{secret_ref}/preflight"): "credential.manage",

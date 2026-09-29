@@ -29,9 +29,10 @@ from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
 from discovery import triage
 from discovery.detector_pool import build_pool
-from discovery.detector_stage import run_detector_stage, timed_detector
+from discovery.detector_stage import DETECTOR_STAGE_VERSION, run_detector_stage, timed_detector
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
 from discovery.suppression import compile_rules
+from classification.compliance.gdpr_confidence import confirm as confirm_exact_match
 from permissions.acl_analyzer import ACL_ANALYSIS_VERSION, analyze_acl
 from risk.risk_engine import RiskAssessment, _is_protected_content, calculate_risk
 from scripts.logger import get_logger
@@ -112,6 +113,9 @@ class ScanConfig:
     # partitioned scan builds a configuration per unit, so a rule written mid-scan
     # reaches the units that start after it.
     suppression_rules: list[dict] = field(default_factory=list)
+    # D2: the workspace's exact-match reference fingerprints ({"digest", "fingerprints"}),
+    # read once when the configuration is built, like the suppression rules.
+    exact_match: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -320,6 +324,8 @@ class DSPMDiscoveryEngine:
         self._suppression = compile_rules(config.suppression_rules)
         self._suppression_lock = threading.Lock()
         self._suppression_counts = {"findings": 0, "files": 0}
+        self._exact_match = dict(config.exact_match or {})
+        self._exact_match_confirmed = 0
 
     def _cancelled(self) -> bool:
         """True if the caller cancelled (e.g. the job heartbeat set cancel) OR the
@@ -684,6 +690,9 @@ class DSPMDiscoveryEngine:
                     # a new rule would not take effect, and a deleted one would go on
                     # hiding what it used to cover.
                     self._suppression.digest,
+                    # D2: a reference set added or removed changes which findings are
+                    # confirmed, so an unchanged file is read again rather than replayed.
+                    str(self._exact_match.get("digest") or ""),
                 )
             ),
         )
@@ -1101,6 +1110,12 @@ class DSPMDiscoveryEngine:
                     "suppressed_findings": self._suppression_counts["findings"],
                     "files_affected": self._suppression_counts["files"],
                 }
+        if self._exact_match:
+            with self._suppression_lock:
+                diagnostics["exact_match"] = {
+                    "reference_values": len(self._exact_match.get("fingerprints") or {}),
+                    "confirmed_findings": self._exact_match_confirmed,
+                }
         counts = dict(self._incremental_counts)
         total = len(analyzed_files)
         reused = sum(1 for item in analyzed_files if item.get("cache_reused") or item.get("incremental_reused"))
@@ -1426,6 +1441,28 @@ class DSPMDiscoveryEngine:
                 self._suppression_counts["files"] += 1
         return kept
 
+    def _apply_exact_match(self, findings: list[dict]) -> list[dict]:
+        """D2: a finding whose value is in the workspace's approved reference set is
+        confirmed. The fingerprints it is matched with are removed here whatever the
+        outcome - they never reach a report or the estate."""
+        index = self._exact_match.get("fingerprints") or {}
+        for finding in findings:
+            fingerprints = finding.pop("edm_fingerprints", None) or []
+            if not index or not fingerprints:
+                continue
+            sets: set[str] = set()
+            matched = 0
+            for fingerprint in fingerprints:
+                names = index.get(fingerprint)
+                if names:
+                    matched += 1
+                    sets.update(names)
+            if matched:
+                confirm_exact_match(finding, sorted(sets), matched)
+                with self._suppression_lock:
+                    self._exact_match_confirmed += 1
+        return findings
+
     def _analyze_record(self, record: dict) -> dict:
         # The prior analysis this record was collected with is taken, not read.
         # On the reuse path it becomes the result; on every other path it is dead
@@ -1502,7 +1539,7 @@ class DSPMDiscoveryEngine:
             record["detector_metrics"] = detector_metrics
         if cached is None:
             self._store_cached_findings(cache_key, findings, record)
-        findings = self._apply_suppression(findings, record)
+        findings = self._apply_exact_match(self._apply_suppression(findings, record))
         scan_meta = {
             "scan_completeness": record.get("scan_completeness") or "UNKNOWN",
             "bytes_scanned": int(record.get("bytes_scanned") or 0),
@@ -1510,7 +1547,9 @@ class DSPMDiscoveryEngine:
             "truncated": bool(record.get("truncated")),
         }
         acl_assessment = analyze_acl(record.get("acl") or {}, record)
-        canonical_record = {**record, "permissions": acl_assessment}
+        # The entity registry keys its fallback fingerprints with the workspace, which
+        # the collector record does not carry (D2).
+        canonical_record = {**record, "tenant_id": str(self.config.tenant_id or "default"), "permissions": acl_assessment}
         seen_at = record.get("last_scanned_at") or datetime.now(timezone.utc).isoformat()
         for finding in findings:
             _decorate_finding_taxonomy(finding)
@@ -1579,7 +1618,8 @@ class DSPMDiscoveryEngine:
         # A replayed record was analyzed under the rules of its own scan. Changing the
         # rules changes the version signature, so a replay under different rules should
         # be impossible - this is the belt to that brace, and it costs one call.
-        public_record["findings"] = self._apply_suppression(public_record.get("findings") or [], record)
+        public_record["findings"] = self._apply_exact_match(
+            self._apply_suppression(public_record.get("findings") or [], record))
         public_record["cache_reused"] = True
         public_record["incremental_reused"] = True
         public_record["incremental_scan_reason"] = "durable_baseline_unchanged_file"
@@ -1682,6 +1722,9 @@ class DSPMDiscoveryEngine:
         payload = {
             "content": content,
             "record": record,
+            # The workspace every value fingerprint is keyed with. Collector
+            # records do not carry it, and the detectors fell back to "default".
+            "tenant_id": str(self.config.tenant_id or "default"),
             "framework_ids": sorted(framework_ids),
             "compliance_enabled": bool(self.config.compliance_enabled),
             "timeout_seconds": timeout_seconds,
@@ -1984,7 +2027,7 @@ def _sanitize_evidence_cached(content: str) -> str:
 def _detector_version(framework_ids: set[str]) -> str:
     # B7: how the detectors' output is assembled is part of what a scan found, so the
     # merge has its own version and a change to it invalidates cached analysis.
-    parts = [GENERIC_DETECTOR_VERSION, FINDING_MODEL_VERSION]
+    parts = [GENERIC_DETECTOR_VERSION, FINDING_MODEL_VERSION, DETECTOR_STAGE_VERSION]
     if "gdpr" in framework_ids:
         parts.append(GDPR_DETECTOR_VERSION)
     if "pci_dss" in framework_ids:

@@ -771,21 +771,11 @@ def _detection_confidence_label(findings: list[dict]) -> str:
 
 
 def _extract_confidence_score(finding: dict) -> int | None:
-    value = finding.get("detection_confidence")
-    if value is None:
-        value = finding.get("confidence")
-    if value is None:
-        value = finding.get("mapping_confidence")
-    if isinstance(value, (int, float)):
-        return _clamp_score(value)
-    normalized = str(value or "").strip().lower()
-    if normalized in {"high", "confirmed", "verified"}:
-        return 90
-    if normalized in {"medium", "review", "needs_review", "probable"}:
-        return 70
-    if normalized in {"low", "context", "context_only", "possible"}:
-        return 40
-    return None
+    # D2: one reading everywhere (classification.confidence); None - the finding states
+    # no confidence - is read by the caller as MEDIUM, the same as UNSCORED.
+    from classification.confidence import stated_confidence
+
+    return stated_confidence(finding, fields=("detection_confidence", "confidence", "mapping_confidence"))
 
 
 # The fixed vocabulary `content_status_for_extension` emits, split by what the

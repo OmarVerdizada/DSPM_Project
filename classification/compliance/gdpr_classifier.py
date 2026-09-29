@@ -5,7 +5,14 @@ import re
 import threading
 import time
 
+from classification import exact_match
 from classification.compliance.country_identifiers import validate_country_identifier
+from classification.compliance.gdpr_confidence import (
+    apply_confidence,
+    detector_class,
+    looks_like_secret_literal,
+    person_in,
+)
 from classification.compliance.canonical_entities import canonical_entity_fingerprint, canonical_entity_type_for_finding
 from classification.compliance.gdpr_metadata import custom_context_metadata, gdpr_metadata_for_finding, secure_value_fingerprint
 from classification.compliance.gdpr_rules import GDPR_RULES
@@ -27,7 +34,9 @@ NON_PERSONAL_CONTEXT_RULE_TYPES = {
     "gdpr_vulnerability_pentest_report",
     "gdpr_security_config_firewall_rule",
 }
-GDPR_DETECTOR_VERSION = "gdpr-detector-v3"  # A2: PAN gated by the shared validator
+GDPR_DETECTOR_VERSION = "gdpr-detector-v4"  # D2: confidence tiers, exact-match fingerprints
+# A value's exact-match fingerprints kept per finding, for the reference-set check (D2).
+EDM_FINGERPRINTS_PER_FINDING = 50
 GDPR_RULE_CATALOG_VERSION = "gdpr-rules-v2"
 GDPR_DETECTOR_TIMEOUT_SECONDS = float(os.getenv("DSPM_GDPR_DETECTOR_TIMEOUT_SECONDS", "8"))
 ALWAYS_RUN_RULE_TYPES = {
@@ -112,6 +121,7 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
         str(metadata.get("language") or "all"),
     )
     indexed_keyword_matches = keyword_index.search(evidence_blob)
+    edm_key = exact_match._key()
     started = time.perf_counter()
     skipped_by_prefilter = 0
     timed_out = False
@@ -132,7 +142,13 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
         occurrence_count = 0
         first_raw_value = ""
         entity_type = canonical_entity_type_for_finding({"type": rule.finding_type, "category": rule.category})
+        edm_type = exact_match.ENTITY_BY_FINDING.get(rule.finding_type)
+        edm_fingerprints: list[str] = []
+        is_secret = detector_class(rule.finding_type) == "secret"
+        secret_literal = False
         for value in rule.detector(content or "", metadata):
+            if is_secret and not secret_literal:
+                secret_literal = looks_like_secret_literal(value)
             occurrence_count += 1
             if not first_raw_value:
                 first_raw_value = str(value or "")
@@ -143,6 +159,10 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
                 canonical_fingerprint = canonical_entity_fingerprint(entity_type, value, tenant_id)
                 if canonical_fingerprint not in canonical_fingerprints:
                     canonical_fingerprints.append(canonical_fingerprint)
+            if edm_type and len(edm_fingerprints) < EDM_FINGERPRINTS_PER_FINDING:
+                edm_fingerprint = exact_match.fingerprint(edm_type, value, tenant_id, key=edm_key)
+                if edm_fingerprint and edm_fingerprint not in edm_fingerprints:
+                    edm_fingerprints.append(edm_fingerprint)
             redacted = redact(value)
             if redacted not in matches:
                 matches.append(redacted)
@@ -187,9 +207,19 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
             finding["anonymized"] = False
         if rule.finding_type == "gdpr_fin_pin":
             finding["country_identifier"] = validate_country_identifier("AZ", "FIN", first_raw_value, evidence_blob)
+        if edm_fingerprints:
+            # Matched against the workspace's reference sets by the engine, then dropped:
+            # they never reach a report (discovery_engine._apply_exact_match).
+            finding["edm_fingerprints"] = edm_fingerprints
+        if is_secret:
+            finding["secret_literal"] = secret_literal
         findings.append(finding)
         finding_index[rule.finding_type] = finding
     _apply_custom_keyword_groups(indexed_keyword_matches, findings, finding_index, custom_keyword_groups or [])
+    person_linked = person_in(content or "", findings)
+    for finding in findings:
+        if finding.get("confidence") is None:
+            apply_confidence(finding, person_linked=person_linked)
     return findings
 
 

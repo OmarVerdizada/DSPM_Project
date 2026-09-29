@@ -23,6 +23,12 @@ from classification.compliance.nist_models import NIST_FRAMEWORK_ID
 from classification.regex_classifier import classify_content
 from discovery.finding_merge import merge_findings
 
+# D2: the detectors are given the scan's workspace rather than reading it off the
+# collector record (which never carried it). Findings cached under the previous
+# stage keyed every value with "default", so the stage version is part of the
+# detector version and those findings are not replayed.
+DETECTOR_STAGE_VERSION = "detector-stage-tenant-v1"
+
 
 def timed_detector(name: str, detector: Callable[[], list[dict]], timeout_seconds: float) -> tuple[list[dict], dict]:
     started = time.perf_counter()
@@ -65,7 +71,11 @@ def run_detector_stage(payload: dict[str, Any]) -> dict[str, Any]:
     detector_rows: list[dict] = []
     findings: list[dict] = []
 
-    tenant_id = str(record.get("tenant_id") or record.get("tenant") or "default")
+    # The scan's workspace keys every value fingerprint (secure, canonical, exact
+    # match). The collector record does not carry it; without it every workspace
+    # fingerprinted with "default" and a workspace's reference set never matched.
+    tenant_id = str(payload.get("tenant_id") or record.get("tenant_id") or record.get("tenant") or "default")
+    metadata = {**record, "tenant_id": tenant_id}
     generic_findings, row = timed_detector(
         "generic", lambda: classify_content(content, tenant_id=tenant_id), timeout_seconds,
     )
@@ -76,7 +86,7 @@ def run_detector_stage(payload: dict[str, Any]) -> dict[str, Any]:
         existing = {finding.get("type") for finding in findings}
         if "gdpr" in framework_ids:
             groups = custom_keywords.get("gdpr") or []
-            gdpr_findings, row = timed_detector("gdpr", lambda: classify_gdpr_content(content, record, groups), timeout_seconds)
+            gdpr_findings, row = timed_detector("gdpr", lambda: classify_gdpr_content(content, metadata, groups), timeout_seconds)
             detector_rows.append(row)
             for finding in gdpr_findings:
                 if finding.get("type") not in existing:
@@ -84,7 +94,7 @@ def run_detector_stage(payload: dict[str, Any]) -> dict[str, Any]:
                     existing.add(finding.get("type"))
         if "pci_dss" in framework_ids:
             groups = custom_keywords.get("pci_dss") or []
-            pci_findings, row = timed_detector("pci_dss", lambda: classify_pci_content(content, record, groups), timeout_seconds)
+            pci_findings, row = timed_detector("pci_dss", lambda: classify_pci_content(content, metadata, groups), timeout_seconds)
             detector_rows.append(row)
             for finding in pci_findings:
                 dedupe_key = (
@@ -104,7 +114,7 @@ def run_detector_stage(payload: dict[str, Any]) -> dict[str, Any]:
                     findings.append(finding)
         if NIST_FRAMEWORK_ID in framework_ids:
             groups = custom_keywords.get(NIST_FRAMEWORK_ID) or []
-            nist_findings, row = timed_detector(NIST_FRAMEWORK_ID, lambda: classify_nist_content(content, record, groups), timeout_seconds)
+            nist_findings, row = timed_detector(NIST_FRAMEWORK_ID, lambda: classify_nist_content(content, metadata, groups), timeout_seconds)
             detector_rows.append(row)
             existing_keys = {
                 (

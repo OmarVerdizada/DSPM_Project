@@ -77,6 +77,7 @@ ATTEMPTS = [
     ("PUT", "/api/credentials/{secret_ref}", {"username": "u", "password": "a-foreign-pass-9", "domain": "D"}),
     ("DELETE", "/api/credentials/{secret_ref}", None),
     ("POST", "/api/credentials/{secret_ref}/preflight", None),
+    ("DELETE", "/api/exact-match/sets/{set_id}", None),
     ("POST", "/api/findings/{finding_id}/reveal", {"fingerprint": "[redacted:000000000000]",
                                                      "reason": "a cross-tenant attempt to read a value"}),
     ("GET", "/api/v1/reports/artifacts/{artifact_id}", None),
@@ -161,6 +162,8 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
         targets = self._ok(self.client.post("/api/scan-targets", headers=boss, json={"value": "10.20.0.0/16"}))
         credential = self._ok(self.client.post("/api/credentials", headers=boss,
                                                json={"username": "svc-a", "password": "Cross-tenant-pw-91", "domain": "CORP"}))
+        edm_set = self._ok(self.client.post("/api/exact-match/sets", headers=boss, json={
+            "name": "Customers", "entity_type": "EMAIL_ADDRESS", "values": ["ana@example.com"]}))
         artifact = self._ok(self.client.post("/api/v1/reports", headers=analyst, json={}))
         job = jobs.create_job(A, lambda _job: {"ok": True})
         for _ in range(100):
@@ -177,6 +180,7 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
             "username": "a-member", "name": "xt_reviewer", "tenant_id": A,
             "entry_id": targets["entries"][0]["entry_id"],
             "secret_ref": credential["credential_ref"],
+            "set_id": edm_set["set_id"],
         }
 
     def _state_of_a(self) -> str:
@@ -195,6 +199,7 @@ class AnotherTenantsIdentifiersFailTest(unittest.TestCase):
             "roles": [role for role in self._ok(self.client.get("/api/roles", headers=boss))["roles"] if not role.get("builtin")],
             "scan_targets": self._ok(self.client.get("/api/scan-targets", headers=boss))["entries"],
             "credentials": self._ok(self.client.get("/api/credentials", headers=boss))["credentials"],
+            "exact_match_sets": self._ok(self.client.get("/api/exact-match/sets", headers=boss))["sets"],
             "tenant": store.get_tenant(A),
             "legal_hold": store.get_legal_hold(A),
             "password": store.get_user("a-member")["password_hash"],

@@ -1,7 +1,7 @@
 import unittest
 
 from classification.compliance import keywords, raw_gdpr_keywords
-from classification.compliance.gdpr_classifier import classify_gdpr_content
+from classification.compliance.gdpr_classifier import GDPR_DETECTOR_VERSION, classify_gdpr_content
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
 
@@ -673,7 +673,7 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
         self.assertEqual(second["incremental_scan_reason"], "cache_hit_unchanged_file")
         email = next(item for item in second["findings"]
                      if "gdpr_email_address" in (item.get("detected_by") or [item.get("type")]))
-        self.assertEqual(email["detector_version"], "gdpr-detector-v3")
+        self.assertEqual(email["detector_version"], GDPR_DETECTOR_VERSION)
 
 
 if __name__ == "__main__":

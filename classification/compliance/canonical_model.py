@@ -194,19 +194,11 @@ def _logical_boundary_id(finding: dict, file_obj: dict) -> str:
 
 
 def _confidence(finding: dict) -> int:
-    value = finding.get("confidence")
-    if value is None:
-        value = finding.get("detection_confidence")
-    if isinstance(value, (int, float)):
-        return max(0, min(100, int(value)))
-    normalized = str(value or "").lower()
-    if normalized in {"high", "confirmed", "verified"}:
-        return 90
-    if normalized in {"medium", "review", "needs_review", "probable"}:
-        return 70
-    if normalized:
-        return 40
-    return 50
+    # D2: one reading everywhere (classification.confidence) - this one used to answer 50
+    # for a finding that stated none, where the compliance service answered 70.
+    from classification.confidence import confidence_score
+
+    return confidence_score(finding)
 
 
 def _unique_value_count(finding: dict) -> int:

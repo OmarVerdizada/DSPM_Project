@@ -1112,6 +1112,46 @@ _ASSET_ACCESS_DDL = """CREATE TABLE IF NOT EXISTS asset_access (
 _ASSET_ACCESS_INDEX = "CREATE INDEX IF NOT EXISTS idx_asset_access_principal ON asset_access (tenant_id, principal_key)"
 
 
+# D2: approved reference sets for exact-data matching - the set, and a keyed fingerprint
+# of each of its values. Never a value, never an unkeyed hash of one.
+_EDM_DDL = (
+    """CREATE TABLE IF NOT EXISTS edm_sets (
+            tenant_id TEXT NOT NULL,
+            set_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            row_count INTEGER NOT NULL DEFAULT 0,
+            key_digest TEXT NOT NULL DEFAULT '',
+            created_by TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, set_id)
+        );""",
+    """CREATE TABLE IF NOT EXISTS edm_fingerprints (
+            tenant_id TEXT NOT NULL,
+            set_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, set_id, fingerprint)
+        );""",
+    "CREATE INDEX IF NOT EXISTS idx_edm_fingerprint ON edm_fingerprints (tenant_id, fingerprint)",
+)
+
+
+def add_exact_data_match(conn) -> None:
+    """Revision 0032: approved reference sets for exact-data matching (D2).
+
+    A workspace uploads a list of the values it knows are personal data - its customers'
+    e-mail addresses, its employees' national IDs - and a GDPR finding whose value is on
+    it is confirmed. `edm_sets` names each set; `edm_fingerprints` holds a keyed,
+    per-tenant fingerprint of each value (classification.exact_match) - never the value.
+    Tenant tables: revisions 0003 and 0004 are re-run for their keys and row-level
+    security. Rollback: restore the pre-upgrade backup (older code ignores them).
+    """
+    for statement in _EDM_DDL:
+        conn.execute(statement)
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def add_asset_access(conn) -> None:
     """Revision 0031: who can read each file (D7).
 
@@ -2343,6 +2383,8 @@ def apply_baseline_schema(conn) -> None:
     conn.execute(_SCAN_SOURCES_DDL)  # C13 (revision 0028)
     conn.execute(_ASSET_ACCESS_DDL)  # D7 (revision 0031)
     conn.execute(_ASSET_ACCESS_INDEX)
+    for statement in _EDM_DDL:  # D2 (revision 0032)
+        conn.execute(statement)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -8856,6 +8898,9 @@ _TENANT_ERASURE_TABLES = (
     "asset_versions",
     # D7: who can read each file.
     "asset_access",
+    # D2: exact-data-match reference sets.
+    "edm_fingerprints",
+    "edm_sets",
     "findings",
     "finding_occurrences",
     "finding_index",
@@ -9183,6 +9228,73 @@ def get_scan_source(tenant_id: str, scan_id: str) -> dict | None:
         row = conn.execute("SELECT source_kind, server, credential_kind, credential_ref FROM scan_sources "
                            "WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id)).fetchone()
     return dict(row) if row else None
+
+
+def create_edm_set(tenant_id: str, set_id: str, name: str, entity_type: str, fingerprints, key_digest: str,
+                   created_by: str) -> int:
+    """D2: store a reference set - its name and its values' fingerprints - in one
+    transaction. Returns how many distinct fingerprints it holds."""
+    rows = sorted(set(fingerprints))
+    with _lock:
+        with _connect() as conn:
+            conn.execute(
+                "INSERT INTO edm_sets (tenant_id, set_id, name, entity_type, row_count, key_digest, created_by, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, set_id, name, entity_type, len(rows), key_digest, created_by,
+                 datetime.now(timezone.utc).isoformat()))
+            _executemany(conn, "INSERT INTO edm_fingerprints (tenant_id, set_id, fingerprint) VALUES (?, ?, ?)",
+                         ((tenant_id, set_id, fingerprint) for fingerprint in rows))
+    return len(rows)
+
+
+def list_edm_sets(tenant_id: str) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT set_id, name, entity_type, row_count, key_digest, created_by, created_at FROM edm_sets "
+            "WHERE tenant_id = ? ORDER BY created_at, set_id", (tenant_id,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_edm_set(tenant_id: str, set_id: str) -> bool:
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM edm_fingerprints WHERE tenant_id = ? AND set_id = ?", (tenant_id, set_id))
+            return conn.execute("DELETE FROM edm_sets WHERE tenant_id = ? AND set_id = ?",
+                                (tenant_id, set_id)).rowcount > 0
+
+
+def count_edm_rows(tenant_id: str) -> int:
+    with _connect() as conn:
+        row = conn.execute("SELECT COALESCE(SUM(row_count), 0) AS n FROM edm_sets WHERE tenant_id = ?",
+                           (tenant_id,)).fetchone()
+    return int(row["n"] or 0)
+
+
+def exact_match_index_for_scan(tenant_id: str, key_digest: str) -> dict:
+    """D2: what a scan matches against - every fingerprint of the workspace's reference
+    sets built with the current key, and the names of the sets holding it. Read once,
+    when the scan's configuration is built, like the suppression rules. `digest` changes
+    whenever a set is added or removed, and invalidates incremental reuse."""
+    try:
+        with _connect() as conn:
+            sets = conn.execute(
+                "SELECT set_id, name, row_count FROM edm_sets WHERE tenant_id = ? AND key_digest = ? "
+                "ORDER BY set_id", (tenant_id, key_digest)).fetchall()
+            names = {row["set_id"]: row["name"] for row in sets}
+            index: dict[str, list[str]] = {}
+            if names:
+                for row in conn.execute("SELECT set_id, fingerprint FROM edm_fingerprints WHERE tenant_id = ?",
+                                        (tenant_id,)).fetchall():
+                    if row["set_id"] in names:
+                        index.setdefault(row["fingerprint"], []).append(names[row["set_id"]])
+    except Exception as exc:
+        logger.warning("Exact-match reference sets could not be read for tenant %s (%s); the scan runs without "
+                       "them.", tenant_id, type(exc).__name__)
+        return {}
+    if not index:
+        return {}
+    digest = hashlib.sha256(json.dumps([[row["set_id"], int(row["row_count"] or 0)] for row in sets]).encode()).hexdigest()
+    return {"digest": digest[:16], "fingerprints": index}
 
 
 def list_access_principals(tenant_id: str, *, kind: str = "", limit: int = 200) -> list[dict]:

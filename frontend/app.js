@@ -10602,6 +10602,8 @@ const AUDIT_ACTIONS = {
   "credential.rotated": "Replaced a saved credential's password",
   "evidence.revealed": "Revealed a value behind a finding (read again from its source)",
   "evidence.reveal_refused": "Asked to reveal a value - refused",
+  "exact_match.set_created": "Added an exact-match reference set (values kept only as fingerprints)",
+  "exact_match.set_deleted": "Removed an exact-match reference set",
   "credential.deleted": "Deleted a saved credential",
   "credential.preflight": "Checked a saved credential's privilege",
   "vault.key_rotated": "Rotated the vault key",
