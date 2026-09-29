@@ -471,6 +471,8 @@ PLATFORM_ACCESS: dict[str, frozenset] = {
     # Artifact collection must see a partition's records, or it would take them for garbage.
     "scan_partitions": frozenset({"resume", "housekeeping"}),
     "assets": frozenset({"search-indexer", "housekeeping"}),
+    # D7: the demo-sample purge removes an asset's access rows with the asset.
+    "asset_access": frozenset({"housekeeping"}),
 }
 
 
@@ -1089,6 +1091,42 @@ def _vault_ddl(conn) -> None:
     for column, ddl in _SECRET_COLUMNS:
         if column not in columns:
             conn.execute(f"ALTER TABLE secrets ADD COLUMN {column} {ddl}")
+
+
+# D7: who can read or write each file in the current estate - one row per principal
+# with effective access, written with the asset and replaced when it is scanned again.
+_ASSET_ACCESS_DDL = """CREATE TABLE IF NOT EXISTS asset_access (
+            tenant_id TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            principal_key TEXT NOT NULL,
+            principal TEXT NOT NULL,
+            sid TEXT NOT NULL DEFAULT '',
+            can_read INTEGER NOT NULL DEFAULT 0,
+            can_write INTEGER NOT NULL DEFAULT 0,
+            broad INTEGER NOT NULL DEFAULT 0,
+            privileged INTEGER NOT NULL DEFAULT 0,
+            service INTEGER NOT NULL DEFAULT 0,
+            scan_id TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (tenant_id, asset_id, principal_key)
+        );"""
+_ASSET_ACCESS_INDEX = "CREATE INDEX IF NOT EXISTS idx_asset_access_principal ON asset_access (tenant_id, principal_key)"
+
+
+def add_asset_access(conn) -> None:
+    """Revision 0031: who can read each file (D7).
+
+    A scan has always read each file's ACL and kept it inside the asset's detail, where
+    no query could reach it: "who can read the files with card numbers" had no answer.
+    `asset_access` holds each principal's effective access (allow entries less the
+    denies of the same right), with whether the principal is a broad group, a
+    privileged one or a service or indexer account. A tenant table: revisions 0003
+    and 0004 are re-run for its key and row-level security. It is filled as assets are
+    scanned again; rollback: restore the pre-upgrade backup (older code ignores it).
+    """
+    conn.execute(_ASSET_ACCESS_DDL)
+    conn.execute(_ASSET_ACCESS_INDEX)
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
 
 
 _SCAN_SOURCES_DDL = """CREATE TABLE IF NOT EXISTS scan_sources (
@@ -2303,6 +2341,8 @@ def apply_baseline_schema(conn) -> None:
     _identity_ddl(conn)  # C2 (revision 0026)
     _vault_ddl(conn)  # C12 (revision 0027)
     conn.execute(_SCAN_SOURCES_DDL)  # C13 (revision 0028)
+    conn.execute(_ASSET_ACCESS_DDL)  # D7 (revision 0031)
+    conn.execute(_ASSET_ACCESS_INDEX)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -3234,6 +3274,7 @@ def purge_demo_sample_assets(tenant_id: str | None = None) -> int:
             for asset_id in demo_ids:
                 args = (asset_id,) + ((tenant_id,) if tenant_id else ())
                 conn.execute(f"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}", args)
+                conn.execute(f"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}", args)
                 conn.execute(f"DELETE FROM findings WHERE asset_id = ?{scope_sql}", args)
                 conn.execute(f"DELETE FROM assets WHERE id = ?{scope_sql}", args)
     if demo_ids:
@@ -3624,6 +3665,8 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
         # one asset for it, and the identity is recomputed from the record.
         asset_ids_by_path = {asset.path: asset.id for asset in piece.assets}
         if estate_rows:
+            _write_asset_access(conn, tenant_id, scan_id, records, asset_ids_by_path)
+        if estate_rows:
             # Every finding on the assets this batch touched becomes historical,
             # and the current ones are re-asserted by the upsert below. This was
             # one UPDATE per asset - a million statements on a million-file scan
@@ -3709,6 +3752,33 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
         _write_finding_index(conn, tenant_id, report, seq_offset=seq_offset, seq_span=seq_span)
 
 
+def _write_asset_access(conn, tenant_id: str, scan_id: str, records: list, asset_ids_by_path: dict) -> None:
+    """D7: this batch's assets' access rows, replaced - one row per principal with read
+    or write, from the ACL the collector read (allow entries less the same principal's
+    denies)."""
+    from permissions.acl_analyzer import effective_access
+
+    rows: dict[tuple, tuple] = {}
+    for file_obj in records:
+        asset_id = asset_ids_by_path.get(str(file_obj.get("path") or file_obj.get("name") or ""))
+        if not asset_id:
+            continue
+        for access in effective_access(file_obj.get("acl") or {}):
+            rows[(asset_id, access.key)] = (
+                tenant_id, asset_id, access.key, access.principal[:256], access.sid[:184], int(access.read),
+                int(access.write), int(access.broad), int(access.privileged), int(access.service), scan_id)
+    for id_chunk in _id_chunks(asset_ids_by_path.values()):
+        placeholders = ",".join("?" for _ in id_chunk)
+        conn.execute(f"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})",
+                     (tenant_id, *id_chunk))
+    _executemany(
+        conn,
+        "INSERT INTO asset_access (tenant_id, asset_id, principal_key, principal, sid, can_read, can_write, "
+        "broad, privileged, service, scan_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows.values(),
+    )
+
+
 def _prune_unseen_assets(conn, tenant_id: str, scan_label: str, scan_id: str) -> None:
     """Take the assets a named, complete scan did not see out of the current estate.
 
@@ -3733,6 +3803,10 @@ def _prune_unseen_assets(conn, tenant_id: str, scan_label: str, scan_id: str) ->
     )
     conn.execute(
         f"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
+        (tenant_id, *stale_params),
+    )
+    conn.execute(
+        f"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
         (tenant_id, *stale_params),
     )
     conn.execute(
@@ -8780,6 +8854,8 @@ _TENANT_ERASURE_TABLES = (
     "scan_runs",
     "assets",
     "asset_versions",
+    # D7: who can read each file.
+    "asset_access",
     "findings",
     "finding_occurrences",
     "finding_index",
@@ -9107,6 +9183,64 @@ def get_scan_source(tenant_id: str, scan_id: str) -> dict | None:
         row = conn.execute("SELECT source_kind, server, credential_kind, credential_ref FROM scan_sources "
                            "WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id)).fetchone()
     return dict(row) if row else None
+
+
+def list_access_principals(tenant_id: str, *, kind: str = "", limit: int = 200) -> list[dict]:
+    """D7: every principal with access to a file in the current estate, with how many
+    files - and how many holding findings - it can read and write. `kind` narrows it to
+    broad groups, privileged or service/indexer accounts."""
+    kind_sql = {"broad": " AND aa.broad = 1", "privileged": " AND aa.privileged = 1",
+                "service": " AND aa.service = 1"}.get(kind, "")
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT aa.principal_key AS principal_key, MAX(aa.principal) AS principal, MAX(aa.sid) AS sid, "
+            "MAX(aa.broad) AS broad, MAX(aa.privileged) AS privileged, MAX(aa.service) AS service, "
+            "SUM(aa.can_read) AS readable, SUM(aa.can_write) AS writable, "
+            "SUM(CASE WHEN aa.can_read = 1 AND a.finding_count > 0 THEN 1 ELSE 0 END) AS readable_sensitive, "
+            "MAX(CASE WHEN aa.can_read = 1 THEN a.risk_score ELSE 0 END) AS max_risk_score "
+            "FROM asset_access aa JOIN assets a ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id "
+            f"WHERE aa.tenant_id = ?{kind_sql} GROUP BY aa.principal_key "
+            "ORDER BY readable_sensitive DESC, readable DESC, aa.principal_key LIMIT ?",  # noqa: S608 - fixed fragments
+            (tenant_id, max(1, min(int(limit), 1000))),
+        ).fetchall()
+    return [{"key": row["principal_key"], "principal": row["principal"], "sid": row["sid"] or "",
+             "broad": bool(row["broad"]), "privileged": bool(row["privileged"]), "service": bool(row["service"]),
+             "readable_files": int(row["readable"] or 0), "readable_sensitive_files": int(row["readable_sensitive"] or 0),
+             "writable_files": int(row["writable"] or 0), "max_risk_score": float(row["max_risk_score"] or 0)}
+            for row in rows]
+
+
+def list_access_assets(tenant_id: str, *, principal_key: str = "", kind: str = "", sensitive_only: bool = False,
+                       writable_only: bool = False, limit: int = 100, offset: int = 0) -> list[dict]:
+    """D7: the files a principal can read (or write), or - with `kind` - the files a broad
+    group, privileged or service/indexer account can read; riskiest first."""
+    clauses = ["aa.tenant_id = ?"]
+    params: list = [tenant_id]
+    if principal_key:
+        clauses.append("aa.principal_key = ?")
+        params.append(principal_key)
+    kind_column = {"broad": "broad", "privileged": "privileged", "service": "service"}.get(kind)
+    if kind_column:
+        clauses.append(f"aa.{kind_column} = 1")
+    clauses.append("aa.can_write = 1" if writable_only else "aa.can_read = 1")
+    if sensitive_only:
+        clauses.append("a.finding_count > 0")
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT a.id AS asset_id, a.path AS path, a.name AS name, a.share AS share, a.source AS source, "
+            "a.risk_level AS risk_level, a.risk_score AS risk_score, a.finding_count AS finding_count, "
+            "MAX(aa.can_read) AS can_read, MAX(aa.can_write) AS can_write, MAX(aa.principal) AS principal "
+            "FROM asset_access aa JOIN assets a ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id "
+            f"WHERE {' AND '.join(clauses)} "  # noqa: S608 - fixed fragments
+            "GROUP BY a.id, a.path, a.name, a.share, a.source, a.risk_level, a.risk_score, a.finding_count "
+            "ORDER BY a.risk_score DESC, a.path LIMIT ? OFFSET ?",
+            (*params, max(1, min(int(limit), 500)), max(0, int(offset))),
+        ).fetchall()
+    return [{"asset_id": row["asset_id"], "path": row["path"], "name": row["name"], "share": row["share"] or "",
+             "source": row["source"], "risk_level": row["risk_level"], "risk_score": float(row["risk_score"] or 0),
+             "finding_count": int(row["finding_count"] or 0), "can_read": bool(row["can_read"]),
+             "can_write": bool(row["can_write"]), "principal": row["principal"] if not principal_key else ""}
+            for row in rows]
 
 
 def finding_location(tenant_id: str, finding_id: str) -> dict | None:

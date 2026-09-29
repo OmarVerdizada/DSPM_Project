@@ -507,6 +507,16 @@ def sha256_zip_entry(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, chunk_siz
         return ""
 
 
+def local_acl(path: Path) -> dict:
+    """D7: the file's owner and access-control entries, read in-process on Windows - {}
+    elsewhere, when the descriptor cannot be read, or with DSPM_LOCAL_ACL=0. A local scan
+    used to read only the owner, so no local file was ever assessed for broad access."""
+    if os.getenv("DSPM_LOCAL_ACL", "1").strip() == "0":
+        return {}
+    acl = win_security.security_for_path(str(path))
+    return acl if (acl.get("owner") or acl.get("entries")) else {}
+
+
 def file_owner(path: Path) -> str:
     try:
         owner = path.owner()
@@ -796,7 +806,8 @@ def scan_directory(
         if extension == ".zip":
             zip_protection = inspect_zip_protection(item)
 
-        owner = file_owner(item)
+        acl = local_acl(item)
+        owner = str(acl.get("owner") or "") or file_owner(item)
         archive_metadata = archive_protection_metadata(extension)
         content_status = None
         content_scannable = None
@@ -841,6 +852,7 @@ def scan_directory(
                 protected=protected,
                 protection_type=protection_type,
                 owner=owner,
+                acl=acl,
                 created_at=created_at,
                 modified_at=modified_at,
                 attributes=attributes,

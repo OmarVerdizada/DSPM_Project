@@ -193,6 +193,10 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_MAX_JOBS_PER_TENANT", "int", {"minimum": 1}),
     ("DSPM_JOB_RETENTION_SECONDS", "int", {"minimum": 0}),
     ("DSPM_PARTITIONED_SCANS", "bool"),
+    # D7: read each local file's access-control entries (Windows, in-process)
+    ("DSPM_LOCAL_ACL", "bool", {"default": "1"}),
+    # D7: accounts that index or crawl content, flagged like service accounts (comma list)
+    ("DSPM_INDEXER_PRINCIPALS", "str"),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),
     ("DSPM_PARTITION_MAX_ATTEMPTS", "int", {"minimum": 1}),
     ("DSPM_PARTITION_MAX_FILES", "int", {"minimum": 1}),

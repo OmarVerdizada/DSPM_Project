@@ -195,6 +195,35 @@ class SMBConfig:
     allowed_shares: tuple[str, ...] | None = None
 
 
+
+def normalize_acl(owner, principals, permissions, types=None, *, entries=None) -> dict:
+    """One shape for every ACL path (in-process, batched and per-file PowerShell): the
+    owner, the parallel principal/permission lists reports have always carried, and -
+    D7 - whether each entry allows or denies (``types``), or the full entries when the
+    in-process read has them. A pair with an empty principal is dropped as a pair, so
+    the lists stay aligned."""
+    def listed(value) -> list:
+        if value is None:
+            return []
+        return [value] if isinstance(value, str) else list(value)
+
+    principals, permissions, types = listed(principals), listed(permissions), listed(types)
+    kept_principals: list[str] = []
+    kept_permissions: list[str] = []
+    kept_types: list[str] = []
+    for index, principal in enumerate(principals):
+        if not str(principal or "").strip():
+            continue
+        kept_principals.append(str(principal))
+        kept_permissions.append(str(permissions[index]) if index < len(permissions) else "")
+        kept_types.append(str(types[index]).lower() if index < len(types) else "allow")
+    acl = {"owner": str(owner or ""), "principals": kept_principals, "permissions": kept_permissions}
+    if types:
+        acl["types"] = kept_types
+    if entries:
+        acl["entries"] = [dict(entry) for entry in entries if isinstance(entry, dict)]
+    return acl
+
 class SMBScanner:
     def __init__(self, config: SMBConfig):
         self.config = config
@@ -2019,6 +2048,9 @@ class SMBScanner:
                 permissions = @($acl.Access | ForEach-Object {
                   $_.FileSystemRights.ToString()
                 })
+                types = @($acl.Access | ForEach-Object {
+                  $_.AccessControlType.ToString()
+                })
                 error = ''
               }) | Out-Null
             } catch {
@@ -2028,6 +2060,7 @@ class SMBScanner:
                 owner = ''
                 principals = @()
                 permissions = @()
+                types = @()
                 error = [string]$_.Exception.GetType().Name
               }) | Out-Null
             }
@@ -2094,24 +2127,11 @@ class SMBScanner:
             path = str(row.get("path") or "")
             if not path:
                 continue
-            principals = row.get("principals") or []
-            permissions = row.get("permissions") or []
-            if isinstance(principals, str):
-                principals = [principals]
             if row.get("ok") is False:
                 self._bump_diag("acl_batch_item_failures")
                 continue
-            if isinstance(permissions, str):
-                permissions = [permissions]
-            normalized[path] = {
-                "owner": str(row.get("owner") or ""),
-                "principals": [
-                    str(item) for item in principals if str(item or "").strip()
-                ],
-                "permissions": [
-                    str(item) for item in permissions if str(item or "").strip()
-                ],
-            }
+            normalized[path] = normalize_acl(row.get("owner"), row.get("principals"), row.get("permissions"),
+                                             row.get("types"))
         return normalized
 
     def _acl_inproc(self, unc_path: str) -> dict | None:
@@ -2125,11 +2145,7 @@ class SMBScanner:
         owner = str(acl.get("owner") or "")
         if not owner:
             return None
-        normalized = {
-            "owner": owner,
-            "principals": [str(item) for item in (acl.get("principals") or []) if str(item or "").strip()],
-            "permissions": [str(item) for item in (acl.get("permissions") or []) if str(item or "").strip()],
-        }
+        normalized = normalize_acl(owner, acl.get("principals"), acl.get("permissions"), entries=acl.get("entries"))
         if normalized["principals"]:
             self._bump_diag("acl_read_success")
         self._bump_diag("acl_inproc_paths")
@@ -2171,6 +2187,7 @@ class SMBScanner:
               owner = [string]$directAcl.Owner
               principals = @($directAcl.Access | ForEach-Object {{ $_.IdentityReference.Value }})
               permissions = @($directAcl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+              types = @($directAcl.Access | ForEach-Object {{ $_.AccessControlType.ToString() }})
             }} | ConvertTo-Json -Compress
             exit 0
           }}
@@ -2194,6 +2211,7 @@ class SMBScanner:
             owner = [string]$acl.Owner
             principals = @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }})
             permissions = @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+            types = @($acl.Access | ForEach-Object {{ $_.AccessControlType.ToString() }})
           }} | ConvertTo-Json -Compress
         }} finally {{
           Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
@@ -2229,17 +2247,7 @@ class SMBScanner:
             acl = json.loads(completed.stdout.strip()) if completed.stdout.strip() else {}
         except json.JSONDecodeError:
             acl = {"owner": completed.stdout.strip().splitlines()[0] if completed.stdout.strip() else ""}
-        principals = acl.get("principals", [])
-        permissions = acl.get("permissions", [])
-        if isinstance(principals, str):
-            principals = [principals]
-        if isinstance(permissions, str):
-            permissions = [permissions]
-        normalized_acl = {
-            "owner": str(acl.get("owner") or ""),
-            "principals": [str(item) for item in principals if str(item or "").strip()],
-            "permissions": [str(item) for item in permissions if str(item or "").strip()],
-        }
+        normalized_acl = normalize_acl(acl.get("owner"), acl.get("principals"), acl.get("permissions"), acl.get("types"))
         if not normalized_acl["owner"]:
             self._bump_diag("owner_read_failed")
         if normalized_acl["principals"]:

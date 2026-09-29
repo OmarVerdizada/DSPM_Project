@@ -39,13 +39,6 @@
     {
       "file": "backend/store.py",
       "test_id": "B608",
-      "code": "args = (asset_id,) + ((tenant_id,) if tenant_id else ()) conn.execute(f\"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args)",
-      "reviewed": "2026-09-28",
-      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
-    },
-    {
-      "file": "backend/store.py",
-      "test_id": "B608",
       "code": "cap_sql = f\"SELECT COUNT(*) FROM (SELECT 1 FROM assets WHERE {' AND '.join(where)} LIMIT ?) t\" total = int(conn.execute(cap_sql, tuple(params) + (_INVENTORY_COUNT_CAP + 1,)).fetchone()[0])",
       "reviewed": "2026-09-28",
       "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
@@ -105,13 +98,6 @@
       "code": "conn.execute( f\"UPDATE scan_schedules SET {', '.join(sets)} WHERE tenant_id = ? AND schedule_id = ?\", (*params, tenant_id, str(schedule_id)),",
       "reviewed": "2026-09-28",
       "reason": "Interpolates a SET list from a code-owned column whitelist. Every value is a bound parameter."
-    },
-    {
-      "file": "backend/store.py",
-      "test_id": "B608",
-      "code": "conn.execute(f\"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM assets WHERE id = ?{scope_sql}\", args)",
-      "reviewed": "2026-09-28",
-      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
     },
     {
       "file": "backend/store.py",
@@ -483,6 +469,55 @@
       "code": "changed += conn.execute( f\"UPDATE {table} SET {column} = ?{stamp} WHERE {where} AND {column} = ?\",  # noqa: S608 tuple(params)).rowcount",
       "reviewed": "2026-09-28",
       "reason": "C12 vault re-seal: table and column names come from the fixed _SEALED_COLUMNS constant; every value, including the compared sealed value, is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "args = (asset_id,) + ((tenant_id,) if tenant_id else ()) conn.execute(f\"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}\", args)",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({stale_sql})\", (tenant_id, *stale_params),",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM assets WHERE id = ?{scope_sql}\", args)",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args)",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "placeholders = \",\".join(\"?\" for _ in id_chunk) conn.execute(f\"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk))",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( \"SELECT a.id AS asset_id, a.path AS path, a.name AS name, a.share AS share, a.source AS source, \" \"a.risk_level AS risk_level, a.risk_score AS risk_score, a.finding_count AS finding_count, \" \"MAX(aa.can_read) AS can_read, MAX(aa.can_write) AS can_write, MAX(aa.principal) AS principal \" \"FROM asset_access aa JOIN assets a ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id \" f\"WHERE {' AND '.join(clauses)} \"  # noqa: S608 - fixed fragments \"GROUP BY a.id, a.path, a.name, a.share, a.source, a.risk_level, a.risk_score, a.finding_count \" \"ORDER BY a.risk_score DESC, a.path LIMIT ? OFFSET ?\", (*params, max(1, min(int(limit), 500)), max(0, int(offset))),",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( \"SELECT aa.principal_key AS principal_key, MAX(aa.principal) AS principal, MAX(aa.sid) AS sid, \" \"MAX(aa.broad) AS broad, MAX(aa.privileged) AS privileged, MAX(aa.service) AS service, \" \"SUM(aa.can_read) AS readable, SUM(aa.can_write) AS writable, \" \"SUM(CASE WHEN aa.can_read = 1 AND a.finding_count > 0 THEN 1 ELSE 0 END) AS readable_sensitive, \" \"MAX(CASE WHEN aa.can_read = 1 THEN a.risk_score ELSE 0 END) AS max_risk_score \" \"FROM asset_access aa JOIN assets a ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id \" f\"WHERE aa.tenant_id = ?{kind_sql} GROUP BY aa.principal_key \" \"ORDER BY readable_sensitive DESC, readable DESC, aa.principal_key LIMIT ?\",  # noqa: S608 - fixed fragments (tenant_id, max(1, min(int(limit), 1000))),",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
     }
   ]
 }

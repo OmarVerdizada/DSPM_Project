@@ -73,6 +73,7 @@ def _revisions() -> list[tuple[int, str, object]]:
     (28, "scan_sources", store.add_scan_sources),
     (29, "classify_directory_secrets", store.classify_directory_secrets),
     (30, "admit_whole_database_backup", store.admit_whole_database_backup),
+    (31, "asset_access", store.add_asset_access),
     ]
 
 

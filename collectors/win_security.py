@@ -30,6 +30,7 @@ _DACL_SECURITY_INFORMATION = 0x00000004
 _ERROR_SUCCESS = 0
 _ACCESS_ALLOWED_ACE_TYPE = 0
 _ACCESS_DENIED_ACE_TYPE = 1
+_INHERITED_ACE = 0x10
 
 # .NET System.Security.AccessControl.FileSystemRights, ascending by value.
 # Enum.ToString() for a [Flags] enum walks these largest-first, subtracting and
@@ -208,11 +209,16 @@ def rights_to_names(mask: int) -> str:
     return ", ".join(parts) if parts else str(mask)
 
 
-def _read_dacl(dacl_ptr: Any) -> tuple[list[str], list[str]]:
-    """(principals, permissions) parallel lists, mirroring Get-Acl's .Access."""
+def _read_dacl(dacl_ptr: Any) -> tuple[list[str], list[str], list[dict]]:
+    """(principals, permissions) parallel lists, mirroring Get-Acl's .Access, and the
+    entries themselves: principal, SID, rights, access mask, allow or deny, inherited.
+
+    D7: the parallel lists cannot say whether an entry allows or denies - a Deny for
+    Everyone read exactly like an Allow, and was flagged as broad access. The entries
+    carry the type; the lists stay as they were for reports and baselines."""
     ctypes = _ctypes
     if not dacl_ptr:
-        return [], []
+        return [], [], []
 
     class ACL_SIZE_INFORMATION(ctypes.Structure):
         _fields_ = [
@@ -225,10 +231,11 @@ def _read_dacl(dacl_ptr: Any) -> tuple[list[str], list[str]]:
     # AclSizeInformation == 2
     if not _advapi32.GetAclInformation(dacl_ptr, ctypes.byref(info),
                                        ctypes.sizeof(info), 2):
-        return [], []
+        return [], [], []
 
     principals: list[str] = []
     permissions: list[str] = []
+    entries: list[dict] = []
     for index in range(int(info.AceCount)):
         ace_ptr = ctypes.c_void_p()
         if not _advapi32.GetAce(dacl_ptr, index, ctypes.byref(ace_ptr)):
@@ -239,12 +246,23 @@ def _read_dacl(dacl_ptr: Any) -> tuple[list[str], list[str]]:
         ace_type = ctypes.c_ubyte.from_address(address).value
         if ace_type not in (_ACCESS_ALLOWED_ACE_TYPE, _ACCESS_DENIED_ACE_TYPE):
             continue
+        ace_flags = ctypes.c_ubyte.from_address(address + 1).value
         # ACCESS_ALLOWED_ACE: ACE_HEADER (4 bytes) + ACCESS_MASK (4) + SidStart
         mask = ctypes.c_ulong.from_address(address + 4).value
         sid_ptr = ctypes.c_void_p(address + 8)
-        principals.append(_account_for_sid(sid_ptr))
-        permissions.append(rights_to_names(mask))
-    return principals, permissions
+        principal = _account_for_sid(sid_ptr)
+        rights = rights_to_names(mask)
+        principals.append(principal)
+        permissions.append(rights)
+        entries.append({
+            "principal": principal,
+            "sid": _sid_to_string(sid_ptr),
+            "rights": rights,
+            "mask": int(mask),
+            "type": "deny" if ace_type == _ACCESS_DENIED_ACE_TYPE else "allow",
+            "inherited": bool(ace_flags & _INHERITED_ACE),
+        })
+    return principals, permissions, entries
 
 
 def security_for_path(path: str, *, with_dacl: bool = True) -> dict:
@@ -275,9 +293,10 @@ def security_for_path(path: str, *, with_dacl: bool = True) -> dict:
     try:
         result: dict = {"owner": _account_for_sid(owner_sid) if owner_sid.value else ""}
         if with_dacl:
-            principals, permissions = _read_dacl(dacl.value)
+            principals, permissions, entries = _read_dacl(dacl.value)
             result["principals"] = principals
             result["permissions"] = permissions
+            result["entries"] = entries
         return result
     except Exception:
         return {}

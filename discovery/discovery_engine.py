@@ -32,7 +32,7 @@ from discovery.detector_pool import build_pool
 from discovery.detector_stage import run_detector_stage, timed_detector
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
 from discovery.suppression import compile_rules
-from permissions.acl_analyzer import analyze_acl
+from permissions.acl_analyzer import ACL_ANALYSIS_VERSION, analyze_acl
 from risk.risk_engine import RiskAssessment, _is_protected_content, calculate_risk
 from scripts.logger import get_logger
 
@@ -661,6 +661,9 @@ class DSPMDiscoveryEngine:
         self._version_signature = (
             str(self.config.tenant_id),
             PARSER_VERSION,
+            # D7: what a scan concludes from a file's ACL is part of its result, so a
+            # changed analysis re-reads rather than replaying an older verdict.
+            ACL_ANALYSIS_VERSION,
             detector_version,
             rule_catalog_version,
             tuple(sorted(framework_ids)),

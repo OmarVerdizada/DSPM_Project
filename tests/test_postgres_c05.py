@@ -36,6 +36,8 @@ REQUIRED_ISOLATED = {
     "directory_settings", "user_mfa",
     # C13: how each scan reached its files.
     "scan_sources",
+    # D7: who can read each file.
+    "asset_access",
 }
 
 
@@ -110,6 +112,7 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
             "files": [{"path": f"/{tenant}/doc.txt", "reuse_key": f"local:///{tenant}/doc.txt", "name": "doc.txt",
                        "size": 7, "modified_at": "2026-08-06T00:00:00Z", "content_hash": "hash-a",
                        "risk": {"level": "HIGH", "score": 80},
+                       "acl": {"owner": "O", "principals": ["Everyone"], "permissions": ["Read"]},
                        "findings": [{"type": "email", "risk": "HIGH", "count": 1, "finding_id": f"{tenant}-f1"}]}],
         })
         store.record_job({"id": f"{tenant}-job", "tenant_id": tenant, "status": "running",

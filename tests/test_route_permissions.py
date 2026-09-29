@@ -167,6 +167,9 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("GET", "/api/credentials"): "credential.manage",
     # C13: one raw value, read again from its source
     ("POST", "/api/findings/{finding_id}/reveal"): "evidence.reveal",
+    # D7: who can read the estate's files
+    ("GET", "/api/access/principals"): "inventory.view",
+    ("GET", "/api/access/files"): "inventory.view",
     ("PUT", "/api/credentials/{secret_ref}"): "credential.manage",
     ("DELETE", "/api/credentials/{secret_ref}"): "credential.manage",
     ("POST", "/api/credentials/{secret_ref}/preflight"): "credential.manage",

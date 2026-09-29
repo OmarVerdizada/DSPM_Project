@@ -3723,6 +3723,38 @@ def finding_detail(finding_id: str, principal: Principal = Depends(require_permi
     return {"finding": finding, "framework": framework, "detail": detail}
 
 
+_ACCESS_KINDS = {"", "broad", "privileged", "service"}
+
+
+@app.get("/api/access/principals")
+def access_principals(kind: str = "", limit: int = 200,
+                      principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
+    """D7: who can read files in this workspace's estate - each principal, how many files it
+    can read and write, and how many of those hold findings; `kind` narrows it to broad
+    groups, privileged accounts, or service and indexer accounts."""
+    if kind not in _ACCESS_KINDS:
+        raise HTTPException(status_code=400, detail="kind must be broad, privileged or service")
+    return {"principals": store_module.list_access_principals(principal.tenant_id, kind=kind, limit=limit)}
+
+
+@app.get("/api/access/files")
+def access_files(key: str = "", kind: str = "", sensitive_only: bool = True, writable_only: bool = False,
+                 limit: int = 100, offset: int = 0,
+                 principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
+    """D7: the files a principal (its `key` from /api/access/principals) can read - or
+    write - or, with `kind`, the files a broad group, privileged or service/indexer
+    account can; by default only files holding findings, riskiest first."""
+    if kind not in _ACCESS_KINDS:
+        raise HTTPException(status_code=400, detail="kind must be broad, privileged or service")
+    if not key and not kind:
+        raise HTTPException(status_code=400, detail="Name a principal (key) or a kind (broad, privileged or service).")
+    files = store_module.list_access_assets(principal.tenant_id, principal_key=key.strip()[:256], kind=kind,
+                                            sensitive_only=sensitive_only, writable_only=writable_only,
+                                            limit=limit, offset=offset)
+    return {"files": files, "key": key, "kind": kind, "sensitive_only": sensitive_only,
+            "writable_only": writable_only}
+
+
 class RevealRequest(BaseModel):
     fingerprint: str = Field(min_length=8, max_length=64)
     reason: str = Field(min_length=1, max_length=500)

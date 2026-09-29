@@ -90,6 +90,8 @@ class EveryStoreFunctionHasAScopeTest(unittest.TestCase):
             "partitioned_scans": ["resume"],
             "scan_partitions": ["housekeeping", "resume"],
             "assets": ["housekeeping", "search-indexer"],
+            # D7: the demo-sample purge removes an asset's access rows with it
+            "asset_access": ["housekeeping"],
         })
         every = {purpose for purposes in store.PLATFORM_ACCESS.values() for purpose in purposes}
         self.assertLessEqual(every | {"migration", "backup"}, set(db.PLATFORM_PURPOSES))
