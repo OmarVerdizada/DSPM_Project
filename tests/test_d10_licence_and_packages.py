@@ -412,8 +412,9 @@ class TheLicenceTest(LicenceCase):
         altered = self.licence()
         altered["licence"]["customer"] = "Someone else"
         bad.write_text(json.dumps(altered), encoding="utf-8")
+        # The host command reads the database this test reads: the SQLite file, or the
+        # disposable PostgreSQL database when that is the one configured.
         env = {**os.environ, "DSPM_DB_PATH": str(store.DB_PATH), "DSPM_TRUST_FILE": str(self.trust_path)}
-        env.pop("DSPM_DB_URL", None)
         refused = subprocess.run([sys.executable, "main.py", "licence", "install", str(bad)], cwd=ROOT, env=env,
                                  capture_output=True, text=True, timeout=120)
         self.assertEqual(refused.returncode, 1)

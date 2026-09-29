@@ -77,6 +77,26 @@ def _int(name: str, default: int, low: int, high: int) -> int:
         return default
 
 
+class JsonFormatter(logging.Formatter):
+    """D11: one JSON object a line (DSPM_LOG_FORMAT=json), for a log shipper - the same
+    redacted message and traceback the text format carries."""
+
+    def __init__(self, service: str) -> None:
+        super().__init__()
+        self.service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        import json
+        from datetime import datetime, timezone
+
+        document = {"ts": datetime.fromtimestamp(record.created, timezone.utc).isoformat(timespec="milliseconds"),
+                    "level": record.levelname, "service": self.service, "pid": record.process,
+                    "logger": record.name, "message": record.getMessage()}
+        if record.exc_text:
+            document["exception"] = record.exc_text
+        return json.dumps(document, ensure_ascii=False)
+
+
 def configure(service: str, *, log_dir: str | os.PathLike | None = None) -> Path | None:
     """Route the root logger (and uvicorn's) through the redacting filter, to standard
     error and - when a log directory is configured - to a rotating file. Returns the
@@ -86,7 +106,8 @@ def configure(service: str, *, log_dir: str | os.PathLike | None = None) -> Path
     directory = str(log_dir or os.getenv("DSPM_LOG_DIR", "")).strip()
     level = getattr(logging, os.getenv("DSPM_LOG_LEVEL", "INFO").strip().upper() or "INFO", logging.INFO)
     redactor = RedactingFilter(secret_values)
-    formatter = logging.Formatter(FORMAT)
+    json_lines = os.getenv("DSPM_LOG_FORMAT", "text").strip().lower() == "json"
+    formatter = JsonFormatter(service) if json_lines else logging.Formatter(FORMAT)
     handlers: list[logging.Handler] = []
     stream = logging.StreamHandler(sys.stderr)
     handlers.append(stream)

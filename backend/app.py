@@ -590,6 +590,21 @@ def schema_problem() -> str:
 
 
 @app.middleware("http")
+async def count_requests(request: Request, call_next):
+    """D11: every request counted by method and status, and timed - never by path."""
+    from backend import metrics
+
+    started = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    finally:
+        metrics.record_request(request.method, status, time.perf_counter() - started)
+
+
+@app.middleware("http")
 async def schema_guard(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/") and path not in _SCHEMA_GUARD_OPEN:
@@ -1506,6 +1521,34 @@ def database_activity(principal: Principal = Depends(require_permission("platfor
         "applicable": bool(result.get("applicable")),
     })
     return result
+
+
+def _metrics_reader(request: Request) -> Principal:
+    """D11: who may read /metrics - a scraper with the DSPM_METRICS_TOKEN, or the
+    installation's administrator."""
+    from backend import metrics
+    from backend.security import verify_token
+
+    header = request.headers.get("authorization", "")
+    if metrics.token_allowed(header):
+        return Principal(subject="metrics-scraper", role="metrics", tenant_id="default", auth_type="metrics-token")
+    if not header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Metrics need the scrape token or an administrator.")
+    principal = verify_token(header[7:].strip())
+    if not is_platform_admin(principal):
+        raise HTTPException(status_code=403, detail="Metrics are the installation administrator's.")
+    return principal
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(principal: Principal = Depends(_metrics_reader)) -> Response:
+    """D11: Prometheus text. A scraper sends `Authorization: Bearer <DSPM_METRICS_TOKEN>`;
+    without a token configured, only the installation's administrator may read it."""
+    from backend import metrics
+
+    ready = readiness().status_code == 200
+    return Response(content=metrics.render(ready=ready, build=_build_info()), media_type=metrics.CONTENT_TYPE,
+                    headers={"Cache-Control": "no-store"})
 
 
 @functools.lru_cache(maxsize=1)

@@ -364,6 +364,15 @@ def kick() -> None:
     _wake.set()
 
 
+def run_pass() -> None:
+    """One pass: what is due to be delivered, tickets, and the installation's own health."""
+    from backend import ops_alerts
+
+    drain()
+    drain_tickets()
+    ops_alerts.maybe_evaluate()  # D11: the queue, backups, the SIEM
+
+
 def _loop(interval: float) -> None:
     while not _stop.is_set():
         _wake.wait(interval)
@@ -371,8 +380,7 @@ def _loop(interval: float) -> None:
         if _stop.is_set():
             return
         try:
-            drain()
-            drain_tickets()
+            run_pass()
         except Exception:  # the deliverer must outlive a bad pass
             logger.exception("Alert delivery pass failed")
 

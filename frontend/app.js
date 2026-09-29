@@ -10631,6 +10631,7 @@ const AUDIT_ACTIONS = {
   "ticket.synced": "Checked open tickets",
   "licence.installed": "Installed a licence",
   "licence.refused": "A licence file was refused",
+  "ops.recovered": "An installation problem cleared (queue, backup or SIEM)",
   "credential.deleted": "Deleted a saved credential",
   "credential.preflight": "Checked a saved credential's privilege",
   "vault.key_rotated": "Rotated the vault key",

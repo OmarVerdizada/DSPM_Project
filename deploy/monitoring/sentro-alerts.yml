@@ -1,0 +1,65 @@
+# Sentro DSPM - Prometheus alert rules (D11). Load with rule_files in prometheus.yml.
+# Every expression reads a metric /metrics exposes (tests/test_d11_observability.py checks
+# the names). The same conditions also raise in-product alerts (backend/ops_alerts.py),
+# so an install without Prometheus is still told.
+groups:
+  - name: sentro
+    rules:
+      - alert: SentroDown
+        expr: up{job="sentro"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Sentro on {{ $labels.instance }} does not answer /metrics."
+      - alert: SentroNotReady
+        expr: sentro_ready == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Sentro is up but not ready (database or schema); see /api/ready."
+      - alert: SentroScanQueueStuck
+        expr: max(sentro_scan_job_oldest_queued_seconds, sentro_scan_partition_oldest_queued_seconds) > 1800
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "A scan has waited more than 30 minutes to start; check the worker service."
+      - alert: SentroScanQueueBacklog
+        expr: sum(sentro_scan_jobs{state="queued"}) > 20
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 20 scans are queued."
+      - alert: SentroBackupFailed
+        expr: sentro_backup_last_attempt_success == 0
+        labels: {severity: critical}
+        annotations:
+          summary: "The last backup attempt failed; run main.py backup create --verify."
+      - alert: SentroBackupStale
+        expr: sentro_backup_age_seconds > 93600 or sentro_backup_age_seconds < 0
+        for: 15m
+        labels: {severity: critical}
+        annotations:
+          summary: "The newest backup is older than 26 hours (or there is none)."
+      - alert: SentroSiemFailing
+        expr: sentro_siem_outbox_failing > 0 and sentro_siem_outbox_oldest_seconds > 900
+        labels: {severity: warning}
+        annotations:
+          summary: "The SIEM has not accepted audit events for 15 minutes; they are queued."
+      - alert: SentroAlertDeliveryFailing
+        expr: sentro_alert_deliveries_failing > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "An alert channel or ticket system is refusing deliveries; see Settings -> Alerts & tickets."
+      - alert: SentroLicenceInvalid
+        expr: sentro_licence_valid == 0
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "The licence is missing, invalid or expired past its grace period."
+      - alert: SentroCollectorFailing
+        expr: sentro_collector_up == 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "The {{ $labels.collector }} metrics cannot be read."

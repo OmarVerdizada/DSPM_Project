@@ -91,6 +91,8 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_API_KEYS", "secret"),
     ("DSPM_MEILISEARCH_API_KEY", "secret"),
     ("DSPM_ALERT_WEBHOOK_URL", "secret"),
+    # D11: the bearer token a Prometheus scraper sends to /metrics.
+    ("DSPM_METRICS_TOKEN", "secret"),
     ("DSPM_LOCAL_ARTIFACT_KEY_PATH", "path"),
     ("DSPM_LOCAL_BACKUP_KEY_PATH", "path"),
     ("DSPM_LOCAL_EVIDENCE_KEY_PATH", "path"),
@@ -208,6 +210,11 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_TRUST_FILE", "path"),
     ("DSPM_LICENCE_REQUIRED", "bool"),
     ("DSPM_LICENCE_GRACE_DAYS", "int", {"minimum": 0}),
+    # D11: log lines as JSON for a shipper; when the installation's own alerts are checked,
+    # and how long a queued scan may wait before it is "stuck".
+    ("DSPM_LOG_FORMAT", "enum", {"default": "text", "choices": ("text", "json")}),
+    ("DSPM_OPS_ALERT_INTERVAL_SECONDS", "int", {"minimum": 30}),
+    ("DSPM_QUEUE_STUCK_MINUTES", "int", {"minimum": 0}),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),
     ("DSPM_PARTITION_MAX_ATTEMPTS", "int", {"minimum": 1}),
     ("DSPM_PARTITION_MAX_FILES", "int", {"minimum": 1}),

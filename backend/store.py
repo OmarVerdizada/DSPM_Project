@@ -466,14 +466,14 @@ PLATFORM_ACCESS: dict[str, frozenset] = {
     "alert_events": frozenset({"housekeeping", "platform-admin"}),
     # D3: one deliverer sends every workspace's alerts and follows every ticket;
     # retention prunes old deliveries with the alerts.
-    "alert_deliveries": frozenset({"delivery", "housekeeping"}),
-    "finding_tickets": frozenset({"delivery"}),
+    "alert_deliveries": frozenset({"delivery", "housekeeping", "metrics"}),
+    "finding_tickets": frozenset({"delivery", "metrics"}),
     "derived_cache": frozenset({"housekeeping"}),
     "scan_reports": frozenset({"housekeeping", "platform-admin"}),
-    "scan_jobs": frozenset({"housekeeping", "resume"}),
+    "scan_jobs": frozenset({"housekeeping", "metrics", "resume"}),
     "partitioned_scans": frozenset({"resume"}),
     # Artifact collection must see a partition's records, or it would take them for garbage.
-    "scan_partitions": frozenset({"resume", "housekeeping"}),
+    "scan_partitions": frozenset({"resume", "housekeeping", "metrics"}),
     "assets": frozenset({"search-indexer", "housekeeping"}),
     # D7: the demo-sample purge removes an asset's access rows with the asset.
     "asset_access": frozenset({"housekeeping"}),
@@ -1262,6 +1262,12 @@ def add_alert_delivery(conn) -> None:
     add_tenant_integrity(conn)
     add_tenant_rls(conn)
 
+
+def add_metrics_purpose(conn) -> None:
+    """Revision 0034: the `metrics` purpose (D11) - /metrics and the installation's own
+    alerts count scan jobs, partitions and waiting deliveries across workspaces. Counts
+    only; no row leaves. Re-runs revision 0004 so the policies admit it."""
+    add_tenant_rls(conn)
 
 def add_asset_access(conn) -> None:
     """Revision 0031: who can read each file (D7).
@@ -9832,6 +9838,35 @@ def retry_alert_deliveries_now(tenant_id: str, channel: str = "") -> int:
                                 (tenant_id,)).rowcount
 
 
+def metrics_scan_jobs() -> dict:
+    """D11: scan jobs by state and the oldest still queued - counts only, every workspace."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT status, COUNT(*) AS n FROM scan_jobs GROUP BY status").fetchall()
+        oldest = conn.execute("SELECT MIN(created_at) AS oldest FROM scan_jobs WHERE status = 'queued'").fetchone()
+    return {"states": {str(row["status"]): int(row["n"]) for row in rows}, "oldest_queued": oldest["oldest"] or ""}
+
+
+def metrics_scan_partitions() -> dict:
+    """D11: scan partitions by state and the oldest still queued."""
+    with _connect() as conn:
+        rows = conn.execute("SELECT status, COUNT(*) AS n FROM scan_partitions GROUP BY status").fetchall()
+        oldest = conn.execute("SELECT MIN(updated_at) AS oldest FROM scan_partitions WHERE status = 'queued'").fetchone()
+    return {"states": {str(row["status"]): int(row["n"]) for row in rows}, "oldest_queued": oldest["oldest"] or ""}
+
+
+def metrics_alert_deliveries() -> dict:
+    """D11: alert deliveries and tickets waiting, and how many of them failed at least once."""
+    with _connect() as conn:
+        alerts = conn.execute(
+            "SELECT COUNT(*) AS pending, SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END) AS failing "
+            "FROM alert_deliveries WHERE status = 'pending'").fetchone()
+        tickets = conn.execute(
+            "SELECT COUNT(*) AS pending, SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END) AS failing "
+            "FROM finding_tickets WHERE status = 'pending'").fetchone()
+    return {"pending": int(alerts["pending"] or 0) + int(tickets["pending"] or 0),
+            "failing": int(alerts["failing"] or 0) + int(tickets["failing"] or 0)}
+
+
 def create_finding_ticket(tenant_id: str, ticket_id: str, finding_id: str, system: str, payload: dict,
                           created_by: str) -> dict | None:
     """Queue a ticket for a finding. None when the finding already has one in `system`
@@ -10971,6 +11006,7 @@ PLATFORM_FUNCTIONS = {
     "claim_audit_outbox": "siem", "delete_audit_outbox": "siem", "retry_audit_outbox": "siem",
     "audit_outbox_status": "siem", "reset_audit_outbox_backoff": "siem",
     "claim_alert_deliveries": "delivery", "claim_ticket_work": "delivery",
+    "metrics_scan_jobs": "metrics", "metrics_scan_partitions": "metrics", "metrics_alert_deliveries": "metrics",
     "_prune_audit_chains": "housekeeping", "prune_event_tables": "housekeeping",
     "prune_job_records": "housekeeping", "referenced_artifact_ids": "housekeeping",
     "recover_interrupted_jobs": "resume", "list_unfinished_partitioned_scans": "resume",

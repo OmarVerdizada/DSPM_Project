@@ -86,15 +86,15 @@ class EveryStoreFunctionHasAScopeTest(unittest.TestCase):
             "alert_events": ["housekeeping", "platform-admin"],
             "derived_cache": ["housekeeping"],
             "scan_reports": ["housekeeping", "platform-admin"],
-            "scan_jobs": ["housekeeping", "resume"],
+            "scan_jobs": ["housekeeping", "metrics", "resume"],
             "partitioned_scans": ["resume"],
-            "scan_partitions": ["housekeeping", "resume"],
+            "scan_partitions": ["housekeeping", "metrics", "resume"],
             "assets": ["housekeeping", "search-indexer"],
             # D7: the demo-sample purge removes an asset's access rows with it
             "asset_access": ["housekeeping"],
             # D3: the deliverer spans workspaces; retention prunes old deliveries
-            "alert_deliveries": ["delivery", "housekeeping"],
-            "finding_tickets": ["delivery"],
+            "alert_deliveries": ["delivery", "housekeeping", "metrics"],
+            "finding_tickets": ["delivery", "metrics"],
         })
         every = {purpose for purposes in store.PLATFORM_ACCESS.values() for purpose in purposes}
         self.assertLessEqual(every | {"migration", "backup"}, set(db.PLATFORM_PURPOSES))

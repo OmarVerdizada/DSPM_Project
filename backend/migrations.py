@@ -76,6 +76,7 @@ def _revisions() -> list[tuple[int, str, object]]:
     (31, "asset_access", store.add_asset_access),
     (32, "exact_data_match", store.add_exact_data_match),
     (33, "alert_delivery", store.add_alert_delivery),
+    (34, "metrics_purpose", store.add_metrics_purpose),
     ]
 
 

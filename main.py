@@ -277,6 +277,20 @@ def migrate_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _record_backup_attempt(ok: bool, error: str) -> None:
+    """D11: what the last backup attempt did, for /metrics and the installation's alerts -
+    the time and the error's type, never its text (a failing pg_dump can echo a URL)."""
+    from datetime import datetime, timezone
+
+    try:
+        from backend import store
+
+        store.set_app_setting("backup.last_attempt", json.dumps(
+            {"at": datetime.now(timezone.utc).isoformat(), "ok": bool(ok), "error": str(error)[:80]}))
+    except Exception:  # recording must never change what the backup itself did
+        pass
+
+
 def backup_command(args: argparse.Namespace) -> int:
     """Encrypted backups of the database and the artifact store (C11; C0.3's first half)."""
     os.environ["DSPM_MIGRATIONS_CLI"] = "1"
@@ -286,7 +300,12 @@ def backup_command(args: argparse.Namespace) -> int:
         print(json.dumps(document) if args.json else text)
 
     if args.backup_command == "create":
-        manifest = backup.create_backup()
+        try:
+            manifest = backup.create_backup()
+        except Exception as exc:
+            _record_backup_attempt(False, type(exc).__name__)
+            raise
+        _record_backup_attempt(True, "")
         document = {"manifest": str(manifest),
                     "schema_revision": json.loads(manifest.read_text(encoding="utf-8")).get("schema_revision")}
         if args.verify:
