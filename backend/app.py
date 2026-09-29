@@ -3515,6 +3515,97 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_permission
         raise _safe_operation_error("Scan failed", exc) from exc
 
 
+# ── D6: database column sampling ───────────────────────────────────────────────────
+class DatabaseScanRequest(BaseModel):
+    """A database to sample. The password is typed for this scan and never stored, or a
+    saved credential's reference is given instead."""
+    engine: str = Field(default="postgresql", max_length=20)
+    host: str = Field(min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    database: str = Field(min_length=1, max_length=128)
+    username: str = Field(default="", max_length=128)
+    password: str | None = Field(default=None, max_length=1024)
+    credential_ref: str | None = Field(default=None, max_length=128)
+    sslmode: str = Field(default="verify-full", max_length=20)
+    schemas: list[str] = Field(default_factory=list, max_length=100)
+    include_tables: list[str] = Field(default_factory=list, max_length=100)
+    sample_rows: int = Field(default=1000, ge=1, le=10_000)
+    max_tables: int = Field(default=500, ge=1, le=5000)
+    scan_label: str = Field(default="", max_length=80)
+    save_report: bool = True
+    compact_result: bool = True
+    compliance_enabled: bool = True
+    compliance_frameworks: list[str] = Field(default_factory=lambda: ["gdpr", "pci_dss"], max_length=10)
+
+
+_DB_SSLMODES = ("verify-full", "verify-ca", "require", "prefer", "disable")
+
+
+def _database_source(payload: DatabaseScanRequest, principal: Principal):
+    from collectors import database_scanner
+    from collectors.net_guard import TargetNotAllowed, resolve_and_pin
+
+    engine = payload.engine.strip().lower()
+    if engine not in database_scanner.ENGINES:
+        raise HTTPException(status_code=400, detail="Choose postgresql, mysql or sqlserver.")
+    sslmode = payload.sslmode.strip().lower()
+    if sslmode not in _DB_SSLMODES:
+        raise HTTPException(status_code=400, detail="sslmode must be verify-full, verify-ca, require, prefer or disable.")
+    if IS_PRODUCTION and sslmode not in {"verify-full", "verify-ca"}:
+        raise HTTPException(status_code=400, detail="In production a database is read over verified TLS: "
+                            "sslmode verify-full or verify-ca.")
+    _validate_scan_target(payload.host, principal)
+    try:
+        address = resolve_and_pin(payload.host, tenant_id=principal.tenant_id)
+    except TargetNotAllowed as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "That database host is not allowed.")) from exc
+    username, password = payload.username.strip(), payload.password or ""
+    if payload.credential_ref:
+        try:
+            account = CredentialVault().resolve(principal.tenant_id, payload.credential_ref)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Saved credential not found") from exc
+        username, password = account.get("username") or username, account.get("password") or ""
+    if not username:
+        raise HTTPException(status_code=400, detail="Give the database user name, or a saved credential.")
+    source = database_scanner.DatabaseSource(
+        engine=engine, host=payload.host.strip(), port=payload.port or database_scanner.DEFAULT_PORTS[engine],
+        database=payload.database.strip(), username=username, password=password, sslmode=sslmode,
+        schemas=[item.strip() for item in payload.schemas if item.strip()],
+        include_tables=[item.strip() for item in payload.include_tables if item.strip()],
+        sample_rows=payload.sample_rows, max_tables=payload.max_tables, address=address)
+    return source.bounded()
+
+
+@app.post("/api/database/scan")
+@evidence_scoped
+def database_scan(payload: DatabaseScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
+    """D6: sample a database's text columns and report the ones holding sensitive data -
+    table and row counts, the sample's size, masked samples only."""
+    from collectors import database_scanner
+    from discovery.database_engine import DatabaseDiscoveryEngine
+
+    _require_scan_licence()
+    source = _database_source(payload, principal)
+    config = ScanConfig(tenant_id=principal.tenant_id, compliance_enabled=payload.compliance_enabled,
+                        compliance_frameworks=list(payload.compliance_frameworks),
+                        suppression_rules=suppression_rules_for_scan(principal.tenant_id),
+                        exact_match=_exact_match_for_scan(principal.tenant_id))
+    try:
+        data = DatabaseDiscoveryEngine(config, source).run().to_dict()
+    except database_scanner.DatabaseScanError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The database could not be scanned.")) from exc
+    except Exception as exc:
+        raise _safe_operation_error("Database scan failed", exc) from exc
+    data["source"] = f"{source.engine}://{source.host}:{source.port}/{source.database}"
+    _apply_compliance(data, payload)
+    _persist_scan(data, payload, principal)
+    audit(principal.tenant_id, principal.subject, "scan.completed", {
+        "scan_id": data.get("scan_id"), "database": data["source"],
+        "columns": len(data.get("files") or []), "sample_rows": source.sample_rows})
+    return _compact_scan_report(data) if payload.compact_result else data
+
+
 @app.get("/api/scans/{job_id}")
 @evidence_scoped
 def scan_job(job_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
@@ -4929,11 +5020,13 @@ def _record_scan_source(tenant_id: str, scan_id: str, payload) -> None:
     if not scan_id:
         return
     endpoint = isinstance(payload, EndpointScanRequest)
-    server = str(getattr(payload, "host", "") if endpoint else getattr(payload, "server", "") or "").strip()
+    database = isinstance(payload, DatabaseScanRequest)
+    server = str(getattr(payload, "host", "") if endpoint or database else getattr(payload, "server", "") or "").strip()
     ref = str(getattr(payload, "credential_ref", "") or "").strip()
     typed = bool(str(getattr(payload, "password", "") or ""))
     kind = "saved" if ref else ("typed" if typed else "none")
-    source = "endpoint-winrm" if endpoint else ("smb" if server and not _is_local_endpoint_host(server) else "local")
+    source = ("endpoint-winrm" if endpoint else "database" if database
+              else ("smb" if server and not _is_local_endpoint_host(server) else "local"))
     try:
         store_module.record_scan_source(tenant_id, scan_id, source, server, kind, ref)
     except Exception as exc:  # a lost record only makes the scan unrevealable

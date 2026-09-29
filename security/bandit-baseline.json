@@ -2,13 +2,6 @@
   "about": "C7: Bandit findings at medium severity and above, each reviewed. The gate (scripts/static_gate.py bandit) fails on any finding not listed here; a listed one is matched by file, test and code, not line number. Low-severity checks are not gated: in this codebase they are names like 'password' in field lists and try/except/pass around optional features.",
   "findings": [
     {
-      "file": "backend/alerts.py",
-      "test_id": "B310",
-      "code": "try: request.urlopen(req, timeout=5).read() except Exception:",
-      "reviewed": "2026-09-28",
-      "reason": "Operator-configured alert webhook (DSPM_ALERT_WEBHOOK_URL); only http(s) URLs are opened (checked just above)."
-    },
-    {
       "file": "backend/backup.py",
       "test_id": "B608",
       "code": "counts[table] = conn.execute( f'SELECT COUNT(*) FROM \"{table}\"' ).fetchone()[0]",
@@ -518,6 +511,55 @@
       "code": "rows = conn.execute( \"SELECT aa.principal_key AS principal_key, MAX(aa.principal) AS principal, MAX(aa.sid) AS sid, \" \"MAX(aa.broad) AS broad, MAX(aa.privileged) AS privileged, MAX(aa.service) AS service, \" \"SUM(aa.can_read) AS readable, SUM(aa.can_write) AS writable, \" \"SUM(CASE WHEN aa.can_read = 1 AND a.finding_count > 0 THEN 1 ELSE 0 END) AS readable_sensitive, \" \"MAX(CASE WHEN aa.can_read = 1 THEN a.risk_score ELSE 0 END) AS max_risk_score \" \"FROM asset_access aa JOIN assets a ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id \" f\"WHERE aa.tenant_id = ?{kind_sql} GROUP BY aa.principal_key \" \"ORDER BY readable_sensitive DESC, readable DESC, aa.principal_key LIMIT ?\",  # noqa: S608 - fixed fragments (tenant_id, max(1, min(int(limit), 1000))),",
       "reviewed": "2026-09-28",
       "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "params += system return (f\"SELECT table_schema, table_name FROM information_schema.tables WHERE {' AND '.join(clauses)} \" \"ORDER BY table_schema, table_name\", params)",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "def columns_sql(self) -> str: return (\"SELECT column_name, data_type FROM information_schema.columns \" f\"WHERE table_schema = {self.marker} AND table_name = {self.marker} ORDER BY ordinal_position\")",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "def count_sql(self, schema: str, table: str) -> str: return f\"SELECT COUNT(*) FROM {self.quote(schema)}.{self.quote(table)}\"",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "selected = \", \".join(f\"{self.quote(column)}::text\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "selected = \", \".join(f\"CAST({self.quote(column)} AS CHAR)\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "def count_sql(self, schema: str, table: str) -> str: return f\"SELECT COUNT_BIG(*) FROM {self.quote(schema)}.{self.quote(table)}\"",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "selected = \", \".join(f\"CAST({self.quote(column)} AS NVARCHAR(MAX))\" for column in columns) return f\"SELECT TOP ({int(limit)}) {selected} FROM {self.quote(schema)}.{self.quote(table)}\"",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
     }
   ]
 }

@@ -1287,4 +1287,7 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "reuse_key": str(record.get("reuse_key") or ""),
             }
         )
+        if isinstance(record.get("database"), dict):
+            # D6: a sampled database column carries its table, row count and sample size.
+            normalized[-1]["database"] = dict(record["database"])
     return normalized

@@ -323,6 +323,10 @@ Severity bands:
 
 Until this release the detectors keyed every value fingerprint with the `default` workspace whatever workspace scanned, because the scan's workspace was never passed to them. They are keyed with the scanning workspace now. In a workspace other than `default`, a suppression rule written for one value (`fingerprint`) before the upgrade was keyed the old way and no longer matches: write it again from the finding.
 
+## Database column sampling
+
+`POST /api/database/scan` (`scan.run`) reads a database's text columns and reports the ones holding sensitive data, each column a record (`postgresql://db01:5432/crm/public.customers/email`). It reads a **bounded sample**: at most `sample_rows` rows a table (default 1,000, at most 10,000), `max_tables` tables, 200 text columns a table and 256 characters a value, under a statement timeout; the table's row count is exact (or the planner's estimate when counting ran out of time, and it says so), and every column carries `database.table_rows`, `table_rows_exact`, `sampled_rows` and `sample_limit`. `schemas` and `include_tables` (`schema.table` patterns) narrow what is read. The session is read-only, connects to the address the workspace's scan targets allow (pinned), and in production must verify TLS (`sslmode` `verify-full` or `verify-ca`). The password is typed for the scan or taken from a saved credential (`credential_ref`); findings carry masked samples only, a column has no preview, and nothing sampled is logged or exported. PostgreSQL is supported; MySQL and SQL Server need their drivers (PyMySQL, pyodbc), which are not installed with the product.
+
 ## Alerts, webhooks, e-mail and tickets
 
 A scan that finds critical exposure raises an **alert**. Alerts are listed under **Evidence → Alerts** (`GET /api/alerts`, `inventory.view`) with where each was delivered, and acknowledged there (`POST /api/alerts/{id}/acknowledge`, `findings.triage`). An alert is written to the audit trail when it is raised, so a configured SIEM receives it too (syslog, CEF or JSON - see *Audit trail*).
