@@ -67,7 +67,7 @@ def conditions() -> dict[str, dict]:
                                              "backup create --verify and read what it says."}
     max_age = _float("DSPM_BACKUP_MAX_AGE_HOURS", 26) * 3600
     age = backup.latest_backup_age_seconds()
-    production = os.getenv("DSPM_ENV", "").strip().lower() in {"prod", "production"}
+    production = os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}
     if max_age and ((age is not None and age > max_age) or (age is None and production)):
         found["backup_stale"] = {"severity": "HIGH", "title": "No recent backup",
                                  "message": ("There is no backup yet." if age is None else
