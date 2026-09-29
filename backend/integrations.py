@@ -44,6 +44,8 @@ MAX_SECRET_CHARS = 4096
 class IntegrationError(ValueError):
     """A configuration that cannot be saved. `str()` is safe to show."""
 
+    client_safe = True  # backend.errors: every message here is written for the person
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -57,7 +59,7 @@ def _https_url(value, what: str) -> str:
         raise IntegrationError(f"The {what} address is too long.")
     parts = urlsplit(url)
     if parts.scheme.lower() != "https" or not parts.hostname:
-        raise IntegrationError(f"The {what} address must start with https:// - Sentro does not send over plain HTTP.")
+        raise IntegrationError(f"The {what} address must be an HTTPS address - Sentro does not send over plain HTTP.")
     if parts.username or parts.password:
         raise IntegrationError(f"Put no user name or password in the {what} address; use the fields for them.")
     if parts.fragment:

@@ -95,6 +95,11 @@ class Layout:
         return self.data_root / "install.json"
 
     @property
+    def trust_file(self) -> Path:
+        """The publisher keys this install trusts (D10). Pinned at install; a package never replaces it."""
+        return self.data_root / "trust" / "publishers.json"
+
+    @property
     def backend(self) -> str:
         return f"{self.prefix}Backend"
 
@@ -111,7 +116,8 @@ class Layout:
 
     def data_dirs(self) -> list[Path]:
         return [self.data_root / name for name in
-                ("config", "secrets", "db", "artifacts", "backups", "cache", "reports", "logs", "logs/service")]
+                ("config", "secrets", "trust", "db", "artifacts", "backups", "cache", "reports", "logs",
+                 "logs/service")]
 
 
 def read_state(layout: Layout) -> dict | None:
@@ -323,6 +329,96 @@ def init_secrets(layout: Layout, db_url_file: Path | None) -> list[str]:
     return created
 
 
+TRUST_SETTING_COMMENT = "# D10: the publisher keys this install trusts for update packages and licences."
+
+
+def ensure_trust_setting(layout: Layout) -> bool:
+    """An install from before D10 has no DSPM_TRUST_FILE in its configuration: add it."""
+    text = layout.config_file.read_text(encoding="utf-8") if layout.config_file.exists() else ""
+    if not text or "DSPM_TRUST_FILE" in text:
+        return False
+    addition = f"{TRUST_SETTING_COMMENT}\nDSPM_TRUST_FILE = '{layout.trust_file}'\n"
+    layout.config_file.write_text(text.rstrip("\n") + "\n" + addition, encoding="utf-8")
+    return True
+
+
+# ---- the publisher's signature (D10) ------------------------------------------
+def load_signing(folder: Path):
+    """The verifier (backend/signing.py, standard library only) of a package or release."""
+    import types
+
+    source = Path(folder) / "app" / "backend" / "signing.py"
+    if not source.is_file():
+        return None
+    # Compiled here, never through the import system: that would write a __pycache__ .pyc
+    # into the package, which its own checksums then (rightly) refuse. A .pyc beside the
+    # sources is exactly what verification must not ignore - it can run instead of them.
+    module = types.ModuleType(f"sentro_signing_{abs(hash(str(source)))}")
+    module.__file__ = str(source)
+    exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)  # noqa: S102 - the verifier
+    return module
+
+
+def pin_publisher(package: Path, layout: Layout, *, publisher_key_file: Path | None = None,
+                  trust_package_publisher: bool = False, signing=None) -> str:
+    """At install, record which publisher key this install trusts. The key comes from the
+    operator (-PublisherKeyFile, the .pub published with the release) or, when they say so
+    after comparing its fingerprint with the published one, from the package itself."""
+    signing = signing or load_signing(package)
+    if signing is None:
+        return ""
+    if publisher_key_file is not None:
+        text = Path(publisher_key_file).read_text(encoding="utf-8").strip()
+        try:
+            document = json.loads(text)
+            key_text, purposes = document["public_key"], document.get("purposes") or ["package", "licence"]
+        except (ValueError, KeyError, TypeError):
+            key_text, purposes = text, ["package", "licence"]
+        source = f"the publisher key file {publisher_key_file}"
+    elif trust_package_publisher:
+        publisher = package / signing.PUBLISHER_FILE
+        if not publisher.is_file():
+            raise InstallError("-TrustPackagePublisher: the package carries no publisher key (it is unsigned).")
+        document = json.loads(publisher.read_text(encoding="utf-8"))
+        key_text, purposes = document["public_key"], document.get("purposes") or ["package", "licence"]
+        source = "the package (-TrustPackagePublisher)"
+    else:
+        return ""
+    try:
+        public = signing.decode_public_key(key_text)
+    except signing.TrustError as exc:
+        raise InstallError(f"The publisher key is not usable: {exc}") from exc
+    entry = signing.add_to_trust(layout.trust_file, public, purposes, f"pinned at install from {source}", now())
+    say(f"Trusting publisher key {entry['key_id']} (fingerprint {entry['fingerprint']}) for "
+        f"{', '.join(entry['purposes'])}. Compare the fingerprint with the one published with the release.")
+    return entry["key_id"]
+
+
+def verify_package(package: Path, layout: Layout, *, installed: dict | None = None, verifier: Path | None = None,
+                   allow_unsigned: bool = False, allow_downgrade: bool = False) -> dict:
+    """Check the package with the INSTALLED release's verifier and this install's trust file
+    when there is one - never with trust the package brings."""
+    signing = load_signing(verifier) if verifier is not None else None
+    if signing is None:
+        signing = load_signing(package)
+        if verifier is not None and signing is not None:
+            say("The installed release predates package signatures (D10); the new package's verifier is used.")
+    if signing is None:
+        if allow_unsigned:
+            say("WARNING: no package verifier; accepted unsigned (-AllowUnsigned).")
+            return {"label": read_manifest(package).get("label"), "signed_by": ""}
+        raise InstallError("REFUSED: this package has no verifier (app/backend/signing.py).")
+    try:
+        result = signing.verify_package(package, signing.load_trust(layout.trust_file), installed=installed,
+                                        allow_unsigned=allow_unsigned, allow_downgrade=allow_downgrade)
+    except signing.TrustError as exc:
+        raise InstallError(f"REFUSED: {exc}") from exc
+    say(f"Package {result['label']}: {result['files']} files verified; "
+        + (f"signed by publisher key {result['signed_by']}." if result["signed_by"]
+           else "NOT signed by its publisher - accepted because -AllowUnsigned was given."))
+    return result
+
+
 def render_config(layout: Layout, mode: str, port: int, public_host: str = "") -> str:
     def q(path: Path) -> str:
         return "'" + str(path) + "'"
@@ -351,6 +447,8 @@ def render_config(layout: Layout, mode: str, port: int, public_host: str = "") -
     lines.append("# C12: the vault's versioned key ring. The first `main.py vault rotate` creates it from")
     lines.append("# vault_key; from then on it holds every key a saved credential names.")
     lines.append(f"DSPM_VAULT_KEYRING = {q(layout.secrets / 'vault_keyring.json')}")
+    lines.append(TRUST_SETTING_COMMENT)
+    lines.append(f"DSPM_TRUST_FILE = {q(layout.trust_file)}")
     if production:
         lines.append(f"DSPM_DB_URL_FILE = {q(layout.secrets / 'db_url')}")
         lines.append("# The name users type, served by the HTTPS reverse proxy on this host (C5).")
@@ -476,7 +574,8 @@ def wait_ready(port: int, seconds: int = READY_TIMEOUT_SECONDS) -> dict:
 
 # ---- operations -----------------------------------------------------------------
 def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file: Path | None,
-            public_host: str = "", runner: Runner | None = None) -> dict:
+            public_host: str = "", runner: Runner | None = None, publisher_key_file: Path | None = None,
+            trust_package_publisher: bool = False, allow_unsigned: bool = False) -> dict:
     runner = runner or Runner()
     services = Services(layout, runner)
     manifest = read_manifest(package)
@@ -494,6 +593,9 @@ def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file:
     for folder in [layout.install_root, layout.releases, layout.bin, *layout.data_dirs()]:
         folder.mkdir(parents=True, exist_ok=True)
     lock_down(layout, runner)
+    pin_publisher(package, layout, publisher_key_file=publisher_key_file,
+                  trust_package_publisher=trust_package_publisher)
+    verify_package(package, layout, allow_unsigned=allow_unsigned)
     if state is not None:
         say(f"Reusing the data, keys and configuration in {layout.data_root} (last release there: "
             f"{state.get('release') or state.get('history', [{}])[-1].get('release') or 'none recorded'}).")
@@ -535,8 +637,12 @@ def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file:
     return read_state(layout)
 
 
-def decide_upgrade(installed: dict, package: dict, db_revision: int, restore_manifest: dict | None) -> str:
-    """'upgrade', 'downgrade' or 'restore-downgrade'; raises InstallError when refused."""
+def decide_upgrade(installed: dict, package: dict, db_revision: int, restore_manifest: dict | None,
+                   *, allow_downgrade: bool = False) -> str:
+    """'upgrade', 'downgrade' or 'restore-downgrade'; raises InstallError when refused.
+    D10: an older build is refused unless going back was asked for (-AllowDowngrade, or
+    -RestoreBackup with the backup taken before the upgrade) - an old signed package is
+    still an old package."""
     if package["commit"] == installed.get("commit"):
         raise InstallError(f"Release {package['label']} is already installed.")
     older = int(package["commit_time"]) < int(installed.get("commit_time") or 0)
@@ -552,11 +658,14 @@ def decide_upgrade(installed: dict, package: dict, db_revision: int, restore_man
             f"is at {db_revision}. Code this old cannot run on it, and running it would lose what the newer "
             f"schema holds. To go back, pass -RestoreBackup with the backup taken before the upgrade "
             f"(its manifest is in {installed.get('data_root', '<DataRoot>')}\\backups and is named in install.json).")
+    if older and not allow_downgrade:
+        raise InstallError(f"Refusing a downgrade: {package['label']} was built before the installed release "
+                           f"{installed.get('release', '')}. To go back on purpose, pass -AllowDowngrade.")
     return "downgrade" if older else "upgrade"
 
 
 def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None,
-            runner: Runner | None = None) -> dict:
+            runner: Runner | None = None, allow_unsigned: bool = False, allow_downgrade: bool = False) -> dict:
     runner = runner or Runner()
     services = Services(layout, runner)
     state = read_state(layout)
@@ -569,6 +678,12 @@ def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None
     restore_manifest = json.loads(Path(restore_backup).read_text(encoding="utf-8")) if restore_backup else None
     if manifest["commit"] == state.get("commit"):
         raise InstallError(f"Release {manifest['label']} is already installed.")
+    # D10: nothing from the new package is placed before the installed release's verifier
+    # has checked it against this install's trust file.
+    verify_package(package, layout, installed=state, verifier=old_release, allow_unsigned=allow_unsigned,
+                   allow_downgrade=allow_downgrade or restore_manifest is not None)
+    if ensure_trust_setting(layout):
+        say(f"Added DSPM_TRUST_FILE to {layout.config_file}.")
     # Maintenance runs with the NEW release: its migrate/backup commands open the
     # database without converging it, and the running release needs none of them.
     existed = (layout.releases / manifest["label"]).exists()
@@ -576,7 +691,8 @@ def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None
     product(layout, new_release, runner, "config", "check")  # nothing is stopped yet
     status = product_json(layout, new_release, runner, "migrate", "status", "--json")
     try:
-        kind = decide_upgrade(state, manifest, int(status["applied_revision"]), restore_manifest)
+        kind = decide_upgrade(state, manifest, int(status["applied_revision"]), restore_manifest,
+                              allow_downgrade=allow_downgrade)
     except InstallError:
         if not existed:  # never delete a release that was there before this run
             shutil.rmtree(new_release, ignore_errors=True)
@@ -691,6 +807,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.choices["install"].add_argument("--mode", choices=("evaluation", "production"), default="production")
     sub.choices["install"].add_argument("--db-url-file", type=Path)
     sub.choices["install"].add_argument("--public-host", default="")
+    sub.choices["install"].add_argument("--publisher-key-file", type=Path)
+    sub.choices["install"].add_argument("--trust-package-publisher", action="store_true")
+    for name in ("install", "upgrade"):
+        sub.choices[name].add_argument("--allow-unsigned", action="store_true")
+    sub.choices["upgrade"].add_argument("--allow-downgrade", action="store_true")
     sub.choices["upgrade"].add_argument("--restore-backup", type=Path)
     sub.choices["uninstall"].add_argument("--remove-data", action="store_true")
     sub.choices["uninstall"].add_argument("--confirm-remove-data", default="")
@@ -699,9 +820,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "install":
             install(args.package.resolve(), layout, port=args.port, mode=args.mode, db_url_file=args.db_url_file,
-                    public_host=args.public_host)
+                    public_host=args.public_host, publisher_key_file=args.publisher_key_file,
+                    trust_package_publisher=args.trust_package_publisher, allow_unsigned=args.allow_unsigned)
         elif args.command == "upgrade":
-            upgrade(args.package.resolve(), layout, restore_backup=args.restore_backup)
+            upgrade(args.package.resolve(), layout, restore_backup=args.restore_backup,
+                    allow_unsigned=args.allow_unsigned, allow_downgrade=args.allow_downgrade)
         else:
             uninstall(layout, remove_data=args.remove_data, confirm=args.confirm_remove_data)
     except InstallError as exc:

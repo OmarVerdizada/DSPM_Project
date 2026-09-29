@@ -17838,3 +17838,7 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
   text-align: center;
 }
 .nav-badge[hidden] { display: none; }
+
+/* D10: the licence row is the platform administrator's only; the feature row's own display
+   rule would otherwise win over the hidden attribute. */
+#feature-licence-row[hidden], #licence-status[hidden] { display: none; }

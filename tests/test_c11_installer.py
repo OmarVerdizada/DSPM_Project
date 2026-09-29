@@ -47,8 +47,12 @@ class TheUpgradeDecisionTest(unittest.TestCase):
         self.assertIn("revision 25", message)
         self.assertIn("-RestoreBackup", message)
 
-    def test_an_older_build_at_the_same_schema_downgrades(self) -> None:
-        self.assertEqual(installer.decide_upgrade(self.INSTALLED, _manifest("dddddd", 1000, 26), 26, None), "downgrade")
+    def test_an_older_build_at_the_same_schema_downgrades_only_when_asked(self) -> None:
+        # D10: an old build - signed or not - is a downgrade the operator states.
+        with self.assertRaises(installer.InstallError):
+            installer.decide_upgrade(self.INSTALLED, _manifest("dddddd", 1000, 26), 26, None)
+        self.assertEqual(installer.decide_upgrade(self.INSTALLED, _manifest("dddddd", 1000, 26), 26, None,
+                                                  allow_downgrade=True), "downgrade")
 
     def test_going_back_needs_a_backup_at_the_package_schema(self) -> None:
         with self.assertRaises(installer.InstallError):
@@ -237,7 +241,10 @@ class ARefusedUpgradeTest(_LayoutCase):
             release.mkdir(exist_ok=True)
             return release
 
+        # The package's signature is D10's subject (test_d10_licence_and_packages); here it is
+        # the schema decision after the release is placed.
         with (mock.patch.object(installer, "current_release", return_value=running),
+              mock.patch.object(installer, "verify_package", return_value={}),
               mock.patch.object(installer, "place_release", side_effect=place),
               mock.patch.object(installer, "product"),
               mock.patch.object(installer, "product_json", return_value={"applied_revision": 26})):

@@ -203,6 +203,11 @@ SETTINGS: dict[str, Setting] = _settings(
     # is asked whether it is done.
     ("DSPM_ALERT_DELIVERY_INTERVAL_SECONDS", "int", {"minimum": 1}),
     ("DSPM_TICKET_SYNC_SECONDS", "int", {"minimum": 30}),
+    # D10: the publisher keys this install trusts (pinned by the installer), whether a scan
+    # needs a valid licence, and how long an expired one keeps scans running.
+    ("DSPM_TRUST_FILE", "path"),
+    ("DSPM_LICENCE_REQUIRED", "bool"),
+    ("DSPM_LICENCE_GRACE_DAYS", "int", {"minimum": 0}),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),
     ("DSPM_PARTITION_MAX_ATTEMPTS", "int", {"minimum": 1}),
     ("DSPM_PARTITION_MAX_FILES", "int", {"minimum": 1}),

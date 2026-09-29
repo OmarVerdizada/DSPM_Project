@@ -320,6 +320,52 @@ def backup_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def licence_command(args: argparse.Namespace) -> int:
+    """The offline licence (D10): install a licence file, or show the one installed. The
+    recovery path when the console cannot be reached, or the licence ran out: copy the
+    renewal to the host and run `python main.py licence install <file>`."""
+    from backend import licensing
+
+    if args.licence_command == "install":
+        try:
+            licence = licensing.install(Path(args.file).read_bytes())
+        except (OSError, licensing.LicenceError) as exc:
+            print(f"REFUSED: {exc}")
+            return 1
+        from backend import store
+
+        store.audit("default", "host", "licence.installed", {
+            "licence_id": licence["licence_id"], "customer": licence["customer"], "expires_at": licence["expires_at"],
+            "key_id": licence["key_id"], "source": "command line"})
+        print(f"Installed licence {licence['licence_id']} for {licence['customer']}, valid until {licence['expires_at']}.")
+        return 0
+    status = licensing.status(licensing.installed())
+    print(json.dumps(status, indent=2) if args.json else status["message"])
+    return 0 if status["state"] in {"valid", "grace"} else 1
+
+
+def package_command(args: argparse.Namespace) -> int:
+    """Check an update package with THIS install's verifier and trust file before running
+    anything from it (D10)."""
+    from backend import signing
+
+    trust_path = Path(args.trust) if args.trust else None
+    if trust_path is None:
+        from backend import licensing
+
+        trust_path = licensing.trust_file()
+    installed = {"commit_time": args.installed_commit_time} if args.installed_commit_time else None
+    try:
+        result = signing.verify_package(Path(args.package), signing.load_trust(trust_path), installed=installed,
+                                        allow_unsigned=args.allow_unsigned, allow_downgrade=args.allow_downgrade)
+    except signing.TrustError as exc:
+        print(f"REFUSED: {exc}")
+        return 1
+    print(json.dumps(result) if args.json else
+          f"verified {result['label']}: {result['files']} files, signed by {result['signed_by'] or 'nobody (accepted unsigned)'}")
+    return 0
+
+
 def vault_command(args: argparse.Namespace) -> int:
     """The vault's keys (C12): status, rotation, rollback and escrow. Run as an
     administrator, with the services running or not - a rotation never leaves a sealed
@@ -450,6 +496,27 @@ def build_parser() -> argparse.ArgumentParser:
                     escrow_export, escrow_verify, escrow_recover):
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=vault_command)
+
+    licence_parser = subparsers.add_parser("licence", help="The offline licence (D10).")
+    licence_commands = licence_parser.add_subparsers(dest="licence_command", required=True)
+    licence_install = licence_commands.add_parser("install", help="Verify and install a licence file.")
+    licence_install.add_argument("file")
+    licence_status = licence_commands.add_parser("status", help="The installed licence and what it allows.")
+    licence_status.add_argument("--json", action="store_true")
+    for command in (licence_install, licence_status):
+        command.set_defaults(func=licence_command)
+
+    package_parser = subparsers.add_parser("package", help="Update packages (D10).")
+    package_commands = package_parser.add_subparsers(dest="package_command", required=True)
+    package_verify = package_commands.add_parser(
+        "verify", help="Check a package's files and its publisher's signature against this install's trust file.")
+    package_verify.add_argument("--package", required=True)
+    package_verify.add_argument("--trust", help="The trust file (default: DSPM_TRUST_FILE).")
+    package_verify.add_argument("--installed-commit-time", type=int, default=0)
+    package_verify.add_argument("--allow-unsigned", action="store_true")
+    package_verify.add_argument("--allow-downgrade", action="store_true")
+    package_verify.add_argument("--json", action="store_true")
+    package_verify.set_defaults(func=package_command)
 
     backup_parser = subparsers.add_parser("backup", help="Encrypted backups of the database and artifacts.")
     backup_commands = backup_parser.add_subparsers(dest="backup_command", required=True)

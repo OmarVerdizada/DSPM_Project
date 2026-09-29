@@ -47,7 +47,16 @@ def run_due_schedules(
     and the sweep moves on; the schedule keeps its place.
     """
     started: list[str] = []
+    from backend import licensing
+
+    allowed, why = licensing.scans_allowed()
     for schedule in store.claim_due_schedules(now=now, limit=limit):
+        if not allowed:
+            # D10: said on the schedule's run, where its owner looks - not a silent skip.
+            with suppress(Exception):
+                store.record_schedule_run(schedule["tenant_id"], schedule["schedule_id"], status="failed",
+                                          error=f"not started: {why}"[:300])
+            continue
         try:
             start(schedule)
         except Exception as exc:

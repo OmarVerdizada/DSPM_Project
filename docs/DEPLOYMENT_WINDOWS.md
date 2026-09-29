@@ -46,6 +46,40 @@ package's SHA-256 (`sentro-<label>-win64.zip.sha256`) with the value published w
 release. `SHA256SUMS` detects a damaged file; only a signature proves who built it.
 WinSW is not signed by its authors; its digest is pinned in the package manifest.
 
+### The publisher's signature (D10)
+
+Independently of Authenticode, a release is signed by its publisher with an Ed25519 key
+kept offline (`scripts/sentro_sign.py`; `build_package.py --sign-key`). `SIGNATURE.json`
+signs what the package is - its label, commit, build time and schema revision - and the
+digest of `SHA256SUMS`, so a changed file, a rewritten `SHA256SUMS` or a manifest edited to
+pass an old build off as new are all refused. `publisher.json` is the key the package says
+signed it; it is **never trusted because the package carries it**.
+
+An install trusts the publisher keys in `<DataRoot>\trust\publishers.json` (named by
+`DSPM_TRUST_FILE` in the configuration) and nothing else. The key is pinned once, at the
+first install, by the operator:
+
+```powershell
+# the publisher's .pub file, obtained with the release through a channel you trust
+powershell -ExecutionPolicy Bypass -File .\install.ps1 ... -PublisherKeyFile D:\sentro-publisher.pub
+# or, after comparing the fingerprint the installer prints with the published one
+powershell -ExecutionPolicy Bypass -File .\install.ps1 ... -TrustPackagePublisher
+```
+
+An upgrade is verified with the **installed** release's verifier and the pinned key before
+anything from the new package is placed; a package signed by any other key is refused,
+whatever key it carries. To check a package before starting an upgrade at all - with code
+that is already installed, not code from the package - run on the server:
+
+```powershell
+& "C:\Program Files\Sentro\current\python\python.exe" "C:\Program Files\Sentro\current\app\main.py" package verify --package D:\sentro-r34-...-win64
+```
+
+A package that is not publisher-signed is refused unless `-AllowUnsigned` is given (check
+its SHA-256 against the published value first). **Production publisher key: HELD for the
+publisher's key ceremony** - the key pair is made offline by the product owner with
+`scripts/sentro_sign.py keygen`, and only its `.pub` ever leaves that machine.
+
 ## Install
 
 From an elevated PowerShell, in the unpacked package folder:
@@ -225,7 +259,41 @@ holds. To go back, restore the backup that the upgrade took (at the older schema
 powershell -ExecutionPolicy Bypass -File .\upgrade.ps1 -RestoreBackup C:\ProgramData\Sentro\backups\sentro_sqlite_<stamp>.manifest.json -AllowUnsigned
 ```
 
-A package at the **same** schema installs over a newer one without a restore.
+A package at the **same** schema but an **older build** is refused too (D10): an old signed
+package is still an old package, and replaying one is how a fixed vulnerability comes back.
+Going back is a decision the operator states:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\upgrade.ps1 -AllowDowngrade
+```
+
+Going back with `-RestoreBackup` is already such a statement and needs no second flag.
+
+## Licence (D10)
+
+A licence is a file the publisher signs with its licence key; nothing is fetched and
+nothing reports back. It holds the customer, its validity dates and what it covers, and is
+refused if it was altered, is signed by a key the install does not trust for licences
+(`<DataRoot>\trust\publishers.json`), is not yet valid or has expired. A refused licence
+never replaces the one installed.
+
+Install it in the console (Settings -> Features -> Licence, as the installation's
+administrator with two-step sign-in), or on the server. **The server path is the offline
+recovery path** - it needs neither the console nor a network, only the file:
+
+```powershell
+cd "C:\Program Files\Sentro\current\app"
+..\python\python.exe main.py licence install D:\contoso-2027.licence
+..\python\python.exe main.py licence status
+```
+
+Whether scans need a licence is the operator's setting, `DSPM_LICENCE_REQUIRED` (off by
+default). When it is on and the licence is missing or has run out, **new scans are
+refused, and nothing else is**: findings, reports, exports, the audit trail and the
+console stay available, and nothing is deleted. An expired licence keeps scans running for
+`DSPM_LICENCE_GRACE_DAYS` (14) so a renewal can arrive; a scheduled scan that cannot start
+records why on its schedule. Recovery is always the same step: install the renewal with
+`main.py licence install`, and the next scan runs.
 
 ## Uninstall
 

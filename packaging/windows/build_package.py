@@ -177,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=REPO / "dist")
     parser.add_argument("--cache", type=Path, default=Path(tempfile.gettempdir()) / "sentro-build-cache")
     parser.add_argument("--no-zip", action="store_true", help="leave the folder only (a local install test)")
+    parser.add_argument("--sign-key", type=Path, default=os.getenv("SENTRO_PACKAGE_SIGNING_KEY") or None,
+                        help="the publisher's Ed25519 key (D10); scripts/sentro_sign.py keygen makes one")
     args = parser.parse_args(argv)
 
     pins = json.loads((HERE / "pins.json").read_text(encoding="utf-8"))
@@ -249,6 +251,14 @@ def main(argv: list[str] | None = None) -> int:
                                  f"$SentroPackageSumsDigest = '{sums_digest}'\n", encoding="utf-8")
         if thumbprint:
             sign_scripts(staging, thumbprint, only=digest_script)
+        if args.sign_key:
+            # D10: the publisher's signature over what the package is and SHA256SUMS - checked by
+            # the installer against the key the install pinned, never the key the package carries.
+            sys.path.insert(0, str(REPO / "scripts"))
+            import sentro_sign
+
+            envelope = sentro_sign.sign_package(sentro_sign.load_private_key(Path(args.sign_key)), staging)
+            print(f"publisher signature: key {envelope['key_id']}")
 
         args.out.mkdir(parents=True, exist_ok=True)
         final = args.out / f"sentro-{label}-win64"

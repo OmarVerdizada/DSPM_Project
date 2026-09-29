@@ -365,7 +365,9 @@ class TheSignedWebhookTest(D3Case):
     def test_plain_http_and_credentials_in_the_address_are_refused(self) -> None:
         for url in ("http://localhost/hook", f"https://user:pass@localhost:{self.services.port}/hook", "file:///etc/passwd"):
             with self.subTest(url=url):
-                self.assertEqual(self.configure("webhook", {"url": url}).status_code, 400)
+                refused = self.configure("webhook", {"url": url})
+                self.assertEqual(refused.status_code, 400)
+                self.assertNotIn("reference", refused.json()["detail"], "the reason itself, not a fallback")
 
     def test_loopback_link_local_and_metadata_addresses_are_never_called(self) -> None:
         with mock.patch.object(outbound, "_allow_loopback", return_value=False):

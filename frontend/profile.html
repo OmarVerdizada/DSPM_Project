@@ -448,6 +448,21 @@
               <button type="button" class="settings-danger-btn" id="siem-remove-btn">Remove configuration</button>
             </div>
             <p id="siem-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
+
+            <!-- D10: the offline licence. A file the publisher signed; the server verifies it and
+                 keeps the installed one if the new one is refused. -->
+            <div class="settings-feature-row siem-row" id="feature-licence-row" hidden>
+              <div class="settings-feature-copy">
+                <strong>Licence</strong>
+                <span>A licence file from the publisher. Nothing is fetched; it is checked here, against the publisher key this install trusts.</span>
+                <span id="licence-state" class="siem-state" data-state="loading"><span class="siem-dot" aria-hidden="true"></span><span id="licence-state-text">Checking&hellip;</span></span>
+              </div>
+              <span class="siem-actions">
+                <input type="file" id="licence-file" accept=".licence,.lic,.json" hidden />
+                <button type="button" class="secondary-btn" id="licence-install-btn">Install licence file</button>
+              </span>
+            </div>
+            <p id="licence-status" class="settings-hint" role="status" aria-live="polite" hidden>&nbsp;</p>
           </article>
           <!-- D3: where this workspace's alerts and tickets go. Delivery - the queue, retries,
                signatures, TLS - is the server's; this is its configuration. A secret is typed

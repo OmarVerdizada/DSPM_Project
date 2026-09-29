@@ -2021,6 +2021,70 @@ integrationsCard?.addEventListener("click", async (event) => {
   }
 });
 
+/* ── Licence (D10) ────────────────────────────────────────────── */
+// The platform administrator installs the publisher's signed licence file here; the server
+// verifies it and refuses an altered, untrusted, not-yet-valid or expired one, keeping the
+// licence already installed. The same file installs offline on the server with
+// `python main.py licence install <file>`.
+const licenceRow = document.querySelector("#feature-licence-row");
+const licenceState = document.querySelector("#licence-state");
+const licenceStateText = document.querySelector("#licence-state-text");
+const licenceStatus = document.querySelector("#licence-status");
+const licenceFile = document.querySelector("#licence-file");
+const LICENCE_STATE_TONE = { valid: "connected", grace: "not_connected", missing: "not_configured",
+  expired: "degraded", invalid: "degraded" };
+
+function renderLicence(licence) {
+  licenceRow.hidden = false;
+  licenceStatus.hidden = false;
+  licenceState.dataset.state = LICENCE_STATE_TONE[licence.state] || "disabled";
+  const required = licence.required ? "" : " Scans do not require one on this install.";
+  licenceStateText.textContent = `${licence.message || licence.state}${licence.state === "valid" ? "" : required}`;
+}
+
+async function loadLicence() {
+  let permissions = [];
+  try {
+    permissions = JSON.parse(sessionGet("dspm-permissions") || "[]");
+  } catch {
+    permissions = [];
+  }
+  if (!permissions.includes("platform.admin")) return;
+  try {
+    renderLicence((await api("/api/licence")).licence);
+  } catch (error) {
+    if (error.status === 403) return;
+    licenceRow.hidden = false;
+    licenceState.dataset.state = "unavailable";
+    licenceStateText.textContent = "Status unavailable.";
+  }
+}
+
+document.querySelector("#licence-install-btn")?.addEventListener("click", () => licenceFile.click());
+licenceFile?.addEventListener("change", async () => {
+  const file = licenceFile.files?.[0];
+  licenceFile.value = "";
+  if (!file) return;
+  licenceStatus.classList.remove("error");
+  if (file.size > 64 * 1024) {
+    licenceStatus.classList.add("error");
+    setStatus(licenceStatus, "That file is too large to be a licence.");
+    return;
+  }
+  setStatus(licenceStatus, `Checking ${file.name}…`);
+  try {
+    const data = await api("/api/licence", { licence: await file.text() }, "PUT");
+    renderLicence(data.licence);
+    setStatus(licenceStatus, `Installed ${file.name}.`);
+  } catch (error) {
+    licenceStatus.classList.add("error");
+    setStatus(licenceStatus, error.code === "mfa_required"
+      ? "Confirm a code from your authenticator (Two-step sign-in, above) to install a licence."
+      : `${error.message} The licence already installed stays.`);
+  }
+});
+
 loadDirectory();
 loadCredentials();
 loadIntegrations();
+loadLicence();

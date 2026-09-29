@@ -22,6 +22,7 @@ param(
     [string]$DataRoot = (Join-Path $env:ProgramData 'Sentro'),
     [ValidatePattern('^[A-Za-z][A-Za-z0-9]{1,30}$')][string]$ServicePrefix = 'Sentro',
     [string]$RestoreBackup,
+    [switch]$AllowDowngrade,
     [switch]$AllowUnsigned
 )
 $ErrorActionPreference = 'Stop'
@@ -33,6 +34,8 @@ try {
     $arguments = @('upgrade', '--package', $PSScriptRoot, '--install-root', $InstallRoot, '--data-root', $DataRoot,
                    '--prefix', $ServicePrefix)
     if ($RestoreBackup) { $arguments += @('--restore-backup', (Resolve-Path -LiteralPath $RestoreBackup).Path) }
+    if ($AllowDowngrade) { $arguments += '--allow-downgrade' }
+    if ($AllowUnsigned) { $arguments += '--allow-unsigned' }
     $code = Invoke-SentroInstaller -Python $python -Script (Join-Path $PSScriptRoot 'installer\sentro_installer.py') `
         -Arguments $arguments -DataRoot $DataRoot -Action 'upgrade'
 } finally {

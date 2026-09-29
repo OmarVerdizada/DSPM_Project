@@ -10629,6 +10629,8 @@ const AUDIT_ACTIONS = {
   "ticket.create_failed": "Could not create a ticket - retrying",
   "ticket.closed": "A ticket was closed; its finding was resolved",
   "ticket.synced": "Checked open tickets",
+  "licence.installed": "Installed a licence",
+  "licence.refused": "A licence file was refused",
   "credential.deleted": "Deleted a saved credential",
   "credential.preflight": "Checked a saved credential's privilege",
   "vault.key_rotated": "Rotated the vault key",

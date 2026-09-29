@@ -45,6 +45,12 @@ function Test-SentroPackage {
                 throw ("REFUSED: {0} is not validly signed by {1} ({2})." -f $script.Name, $expected, $signature.Status)
             }
         }
+    } elseif (Test-Path -LiteralPath (Join-Path $PackageDir 'SIGNATURE.json')) {
+        # D10: signed by its publisher (Ed25519). The installer checks that signature with the
+        # installed release's verifier and this install's pinned publisher key before placing
+        # anything; the Authenticode signature on the scripts is still HELD.
+        Write-Warning ('Publisher-signed package; the installer verifies its signature against the pinned key. ' +
+                       'Script Authenticode signature: HELD FOR CODE-SIGNING CERTIFICATE.')
     } elseif (-not $AllowUnsigned) {
         throw ("This package is not code-signed (HELD FOR CODE-SIGNING CERTIFICATE). Its checksums show a damaged " +
                "file but cannot prove who built it. Check the package's SHA-256 against the value published " +
@@ -73,7 +79,7 @@ function Test-SentroPackage {
     $root = (Resolve-Path -LiteralPath $PackageDir).Path.TrimEnd('\') + '\'
     foreach ($file in (Get-ChildItem -LiteralPath $PackageDir -Recurse -File)) {
         $relative = $file.FullName.Substring($root.Length) -replace '\\', '/'
-        if ($relative -in 'SHA256SUMS', 'lib/PackageDigest.ps1') { continue }
+        if ($relative -in 'SHA256SUMS', 'lib/PackageDigest.ps1', 'SIGNATURE.json', 'publisher.json') { continue }
         if (-not $listed.ContainsKey($relative)) { throw "REFUSED: $relative is in the package folder but not in SHA256SUMS." }
     }
     Write-Host ("[sentro] Package {0}: {1} files verified; signing: {2}." -f $manifest.label, $listed.Count, $manifest.signing.status)

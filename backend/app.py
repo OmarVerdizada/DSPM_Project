@@ -3380,6 +3380,7 @@ def endpoint_repair_winrm(payload: EndpointScanRequest, principal: Principal = D
 @app.post("/api/endpoint/scan")
 @evidence_scoped
 def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
+    _require_scan_licence()
     try:
         if not _is_local_endpoint_host(payload.host):
             _validate_scan_target(payload.host, principal)
@@ -3422,9 +3423,22 @@ def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(
     }
 
 
+def _require_scan_licence() -> None:
+    """D10: with DSPM_LICENCE_REQUIRED on, a scan needs a valid licence (or one in its
+    grace period). Nothing else is refused: findings, reports and exports stay readable."""
+    from backend import licensing
+
+    allowed, why = licensing.scans_allowed()
+    if not allowed:
+        raise HTTPException(status_code=402, detail=f"{why} New scans need a valid licence; everything already "
+                            "found stays available. Install the licence in Settings, or on the host with "
+                            "`python main.py licence install <file>`.")
+
+
 @app.post("/api/scan")
 @evidence_scoped
 def scan(payload: ScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
+    _require_scan_licence()
     try:
         if not _is_local_endpoint_host(payload.server):
             _validate_scan_target(payload.server, principal)
@@ -3845,6 +3859,37 @@ class RevealRequest(BaseModel):
 # C13: reveals are counted per account, successful or not: a reveal reads a file from its
 # source and returns a raw value, and a burst of them is exactly what a stolen session does.
 REVEAL_THROTTLE = RouteThrottle("reveal", max(1, int(os.getenv("DSPM_REVEAL_MAX_PER_HOUR", "20"))), 3600)
+
+
+# ── D10: the offline licence ───────────────────────────────────────────────────────
+class LicenceRequest(BaseModel):
+    licence: str = Field(min_length=2, max_length=65_536)
+
+
+@app.get("/api/licence")
+def licence_read(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    from backend import licensing
+
+    return {"licence": licensing.status(licensing.installed())}
+
+
+@app.put("/api/licence")
+def licence_install(payload: LicenceRequest,
+                    principal: Principal = Depends(require_permission("platform.admin", mfa=True))) -> dict:
+    """Install a licence file's content. It must be signed by a key the install trusts for
+    licences, and in force; otherwise it is refused and the installed one stays."""
+    from backend import licensing
+
+    try:
+        licence = licensing.install(payload.licence)
+    except licensing.LicenceError as exc:
+        reason = client_message(exc, "The licence was refused.")
+        audit(principal.tenant_id, principal.subject, "licence.refused", {"reason": reason})
+        raise HTTPException(status_code=400, detail=reason) from exc
+    audit(principal.tenant_id, principal.subject, "licence.installed", {
+        "licence_id": licence["licence_id"], "customer": licence["customer"], "expires_at": licence["expires_at"],
+        "key_id": licence["key_id"]})
+    return {"licence": licensing.status(licensing.installed())}
 
 
 # ── D3: alerts, where they go, and tickets ─────────────────────────────────────────

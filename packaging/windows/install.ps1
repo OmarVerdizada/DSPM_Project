@@ -28,6 +28,8 @@ param(
     [ValidateSet('production', 'evaluation')][string]$Mode = 'production',
     [string]$DatabaseUrlFile,
     [string]$PublicHostName,
+    [string]$PublisherKeyFile,
+    [switch]$TrustPackagePublisher,
     [switch]$AllowUnsigned
 )
 $ErrorActionPreference = 'Stop'
@@ -40,6 +42,9 @@ try {
                    '--prefix', $ServicePrefix, '--port', [string]$Port, '--mode', $Mode)
     if ($PublicHostName) { $arguments += @('--public-host', $PublicHostName) }
     if ($DatabaseUrlFile) { $arguments += @('--db-url-file', (Resolve-Path -LiteralPath $DatabaseUrlFile).Path) }
+    if ($PublisherKeyFile) { $arguments += @('--publisher-key-file', (Resolve-Path -LiteralPath $PublisherKeyFile).Path) }
+    if ($TrustPackagePublisher) { $arguments += '--trust-package-publisher' }
+    if ($AllowUnsigned) { $arguments += '--allow-unsigned' }
     $code = Invoke-SentroInstaller -Python $python -Script (Join-Path $PSScriptRoot 'installer\sentro_installer.py') `
         -Arguments $arguments -DataRoot $DataRoot -Action 'install'
 } finally {
