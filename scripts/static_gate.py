@@ -35,7 +35,8 @@ MYPY_MODULES = [
     "backend/deployment_boundary.py", "backend/client_address.py", "backend/target_scope.py",
     "backend/siem_settings.py", "backend/permissions.py", "backend/errors.py", "backend/audit_chain.py",
 ]
-FRONTEND_SCRIPTS = sorted(path.name for path in (ROOT / "frontend").glob("*.js"))
+FRONTEND_SCRIPTS = sorted([path.name for path in (ROOT / "frontend").glob("*.js")]
+                          + [f"console/{path.name}" for path in (ROOT / "frontend" / "console").glob("*.js")])
 
 
 def _run(command: list[str], cwd: Path = ROOT) -> subprocess.CompletedProcess:
@@ -112,7 +113,8 @@ def gate_eslint(root: Path = ROOT, targets: list[str] | None = None) -> list[str
         report = json.loads(run.stdout)
     except ValueError:
         return [f"eslint did not report: {run.stderr.strip()[:300]}"]
-    return [f"frontend/{Path(item['filePath']).name}:{message['line']}: {message.get('ruleId')}: {message['message']}"
+    return [f"frontend/{Path(item['filePath']).relative_to(frontend.resolve()).as_posix() if Path(item['filePath']).is_relative_to(frontend.resolve()) else Path(item['filePath']).name}"
+            f":{message['line']}: {message.get('ruleId')}: {message['message']}"
             for item in report for message in item["messages"]]
 
 

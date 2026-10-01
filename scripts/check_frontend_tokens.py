@@ -59,10 +59,10 @@ MIN_PX = 12
 
 CSS_PATHS = ("frontend/",)
 CSS_SUFFIXES = (".css",)
-# Generated third-party output is reviewed through its small source file and
-# lockfile. Checking minified Tailwind/daisyUI internals as product-authored
-# CSS would produce thousands of false positives.
-GENERATED_CSS_FILES = {"frontend/styles/daisyui.css"}
+# Generated third-party CSS would be reviewed through its source file and lockfile
+# rather than line by line. There is none since D4 replaced the DaisyUI build with
+# styles/components.css; every stylesheet the console loads is product-authored.
+GENERATED_CSS_FILES: set[str] = set()
 
 HEX = re.compile(r"#[0-9a-fA-F]{3,8}\b")
 IMPORTANT = re.compile(r"!\s*important")

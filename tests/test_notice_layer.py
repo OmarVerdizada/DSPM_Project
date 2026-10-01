@@ -2,8 +2,8 @@
 
 Three faults shipped together and each has its own lock here:
 
-  * the element class was `.toast`, which daisyui.css already defines as a
-    fixed-position CONTAINER component - so every notification inherited a
+  * the element class was `.toast`, which daisyui.css (loaded until D4) defined
+    as a fixed-position CONTAINER component - so every notification inherited a
     vendor sheet's width and insets and floated away from its corner;
   * the host was `pointer-events: none` and nothing turned it back on for the
     notice, so the dismiss button could not be clicked at all;
@@ -21,7 +21,6 @@ FRONTEND = Path("frontend")
 SHEET = (FRONTEND / "styles" / "toast.css").read_text(encoding="utf-8")
 TOKENS = (FRONTEND / "styles" / "tokens.css").read_text(encoding="utf-8")
 LEGACY = (FRONTEND / "styles.css").read_text(encoding="utf-8")
-VENDOR = (FRONTEND / "styles" / "daisyui.css").read_text(encoding="utf-8")
 MARKUP = (FRONTEND / "index.html").read_text(encoding="utf-8")
 SCRIPT = (FRONTEND / "app.js").read_text(encoding="utf-8")
 
@@ -47,15 +46,12 @@ def rule(selector: str) -> str:
 
 
 class VendorCollisionTests(unittest.TestCase):
-    def test_the_collision_this_sheet_exists_to_avoid_is_real(self) -> None:
-        """If daisyUI ever drops `.toast`, this rename can be reconsidered.
-
-        Until then the reason has to stay visible, because `.toast` is the
-        obvious name and someone will reach for it again.
-        """
-        toast = re.search(r"\.toast\s*\{([^{}]*)\}", VENDOR)
-        self.assertIsNotNone(toast, "daisyui.css no longer defines .toast")
-        self.assertIn("position:fixed", toast.group(1).replace(" ", ""))
+    def test_no_vendor_sheet_is_loaded_to_collide_with(self) -> None:
+        """D4 removed daisyui.css, whose `.toast` was the collision. The rename
+        stays: `.toast` is the obvious name, and the reason is kept in toast.css."""
+        self.assertFalse((FRONTEND / "styles" / "daisyui.css").exists())
+        self.assertNotIn("daisyui", MARKUP)
+        self.assertIn("`.notice`, not `.toast`", SHEET)
 
     def test_the_console_does_not_use_the_vendor_class(self) -> None:
         self.assertNotIn('class="toast', MARKUP)

@@ -2027,7 +2027,7 @@ function isAdminRole() {
 
 // Tabs that need more than reading. An admin tab falls back to Asset rules, as it
 // always has; a scan tab to the overview.
-const TAB_PERMISSIONS = { "file-servers": "scan.run", endpoint: "scan.run" };
+const TAB_PERMISSIONS = { "file-servers": "scan.run", endpoint: "scan.run", access: "inventory.view" };
 
 function applyRoleVisibility() {
   const isAdmin = isAdminRole();
@@ -3932,6 +3932,7 @@ const NAV_DESTINATIONS = {
   reports: "reports",
   history: "reports",
   alerts: "reports",
+  access: "reports",
   security: "security",
   admin: "security",
   settings: "security",
@@ -4111,6 +4112,12 @@ function switchTab(tabName) {
   }
   if (resolvedTab === "alerts") {
     loadAlerts().catch(() => {});
+  }
+  if (resolvedTab === "access") {
+    loadAccessPrincipals().catch(() => {});
+  }
+  if (resolvedTab === "settings") {
+    loadExactMatchSets().catch(() => {});
   }
   // The 200-row workspace slice used to be fetched at boot for a tab that was
   // not on screen: 203KB and 9,685 nodes nobody had asked for.
@@ -8799,12 +8806,12 @@ function renderRemediationFilterOptions() {
 
 function remediationBadge(finding = {}) {
   const severity = remediationSeverity(finding);
-  return `<span class="badge badge-sm badge-soft remediation-badge remediation-severity" data-severity="${severity}">${remediationStatusLabel(severity)}</span>`;
+  return `<span class="badge remediation-badge remediation-severity" data-severity="${severity}">${remediationStatusLabel(severity)}</span>`;
 }
 
 function remediationStatusBadge(finding = {}) {
   const status = remediationStatus(finding);
-  return `<span class="badge badge-sm badge-soft remediation-badge remediation-status" data-status="${status}">${escapeHtml(remediationStatusLabel(status))}</span>`;
+  return `<span class="badge remediation-badge remediation-status" data-status="${status}">${escapeHtml(remediationStatusLabel(status))}</span>`;
 }
 
 function remediationSlaMarkup(finding = {}) {
@@ -8840,11 +8847,11 @@ function remediationActionMenu(finding = {}) {
   const primary = actions.filter((action) => !["risk_acceptance", "false_positive", "suppress"].includes(action));
   const exceptions = actions.filter((action) => ["risk_acceptance", "false_positive", "suppress"].includes(action));
   return `
-    <details class="dropdown dropdown-end remediation-queue-menu">
-      <summary class="btn btn-sm btn-square btn-ghost remediation-more-button" aria-label="Actions for ${escapeHtml(findingDisplayName(finding))}">
+    <details class="remediation-queue-menu">
+      <summary class="btn btn-ghost btn-icon remediation-more-button" aria-label="Actions for ${escapeHtml(findingDisplayName(finding))}">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>
       </summary>
-      <div class="dropdown-content">
+      <div class="remediation-menu-list">
         <button type="button" data-remediation-open="${findingId}">View details</button>
         ${filePath ? `<button type="button" data-remediation-file-open="${escapeHtml(filePath)}">Open file in Findings</button>` : ""}
         ${primary.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}
@@ -9183,7 +9190,7 @@ function remediationWorkflowStage(finding = {}) {
 function remediationWorkflowMarkup(finding = {}) {
   const stage = remediationWorkflowStage(finding);
   const labels = ["Triage", "Assigned", "Remediation", "Validation", "Resolved"];
-  return `<ul class="steps steps-horizontal remediation-workflow-steps" aria-label="Remediation workflow">${labels.map((label, index) => `<li class="step ${index <= stage ? "step-primary" : ""}">${label}</li>`).join("")}</ul>`;
+  return `<ul class="remediation-workflow-steps" aria-label="Remediation workflow">${labels.map((label, index) => `<li class="remediation-workflow-step${index <= stage ? " is-reached" : ""}">${label}</li>`).join("")}</ul>`;
 }
 
 function remediationHistory(finding = {}) {
@@ -9220,7 +9227,7 @@ function remediationValidationMarkup(finding = {}) {
   const lastScan = finding.last_seen || remediationFileContext(finding).last_scanned_at || latestReport?.timestamp || "";
   const pending = status === "PENDING_VALIDATION";
   return `<section class="remediation-drawer-section"><div class="remediation-validation-panel">
-    <div class="remediation-section-head"><h4>${pending ? "Validation required" : "Validation recorded"}</h4>${pending ? '<span class="badge badge-sm badge-soft remediation-badge remediation-status" data-status="PENDING_VALIDATION">Pending</span>' : ""}</div>
+    <div class="remediation-section-head"><h4>${pending ? "Validation required" : "Validation recorded"}</h4>${pending ? '<span class="badge remediation-badge remediation-status" data-status="PENDING_VALIDATION">Pending</span>' : ""}</div>
     <p>${pending ? "Review current occurrence evidence before recording validation. This action does not trigger a new scan." : `Validated by ${escapeHtml(finding.validator || "an analyst")}.`}</p>
     <div class="remediation-validation-meta">
       <div><span>Last remediation activity</span><strong>${escapeHtml(remediationFormatDate(lastActivity?.timestamp || lastActivity?.created_at || ""))}</strong></div>
@@ -9228,7 +9235,7 @@ function remediationValidationMarkup(finding = {}) {
       <div><span>Current occurrences</span><strong>${occurrences.toLocaleString()}</strong></div>
       <div><span>Validated</span><strong>${escapeHtml(remediationFormatDate(finding.validated_at || ""))}</strong></div>
     </div>
-    ${pending && remediationCanManage(finding) ? `<button type="button" class="btn btn-sm" data-remediation-action="validate" data-finding-id="${escapeHtml(finding.finding_id || "")}">Validate current evidence</button>` : ""}
+    ${pending && remediationCanManage(finding) ? `<button type="button" class="btn" data-remediation-action="validate" data-finding-id="${escapeHtml(finding.finding_id || "")}">Validate current evidence</button>` : ""}
   </div></section>`;
 }
 
@@ -9246,8 +9253,8 @@ function remediationDrawerActions(finding = {}) {
   const exceptions = actions.filter((action) => ["risk_acceptance", "false_positive", "suppress"].includes(action));
   const findingId = escapeHtml(finding.finding_id || "");
   return `<div class="remediation-drawer-actions">
-    ${main.map((action, index) => `<button type="button" class="btn btn-sm ${index === 0 ? "btn-primary" : ""}" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}
-    ${exceptions.length ? `<details class="dropdown dropdown-end remediation-queue-menu"><summary class="btn btn-sm">More</summary><div class="dropdown-content">${exceptions.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}</div></details>` : ""}
+    ${main.map((action, index) => `<button type="button" class="btn ${index === 0 ? "btn-primary" : ""}" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}
+    ${exceptions.length ? `<details class="remediation-queue-menu"><summary class="btn">More</summary><div class="remediation-menu-list">${exceptions.map((action) => `<button type="button" data-remediation-action="${action}" data-finding-id="${findingId}">${escapeHtml(remediationActionLabel(action))}</button>`).join("")}</div></details>` : ""}
   </div>`;
 }
 
@@ -9266,7 +9273,7 @@ function renderRemediationDrawer(finding = selectedRemediationFinding) {
   remediationDrawerBody.innerHTML = `
     <header class="remediation-drawer-head">
       <div class="remediation-drawer-headline">${remediationBadge(finding)}<span class="remediation-finding-id" title="${escapeHtml(finding.finding_id || "")}">Finding ID: ${escapeHtml(finding.finding_id || "Not available")}</span></div>
-      <div class="remediation-drawer-title-row"><h3 id="remediation-drawer-title">${escapeHtml(findingDisplayName(finding))}</h3><label for="remediation-drawer-toggle" class="btn btn-sm btn-circle btn-ghost remediation-drawer-close" aria-label="Close finding details">×</label></div>
+      <div class="remediation-drawer-title-row"><h3 id="remediation-drawer-title">${escapeHtml(findingDisplayName(finding))}</h3><label for="remediation-drawer-toggle" class="btn btn-ghost btn-icon remediation-drawer-close" aria-label="Close finding details">×</label></div>
       <div class="remediation-drawer-score-row"><span>Risk score <strong>${remediationRiskScore(finding)} / 100</strong></span>${remediationStatusBadge(finding)}</div>
     </header>
     <div class="remediation-drawer-content">
@@ -9290,7 +9297,7 @@ function renderRemediationDrawer(finding = selectedRemediationFinding) {
       </div></section>
       ${remediationValidationMarkup(finding)}
       <section class="remediation-drawer-section"><div class="remediation-section-head"><h4>Activity</h4><span class="remediation-cell-secondary">${remediationHistory(finding).length} events</span></div>${remediationActivityMarkup(finding)}
-        ${remediationCanManage(finding) ? `<form class="remediation-comment-form" data-remediation-comment-form><input class="input input-sm" name="comment" maxlength="1000" required placeholder="Add comment…" aria-label="Add comment" /><button type="submit" class="btn btn-sm">Send</button></form>` : ""}
+        ${remediationCanManage(finding) ? `<form class="remediation-comment-form" data-remediation-comment-form><input class="input" name="comment" maxlength="1000" required placeholder="Add comment…" aria-label="Add comment" /><button type="submit" class="btn">Send</button></form>` : ""}
       </section>
     </div>${remediationDrawerActions(finding)}`;
   loadFindingTickets(finding.finding_id).catch(() => {});
@@ -9324,7 +9331,7 @@ async function openRemediationFinding(findingId, { openDrawer = true } = {}) {
     renderRemediationDrawer(selectedRemediationFinding);
   } catch (error) {
     if (!isCurrentTenantContext(context) || requestId !== remediationDetailRequest) return;
-    remediationDrawerBody.innerHTML = `<div class="remediation-drawer-empty"><strong>Unable to load finding details</strong><span>Please try again.</span><button type="button" class="btn btn-sm" data-remediation-open="${escapeHtml(finding.finding_id)}">Retry</button></div>`;
+    remediationDrawerBody.innerHTML = `<div class="remediation-drawer-empty"><strong>Unable to load finding details</strong><span>Please try again.</span><button type="button" class="btn" data-remediation-open="${escapeHtml(finding.finding_id)}">Retry</button></div>`;
   }
 }
 
@@ -9343,13 +9350,13 @@ function remediationShowModal(modal) {
   if (!modal) return;
   modal.querySelectorAll("[data-remediation-modal-error]").forEach((element) => { element.textContent = ""; });
   if (typeof modal.showModal === "function") modal.showModal();
-  else modal.classList.add("modal-open");
+  else modal.classList.add("is-open");
 }
 
 function closeRemediationModal(modal) {
   if (!modal) return;
   if (typeof modal.close === "function") modal.close();
-  else modal.classList.remove("modal-open");
+  else modal.classList.remove("is-open");
 }
 
 function openRemediationAction(action, findingId) {
@@ -13468,155 +13475,3 @@ function initScanProfileDecks() {
 }
 
 initScanProfileDecks();
-
-
-/* ── Alerts (D3) ──────────────────────────────────────────────── */
-// What scans raised, where each alert went, and who acknowledged it. The server owns
-// delivery - the queue, the retries, the signatures; this page reads it.
-// Looked up when used: history loads (and asks for the count) before this part of the
-// file has run.
-function alertsParts() {
-  return {
-    body: document.querySelector("#alerts-body"),
-    context: document.querySelector("#alerts-context"),
-    filter: document.querySelector("#alerts-filter"),
-    badge: document.querySelector("#alerts-nav-badge"),
-  };
-}
-const ALERT_CHANNEL_LABELS = { webhook: "Webhook", email: "E-mail" };
-const ALERT_DELIVERY_WORDS = { delivered: "delivered", pending: "waiting", cancelled: "cancelled" };
-
-function alertDeliveryText(delivery) {
-  const label = ALERT_CHANNEL_LABELS[delivery.channel] || delivery.channel;
-  if (delivery.status === "pending" && delivery.attempts > 0) {
-    return `${label}: retrying (${delivery.attempts} attempt${delivery.attempts === 1 ? "" : "s"}) - ${delivery.last_error || "not accepted yet"}`;
-  }
-  return `${label}: ${ALERT_DELIVERY_WORDS[delivery.status] || delivery.status}`;
-}
-
-function renderAlerts(alerts, open) {
-  const { body: alertsBody, context: alertsContext, filter: alertsFilter, badge: alertsNavBadge } = alertsParts();
-  if (alertsNavBadge) {
-    alertsNavBadge.hidden = !open;
-    alertsNavBadge.textContent = open ? String(open) : "";
-  }
-  if (alertsContext) {
-    alertsContext.textContent = open
-      ? `${open} open alert${open === 1 ? "" : "s"}. Acknowledge one when it has been looked at.`
-      : "No open alerts.";
-  }
-  if (!alertsBody) return;
-  if (!alerts.length) {
-    alertsBody.innerHTML = `<tr><td colspan="6" class="empty">${alertsFilter?.value === "open" ? "No open alerts." : "No alerts yet. A scan raises one when it finds critical exposure."}</td></tr>`;
-    return;
-  }
-  const mayAcknowledge = can("findings.triage");
-  alertsBody.innerHTML = alerts.map((alert) => {
-    const deliveries = (alert.deliveries || []).map(alertDeliveryText);
-    const status = alert.status === "acknowledged"
-      ? `Acknowledged by ${escapeHtml(alert.acknowledged_by)} ${escapeHtml(getFriendlyTimestamp(alert.acknowledged_at))}`
-      : "Open";
-    const action = alert.status === "open" && mayAcknowledge
-      ? `<button type="button" class="secondary-btn" data-alert-ack="${Number(alert.alert_id)}">Acknowledge</button>`
-      : "";
-    return `<tr>
-      <td>${escapeHtml(getFriendlyTimestamp(alert.created_at))}</td>
-      <td><span class="badge ${escapeHtml(alert.severity || "")}">${escapeHtml(alert.severity || "-")}</span></td>
-      <td><strong>${escapeHtml(alert.title)}</strong><br><span class="muted">${escapeHtml(alert.message)}</span></td>
-      <td>${deliveries.length ? deliveries.map(escapeHtml).join("<br>") : '<span class="muted">No channel set</span>'}</td>
-      <td>${status}</td>
-      <td>${action}</td>
-    </tr>`;
-  }).join("");
-}
-
-async function loadAlerts() {
-  if (!accessToken) return;
-  const { body: alertsBody, filter: alertsFilter } = alertsParts();
-  const context = captureTenantContext();
-  const status = alertsFilter?.value ?? "open";
-  try {
-    const data = await api(`/api/alerts${status ? `?status=${encodeURIComponent(status)}` : ""}`, null, "GET");
-    if (!isCurrentTenantContext(context)) return;
-    renderAlerts(data.alerts || [], Number(data.open || 0));
-  } catch (error) {
-    if (!isCurrentTenantContext(context)) return;
-    if (alertsBody) alertsBody.innerHTML = `<tr><td colspan="6" class="empty">Alerts unavailable: ${escapeHtml(error.message)}</td></tr>`;
-  }
-}
-
-alertsParts().filter?.addEventListener("change", () => { loadAlerts(); });
-document.querySelector("#refresh-alerts-btn")?.addEventListener("click", () => { loadAlerts(); });
-alertsParts().body?.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-alert-ack]");
-  if (!button) return;
-  button.disabled = true;
-  try {
-    await api(`/api/alerts/${encodeURIComponent(button.dataset.alertAck)}/acknowledge`, null, "POST");
-    showToast("Alert acknowledged", "", "success");
-  } catch (error) {
-    showToast("Could not acknowledge the alert", error.message, "danger");
-  }
-  loadAlerts();
-});
-
-
-/* ── A finding's ticket (D3) ──────────────────────────────────── */
-// Sent to Jira or ServiceNow from the queue; closing the ticket there resolves the
-// finding here. The drawer shows the ticket and, when there is none, a button per
-// ticket system the workspace has turned on.
-const TICKET_SYSTEM_LABELS = { jira: "Jira", servicenow: "ServiceNow" };
-const TICKET_STATUS_WORDS = { pending: "being created", open: "open", closed: "closed", cancelled: "cancelled" };
-
-function remediationTicketSection(finding = {}) {
-  if (!finding.finding_id) return "";
-  return `<section class="remediation-drawer-section" data-ticket-finding="${escapeHtml(finding.finding_id)}"><h4>Ticket</h4><div data-ticket-slot><span class="remediation-cell-secondary">Loading tickets…</span></div></section>`;
-}
-
-function findingTicketMarkup(tickets, systems, findingId, mayRequest) {
-  const lines = tickets.map((ticket) => {
-    const label = TICKET_SYSTEM_LABELS[ticket.system] || ticket.system;
-    const name = ticket.external_key ? `${label} ${ticket.external_key}` : label;
-    const link = ticket.external_url && /^https:\/\//i.test(ticket.external_url)
-      ? `<a href="${escapeHtml(ticket.external_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(name)}</a>`
-      : escapeHtml(name);
-    const state = TICKET_STATUS_WORDS[ticket.status] || ticket.status;
-    const error = ticket.status === "pending" && ticket.last_error ? ` - ${escapeHtml(ticket.last_error)}` : "";
-    const outside = ticket.external_status ? ` (${escapeHtml(ticket.external_status)})` : "";
-    return `<li>${link}: ${escapeHtml(state)}${outside}${error}</li>`;
-  });
-  const live = new Set(tickets.filter((ticket) => ["pending", "open"].includes(ticket.status)).map((ticket) => ticket.system));
-  const buttons = mayRequest
-    ? systems.filter((system) => !live.has(system)).map((system) => `<button type="button" class="btn btn-sm" data-ticket-system="${escapeHtml(system)}" data-finding-id="${escapeHtml(findingId)}">Send to ${escapeHtml(TICKET_SYSTEM_LABELS[system] || system)}</button>`)
-    : [];
-  const empty = !tickets.length && !buttons.length
-    ? `<span class="remediation-cell-secondary">${systems.length || !mayRequest ? "No ticket." : "No ticket system is set up (Account → Settings → Features → Alerts & tickets)."}</span>`
-    : "";
-  return `${lines.length ? `<ul class="remediation-risk-list">${lines.join("")}</ul>` : ""}${buttons.join(" ")}${empty}`;
-}
-
-async function loadFindingTickets(findingId) {
-  if (!findingId || !accessToken) return;
-  const mayRequest = can("findings.triage");
-  const [tickets, systems] = await Promise.all([
-    api(`/api/tickets?finding_id=${encodeURIComponent(findingId)}`, null, "GET").then((data) => data.tickets || []),
-    mayRequest ? api("/api/tickets/systems", null, "GET").then((data) => data.systems || []).catch(() => []) : Promise.resolve([]),
-  ]);
-  const section = [...document.querySelectorAll("[data-ticket-finding]")].find((item) => item.dataset.ticketFinding === String(findingId));
-  const slot = section?.querySelector("[data-ticket-slot]");
-  if (slot) slot.innerHTML = findingTicketMarkup(tickets, systems, findingId, mayRequest);
-}
-
-document.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-ticket-system]");
-  if (!button) return;
-  button.disabled = true;
-  const system = button.dataset.ticketSystem;
-  try {
-    await api(`/api/findings/${encodeURIComponent(button.dataset.findingId)}/ticket`, { system }, "POST");
-    showToast("Ticket requested", `It is created in ${TICKET_SYSTEM_LABELS[system] || system} from the queue.`, "success");
-  } catch (error) {
-    showToast("Could not request a ticket", error.message, "danger");
-  }
-  loadFindingTickets(button.dataset.findingId).catch(() => {});
-});

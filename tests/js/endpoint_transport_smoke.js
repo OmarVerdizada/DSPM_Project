@@ -16,6 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const { runConsole } = require("./console_scripts");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const APP = path.join(ROOT, "frontend", "app.js");
@@ -151,7 +152,7 @@ function finish(result, ok) {
 }
 
 try {
-  vm.runInContext(fs.readFileSync(APP, "utf8"), context, { filename: "app.js" });
+  runConsole(vm, context);
 } catch (error) {
   finish({ error: `app.js did not load: ${String(error && error.stack).split("\n").slice(0, 3).join(" | ")}`,
            payload: null, unknown_ids: [...unknownIds], console_errors: consoleErrors }, false);

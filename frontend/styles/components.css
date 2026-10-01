@@ -1,0 +1,100 @@
+/* ============================================================
+   SENTRO — component base
+   ------------------------------------------------------------
+   The base geometry of the few shared primitives the pages build
+   on: buttons, text fields, badges and alerts. Colour, radius and
+   type come from the page sheets and tokens.css; this file only
+   says how the element is laid out and behaves.
+
+   Everything here sits in the `components` cascade layer, beneath
+   every page sheet (which are unlayered), so a page rule wins over
+   these whatever its specificity. That is the place DaisyUI's
+   generated sheet held until D4 replaced it with these rules - the
+   values are the ones the console measured with it loaded.
+   ============================================================ */
+
+@layer components {
+  /* Read by a screen reader, not seen. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border-width: 0;
+  }
+
+  .btn {
+    display: inline-flex;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    gap: calc(var(--space-1) * 1.5);
+    border-style: solid;
+    border-width: 1px;
+    text-align: center;
+    vertical-align: middle;
+    cursor: pointer;
+    user-select: none;
+    touch-action: manipulation;
+    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-duration: var(--motion-base);
+    transition-timing-function: var(--ease-out);
+  }
+
+  .btn-ghost {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  /* A button that is one glyph: as wide as it is tall. */
+  .btn-icon {
+    padding-inline: 0;
+  }
+
+  .input {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 36px;
+    white-space: nowrap;
+    vertical-align: middle;
+    appearance: none;
+    cursor: text;
+  }
+
+  .textarea {
+    vertical-align: middle;
+    appearance: none;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    width: fit-content;
+    vertical-align: middle;
+  }
+
+  .alert {
+    display: grid;
+    grid-auto-flow: column;
+    grid-template-columns: auto;
+    justify-content: start;
+    align-items: center;
+    justify-items: start;
+    gap: var(--space-4);
+    border-style: solid;
+    border-width: 1px;
+    border-radius: var(--radius-card);
+    line-height: var(--leading-text);
+    text-align: start;
+  }
+}

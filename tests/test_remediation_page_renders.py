@@ -130,9 +130,13 @@ class TheRemediationPageRendersTest(unittest.TestCase):
             frontend = Path(temp) / "frontend"
             frontend.mkdir()
             (frontend / "app.js").write_text(broken, encoding="utf-8")
+            # The console as index.html loads it: its feature scripts, then the broken app.js.
+            shutil.copy(ROOT / "frontend" / "index.html", frontend / "index.html")
+            shutil.copytree(ROOT / "frontend" / "console", frontend / "console")
             smoke_dir = Path(temp) / "tests" / "js"
             smoke_dir.mkdir(parents=True)
             shutil.copy(SMOKE, smoke_dir / SMOKE.name)
+            shutil.copy(SMOKE.parent / "console_scripts.js", smoke_dir / "console_scripts.js")
             fixture = Path(temp) / "findings.json"
             fixture.write_text(json.dumps(self._findings(PAGE_QUERY)), encoding="utf-8")
             run = subprocess.run([NODE, str(smoke_dir / SMOKE.name), str(fixture)], capture_output=True,

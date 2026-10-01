@@ -23,6 +23,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const { runConsole } = require("./console_scripts");
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const scenario = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -164,7 +165,8 @@ async function main() {
     booting = true;
   }
   try {
-    vm.runInContext(fs.readFileSync(APP, "utf8"), context, { filename: SCRIPT });
+    if (SCRIPT === "app.js") runConsole(vm, context);
+    else vm.runInContext(fs.readFileSync(APP, "utf8"), context, { filename: SCRIPT });
   } catch (error) {
     finish({ error: `${SCRIPT} did not load: ${String(error && error.stack).split("\n").slice(0, 3).join(" | ")}` }, false);
   }

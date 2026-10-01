@@ -9,16 +9,48 @@
 // the reason rather than switching the rule off.
 import globals from "globals";
 
+//
+// D4 split app.js by feature: console/*.js load before app.js, one feature each. Each
+// side uses some of the other's names when a handler runs - never while loading - and
+// they are listed here by file, so a name nobody defines is still an error.
+const FROM_FEATURES = {
+  // console/alerts.js
+  loadAlerts: "readonly",
+  loadFindingTickets: "readonly",
+  remediationTicketSection: "readonly",
+  // console/access.js
+  loadAccessPrincipals: "readonly",
+  // console/exact-match.js
+  loadExactMatchSets: "readonly",
+};
+const FROM_APP = {
+  accessToken: "readonly",
+  api: "readonly",
+  can: "readonly",
+  captureTenantContext: "readonly",
+  escapeHtml: "readonly",
+  filterInput: "readonly",
+  getFriendlyTimestamp: "readonly",
+  isCurrentTenantContext: "readonly",
+  showToast: "readonly",
+  switchTab: "readonly",
+};
+
+const base = { ecmaVersion: 2024, sourceType: "script" };
+
 export default [
   {
     files: ["*.js"],
-    languageOptions: {
-      ecmaVersion: 2024,
-      sourceType: "script",
-      globals: { ...globals.browser },
-    },
-    rules: {
-      "no-undef": "error",
-    },
+    languageOptions: { ...base, globals: { ...globals.browser } },
+    rules: { "no-undef": "error" },
+  },
+  {
+    files: ["app.js"],
+    languageOptions: { ...base, globals: { ...globals.browser, ...FROM_FEATURES } },
+  },
+  {
+    files: ["console/*.js"],
+    languageOptions: { ...base, globals: { ...globals.browser, ...FROM_APP } },
+    rules: { "no-undef": "error" },
   },
 ];

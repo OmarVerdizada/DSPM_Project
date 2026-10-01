@@ -189,7 +189,7 @@ class ScrollbarTests(unittest.TestCase):
     def test_the_widget_reveals_the_bar_inside_it(self) -> None:
         """`:hover` on a scrolling element means the pointer is inside THAT
         element - over the list, not over the card's header or its padding."""
-        self.assertIn(".dash-card, .workspace, .modal-box, .sheet, .remediation-drawer-panel,", SHELL_CSS)
+        self.assertIn(".dash-card, .workspace, .remediation-modal-box, .sheet, .remediation-drawer-panel,", SHELL_CSS)
         block = SHELL_CSS[SHELL_CSS.index("The widget reveals its own bar"):]
         self.assertIn("::-webkit-scrollbar-thumb", block[:1800])
         self.assertIn("scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;", block[:1800])

@@ -1,8 +1,8 @@
 /* ============================================================
    SENTRO — notifications
    ------------------------------------------------------------
-   The console's notifications are called `.notice`, not `.toast`,
-   and that is deliberate. daisyui.css defines `.toast` as a
+   The console's notifications are called `.notice`, not `.toast`.
+   While daisyui.css was loaded (until D4) it defined `.toast` as a
    fixed-position CONTAINER component, so every notification this
    console raised inherited `position: fixed`, `width: max-content`,
    `bottom: 1rem` and `inset-inline: auto 1rem` from a vendor sheet

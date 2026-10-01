@@ -193,6 +193,10 @@
      not a shadow; only the card itself lifts off the paper. */
   --elev-raised: 0 4px 16px rgba(17, 24, 39, .06);
   --elev-overlay: 0 24px 48px rgba(17, 24, 39, .18);
+  /* What dims the page behind a modal dialog, painted by the dialog itself
+     (::backdrop paints nothing on the engine the console ships in). The
+     same in both themes. */
+  --scrim: rgba(0, 0, 0, .4);
 
   /* ── Stacking — five named levels ─────────────────────────
      Replaces 25 ad-hoc z-index values spanning 0–20000. */

@@ -15,6 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const { runConsole } = require("./console_scripts");
 
 const APP = path.resolve(__dirname, "..", "..", "frontend", "app.js");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -106,7 +107,7 @@ function finish(result) {
 }
 
 try {
-  vm.runInContext(fs.readFileSync(APP, "utf8"), context, { filename: "app.js" });
+  runConsole(vm, context);
 } catch (error) {
   // A browser global app.js started using at load time and this stand-in lacks.
   finish({ loaded: false, error: `app.js did not load in the render smoke: ${String(error && error.stack).split("\n").slice(0, 3).join(" | ")}`, rows: 0, console_errors: consoleErrors });

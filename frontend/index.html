@@ -5,15 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SENTRO — DSPM Command Center</title>
     <link rel="stylesheet" href="/static/fonts/fonts.css?v=1" />
-    <link rel="stylesheet" href="/static/styles/daisyui.css?v=2" />
-    <link rel="stylesheet" href="/static/styles/tokens.css?v=10" />
+    <link rel="stylesheet" href="/static/styles/tokens.css?v=11" />
+    <link rel="stylesheet" href="/static/styles/components.css?v=1" />
     <link rel="stylesheet" href="/static/styles.css?v=260" />
-    <link rel="stylesheet" href="/static/styles/shell.css?v=16" />
+    <link rel="stylesheet" href="/static/styles/shell.css?v=17" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=22" />
-    <link rel="stylesheet" href="/static/styles/remediation.css?v=12" />
+    <link rel="stylesheet" href="/static/styles/remediation.css?v=13" />
     <link rel="stylesheet" href="/static/styles/reports.css?v=6" />
-    <link rel="stylesheet" href="/static/styles/history.css?v=1" />
-    <link rel="stylesheet" href="/static/styles/toast.css?v=1" />
+    <link rel="stylesheet" href="/static/styles/history.css?v=2" />
+    <link rel="stylesheet" href="/static/styles/toast.css?v=2" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -97,6 +97,7 @@
               <button type="button" class="nav-sub-link" data-tab-jump="reports">Reports</button>
               <button type="button" class="nav-sub-link" data-tab-jump="history">History &amp; audit</button>
               <button type="button" class="nav-sub-link" data-tab-jump="alerts">Alerts <span class="nav-badge" id="alerts-nav-badge" hidden></span></button>
+              <button type="button" class="nav-sub-link" data-tab-jump="access" data-requires="inventory.view">Who can read</button>
             </div>
           </div>
           <button type="button" class="tab" data-tab="security" title="Users, tenants, asset rules, risk logic">
@@ -742,9 +743,9 @@
         </section>
 
         <section id="tab-risk" class="tab-panel remediation-center">
-          <div class="drawer drawer-end remediation-drawer-shell">
-            <input id="remediation-drawer-toggle" type="checkbox" class="drawer-toggle" aria-label="Finding details" />
-            <div class="drawer-content remediation-page-content">
+          <div class="remediation-drawer-shell">
+            <input id="remediation-drawer-toggle" type="checkbox" class="remediation-drawer-toggle" aria-label="Finding details" />
+            <div class="remediation-page-content">
               <div class="section-header">
                 <div>
                   <h2 class="page-title">Remediation</h2>
@@ -825,7 +826,7 @@
 
                 <p id="remediation-result-count" class="visually-hidden" role="status" aria-live="polite">Loading findings…</p>
 
-                <div id="remediation-error" class="alert alert-error alert-soft remediation-error" role="alert" hidden>
+                <div id="remediation-error" class="alert remediation-error" role="alert" hidden>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
                   <div><strong>Unable to load remediation findings.</strong><span data-remediation-error-reason>Please try again.</span></div>
                   <button type="button" class="secondary-btn mini-btn" data-remediation-retry>Retry</button>
@@ -835,8 +836,8 @@
               </section>
             </div>
 
-            <div class="drawer-side remediation-drawer-side">
-              <label for="remediation-drawer-toggle" aria-label="Close finding details" class="drawer-overlay"></label>
+            <div class="remediation-drawer-side">
+              <label for="remediation-drawer-toggle" aria-label="Close finding details" class="remediation-drawer-overlay"></label>
               <aside class="remediation-drawer-panel" aria-label="Finding details">
                 <div id="remediation-drawer-body" class="remediation-drawer-body">
                   <div class="remediation-drawer-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg><strong>Select a finding</strong><span>Choose a queue item to inspect its risk and remediation workflow.</span></div>
@@ -845,63 +846,63 @@
             </div>
           </div>
 
-          <dialog id="remediation-assignment-modal" class="modal">
-            <form id="remediation-assignment-form" class="modal-box remediation-modal-box">
-              <div class="remediation-modal-header"><div><span class="eyebrow">Ownership</span><h3>Assign finding</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
-              <label>Owner<input id="remediation-assignment-owner" name="owner" class="input input-sm" required maxlength="160" autocomplete="off" /></label>
-              <label>Due date<input id="remediation-assignment-due" name="sla_due" class="input input-sm" type="date" /></label>
-              <label>Comment<textarea id="remediation-assignment-comment" name="comment" class="textarea textarea-sm" maxlength="1000" placeholder="Add assignment context"></textarea></label>
+          <dialog id="remediation-assignment-modal" class="remediation-dialog">
+            <form id="remediation-assignment-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Ownership</span><h3>Assign finding</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <label>Owner<input id="remediation-assignment-owner" name="owner" class="input" required maxlength="160" autocomplete="off" /></label>
+              <label>Due date<input id="remediation-assignment-due" name="sla_due" class="input" type="date" /></label>
+              <label>Comment<textarea id="remediation-assignment-comment" name="comment" class="textarea" maxlength="1000" placeholder="Add assignment context"></textarea></label>
               <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
-              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Assign</button></div>
-            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Assign</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
           </dialog>
 
-          <dialog id="remediation-risk-modal" class="modal">
-            <form id="remediation-risk-form" class="modal-box remediation-modal-box remediation-modal-wide">
-              <div class="remediation-modal-header remediation-span-two"><div><span class="eyebrow">Auditable exception</span><h3>Risk acceptance</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
+          <dialog id="remediation-risk-modal" class="remediation-dialog">
+            <form id="remediation-risk-form" class="remediation-modal-box remediation-modal-wide">
+              <div class="remediation-modal-header remediation-span-two"><div><span class="eyebrow">Auditable exception</span><h3>Risk acceptance</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
               <p class="remediation-modal-note remediation-span-two">Acceptance records a time-bound security decision. It does not remediate the underlying finding.</p>
-              <label class="remediation-span-two">Business justification<textarea name="business_justification" class="textarea textarea-sm" required maxlength="2000"></textarea></label>
-              <label>Approver<input name="approver" class="input input-sm" required maxlength="160" /></label>
-              <label>Accepted volume<input name="accepted_volume" class="input input-sm" type="number" min="1" max="100000000" required /></label>
-              <label>Review date<input name="review_date" class="input input-sm" type="date" required /></label>
-              <label>Expiration date<input name="expiration_date" class="input input-sm" type="date" required /></label>
-              <label class="remediation-span-two">Compensating controls<textarea name="compensating_controls" class="textarea textarea-sm" required placeholder="One control per line"></textarea></label>
-              <label class="remediation-span-two">Affected assets<textarea name="affected_assets" class="textarea textarea-sm" required placeholder="One asset per line"></textarea></label>
+              <label class="remediation-span-two">Business justification<textarea name="business_justification" class="textarea" required maxlength="2000"></textarea></label>
+              <label>Approver<input name="approver" class="input" required maxlength="160" /></label>
+              <label>Accepted volume<input name="accepted_volume" class="input" type="number" min="1" max="100000000" required /></label>
+              <label>Review date<input name="review_date" class="input" type="date" required /></label>
+              <label>Expiration date<input name="expiration_date" class="input" type="date" required /></label>
+              <label class="remediation-span-two">Compensating controls<textarea name="compensating_controls" class="textarea" required placeholder="One control per line"></textarea></label>
+              <label class="remediation-span-two">Affected assets<textarea name="affected_assets" class="textarea" required placeholder="One asset per line"></textarea></label>
               <p class="remediation-modal-error remediation-span-two" data-remediation-modal-error aria-live="polite"></p>
-              <div class="modal-action remediation-span-two"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Accept risk</button></div>
-            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+              <div class="remediation-modal-actions remediation-span-two"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Accept risk</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
           </dialog>
 
-          <dialog id="remediation-false-positive-modal" class="modal">
-            <form id="remediation-false-positive-form" class="modal-box remediation-modal-box">
-              <div class="remediation-modal-header"><div><span class="eyebrow">Review outcome</span><h3>Mark as false positive</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
-              <label>Reason<textarea name="reason" class="textarea textarea-sm" required maxlength="1000" placeholder="Why is this detection not valid?"></textarea></label>
-              <label>Optional comment<textarea name="comment" class="textarea textarea-sm" maxlength="1000"></textarea></label>
+          <dialog id="remediation-false-positive-modal" class="remediation-dialog">
+            <form id="remediation-false-positive-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Review outcome</span><h3>Mark as false positive</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <label>Reason<textarea name="reason" class="textarea" required maxlength="1000" placeholder="Why is this detection not valid?"></textarea></label>
+              <label>Optional comment<textarea name="comment" class="textarea" maxlength="1000"></textarea></label>
               <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
-              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Confirm</button></div>
-            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Confirm</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
           </dialog>
 
-          <dialog id="remediation-suppression-modal" class="modal">
-            <form id="remediation-suppression-form" class="modal-box remediation-modal-box">
-              <div class="remediation-modal-header"><div><span class="eyebrow">Temporary exception</span><h3>Suppress finding</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
-              <div class="alert alert-warning alert-soft remediation-modal-note"><span>Suppression temporarily hides the finding and does not remediate the underlying risk.</span></div>
-              <label>Reason<textarea name="reason" class="textarea textarea-sm" required maxlength="1000"></textarea></label>
-              <label>Expiration date<input name="expiration_date" class="input input-sm" type="date" required /></label>
-              <label>Optional comment<textarea name="comment" class="textarea textarea-sm" maxlength="1000"></textarea></label>
+          <dialog id="remediation-suppression-modal" class="remediation-dialog">
+            <form id="remediation-suppression-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Temporary exception</span><h3>Suppress finding</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <div class="alert remediation-modal-note"><span>Suppression temporarily hides the finding and does not remediate the underlying risk.</span></div>
+              <label>Reason<textarea name="reason" class="textarea" required maxlength="1000"></textarea></label>
+              <label>Expiration date<input name="expiration_date" class="input" type="date" required /></label>
+              <label>Optional comment<textarea name="comment" class="textarea" maxlength="1000"></textarea></label>
               <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
-              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-sm btn-primary">Suppress</button></div>
-            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Suppress</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
           </dialog>
 
-          <dialog id="remediation-action-modal" class="modal">
-            <form id="remediation-action-form" class="modal-box remediation-modal-box">
-              <div class="remediation-modal-header"><div><span class="eyebrow">Workflow update</span><h3 id="remediation-action-title">Update finding</h3></div><button type="button" class="btn btn-sm btn-circle btn-ghost" data-close-remediation-modal aria-label="Close">×</button></div>
+          <dialog id="remediation-action-modal" class="remediation-dialog">
+            <form id="remediation-action-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Workflow update</span><h3 id="remediation-action-title">Update finding</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
               <p id="remediation-action-description" class="remediation-modal-note"></p>
-              <label>Comment<textarea id="remediation-action-comment" name="comment" class="textarea textarea-sm" maxlength="1000"></textarea></label>
+              <label>Comment<textarea id="remediation-action-comment" name="comment" class="textarea" maxlength="1000"></textarea></label>
               <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
-              <div class="modal-action"><button type="button" class="btn btn-sm" data-close-remediation-modal>Cancel</button><button type="submit" id="remediation-action-submit" class="btn btn-sm btn-primary">Continue</button></div>
-            </form><form method="dialog" class="modal-backdrop"><button>Close</button></form>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" id="remediation-action-submit" class="btn btn-primary">Continue</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
           </dialog>
         </section>
 
@@ -948,6 +949,43 @@
           </div>
 
           <div class="asset-rule-list" id="asset-rule-list"></div>
+
+          <section class="panel history-panel edm-panel" id="edm-panel" data-requires="rules.manage">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Exact-match reference sets</h3>
+                <p class="panel-note">Approved lists of real values. A finding whose value is on a list is confirmed.
+                  Each value is fingerprinted with this workspace's key and dropped: only fingerprints are kept, and a list
+                  is never shown again.</p>
+              </div>
+              <div class="panel-actions">
+                <button type="button" id="refresh-edm-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <form id="edm-form" class="edm-form" autocomplete="off">
+              <label>Name<input id="edm-name" maxlength="80" required placeholder="Customer e-mail addresses" /></label>
+              <label>Data type<select id="edm-type"></select></label>
+              <label class="edm-values-field">Values, one per line
+                <textarea id="edm-values" rows="5" spellcheck="false" autocomplete="off" placeholder="One value per line" aria-describedby="edm-count"></textarea>
+                <small id="edm-count" class="field-hint" aria-live="polite"></small>
+              </label>
+              <label class="edm-file-field">Or read a file
+                <input type="file" id="edm-file" accept=".txt,.csv,text/plain,text/csv" aria-describedby="edm-file-hint" />
+                <small id="edm-file-hint" class="field-hint">.txt or .csv, one value per line. Read here; the file is not uploaded.</small>
+              </label>
+              <div class="edm-actions"><button type="submit">Add set</button><p id="edm-status" class="save-status" role="status"></p></div>
+            </form>
+            <div class="panel-table-wrap">
+              <table class="ledger-table">
+                <thead>
+                  <tr><th scope="col">Name</th><th scope="col">Data type</th><th scope="col" class="is-numeric">Values</th><th scope="col">Added</th><th scope="col">Key</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+                </thead>
+                <tbody id="edm-sets-body">
+                  <tr><td colspan="6" class="empty">Loading reference sets&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section id="tab-reports" class="tab-panel">
@@ -1125,6 +1163,68 @@
             <p class="panel-foot">An alert is sent to the workspace's webhook and e-mail relay (Account &rarr; Settings &rarr;
               Features &rarr; Alerts &amp; tickets) and written to the audit trail, which carries it to the SIEM when one is
               set. A delivery that fails is retried until the receiver accepts it.</p>
+          </section>
+        </section>
+
+        <section id="tab-access" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Who can read</h2>
+            </div>
+          </div>
+          <section class="panel history-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Accounts and groups with access to scanned files</h3>
+                <p class="panel-note" id="access-context">Loading access&hellip;</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Show</span>
+                  <select id="access-kind" title="Which principals to show">
+                    <option value="">Everyone with access</option>
+                    <option value="broad">Everyone-type groups</option>
+                    <option value="privileged">Privileged accounts</option>
+                    <option value="service">Service and indexer accounts</option>
+                  </select>
+                </label>
+                <button type="button" id="access-kind-files" class="secondary-btn" hidden>Their files</button>
+                <button type="button" id="refresh-access-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table access-table">
+                <thead>
+                  <tr><th scope="col">Principal</th><th scope="col">Kind</th><th scope="col" class="is-numeric">Files with findings</th><th scope="col" class="is-numeric">Can read</th><th scope="col" class="is-numeric">Can write</th><th scope="col" class="is-numeric">Highest risk</th></tr>
+                </thead>
+                <tbody id="access-principals-body">
+                  <tr><td colspan="6" class="empty">Loading access&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="panel-foot">From the permissions each scan read: what a principal is allowed, less what it is denied.
+              A group is shown as itself - who is in it is not resolved here.</p>
+          </section>
+          <section class="panel history-panel" id="access-files-panel" hidden>
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title" id="access-files-title">Files</h3>
+                <p class="panel-note" id="access-files-note"></p>
+              </div>
+              <div class="panel-actions">
+                <label class="access-toggle"><input type="checkbox" id="access-sensitive-only" checked /> Only files with findings</label>
+                <label class="access-toggle"><input type="checkbox" id="access-writable-only" /> Can write</label>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table">
+                <thead>
+                  <tr><th scope="col">File</th><th scope="col">Risk</th><th scope="col" class="is-numeric">Findings</th><th scope="col">Access</th></tr>
+                </thead>
+                <tbody id="access-files-body"></tbody>
+              </table>
+            </div>
+            <button type="button" id="access-files-more" class="secondary-btn mini-btn" hidden>Show more</button>
           </section>
         </section>
 
@@ -1941,7 +2041,10 @@
     <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
 
 
-    <script src="/static/app.js?v=253"></script>
+    <script src="/static/console/alerts.js?v=1"></script>
+    <script src="/static/console/access.js?v=1"></script>
+    <script src="/static/console/exact-match.js?v=1"></script>
+    <script src="/static/app.js?v=255"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
     <script src="/static/scan-summary.js?v=2"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->

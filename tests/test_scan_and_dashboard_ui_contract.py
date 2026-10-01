@@ -436,7 +436,7 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
             self.index_html.index('id="tab-settings"')
         ]
         self.assertIn('<h2 class="page-title">Remediation</h2>', risk_panel)
-        self.assertIn('class="drawer drawer-end remediation-drawer-shell"', risk_panel)
+        self.assertIn('class="remediation-drawer-shell"', risk_panel)
         self.assertIn('id="remediation-assignment-modal"', risk_panel)
         self.assertIn('id="remediation-risk-modal"', risk_panel)
         self.assertIn('id="remediation-suppression-modal"', risk_panel)
@@ -667,14 +667,12 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         # The band itself keeps the full-strength ramp.
         self.assertIn('.ledger-cell[data-sev="critical"]  { --band: var(--sev-critical);', pages)
 
-    def test_the_scan_page_survives_daisyui_and_reports_compactly(self) -> None:
-        """daisyUI's `.status` is an 8px dot; the console's is a full-width text
-        box. Loading daisyui.css for the remediation drawer therefore collapsed
-        every scan page's status line to 26px, and a finished scan's message
-        wrapped one word per line. The message itself was eight diagnostics
-        joined with ". "."""
+    def test_the_scan_page_reports_compactly(self) -> None:
+        """A finished scan's message was eight diagnostics joined with ". ", and
+        daisyUI's 8px `.status` dot (loaded until D4) collapsed the line that
+        held it to 26px. The sheet is gone; the console's `.status` is its own."""
         shell = Path("frontend/styles/shell.css").read_text(encoding="utf-8")
-        self.assertIn("aspect-ratio: auto;", shell)
+        self.assertFalse(Path("frontend/styles/daisyui.css").exists())
         self.assertIn(".status-fact", shell)
         # The completion line is a headline plus figures, not a paragraph.
         self.assertIn('setStatus(`Scan completed in ${formatElapsedTime(lastScanElapsedSeconds)}`, "ok", diagnostics)',

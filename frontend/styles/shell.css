@@ -383,23 +383,6 @@ abbr[title] {
 }
 
 
-/* ── daisyUI class collisions ─────────────────────────────────
-   daisyui.css is loaded for the remediation drawer and dialogs, and it claims
-   some very generic class names. `.status` is the one that bit: daisyUI's is
-   an 8px dot (aspect-ratio: 1, inline-block), the console's is a full-width
-   text box - so every scan page's status line collapsed to 26px and wrapped
-   one word per line. Nothing in the console uses daisyUI's dot.
-
-   `.hidden` matches too but both mean display:none, and `.tab` only matches
-   under a `.tabs-border` ancestor the console never renders. Those two are
-   left alone deliberately; check this list before adding a generic class. */
-.status {
-  aspect-ratio: auto;
-  display: block;
-  width: auto;
-  height: auto;
-}
-
 /* ── The scan status box ──────────────────────────────────────
    A completed scan reports eight diagnostics. As one joined sentence they
    read as a paragraph of prose; as a headline and a row of figures they read
@@ -578,7 +561,7 @@ html:hover {
 
 :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
        .remediation-drawer-body, .scroll-card-list, .dash-rows, .drawer-content,
-       .inventory-facet-row, .risk-filter-group, .modal-box, .detail-list) {
+       .inventory-facet-row, .risk-filter-group, .remediation-modal-box, .detail-list) {
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
   transition: scrollbar-color var(--motion-base) var(--ease-out);
@@ -586,10 +569,10 @@ html:hover {
 
 :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
        .remediation-drawer-body, .scroll-card-list, .dash-rows, .drawer-content,
-       .inventory-facet-row, .risk-filter-group, .modal-box, .detail-list):hover,
+       .inventory-facet-row, .risk-filter-group, .remediation-modal-box, .detail-list):hover,
 :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
        .remediation-drawer-body, .scroll-card-list, .dash-rows, .drawer-content,
-       .inventory-facet-row, .risk-filter-group, .modal-box, .detail-list):focus-within {
+       .inventory-facet-row, .risk-filter-group, .remediation-modal-box, .detail-list):focus-within {
   scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
 }
 
@@ -629,7 +612,7 @@ html:hover {
    over the list, the table body, the rows. Over the card's title, its header
    or the padding around it, the bar a reader is looking for stays invisible,
    which reads as no scrollbar at all. The box a bar belongs to reveals it. */
-:is(.dash-card, .workspace, .modal-box, .sheet, .remediation-drawer-panel,
+:is(.dash-card, .workspace, .remediation-modal-box, .sheet, .remediation-drawer-panel,
     .drawer-content, .facet-menu):hover
 :is(.dash-card-body, .dash-rows, .scroll-card-list, .table-wrap,
     .inventory-table-wrap, .remediation-table-wrap, .remediation-drawer-body,
@@ -637,7 +620,7 @@ html:hover {
   scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
 }
 
-:is(.dash-card, .workspace, .modal-box, .sheet, .remediation-drawer-panel,
+:is(.dash-card, .workspace, .remediation-modal-box, .sheet, .remediation-drawer-panel,
     .drawer-content, .facet-menu):hover
 :is(.dash-card-body, .dash-rows, .scroll-card-list, .table-wrap,
     .inventory-table-wrap, .remediation-table-wrap, .remediation-drawer-body,

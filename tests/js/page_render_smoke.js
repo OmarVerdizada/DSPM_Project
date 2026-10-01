@@ -17,6 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const { runConsole } = require("./console_scripts");
 
 const APP = path.resolve(__dirname, "..", "..", "frontend", "app.js");
 const fixture = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -126,7 +127,7 @@ function finish(result) {
 }
 
 try {
-  vm.runInContext(fs.readFileSync(APP, "utf8"), context, { filename: "app.js" });
+  runConsole(vm, context);
 } catch (error) {
   finish({ pages: {}, error: `app.js did not load: ${String(error && error.stack).split("\n").slice(0, 3).join(" | ")}`, html, requested, unanswered: [...unanswered], console_errors: consoleErrors });
 }
@@ -152,6 +153,12 @@ const PAGES = {
   scan_profiles: "loadScanProfiles()",
   hash_changes: "loadHashComparison()",
   alerts: "loadAlerts()",
+  // D7: the principals, then one picked - its files.
+  access: `loadAccessPrincipals().then(() => {
+    accessChosen = { key: ${JSON.stringify(fixture.access_key || "")}, kind: "", label: "picked" };
+    return loadAccessFiles();
+  })`,
+  exact_match: "loadExactMatchSets()",
 };
 
 (async () => {

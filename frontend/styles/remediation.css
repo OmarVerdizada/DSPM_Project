@@ -12,7 +12,7 @@
   font-family: var(--font-text);
 }
 
-.remediation-center :where(.btn, .input, .select, .textarea, .modal-box) {
+.remediation-center :where(.btn, .input, .select, .textarea, .remediation-modal-box) {
   border-color: var(--line);
   border-radius: var(--radius-control);
 }
@@ -31,8 +31,14 @@
   font-weight: var(--weight-semibold);
 }
 
+/* One glyph: as wide as the button is tall. */
+.remediation-center .btn-icon {
+  width: 34px;
+  padding-inline: 0;
+}
+
 /* The legacy shell gives every unlisted button primary CTA chrome. This page
-   opts daisyUI buttons into their own scoped variants instead. */
+   opts its .btn buttons into their own scoped variants instead. */
 #tab-risk.remediation-center .btn:not(.btn-primary) {
   border: 1px solid var(--line);
   color: var(--ink);
@@ -91,6 +97,20 @@
 .remediation-page-content {
   height: 100%;
   min-height: 0;
+}
+
+/* The drawer itself is fixed over the window; the shell holds the page and anchors
+   the drawer's toggle. */
+.remediation-drawer-shell {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+}
+
+/* A wide queue scrolls inside its card; it never widens the page's column. */
+.remediation-drawer-shell > .remediation-page-content {
+  min-width: 0;
 }
 
 .remediation-page-content {
@@ -659,7 +679,8 @@
   color: var(--sev-high);
 }
 
-.remediation-queue-menu.dropdown {
+.remediation-queue-menu {
+  position: relative;
   display: inline-block;
 }
 
@@ -671,7 +692,12 @@
   display: none;
 }
 
-.remediation-queue-menu .dropdown-content {
+/* The menu opens under its button, aligned to its right edge, and grows in; a
+   closed <details> hides it by itself. */
+.remediation-queue-menu .remediation-menu-list {
+  position: absolute;
+  top: 100%;
+  inset-inline-end: 0;
   z-index: var(--z-sticky);
   display: grid;
   width: 190px;
@@ -680,9 +706,18 @@
   border-radius: var(--radius-control);
   background: var(--surface);
   box-shadow: var(--elev-raised);
+  transform-origin: top right;
+  animation: remediation-menu-in var(--motion-base) var(--ease-out);
 }
 
-.remediation-queue-menu .dropdown-content button {
+@keyframes remediation-menu-in {
+  from {
+    opacity: 0;
+    scale: .95;
+  }
+}
+
+.remediation-queue-menu .remediation-menu-list button {
   width: 100%;
   min-height: 32px;
   padding: var(--space-2);
@@ -695,11 +730,11 @@
   cursor: pointer;
 }
 
-.remediation-queue-menu .dropdown-content button:hover {
+.remediation-queue-menu .remediation-menu-list button:hover {
   background: var(--hover-wash);
 }
 
-#tab-risk.remediation-center .remediation-queue-menu .dropdown-content button {
+#tab-risk.remediation-center .remediation-queue-menu .remediation-menu-list button {
   min-height: 32px;
   padding: var(--space-2);
   color: var(--ink);
@@ -709,13 +744,13 @@
   transform: none;
 }
 
-#tab-risk.remediation-center .remediation-queue-menu .dropdown-content button:hover {
+#tab-risk.remediation-center .remediation-queue-menu .remediation-menu-list button:hover {
   background: var(--hover-wash);
   box-shadow: none;
   transform: none;
 }
 
-.remediation-queue-menu .dropdown-content hr {
+.remediation-queue-menu .remediation-menu-list hr {
   width: 100%;
   margin: var(--space-1) 0;
   border: 0;
@@ -779,15 +814,18 @@
 .remediation-skeleton-row .skeleton-short { width: 42%; }
 
 /* Finding drawer */
+/* Hidden once the panel has slid out, not before: the visibility change waits for it. */
 .remediation-drawer-side {
   position: fixed;
   z-index: var(--z-overlay);
   inset: 0;
   display: flex;
+  align-items: flex-start;
   justify-content: flex-end;
   overflow: hidden;
   visibility: hidden;
   pointer-events: none;
+  transition: visibility 0s linear var(--motion-base);
 }
 
 #remediation-drawer-toggle {
@@ -798,9 +836,10 @@
   padding: 0;
   opacity: 0;
   pointer-events: none;
+  appearance: none;
 }
 
-.remediation-drawer-side .drawer-overlay {
+.remediation-drawer-overlay {
   position: absolute;
   inset: 0;
   cursor: pointer;
@@ -825,9 +864,10 @@
 #remediation-drawer-toggle:checked ~ .remediation-drawer-side {
   visibility: visible;
   pointer-events: auto;
+  transition-delay: 0s;
 }
 
-#remediation-drawer-toggle:checked ~ .remediation-drawer-side .drawer-overlay {
+#remediation-drawer-toggle:checked ~ .remediation-drawer-side .remediation-drawer-overlay {
   opacity: 1;
 }
 
@@ -1078,36 +1118,60 @@ body:has(#tab-risk dialog[open]) .app-shell > main {
   content: counter(remediation-step);
 }
 
-.remediation-workflow-steps.steps {
+/* The workflow's stages: a dot each, joined by a line to the one before; the stages
+   reached are drawn in the accent. The line and the dot share the label's first row. */
+.remediation-workflow-steps {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-auto-flow: column;
   width: 100%;
   margin-top: var(--space-3);
   overflow: visible;
 }
 
-.remediation-workflow-steps .step {
+.remediation-workflow-step {
+  display: grid;
+  grid-template-rows: 40px 1fr;
+  grid-template-columns: auto;
+  place-items: center;
   min-width: 0;
   color: var(--ink-muted);
   font-size: var(--text-xs);
+  text-align: center;
   white-space: nowrap;
 }
 
-.remediation-workflow-steps .step::before {
-  height: 2px;
+.remediation-workflow-step::before,
+.remediation-workflow-step::after {
+  content: "";
+  grid-row-start: 1;
+  grid-column-start: 1;
+  border: 1px solid;
   color: var(--line);
   background: var(--line);
 }
 
-.remediation-workflow-steps .step::after {
+.remediation-workflow-step::before {
+  width: 100%;
+  height: 2px;
+  margin-inline-start: -100%;
+}
+
+.remediation-workflow-step:first-child::before {
+  content: none;
+}
+
+.remediation-workflow-step::after {
+  position: relative;
+  z-index: 1;
+  place-self: center;
   width: 10px;
   height: 10px;
-  color: var(--line);
-  background: var(--line);
+  border-radius: 50%;
 }
 
-.remediation-workflow-steps .step.step-primary::before,
-.remediation-workflow-steps .step.step-primary::after {
+.remediation-workflow-step.is-reached::before,
+.remediation-workflow-step.is-reached::after {
   color: var(--indigo);
   background: var(--indigo);
 }
@@ -1222,22 +1286,89 @@ body:has(#tab-risk dialog[open]) .app-shell > main {
   margin-right: auto;
 }
 
-.remediation-drawer-actions .dropdown-content {
+.remediation-drawer-actions .remediation-menu-list {
   bottom: calc(100% + var(--space-1));
   top: auto;
 }
 
-/* Modals use the browser dialog behavior with daisyUI structure. */
-.remediation-center .modal {
+/* Dialogs are the browser's modal <dialog>, drawn over the whole window so the dim
+   behind the form is painted by the dialog itself (::backdrop paints nothing on the
+   engine the console ships in). A closed dialog stays laid out but hidden, so closing
+   fades instead of vanishing. */
+.remediation-center .remediation-dialog {
+  position: fixed;
+  inset: 0;
   z-index: calc(var(--z-overlay) + 1);
+  display: grid;
+  place-items: center;
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  overflow: clip;
+  overscroll-behavior: contain;
+  border: 0;
   color: var(--ink);
+  background-color: transparent;
+  visibility: hidden;
+  pointer-events: none;
+  transition: visibility var(--motion-slow) allow-discrete, background-color var(--motion-slow) var(--ease-out);
 }
 
-.remediation-center .modal::backdrop {
-  background: color-mix(in srgb, var(--paper) 62%, transparent);
+.remediation-center .remediation-dialog[open],
+.remediation-center .remediation-dialog.is-open {
+  visibility: visible;
+  pointer-events: auto;
+  background-color: var(--scrim);
 }
 
-.remediation-modal-box.modal-box {
+.remediation-center .remediation-dialog::backdrop {
+  display: none;
+}
+
+@starting-style {
+  .remediation-center .remediation-dialog[open] {
+    background-color: transparent;
+  }
+}
+
+/* A click outside the form lands on this layer: a form that closes the dialog. It is
+   the whole window, beneath the form, and shows nothing. */
+.remediation-dialog-dismiss {
+  display: grid;
+  z-index: -1;
+  grid-row-start: 1;
+  grid-column-start: 1;
+  place-self: stretch;
+  margin: 0;
+  color: transparent;
+}
+
+.remediation-dialog-dismiss .plain-btn,
+.remediation-dialog-dismiss .plain-btn:hover {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: transparent;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  cursor: pointer;
+}
+
+.remediation-modal-box {
+  grid-row-start: 1;
+  grid-column-start: 1;
+  max-height: 100vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  opacity: 0;
+  scale: .95;
+  transition: opacity var(--motion-base) var(--ease-out), scale var(--motion-slow) var(--ease-out);
   display: grid;
   width: min(440px, calc(100vw - var(--space-5)));
   max-width: none;
@@ -1313,7 +1444,20 @@ body:has(#tab-risk dialog[open]) .app-shell > main {
   font-size: var(--text-xs);
 }
 
-.remediation-modal-box .modal-action {
+.remediation-center .remediation-dialog[open] > .remediation-modal-box,
+.remediation-center .remediation-dialog.is-open > .remediation-modal-box {
+  opacity: 1;
+  scale: 1;
+}
+
+@starting-style {
+  .remediation-center .remediation-dialog[open] > .remediation-modal-box {
+    opacity: 0;
+    scale: .95;
+  }
+}
+
+.remediation-modal-actions {
   display: flex;
   gap: var(--space-2);
   justify-content: flex-end;

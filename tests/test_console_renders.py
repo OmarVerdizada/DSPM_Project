@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 
@@ -35,7 +36,10 @@ HOSTILE_OWNER = "<b onmouseover=alert(3)>boss</b>"
 # handler unless the quote itself is escaped.
 HOSTILE_ATTRIBUTE = 'hr" onfocus="alert(4)'
 HOSTILE_ALERT = "<i onclick=alert(5)>Critical</i>"
-RAW = ["<img src=x onerror", "<script>alert(2)", "<b onmouseover", '" onfocus="alert(4)', "<i onclick"]
+HOSTILE_PRINCIPAL = "CORP\\<u onclick=alert(6)>Everyone</u>"
+HOSTILE_SET = "<s onclick=alert(7)>customers</s>"
+RAW = ["<img src=x onerror", "<script>alert(2)", "<b onmouseover", '" onfocus="alert(4)', "<i onclick", "<u onclick",
+       "<s onclick"]
 
 
 def _hostile_scan() -> dict:
@@ -45,6 +49,8 @@ def _hostile_scan() -> dict:
         files.append({
             "path": f"/share/{folder}/{name}", "name": name, "extension": Path(name).suffix, "size": 10 + index,
             "owner": HOSTILE_OWNER, "modified_at": "2026-06-01T00:00:00+00:00",
+            "acl": {"entries": [{"principal": HOSTILE_PRINCIPAL, "sid": "S-1-5-21-1-2-3-4242", "rights": ["read"],
+                                 "type": "allow", "mask": 0x120089}]},
             "risk": {"level": "HIGH", "score": 80 - index},
             "findings": [{"type": "Email", "risk": "HIGH", "count": 1, "framework": "GDPR",
                           "samples": [f"{HOSTILE_OWNER}@example.com"]}],
@@ -65,9 +71,15 @@ class EveryPageRendersTest(unittest.TestCase):
         store.save_alerts("default", "render-scan", [{"severity": "CRITICAL", "title": HOSTILE_ALERT,
                                                       "message": "2 critical files found"}])
         headers = {"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"}
+        created = self.client.post("/api/exact-match/sets", json={"name": HOSTILE_SET, "entity_type": "EMAIL_ADDRESS",
+                                                                  "values": ["ana@example.com"]},
+                                   headers={"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"})
+        self.assertEqual(created.status_code, 200, created.text[:200])
+        self.addCleanup(lambda: store.delete_edm_set("default", created.json()["set_id"]))
         paths = ["/api/history", "/api/executive-dashboard", "/api/inventory/facets", "/api/scan-profiles",
                  "/api/inventory", "/api/audit", "/api/tenants", "/api/findings", "/api/roles", "/api/users",
-                 "/api/scan-targets", "/api/history/hash-changes", "/api/alerts"]
+                 "/api/scan-targets", "/api/history/hash-changes", "/api/alerts", "/api/access/principals",
+                 "/api/exact-match/sets"]
         responses = {}
         for path in paths:
             response = self.client.get(path, headers=headers)
@@ -76,7 +88,12 @@ class EveryPageRendersTest(unittest.TestCase):
         report = self.client.get("/api/history/render-scan/report?include_files=1", headers=headers)
         self.assertEqual(report.status_code, 200, report.text[:200])
         responses["/api/history/render-scan/report"] = report.json()
-        self.fixture = {"responses": responses, "scan_id": "render-scan",
+        principals = responses["/api/access/principals"]["principals"]
+        access_key = next(row["key"] for row in principals if "alert(6)" in row["principal"])
+        files = self.client.get(f"/api/access/files?key={quote(access_key)}&sensitive_only=false", headers=headers)
+        self.assertEqual(files.status_code, 200, files.text[:200])
+        responses["/api/access/files"] = files.json()
+        self.fixture = {"responses": responses, "scan_id": "render-scan", "access_key": access_key,
                         "permissions": sorted(permissions.PERMISSIONS)}
 
     def _render(self) -> dict:
@@ -94,7 +111,7 @@ class EveryPageRendersTest(unittest.TestCase):
         self.assertNotIn("error", result)
         failed = {name: page["error"] for name, page in result["pages"].items() if not page["ok"]}
         self.assertEqual(failed, {})
-        self.assertEqual(len(result["pages"]), 12)
+        self.assertEqual(len(result["pages"]), 14)
         self.assertEqual(result["unanswered"], [], "a page asked for something the fixture does not hold")
         rendered = "\n".join(result["html"])
         self.assertIn("ledger.xlsx", rendered, "the pages drew the scan")
@@ -108,6 +125,9 @@ class EveryPageRendersTest(unittest.TestCase):
         self.assertIn("&lt;b onmouseover=alert(3)&gt;", rendered, "the hostile owner was drawn, escaped")
         self.assertIn("hr&quot; onfocus=&quot;alert(4)", rendered, "the hostile folder was drawn, escaped")
         self.assertIn("&lt;i onclick=alert(5)&gt;Critical&lt;/i&gt;", rendered, "the hostile alert was drawn, escaped")
+        self.assertIn("&lt;u onclick=alert(6)&gt;Everyone&lt;/u&gt;", rendered, "the hostile principal was drawn, escaped")
+        self.assertIn("&lt;s onclick=alert(7)&gt;customers&lt;/s&gt;", rendered, "the hostile set name was drawn, escaped")
+        self.assertIn("ledger.xlsx", rendered)
 
 
 if __name__ == "__main__":
