@@ -1188,7 +1188,7 @@ class DSPMDiscoveryEngine:
         can never collide with local ones or across hosts."""
         if not self.config.persistent_cache_enabled or not self.config.cache_dir:
             return
-        if str(record.get("source")) not in {"local", "smb", "endpoint-local", "endpoint-winrm", "sharepoint"}:
+        if str(record.get("source")) not in {"local", "smb", "endpoint-local", "endpoint-winrm", "sharepoint", "sftp"}:
             return
         path = str(record.get("path") or "")
         if not path or "::" in path or record.get("protected"):

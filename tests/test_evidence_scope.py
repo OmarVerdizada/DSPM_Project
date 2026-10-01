@@ -153,6 +153,7 @@ class EveryRouteThatReturnsARecordIsScopedTest(unittest.TestCase):
         ("POST", "/api/findings/{finding_id}/validate"),
         # M4 sources whose scan answers with the report.
         ("POST", "/api/database/scan"), ("POST", "/api/sharepoint/scan"),
+        ("POST", "/api/sftp/scan"),
     }
 
     def test_the_scoped_set_is_exactly_these(self) -> None:

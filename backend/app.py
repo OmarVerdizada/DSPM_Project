@@ -3698,6 +3698,79 @@ def sharepoint_scan(payload: SharePointScanRequest, principal: Principal = Depen
     return _compact_scan_report(data) if payload.compact_result else data
 
 
+# ── D9: Linux and macOS over SSH/SFTP ──────────────────────────────────────────────
+class SftpScanRequest(BaseModel):
+    """A host to read over SFTP with an ordinary account. The host key's SHA-256 fingerprint
+    (as `ssh-keygen -lf` prints it) is required: an unknown or changed key is refused."""
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    credential_ref: str = Field(min_length=1, max_length=120)
+    host_key_fingerprint: str = Field(pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
+    paths: list[str] = Field(default_factory=lambda: ["/home"], min_length=1, max_length=50)
+    max_depth: int = Field(default=8, ge=1, le=20)
+    scan_label: str = Field(default="", max_length=80)
+    allowed_extensions: list[str] = Field(default_factory=list, max_length=160)
+    extension_filter_enabled: bool = False
+    save_report: bool = True
+    compact_result: bool = True
+    compliance_enabled: bool = True
+    compliance_frameworks: list[str] = Field(default_factory=lambda: ["gdpr", "pci_dss"], max_length=10)
+
+
+@app.post("/api/sftp/scan")
+@evidence_scoped
+def sftp_scan(payload: SftpScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
+    """D9: a Linux or macOS host's files over SFTP. The saved credential is the account: a
+    password, or - with the domain set to `ssh-key` - an OpenSSH private key."""
+    from collectors import sftp_scanner
+    from collectors.net_guard import TargetNotAllowed, resolve_and_pin
+    from discovery.sftp_engine import SftpDiscoveryEngine
+
+    _require_scan_licence()
+    host = payload.host.strip()
+    _validate_scan_target(host, principal)
+    try:
+        address = resolve_and_pin(host, tenant_id=principal.tenant_id)
+    except TargetNotAllowed as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "That host is not allowed.")) from exc
+    try:
+        account = CredentialVault().resolve(principal.tenant_id, payload.credential_ref)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Saved credential not found") from exc
+    key = str(account.get("domain") or "").lower() == "ssh-key"
+    source = sftp_scanner.SftpSource(
+        host=host, port=payload.port, username=str(account.get("username") or ""), address=address,
+        password="" if key else str(account.get("password") or ""),
+        private_key=str(account.get("password") or "") if key else "",
+        host_key_fingerprint=payload.host_key_fingerprint, paths=list(payload.paths), max_depth=payload.max_depth)
+    label = (payload.scan_label.strip() or f"SFTP {host}")[:80]
+    scope = f"sftp:{host.lower()}"
+    config = ScanConfig(tenant_id=principal.tenant_id, compliance_enabled=payload.compliance_enabled,
+                        compliance_frameworks=list(payload.compliance_frameworks),
+                        allowed_extensions=list(payload.allowed_extensions),
+                        extension_filter_enabled=payload.extension_filter_enabled,
+                        incremental_enabled=True, incremental_scope=scope,
+                        baseline_probe=_incremental_probe(principal.tenant_id, scope, True),
+                        suppression_rules=suppression_rules_for_scan(principal.tenant_id),
+                        exact_match=_exact_match_for_scan(principal.tenant_id))
+    try:
+        data = SftpDiscoveryEngine(config, source).run().to_dict()
+    except sftp_scanner.SftpScanError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The host could not be scanned.")) from exc
+    except Exception as exc:
+        raise _safe_operation_error("SFTP scan failed", exc) from exc
+    data["source"] = f"sftp://{host}"
+    payload.scan_label = label
+    _apply_compliance(data, payload)
+    _persist_scan(data, payload, principal)
+    facts = data.get("scan_diagnostics") or {}
+    audit(principal.tenant_id, principal.subject, "scan.completed", {
+        "scan_id": data.get("scan_id"), "sftp": host, "files": int(facts.get("files") or 0),
+        "read": int(facts.get("read") or 0), "reused": int(facts.get("reused") or 0),
+        "unreadable": len(facts.get("unreadable") or []) + len(facts.get("unreadable_dirs") or [])})
+    return _compact_scan_report(data) if payload.compact_result else data
+
+
 @app.get("/api/scans/{job_id}")
 @evidence_scoped
 def scan_job(job_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:

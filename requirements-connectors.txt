@@ -15,3 +15,7 @@
 # SMB 1/2 only and cannot encrypt, so a server or share requiring encryption refuses it.
 # MIT. Its dependencies, cryptography and pyspnego, are already in requirements.lock.
 smbprotocol==1.17.0
+
+# D9: Linux and macOS hosts over SSH/SFTP (collectors/sftp_scanner.py), read with an
+# ordinary account and a pinned host key. LGPL-2.1. Brings bcrypt, PyNaCl and invoke.
+paramiko==5.0.0
