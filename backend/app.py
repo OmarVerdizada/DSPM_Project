@@ -3616,6 +3616,88 @@ def database_scan(payload: DatabaseScanRequest, principal: Principal = Depends(r
     return _compact_scan_report(data) if payload.compact_result else data
 
 
+# ── D5: SharePoint Online / OneDrive through Microsoft Graph ───────────────────────
+class SharePointScanRequest(BaseModel):
+    """A SharePoint site to scan. The saved credential is the Entra application: its id as
+    the user name, its secret as the password, the Entra tenant as the domain."""
+    site: str = Field(min_length=3, max_length=400)
+    credential_ref: str = Field(min_length=1, max_length=120)
+    scan_label: str = Field(default="", max_length=80)
+    full: bool = False
+    allowed_extensions: list[str] = Field(default_factory=list, max_length=160)
+    extension_filter_enabled: bool = False
+    save_report: bool = True
+    compact_result: bool = True
+    compliance_enabled: bool = True
+    compliance_frameworks: list[str] = Field(default_factory=lambda: ["gdpr", "pci_dss"], max_length=10)
+
+
+def _graph_source(payload: SharePointScanRequest, principal: Principal):
+    from collectors import graph_scanner
+
+    site = payload.site.strip()
+    host = site.split(":", 1)[0].strip().lower()
+    _validate_scan_target(host, principal)
+    try:
+        account = CredentialVault().resolve(principal.tenant_id, payload.credential_ref)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Saved credential not found") from exc
+    if not (account.get("username") and account.get("password") and account.get("domain")):
+        raise HTTPException(status_code=400, detail="The saved credential must hold the application id (user name), "
+                            "its secret (password) and the Entra tenant (domain).")
+    ca_file = os.getenv("DSPM_GRAPH_CA_FILE", "").strip()
+    hosts = tuple(item.strip().lower() for item in os.getenv("DSPM_GRAPH_DOWNLOAD_HOSTS", "").split(",") if item.strip())
+    return graph_scanner.GraphSource(
+        tenant=str(account["domain"]), client_id=str(account["username"]), client_secret=str(account["password"]),
+        site=site, authority=os.getenv("DSPM_GRAPH_AUTHORITY", "https://login.microsoftonline.com").strip(),
+        graph=os.getenv("DSPM_GRAPH_ENDPOINT", "https://graph.microsoft.com").strip(),
+        ca_pem=Path(ca_file).read_text(encoding="utf-8") if ca_file else "",
+        download_hosts=hosts or graph_scanner.GraphSource.__dataclass_fields__["download_hosts"].default)
+
+
+@app.post("/api/sharepoint/scan")
+@evidence_scoped
+def sharepoint_scan(payload: SharePointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
+    """D5: a SharePoint site's libraries through Graph. The first scan reads every file;
+    each later one only what changed, from the checkpoint the last completed scan kept."""
+    from collectors import graph_scanner
+    from discovery.graph_engine import GraphDiscoveryEngine
+
+    _require_scan_licence()
+    source = _graph_source(payload, principal)
+    key = f"sharepoint:{source.site.lower()}"
+    checkpoint = None if payload.full else store_module.get_source_checkpoint(principal.tenant_id, key)
+    label = (payload.scan_label.strip() or f"SharePoint {source.site}")[:80]
+    config = ScanConfig(tenant_id=principal.tenant_id, compliance_enabled=payload.compliance_enabled,
+                        compliance_frameworks=list(payload.compliance_frameworks),
+                        allowed_extensions=list(payload.allowed_extensions),
+                        extension_filter_enabled=payload.extension_filter_enabled,
+                        incremental_enabled=True, incremental_scope=key,
+                        baseline_probe=_incremental_probe(principal.tenant_id, key, True),
+                        suppression_rules=suppression_rules_for_scan(principal.tenant_id),
+                        exact_match=_exact_match_for_scan(principal.tenant_id))
+    engine = GraphDiscoveryEngine(config, source, checkpoint)
+    try:
+        data = engine.run().to_dict()
+    except graph_scanner.GraphScanError as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The SharePoint site could not be scanned.")) from exc
+    except Exception as exc:
+        raise _safe_operation_error("SharePoint scan failed", exc) from exc
+    data["source"] = f"sharepoint://{source.site}"
+    payload.scan_label = label
+    _apply_compliance(data, payload)
+    _persist_scan(data, payload, principal)
+    if engine.next_checkpoint is not None:
+        # Kept only once the scan's report is stored: a scan that failed does not move it.
+        store_module.save_source_checkpoint(principal.tenant_id, key, engine.next_checkpoint)
+    facts = engine.last_scan_diagnostics or {}
+    audit(principal.tenant_id, principal.subject, "scan.completed", {
+        "scan_id": data.get("scan_id"), "sharepoint": source.site, "incremental": bool(checkpoint),
+        **{name: int(facts.get(name) or 0) for name in ("changed", "deleted", "downloaded", "reused")},
+        "unreadable": len(facts.get("unreadable") or [])})
+    return _compact_scan_report(data) if payload.compact_result else data
+
+
 @app.get("/api/scans/{job_id}")
 @evidence_scoped
 def scan_job(job_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:

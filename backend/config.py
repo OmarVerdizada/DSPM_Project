@@ -217,6 +217,12 @@ SETTINGS: dict[str, Setting] = _settings(
     # given no account may use the backend service's own Windows identity.
     ("DSPM_SMB_REQUIRE_ENCRYPTION", "bool"),
     ("DSPM_SMB_ALLOW_SERVICE_IDENTITY", "bool"),
+    # D5: Microsoft Graph for SharePoint/OneDrive - a national cloud's endpoints, a private
+    # CA for a TLS-inspecting proxy, and the hosts a file's download link may be on.
+    ("DSPM_GRAPH_AUTHORITY", "str"),
+    ("DSPM_GRAPH_ENDPOINT", "str"),
+    ("DSPM_GRAPH_CA_FILE", "path"),
+    ("DSPM_GRAPH_DOWNLOAD_HOSTS", "str"),
     ("DSPM_OPS_ALERT_INTERVAL_SECONDS", "int", {"minimum": 30}),
     ("DSPM_QUEUE_STUCK_MINUTES", "int", {"minimum": 0}),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),

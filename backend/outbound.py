@@ -88,9 +88,10 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 def https_request(method: str, url: str, *, body: bytes | None = None, headers: dict | None = None,
-                  ca_pem: str = "", timeout: float = 10.0) -> tuple[int, bytes]:
-    """One HTTPS request to `url`. Returns (status, body up to 64 KB). Raises
-    OutboundRefused with a message fit to show."""
+                  ca_pem: str = "", timeout: float = 10.0, max_bytes: int = MAX_RESPONSE_BYTES) -> tuple[int, bytes]:
+    """One HTTPS request to `url`. Returns (status, body up to `max_bytes` - 64 KB unless the
+    caller needs more, as a Graph page or a file does). Raises OutboundRefused with a
+    message fit to show."""
     parts = urlsplit(url)
     if parts.scheme.lower() != "https" or not parts.hostname:
         raise OutboundRefused("Only https:// addresses are called.")
@@ -104,7 +105,7 @@ def https_request(method: str, url: str, *, body: bytes | None = None, headers: 
     try:
         connection.request(method, path, body=body, headers={"User-Agent": USER_AGENT, **(headers or {})})
         response = connection.getresponse()
-        data = response.read(MAX_RESPONSE_BYTES)
+        data = response.read(max(0, int(max_bytes)))
         return response.status, data
     except OutboundRefused:
         raise

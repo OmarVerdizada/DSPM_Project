@@ -42,6 +42,8 @@ REQUIRED_ISOLATED = {
     "edm_sets", "edm_fingerprints",
     # D3: where alerts go, what is waiting for them, and findings' tickets.
     "alert_channels", "alert_deliveries", "finding_tickets",
+    # D5: delta checkpoints.
+    "source_checkpoints",
 }
 
 
@@ -139,6 +141,7 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
                                  "min_severity": "LOW"}, secret_ref="", actor="tester")
         store.save_alerts(tenant, f"{tenant}-scan", [{"kind": "seed"}])
         store.create_finding_ticket(tenant, f"{tenant}-ticket", f"{tenant}-finding", "jira", {"summary": "seed"}, "tester")
+        store.save_source_checkpoint(tenant, f"sharepoint:{tenant}", {"drives": {}})
         store.add_scan_target(tenant, "network", "10.20.0.0/16", "seed", "tester")
         store.save_directory_settings(tenant, False, {"host": "dc.example.test"}, "", "tester")
         store.begin_mfa_enrollment(tenant, f"{tenant}-user", "pending-ciphertext", 2_000_000_000)

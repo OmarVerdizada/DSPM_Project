@@ -188,6 +188,7 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     ("POST", "/api/tickets/sync"): "findings.triage",
     ("GET", "/api/licence"): "platform.admin",
     ("POST", "/api/database/scan"): "scan.run",
+    ("POST", "/api/sharepoint/scan"): "scan.run",
     ("PUT", "/api/licence"): "platform.admin",
     ("PUT", "/api/credentials/{secret_ref}"): "credential.manage",
     ("DELETE", "/api/credentials/{secret_ref}"): "credential.manage",

@@ -1269,6 +1269,28 @@ def add_metrics_purpose(conn) -> None:
     only; no row leaves. Re-runs revision 0004 so the policies admit it."""
     add_tenant_rls(conn)
 
+_SOURCE_CHECKPOINTS_DDL = """CREATE TABLE IF NOT EXISTS source_checkpoints (
+            tenant_id TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            cursor_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, source_key)
+        );"""
+
+
+def add_source_checkpoints(conn) -> None:
+    """Revision 0035: where a delta-capable source's last scan stopped (D5).
+
+    A SharePoint library is read with Graph's delta query: the checkpoint holds the delta
+    link and what each file was, so the next scan asks only what changed and rebuilds the
+    rest from it. A tenant table: revisions 0003 and 0004 are re-run for its key and
+    row-level security. Rollback: restore the pre-upgrade backup (a missing checkpoint
+    only makes the next scan a full one)."""
+    conn.execute(_SOURCE_CHECKPOINTS_DDL)
+    add_tenant_integrity(conn)
+    add_tenant_rls(conn)
+
+
 def add_asset_access(conn) -> None:
     """Revision 0031: who can read each file (D7).
 
@@ -2507,6 +2529,7 @@ def apply_baseline_schema(conn) -> None:
     conn.execute(_ASSET_ACCESS_INDEX)
     for statement in _EDM_DDL:  # D2 (revision 0032)
         conn.execute(statement)
+    conn.execute(_SOURCE_CHECKPOINTS_DDL)  # D5 (revision 0035)
     _alert_event_columns(conn)  # D3 (revision 0033)
     for statement in _ALERT_DELIVERY_DDL:
         conn.executescript(statement)
@@ -9016,6 +9039,8 @@ _TENANT_ERASURE_TABLES = (
     "scan_profiles",
     "scan_reports",
     "audit_events",
+    # D5: where each delta-capable source's last scan stopped.
+    "source_checkpoints",
     # D3: where alerts go, what is waiting for them, and findings' tickets.
     "alert_deliveries",
     "alert_channels",
@@ -9865,6 +9890,26 @@ def metrics_alert_deliveries() -> dict:
             "FROM finding_tickets WHERE status = 'pending'").fetchone()
     return {"pending": int(alerts["pending"] or 0) + int(tickets["pending"] or 0),
             "failing": int(alerts["failing"] or 0) + int(tickets["failing"] or 0)}
+
+
+def get_source_checkpoint(tenant_id: str, source_key: str) -> dict | None:
+    """D5: where this source's last completed scan stopped, or None."""
+    with _connect() as conn:
+        row = conn.execute("SELECT cursor_json FROM source_checkpoints WHERE tenant_id = ? AND source_key = ?",
+                           (tenant_id, source_key)).fetchone()
+    return _json_object(row["cursor_json"]) if row else None
+
+
+def save_source_checkpoint(tenant_id: str, source_key: str, cursor: dict) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    text = json.dumps(cursor, ensure_ascii=False, separators=(",", ":"))
+    with _lock:
+        with _connect() as conn:
+            updated = conn.execute("UPDATE source_checkpoints SET cursor_json = ?, updated_at = ? "
+                                   "WHERE tenant_id = ? AND source_key = ?", (text, now, tenant_id, source_key)).rowcount
+            if not updated:
+                conn.execute("INSERT INTO source_checkpoints (tenant_id, source_key, cursor_json, updated_at) "
+                             "VALUES (?, ?, ?, ?)", (tenant_id, source_key, text, now))
 
 
 def create_finding_ticket(tenant_id: str, ticket_id: str, finding_id: str, system: str, payload: dict,
