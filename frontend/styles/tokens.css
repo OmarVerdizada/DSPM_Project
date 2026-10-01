@@ -246,7 +246,9 @@
   --paper: #0b0f1a;
   --surface: #111827;
   --line: #1f2937;
-  --indigo: #6366f1;
+  /* One tone deeper than #6366f1, where white on a filled control measured 4.46:1;
+     at #5f62ef it is 4.69. Text on dark paper takes --indigo-ink. */
+  --indigo: #5f62ef;
   --indigo-wash: rgba(99, 102, 241, .14);
   --indigo-ink: #a5b4fc;
   /* Same perceived step on dark paper: 6% measures 4.4 dE2000 against

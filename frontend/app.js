@@ -5135,7 +5135,7 @@ function renderRiskRules(rules) {
           (band) => `
             <article class="logic-band ${band.level}">
               <span>${band.range}</span>
-              <h4>${escapeHtml(band.level)} - ${escapeHtml(band.title)}</h4>
+              <h4 aria-level="3">${escapeHtml(band.level)} - ${escapeHtml(band.title)}</h4>
               <p>${escapeHtml(band.description)}</p>
             </article>
           `
@@ -5152,7 +5152,7 @@ function renderRiskRules(rules) {
         ${formulaCards.map(
           ([title, description]) => `
             <article class="logic-card">
-              <h4>${escapeHtml(title)}</h4>
+              <h4 aria-level="3">${escapeHtml(title)}</h4>
               <p>${escapeHtml(description)}</p>
             </article>
           `
@@ -5174,6 +5174,7 @@ function renderRiskRules(rules) {
       <div class="logic-section-title">
         <span>Detection and control rules</span>
         <strong>${rules.length} signals</strong>
+        <button type="button" class="secondary-btn logic-expand-all" data-logic-expand-all aria-pressed="false">Show all details</button>
       </div>
       <div class="logic-signal-grid">
         ${rules.map(renderLogicRuleCard).join("")}
@@ -5190,7 +5191,7 @@ function renderRiskRules(rules) {
           (asset) => `
             <article class="logic-asset">
               <span class="badge ${asset.level}">${escapeHtml(asset.level)}</span>
-              <h4>${escapeHtml(asset.pattern)}</h4>
+              <h4 aria-level="3">${escapeHtml(asset.pattern)}</h4>
               <p>${escapeHtml(asset.reason || "Matching files inherit this customer-specific risk context.")}</p>
             </article>
           `
@@ -6080,23 +6081,38 @@ function renderLogicRuleCard(rule) {
         <span class="badge ${riskBadgeClass(rule.base_risk)}">${escapeHtml(rule.base_risk)}</span>
         <strong>${escapeHtml(rule.score)}</strong>
       </div>
-      <h4>${escapeHtml(rule.signal)}</h4>
+      <h4 aria-level="3">${escapeHtml(rule.signal)}</h4>
       <p>${escapeHtml(rule.reason)}</p>
-      ${renderLogicRuleList("Findings", rule.findings)}
-      ${renderLogicRuleList("Keywords", rule.keywords)}
-      <div class="logic-action">
-        <span>DLP action</span>
-        <p>${escapeHtml(rule.dlp_action)}</p>
-      </div>
-      ${rule.control ? `
-        <div class="logic-action logic-control">
-          <span>Control guidance</span>
-          <p>${escapeHtml(rule.control)}</p>
+      <details class="logic-signal-more">
+        <summary>What it matches and what to do</summary>
+        ${renderLogicRuleList("Findings", rule.findings)}
+        ${renderLogicRuleList("Keywords", rule.keywords)}
+        <div class="logic-action">
+          <span>DLP action</span>
+          <p>${escapeHtml(rule.dlp_action)}</p>
         </div>
-      ` : ""}
+        ${rule.control ? `
+          <div class="logic-action logic-control">
+            <span>Control guidance</span>
+            <p>${escapeHtml(rule.control)}</p>
+          </div>
+        ` : ""}
+      </details>
     </article>
   `;
 }
+
+// Risk logic was 8.8 screens at 1366x768, three-quarters of it 27 signal cards printing
+// every finding, keyword, DLP action and control in full. A card now shows the signal, its
+// level, score and reason; the rest opens with the card or, for a review, all at once.
+document.addEventListener("click", (event) => {
+  const toggle = event.target.closest?.("[data-logic-expand-all]");
+  if (!toggle) return;
+  const open = toggle.getAttribute("aria-pressed") !== "true";
+  document.querySelectorAll("#risk-rules-body .logic-signal-more").forEach((item) => { item.open = open; });
+  toggle.setAttribute("aria-pressed", String(open));
+  toggle.textContent = open ? "Hide all details" : "Show all details";
+});
 
 function renderLogicRuleList(label, items = []) {
   if (!Array.isArray(items) || !items.length) {
@@ -6154,7 +6170,7 @@ function renderAssetRules() {
         <article class="asset-card ${editingAssetIndex === index ? "editing" : ""}">
           <div>
             <span class="badge ${item.level}">${escapeHtml(item.level)}</span>
-            <h4>${escapeHtml(item.pattern)}</h4>
+            <h4 aria-level="3">${escapeHtml(item.pattern)}</h4>
             <p>${escapeHtml(item.reason || "No business reason provided")}</p>
           </div>
           <div class="asset-card-actions">
@@ -10285,7 +10301,7 @@ function renderTenantsTable(tenants) {
           </td>
           <td>
             <div class="inline-control tenant-code-control">
-              <input class="table-input tenant-code-input" value="${escapeHtml(registrationCode || "Refresh tenants")}" readonly />
+              <input class="table-input tenant-code-input" aria-label="Registration code for ${escapeHtml(tenantLabel(tenant))}" value="${escapeHtml(registrationCode || "Refresh tenants")}" readonly />
               <button type="button" class="secondary-btn" data-copy-code="${escapeHtml(registrationCode)}" ${registrationCode ? "" : "disabled"}>Copy</button>
               <button type="button" class="secondary-btn" data-regenerate-code="${escapeHtml(tenant.tenant_id)}">Generate</button>
             </div>
@@ -11115,9 +11131,9 @@ function renderUsers(users) {
               ? `<div class="subtext mono" title="The installation-wide account key">${escapeHtml(user.username)}</div>`
               : ""}
           </td>
-          <td><input class="table-input" data-user-tenant="${escapeHtml(user.username)}" value="${escapeHtml(user.tenant_id || "default")}" /></td>
+          <td><input class="table-input" data-user-tenant="${escapeHtml(user.username)}" aria-label="Tenant of ${escapeHtml(user.username)}" value="${escapeHtml(user.tenant_id || "default")}" /></td>
           <td>
-            <select class="table-input" data-user-role="${escapeHtml(user.username)}">
+            <select class="table-input" data-user-role="${escapeHtml(user.username)}" aria-label="Role of ${escapeHtml(user.username)}">
               ${roleOptionsHtml(user.role)}
             </select>
           </td>

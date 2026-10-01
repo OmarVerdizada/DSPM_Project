@@ -69,7 +69,7 @@ function renderAccessPrincipals(rows) {
     return;
   }
   parts.principals.innerHTML = rows.map((row) => {
-    const chosen = accessChosen && accessChosen.key === row.key;
+    const chosen = Boolean(accessChosen && accessChosen.key === row.key);
     return `<tr class="access-row${chosen ? " is-chosen" : ""}" data-access-key="${escapeHtml(row.key)}"
         data-access-label="${escapeHtml(row.principal || row.key)}" tabindex="0" aria-selected="${chosen}">
       <td><strong>${escapeHtml(row.principal || row.key)}</strong>${row.sid ? `<span class="access-sid">${escapeHtml(row.sid)}</span>` : ""}</td>

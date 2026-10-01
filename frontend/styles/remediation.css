@@ -616,10 +616,10 @@
   background: transparent;
 }
 
-.remediation-severity[data-severity="CRITICAL"] { color: var(--sev-critical); border-color: color-mix(in srgb, var(--sev-critical) 38%, var(--line)); background: color-mix(in srgb, var(--sev-critical) 8%, var(--surface)); }
-.remediation-severity[data-severity="HIGH"] { color: var(--sev-high); border-color: color-mix(in srgb, var(--sev-high) 38%, var(--line)); background: color-mix(in srgb, var(--sev-high) 8%, var(--surface)); }
-.remediation-severity[data-severity="MEDIUM"] { color: var(--sev-medium); border-color: color-mix(in srgb, var(--sev-medium) 38%, var(--line)); background: color-mix(in srgb, var(--sev-medium) 8%, var(--surface)); }
-.remediation-severity[data-severity="LOW"] { color: var(--sev-low); border-color: color-mix(in srgb, var(--sev-low) 38%, var(--line)); background: color-mix(in srgb, var(--sev-low) 8%, var(--surface)); }
+.remediation-severity[data-severity="CRITICAL"] { color: color-mix(in srgb, var(--sev-critical) 85%, var(--ink)); border-color: color-mix(in srgb, var(--sev-critical) 38%, var(--line)); background: color-mix(in srgb, var(--sev-critical) 8%, var(--surface)); }
+.remediation-severity[data-severity="HIGH"] { color: color-mix(in srgb, var(--sev-high) 85%, var(--ink)); border-color: color-mix(in srgb, var(--sev-high) 38%, var(--line)); background: color-mix(in srgb, var(--sev-high) 8%, var(--surface)); }
+.remediation-severity[data-severity="MEDIUM"] { color: color-mix(in srgb, var(--sev-medium) 85%, var(--ink)); border-color: color-mix(in srgb, var(--sev-medium) 38%, var(--line)); background: color-mix(in srgb, var(--sev-medium) 8%, var(--surface)); }
+.remediation-severity[data-severity="LOW"] { color: color-mix(in srgb, var(--sev-low) 85%, var(--ink)); border-color: color-mix(in srgb, var(--sev-low) 38%, var(--line)); background: color-mix(in srgb, var(--sev-low) 8%, var(--surface)); }
 
 .remediation-status {
   color: var(--ink-muted);

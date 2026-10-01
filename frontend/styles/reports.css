@@ -173,7 +173,11 @@
   transition: grid-template-rows var(--motion-base) var(--ease-out);
 }
 
-.report-type[aria-checked="true"] .report-type-blurb { grid-template-rows: 1fr; }
+.report-type[aria-checked="true"] .report-type-blurb {
+  grid-template-rows: 1fr;
+  /* The muted ink measured 4.32:1 on the chosen row's tint. */
+  color: color-mix(in srgb, var(--ink-muted) 70%, var(--ink));
+}
 .report-type-blurb > span { min-height: 0; }
 
 /* ── The two drawers ──────────────────────────────────────────

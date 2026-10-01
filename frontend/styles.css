@@ -9161,7 +9161,7 @@ button:disabled {
   --text: #f9fafb;
   --muted: #9ca3af;
   --line: #1f2937;
-  --accent: #6366f1;
+  --accent: var(--indigo);
   --accent-strong: #818cf8;
   --accent-soft: rgba(99, 102, 241, .14);
   --sidebar-bg: #0f1420;

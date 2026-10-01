@@ -1272,3 +1272,70 @@ button.ledger-cell:hover { background: var(--band-wash); }
     padding-inline: var(--space-2) !important; /* token-gate: allow - the command bar padding is pinned */
   }
 }
+
+
+/* ── Severity chips read the severity tokens ──────────────────
+   Two legacy palettes (raw orange and amber values) mixed into their own wash put
+   the HIGH and MEDIUM ink at 3.9-4.3:1 on Findings and Risk logic. The tokens
+   are the contrast-checked set in both themes (tests/test_d4_page_gate.py
+   computes every pair). */
+#results-body .badge.CRITICAL,
+#risk-rules-body .logic-signal-card .badge.CRITICAL { --pill: var(--sev-critical); }
+#results-body .badge.HIGH,
+#risk-rules-body .logic-signal-card .badge.HIGH { --pill: var(--sev-high); }
+#results-body .badge.MEDIUM,
+#risk-rules-body .logic-signal-card .badge.MEDIUM { --pill: var(--sev-medium); }
+#results-body .badge.LOW,
+#risk-rules-body .logic-signal-card .badge.LOW { --pill: var(--sev-low); }
+
+/* The alerts' and Risk logic's asset chips on the legacy 12-16% wash
+   measured 4.1-4.3:1; on the card's own surface with a hairline, as the
+   Remediation board's chips are, they measure 4.8-5.0. */
+#tab-alerts .badge,
+#risk-rules-body .logic-asset .badge {
+  background: var(--surface) !important; /* token-gate: allow - the legacy wash is important */
+  border: 1px solid color-mix(in srgb, currentColor 34%, transparent);
+}
+
+/* The scan-source pill's indigo ink measured 3.2:1 on its dark tint. */
+:root[data-theme="dark"] .source-pill { color: var(--indigo-ink); }
+
+
+/* ── Risk logic: a signal's detail on demand ──────────────────
+   The cards keep their grid; only the one opened grows. */
+#risk-rules-body .logic-signal-grid {
+  align-items: start;
+  /* Folded, a card is ~180px of name, score and reason: three to a row at
+     1366px instead of two, and no 250px floor under each. */
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)) !important; /* token-gate: allow - a legacy rule pins 360px columns */
+}
+#risk-rules-body .logic-signal-card { min-height: 0; }
+.logic-signal-more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  list-style: none;
+  cursor: pointer;
+  border-radius: var(--radius-control);
+  color: var(--indigo-ink);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+}
+.logic-signal-more > summary::-webkit-details-marker { display: none; }
+.logic-signal-more > summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.logic-signal-more[open] > summary::before { transform: rotate(45deg); }
+.logic-signal-more > summary:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+.logic-signal-more[open] > summary { margin-bottom: var(--space-2); }
+.logic-signal-more > :not(summary) + :not(summary) { margin-top: var(--space-2); }
+.logic-section-title .logic-expand-all { margin-left: auto; }
