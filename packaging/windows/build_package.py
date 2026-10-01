@@ -221,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
 
         (staging / "installer").mkdir()
         shutil.copy2(HERE / "sentro_installer.py", staging / "installer" / "sentro_installer.py")
+        # Copied into every release as current\installer\upgrade.ps1: the next upgrade starts there.
+        shutil.copy2(HERE / "upgrade-installed.ps1", staging / "installer" / "upgrade-installed.ps1")
         for name in INSTALLER_FILES:
             shutil.copy2(HERE / name, staging / name)
         (staging / "lib").mkdir()

@@ -23,7 +23,8 @@ sentro-<label>-win64\
   wheelhouse\        every dependency as a wheel, installed with pip --no-index --require-hashes
   app\               the product source at the packaged commit (tracked files only), BUILD.json
   bin\WinSW-x64.exe  the service wrapper (WinSW 2.12.0, MIT, third_party\WinSW-LICENSE.txt)
-  installer\         sentro_installer.py (run by the package's own Python)
+  installer\         sentro_installer.py (run by the package's own Python at a first install),
+                     upgrade-installed.ps1 (kept in every release as current\installer\upgrade.ps1)
   docs\              this file
 ```
 
@@ -224,11 +225,26 @@ command line.
 
 ## Upgrade
 
-In the new package's folder:
+Start an upgrade from the **install**, naming the new package's folder:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\upgrade.ps1 -AllowUnsigned
+& "$env:ProgramFiles\Sentro\current\installer\upgrade.ps1" -Package D:\sentro-<label>-win64
 ```
+
+Everything that runs before the package is verified is code this install already verified:
+that script, the installer and package checks beside it, and the running release's Python.
+The package is copied to a folder only administrators can write (`<InstallRoot>\.staging`),
+every file is checked against `SHA256SUMS`, and the publisher's signature against this
+install's pinned key, with the running release's verifier - before any of the package's
+code runs. Running the package's own `upgrade.ps1` would run the package's installer first,
+and someone who can write to the folder it waits in could take the check out of it; that
+script therefore refuses to run on an install that has the launcher.
+
+An install made before the launcher existed has none, so its first upgrade runs the
+package's `upgrade.ps1` - check the package's SHA-256 against the value published with the
+release first. An install from before D10 has no pinned publisher key either; pin it on that
+upgrade from the key file published with the release (`-PublisherKeyFile publisher.pub`).
+Every later upgrade starts from the launcher that upgrade placed.
 
 1. The new release is placed beside the running one and its configuration checked -
    nothing is stopped yet, so a bad package costs no downtime.
@@ -256,7 +272,7 @@ code cannot run on the newer schema, and running it would lose what the newer sc
 holds. To go back, restore the backup that the upgrade took (at the older schema):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\upgrade.ps1 -RestoreBackup C:\ProgramData\Sentro\backups\sentro_sqlite_<stamp>.manifest.json -AllowUnsigned
+& "$env:ProgramFiles\Sentro\current\installer\upgrade.ps1" -Package D:\sentro-<older label>-win64 -RestoreBackup C:\ProgramData\Sentro\backups\sentro_sqlite_<stamp>.manifest.json
 ```
 
 A package at the **same** schema but an **older build** is refused too (D10): an old signed
@@ -264,7 +280,7 @@ package is still an old package, and replaying one is how a fixed vulnerability 
 Going back is a decision the operator states:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\upgrade.ps1 -AllowDowngrade
+& "$env:ProgramFiles\Sentro\current\installer\upgrade.ps1" -Package D:\sentro-<older label>-win64 -AllowDowngrade
 ```
 
 Going back with `-RestoreBackup` is already such a statement and needs no second flag.

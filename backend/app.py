@@ -4281,6 +4281,9 @@ def integrations_save(channel: str, payload: IntegrationRequest,
     except integrations.IntegrationError as exc:
         raise HTTPException(status_code=400, detail=client_message(exc, "The integration settings were refused.")) from exc
     secret_ref = (record or {}).get("secret_ref") or ""
+    if action == "keep" and secret_ref and integrations.destination_changed(channel, saved, config):
+        raise HTTPException(status_code=400, detail="The destination changed: enter the password or token again. "
+                            "A saved secret is only sent where it was entered for.")
     # Checked before anything is sealed: sealing a new secret deletes the one it replaces.
     if channel == "email" and config.get("security") == "none" and (
             config.get("username") or action == "replace" or (action == "keep" and secret_ref)):

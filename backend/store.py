@@ -9820,13 +9820,18 @@ def alert_delivery_queue(tenant_id: str, channel: str) -> dict:
 
 
 def claim_alert_deliveries(*, limit: int, now: float, lease_seconds: float, owner: str) -> list[dict]:
-    """Take up to `limit` due deliveries in every workspace, leased to `owner`."""
+    """Take up to `limit` due deliveries in every workspace, leased to `owner` - taking turns
+    between workspaces, so one with a hundred deliveries waiting for a dead receiver does not
+    hold every other workspace's alerts behind it."""
     claimed: list[dict] = []
     with _lock:
         with _connect() as conn:
             rows = conn.execute(
-                "SELECT id, tenant_id, alert_id, channel, payload, attempts FROM alert_deliveries "
-                "WHERE status = 'pending' AND next_attempt_at <= ? AND lease_until <= ? ORDER BY id LIMIT ?",
+                "SELECT id, tenant_id, alert_id, channel, payload, attempts FROM ("
+                "SELECT id, tenant_id, alert_id, channel, payload, attempts, "
+                "ROW_NUMBER() OVER (PARTITION BY tenant_id ORDER BY id) AS turn FROM alert_deliveries "
+                "WHERE status = 'pending' AND next_attempt_at <= ? AND lease_until <= ?) due "
+                "ORDER BY turn, id LIMIT ?",
                 (now, now, int(limit))).fetchall()
             for row in rows:
                 if conn.execute(
@@ -9837,18 +9842,32 @@ def claim_alert_deliveries(*, limit: int, now: float, lease_seconds: float, owne
 
 
 def finish_alert_delivery(tenant_id: str, delivery_id: int, *, status: str, attempts: int, error: str = "",
-                          next_attempt_at: float = 0.0) -> None:
-    """A delivery's outcome: `delivered`, `cancelled`, or `pending` again with a back-off."""
+                          next_attempt_at: float = 0.0, owner: str = "") -> bool:
+    """A delivery's outcome: `delivered`, `cancelled`, or `pending` again with a back-off.
+    With `owner`, only while that owner still holds the lease on a pending delivery: an
+    outcome from a worker whose lease ran out must not overwrite the one that took over."""
     now = datetime.now(timezone.utc).isoformat()
     delivered_at = now if status == "delivered" else ""
+    held = " AND lease_owner = ? AND status = 'pending'" if owner else ""
     with _lock:
         with _connect() as conn:
-            conn.execute(
+            return bool(conn.execute(
                 "UPDATE alert_deliveries SET status = ?, attempts = ?, last_error = ?, next_attempt_at = ?, "
                 "lease_until = 0, lease_owner = '', last_attempt_at = ?, delivered_at = ? "
-                "WHERE tenant_id = ? AND id = ?",
+                "WHERE tenant_id = ? AND id = ?" + held,
                 (status, int(attempts), str(error)[:300], float(next_attempt_at), now, delivered_at, tenant_id,
-                 int(delivery_id)))
+                 int(delivery_id), *((owner,) if owner else ()))).rowcount)
+
+
+def renew_alert_delivery_lease(tenant_id: str, delivery_id: int, *, owner: str, until: float) -> bool:
+    """Extend a delivery's lease just before it is sent. False when `owner` no longer holds
+    it - the pass took longer than the lease and another worker claimed the delivery."""
+    with _lock:
+        with _connect() as conn:
+            return bool(conn.execute(
+                "UPDATE alert_deliveries SET lease_until = ? WHERE tenant_id = ? AND id = ? AND lease_owner = ? "
+                "AND status = 'pending'", (float(until), tenant_id, int(delivery_id), owner)).rowcount)
+
 
 
 def retry_alert_deliveries_now(tenant_id: str, channel: str = "") -> int:

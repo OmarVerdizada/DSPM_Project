@@ -48,8 +48,10 @@ function Test-SentroPackage {
     } elseif (Test-Path -LiteralPath (Join-Path $PackageDir 'SIGNATURE.json')) {
         # D10: signed by its publisher (Ed25519). The installer checks that signature with the
         # installed release's verifier and this install's pinned publisher key before placing
-        # anything; the Authenticode signature on the scripts is still HELD.
-        Write-Warning ('Publisher-signed package; the installer verifies its signature against the pinned key. ' +
+        # anything - a check that only binds when the installer running it is the INSTALLED
+        # one (<InstallRoot>\current\installer\upgrade.ps1), not the package's own copy.
+        # The Authenticode signature on the scripts is still HELD.
+        Write-Warning ('Publisher-signed package: its signature is checked against the pinned key by the installer. ' +
                        'Script Authenticode signature: HELD FOR CODE-SIGNING CERTIFICATE.')
     } elseif (-not $AllowUnsigned) {
         throw ("This package is not code-signed (HELD FOR CODE-SIGNING CERTIFICATE). Its checksums show a damaged " +

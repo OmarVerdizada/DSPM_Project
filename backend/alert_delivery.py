@@ -112,11 +112,13 @@ def email_text(tenant_id: str, event: dict) -> tuple[str, str]:
     return subject, "\n".join(lines)
 
 
-def send_email(tenant_id: str, config: dict, secret: str, event: dict) -> None:
+def send_email(tenant_id: str, config: dict, secret: str, event: dict) -> list[str]:
+    """Returns the recipients the relay refused while delivering to the rest."""
     subject, text = email_text(tenant_id, event)
-    send_mail(host=config["host"], port=int(config["port"]), security=config["security"], sender=config["sender"],
-              recipients=list(config["recipients"]), subject=subject, text=text,
-              username=str(config.get("username") or ""), password=secret, ca_pem=str(config.get("ca_pem") or ""))
+    return send_mail(host=config["host"], port=int(config["port"]), security=config["security"],
+                     sender=config["sender"], recipients=list(config["recipients"]), subject=subject, text=text,
+                     username=str(config.get("username") or ""), password=secret,
+                     ca_pem=str(config.get("ca_pem") or ""))
 
 
 def _audit(tenant_id: str, action: str, detail: dict) -> None:
@@ -129,37 +131,49 @@ def _audit(tenant_id: str, action: str, detail: dict) -> None:
 
 
 def deliver(row: dict) -> str:
-    """Send one claimed delivery. Returns its outcome: delivered, cancelled or retry."""
+    """Send one claimed delivery. Returns its outcome: delivered, cancelled, retry - or
+    skipped when this worker no longer holds its lease (two backends never send one
+    delivery twice: a pass of slow sends can outlast the lease it was claimed under)."""
     from backend import store
 
     tenant_id, channel = row["tenant_id"], row["channel"]
+    owner = _owner()
+    if not store.renew_alert_delivery_lease(tenant_id, row["id"], owner=owner, until=time.time() + LEASE_SECONDS):
+        return "skipped"
     attempts = int(row.get("attempts") or 0) + 1
     record, secret = integrations.load(tenant_id, channel)
     if record is None or not record.get("enabled"):
         store.finish_alert_delivery(tenant_id, row["id"], status="cancelled", attempts=attempts - 1,
-                                    error="The channel was turned off or removed.")
+                                    error="The channel was turned off or removed.", owner=owner)
         return "cancelled"
     config = record["config"]
     signature = integrations.config_signature(channel, config)
     event = json.loads(row["payload"])
+    refused: list[str] = []
     try:
         if channel == "webhook":
             send_webhook(config, secret, webhook_body(tenant_id, int(row["id"]), event), delivery=str(row["id"]))
         else:
-            send_email(tenant_id, config, secret, event)
+            refused = send_email(tenant_id, config, secret, event)
     except OutboundRefused as exc:
         message = str(exc)[:300]
         store.finish_alert_delivery(tenant_id, row["id"], status="pending", attempts=attempts, error=message,
-                                    next_attempt_at=time.time() + backoff(attempts))
+                                    next_attempt_at=time.time() + backoff(attempts), owner=owner)
         store.record_alert_channel_status(tenant_id, channel, last_error=message, last_error_at=_stamp(),
                                           error_signature=signature)
         if attempts == 1:
             _audit(tenant_id, "alert.delivery_failed", {"alert_id": row["alert_id"], "channel": channel,
                                                         "error": message})
         return "retry"
-    store.finish_alert_delivery(tenant_id, row["id"], status="delivered", attempts=attempts)
+    store.finish_alert_delivery(tenant_id, row["id"], status="delivered", attempts=attempts, owner=owner)
     store.record_alert_channel_status(tenant_id, channel, last_delivery_at=_stamp(), delivery_signature=signature)
-    _audit(tenant_id, "alert.delivered", {"alert_id": row["alert_id"], "channel": channel, "attempts": attempts})
+    detail = {"alert_id": row["alert_id"], "channel": channel, "attempts": attempts}
+    if refused:
+        # Delivered to the rest and not sent again; the channel shows which addresses to fix.
+        detail["refused_recipients"] = refused
+        store.record_alert_channel_status(tenant_id, channel, last_error=f"The relay refused {', '.join(refused)}.",
+                                          last_error_at=_stamp(), error_signature=signature)
+    _audit(tenant_id, "alert.delivered", detail)
     return "delivered"
 
 
@@ -172,12 +186,13 @@ def drain(*, limit: int = 100, now: float | None = None) -> dict:
                                         lease_seconds=LEASE_SECONDS, owner=_owner())
     for row in rows:
         try:
-            counts[deliver(row)] += 1
+            outcome = deliver(row)
+            counts[outcome] = counts.get(outcome, 0) + 1
         except Exception:  # one bad row must not stop the rest; it is retried
             logger.exception("Alert delivery %s failed unexpectedly", row.get("id"))
             store.finish_alert_delivery(row["tenant_id"], row["id"], status="pending",
                                         attempts=int(row.get("attempts") or 0) + 1, error="Internal error.",
-                                        next_attempt_at=time.time() + MAX_BACKOFF_SECONDS)
+                                        next_attempt_at=time.time() + MAX_BACKOFF_SECONDS, owner=_owner())
             counts["retry"] += 1
     return counts
 
@@ -335,8 +350,11 @@ def test_channel(tenant_id: str, channel: str) -> dict:
             send_webhook(config, secret, body, delivery="test", kind="sentro.test")
             message = "The webhook accepted a signed test event."
         elif channel == "email":
-            send_email(tenant_id, config, secret, {"severity": "TEST", "title": "Sentro DSPM connection test",
-                                                   "message": "A test message - not an alert."})
+            refused = send_email(tenant_id, config, secret, {"severity": "TEST", "title": "Sentro DSPM connection test",
+                                                             "message": "A test message - not an alert."})
+            if refused:
+                return {"ok": False, "message": f"The relay refused {', '.join(refused)}; the others were sent the test.",
+                        "signature": integrations.config_signature(channel, config)}
             message = f"The relay accepted a test message for {len(config.get('recipients') or [])} recipient(s)."
         else:
             message = ticketing.client(channel, config, secret).test()

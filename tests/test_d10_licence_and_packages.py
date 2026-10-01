@@ -288,6 +288,96 @@ class TheInstallerTest(PackageCase):
         self.assertIn("--allow-downgrade", upgrade)
 
 
+class TheUpgradeStartsFromTheInstallTest(PackageCase):
+    """M4 exit review (High): the package's upgrade.ps1 ran the package's OWN installer and
+    module before anything verified them, so whoever could write to the folder a package
+    waited in could delete the signature check and regenerate the checksums (they need no
+    key) - and run as Administrator. Upgrades now start from code the install verified."""
+
+    class Placed(Exception):
+        pass
+
+    def layout(self) -> installer.Layout:
+        return installer.Layout(self.tmp / "install", self.tmp / "data", "Sentro")
+
+    def running_release(self, layout: installer.Layout) -> Path:
+        layout.data_root.mkdir(parents=True, exist_ok=True)
+        installer.write_state(layout, {"commit": "old", "commit_time": 1000, "release": "r32-old", "port": 8000,
+                                       "history": []})
+        running = layout.releases / "r32-old"
+        (running / "app" / "backend").mkdir(parents=True)
+        shutil.copyfile(ROOT / "backend" / "signing.py", running / "app" / "backend" / "signing.py")
+        return running
+
+    def test_every_release_keeps_the_code_that_starts_the_next_upgrade(self) -> None:
+        package = self.tmp / "pkg"
+        (package / "installer").mkdir(parents=True)
+        (package / "lib").mkdir()
+        here = ROOT / "packaging" / "windows"
+        shutil.copyfile(here / "sentro_installer.py", package / "installer" / "sentro_installer.py")
+        shutil.copyfile(here / "upgrade-installed.ps1", package / "installer" / "upgrade-installed.ps1")
+        shutil.copyfile(here / "SentroPackage.psm1", package / "lib" / "SentroPackage.psm1")
+        launcher = installer.place_launcher(package, self.tmp / "release")
+        self.assertEqual(sorted(path.name for path in launcher.iterdir()),
+                         ["SentroPackage.psm1", "sentro_installer.py", "upgrade.ps1"])
+        self.assertEqual((launcher / "upgrade.ps1").read_bytes(), (here / "upgrade-installed.ps1").read_bytes())
+        source = (here / "sentro_installer.py").read_text(encoding="utf-8")
+        self.assertIn("    release = place_release(package, layout, runner)\n    place_launcher(package, release)\n", source)
+        self.assertIn("    new_release = place_release(package, layout, runner)\n    place_launcher(package, new_release)\n", source)
+        builder = (here / "build_package.py").read_text(encoding="utf-8")
+        self.assertIn('shutil.copy2(HERE / "upgrade-installed.ps1", staging / "installer" / "upgrade-installed.ps1")', builder)
+
+    def test_the_installed_launcher_runs_only_installed_code(self) -> None:
+        launcher = (ROOT / "packaging" / "windows" / "upgrade-installed.ps1").read_text(encoding="utf-8")
+        self.assertIn("Import-Module (Join-Path $PSScriptRoot 'SentroPackage.psm1')", launcher)
+        self.assertIn("$python = Join-Path $InstallRoot 'current\\python\\python.exe'", launcher)
+        self.assertIn("-Script (Join-Path $PSScriptRoot 'sentro_installer.py')", launcher)
+        self.assertNotIn("Expand-SentroRuntime", launcher, "never the package's Python")
+        package_script = (ROOT / "packaging" / "windows" / "upgrade.ps1").read_text(encoding="utf-8")
+        refusal = package_script.index("if (Test-Path -LiteralPath $launcher)")
+        self.assertLess(refusal, package_script.index("Import-Module"), "the package's code is not loaded first")
+        self.assertIn("$launcher = Join-Path $InstallRoot 'current\\installer\\upgrade.ps1'", package_script)
+
+    def test_what_is_verified_is_a_staged_copy_and_it_is_what_is_placed(self) -> None:
+        layout = self.layout()
+        layout.trust_file.parent.mkdir(parents=True)
+        shutil.copyfile(self.trust_path, layout.trust_file)
+        running = self.running_release(layout)
+        package = self.make_package(commit_time=3000, sign_with=self.publisher)
+        placed = []
+
+        def place(source, *_args):
+            placed.append(Path(source))
+            # The copy being placed is the verified one; the original changing now is too late.
+            (package / "app" / "main.py").write_text("print('swapped')\n", encoding="utf-8")
+            self.assertEqual((Path(source) / "app" / "main.py").read_text(encoding="utf-8"), "print('sentro')\n")
+            raise self.Placed()
+
+        with (mock.patch.object(installer, "current_release", return_value=running),
+              mock.patch.object(installer, "place_release", side_effect=place)):
+            with self.assertRaises(self.Placed):
+                installer.upgrade(package, layout, runner=installer.Runner())
+        self.assertEqual(len(placed), 1)
+        self.assertEqual(placed[0].parent, layout.install_root / ".staging")
+        self.assertFalse(placed[0].exists(), "the staged copy is removed")
+
+    def test_an_install_from_before_d10_pins_the_operators_key_at_upgrade(self) -> None:
+        layout = self.layout()
+        running = self.running_release(layout)
+        package = self.make_package(commit_time=3000, sign_with=self.publisher)
+        with mock.patch.object(installer, "current_release", return_value=running):
+            with self.assertRaisesRegex(installer.InstallError, "does not trust"):
+                installer.upgrade(package, layout, runner=installer.Runner())
+        key_file = self.tmp / "publisher.pub"
+        key_file.write_text(json.dumps(sentro_sign.publisher_document(raw(self.publisher))), encoding="utf-8")
+        with (mock.patch.object(installer, "current_release", return_value=running),
+              mock.patch.object(installer, "place_release", side_effect=self.Placed)):
+            with self.assertRaises(self.Placed):
+                installer.upgrade(package, layout, runner=installer.Runner(), publisher_key_file=key_file)
+        self.assertIn(signing.key_id(raw(self.publisher)), signing.load_trust(layout.trust_file))
+        self.assertIn('--publisher-key-file', (ROOT / "packaging" / "windows" / "upgrade-installed.ps1").read_text(encoding="utf-8"))
+
+
 class LicenceCase(KeysCase):
 
     def setUp(self) -> None:

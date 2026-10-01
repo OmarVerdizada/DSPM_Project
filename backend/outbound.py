@@ -155,9 +155,14 @@ SMTP_SECURITY = ("starttls", "tls", "none")
 
 
 def send_mail(*, host: str, port: int, security: str, sender: str, recipients: list[str], subject: str,
-              text: str, username: str = "", password: str = "", ca_pem: str = "", timeout: float = 15.0) -> None:
+              text: str, username: str = "", password: str = "", ca_pem: str = "", timeout: float = 15.0) -> list[str]:
     """Send one plain-text message. STARTTLS and implicit TLS are verified; `none` sends
-    in the clear and is refused with a password."""
+    in the clear and is refused with a password.
+
+    Returns the recipients the relay refused while it accepted the others: the message
+    WAS delivered to those, so it is not a failure to retry - a retry sent it to them
+    again every few minutes, forever, because one address was gone (M4 exit review).
+    Every recipient refused is a failure (smtplib raises)."""
     if security not in SMTP_SECURITY:
         raise OutboundRefused("Choose STARTTLS, TLS or none.")
     if security == "none" and (username or password):
@@ -184,8 +189,7 @@ def send_mail(*, host: str, port: int, security: str, sender: str, recipients: l
             if username:
                 client.login(username, password)
             refused = client.send_message(message)
-            if refused:
-                raise OutboundRefused(f"{host}:{port} refused {len(refused)} of the recipients.")
+            return sorted(str(address) for address in (refused or {}))
         finally:
             try:
                 client.quit()
@@ -195,6 +199,8 @@ def send_mail(*, host: str, port: int, security: str, sender: str, recipients: l
         raise
     except smtplib.SMTPAuthenticationError as exc:
         raise OutboundRefused(f"{host}:{port} refused the user name or password.") from exc
+    except smtplib.SMTPRecipientsRefused as exc:
+        raise OutboundRefused(f"{host}:{port} refused every recipient.") from exc
     except smtplib.SMTPResponseException as exc:
         raise OutboundRefused(f"{host}:{port} refused the message (SMTP {exc.smtp_code}).") from exc
     except smtplib.SMTPException as exc:

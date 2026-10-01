@@ -174,6 +174,19 @@ def secret_change(channel: str, request: dict) -> tuple[str, str | None]:
     return "replace", value
 
 
+# Where a channel's saved password or token is sent. A save that moves it - another host or
+# port, another URL, another CA trusted for it - without the secret being entered again
+# would send the saved one to wherever the request pointed: an administrator who never saw
+# it could collect it on a host of their own (M4 exit review). The webhook's secret signs
+# requests and is never sent, so it does not follow the URL.
+DESTINATION_FIELDS = {"email": ("host", "port", "ca_fingerprint"), "jira": ("base_url", "ca_fingerprint"),
+                      "servicenow": ("instance_url", "ca_fingerprint")}
+
+
+def destination_changed(channel: str, saved: dict, config: dict) -> bool:
+    return bool(saved) and any(saved.get(field) != config.get(field) for field in DESTINATION_FIELDS.get(channel, ()))
+
+
 def new_signing_secret() -> str:
     return "whsec_" + secrets.token_urlsafe(32)
 

@@ -40,10 +40,18 @@ _duration_sum = 0.0
 _duration_count = 0
 
 
+# The HTTP server accepts any token as a method, and every request is counted before it
+# is authenticated: a client inventing methods ("AAAAAAAAA1", "AAAAAAAAA2", ...) made a
+# new series each, without limit (M4 exit review). Anything else is OTHER.
+KNOWN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+
+
 def record_request(method: str, status: int, seconds: float) -> None:
     """Called by the request middleware; the path is not recorded (it can carry ids)."""
     global _duration_sum, _duration_count
-    key = (str(method or "GET").upper()[:10], str(int(status or 0)))
+    verb = str(method or "GET").upper()
+    status_code = int(status or 0)
+    key = (verb if verb in KNOWN_METHODS else "OTHER", str(status_code if 100 <= status_code <= 599 else 0))
     with _lock:
         _requests[key] = _requests.get(key, 0) + 1
         index = next((position for position, bound in enumerate(BUCKETS) if seconds <= bound), len(BUCKETS))

@@ -254,6 +254,37 @@ def place_release(package: Path, layout: Layout, runner: Runner) -> Path:
     return release
 
 
+# The code that starts the NEXT upgrade, kept inside each release (M4 exit review). An
+# upgrade run from the new package's own scripts runs that package's installer and module
+# before anything has verified them: someone who can write to the folder a package waits in
+# could take the signature check out and regenerate the checksums, which need no key. Run
+# from <InstallRoot>\current\installer\upgrade.ps1 instead, the installer, the package
+# checks and the Python are the ones this install already verified.
+LAUNCHER_DIR = "installer"
+LAUNCHER_FILES = (("installer/sentro_installer.py", "sentro_installer.py"),
+                  ("lib/SentroPackage.psm1", "SentroPackage.psm1"),
+                  ("installer/upgrade-installed.ps1", "upgrade.ps1"))
+
+
+def place_launcher(package: Path, release: Path) -> Path:
+    target = release / LAUNCHER_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    for source, name in LAUNCHER_FILES:
+        if (package / source).is_file():
+            shutil.copy2(package / source, target / name)
+    return target
+
+
+def stage_package(package: Path, layout: Layout) -> Path:
+    """A copy of the package under the install root, where only administrators can write,
+    so what is verified is exactly what is placed: the folder a package arrives in - a share,
+    a download folder - can change between the check and the copy."""
+    staged = layout.install_root / ".staging" / secrets.token_hex(8)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(package, staged)
+    return staged
+
+
 def switch_current(layout: Layout, release: Path) -> None:
     import _winapi
 
@@ -608,6 +639,7 @@ def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file:
     say(f"Placing release {manifest['label']} (Python {manifest['python']['version']}, "
         f"{len(manifest['wheels'])} wheels from the package).")
     release = place_release(package, layout, runner)
+    place_launcher(package, release)
     product(layout, release, runner, "config", "check")
     switch_current(layout, release)
     migrated = product_json(layout, release, runner, "migrate", "upgrade", "--json")
@@ -665,12 +697,24 @@ def decide_upgrade(installed: dict, package: dict, db_revision: int, restore_man
 
 
 def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None,
-            runner: Runner | None = None, allow_unsigned: bool = False, allow_downgrade: bool = False) -> dict:
+            runner: Runner | None = None, allow_unsigned: bool = False, allow_downgrade: bool = False,
+            publisher_key_file: Path | None = None) -> dict:
+    """Upgrade from a staged copy of the package (see stage_package), removed afterwards."""
+    if read_state(layout) is None:
+        raise InstallError(f"No Sentro install is recorded in {layout.state_file}; use install.ps1.")
+    staged = stage_package(package, layout)
+    try:
+        return _upgrade(staged, layout, restore_backup=restore_backup, runner=runner, allow_unsigned=allow_unsigned,
+                        allow_downgrade=allow_downgrade, publisher_key_file=publisher_key_file)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+def _upgrade(package: Path, layout: Layout, *, restore_backup: Path | None, runner: Runner | None,
+             allow_unsigned: bool, allow_downgrade: bool, publisher_key_file: Path | None) -> dict:
     runner = runner or Runner()
     services = Services(layout, runner)
     state = read_state(layout)
-    if state is None:
-        raise InstallError(f"No Sentro install is recorded in {layout.state_file}; use install.ps1.")
     manifest = read_manifest(package)
     old_release = current_release(layout)
     if old_release is None:
@@ -678,6 +722,11 @@ def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None
     restore_manifest = json.loads(Path(restore_backup).read_text(encoding="utf-8")) if restore_backup else None
     if manifest["commit"] == state.get("commit"):
         raise InstallError(f"Release {manifest['label']} is already installed.")
+    if publisher_key_file is not None:
+        # An install from before D10 has no pinned key, and install.ps1 refuses an existing
+        # install: the key is pinned here, from a file the operator names, with the INSTALLED
+        # release's code when it has a verifier - never from the package.
+        pin_publisher(package, layout, publisher_key_file=publisher_key_file, signing=load_signing(old_release))
     # D10: nothing from the new package is placed before the installed release's verifier
     # has checked it against this install's trust file.
     verify_package(package, layout, installed=state, verifier=old_release, allow_unsigned=allow_unsigned,
@@ -688,6 +737,7 @@ def upgrade(package: Path, layout: Layout, *, restore_backup: Path | None = None
     # database without converging it, and the running release needs none of them.
     existed = (layout.releases / manifest["label"]).exists()
     new_release = place_release(package, layout, runner)
+    place_launcher(package, new_release)
     product(layout, new_release, runner, "config", "check")  # nothing is stopped yet
     status = product_json(layout, new_release, runner, "migrate", "status", "--json")
     try:
@@ -807,7 +857,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.choices["install"].add_argument("--mode", choices=("evaluation", "production"), default="production")
     sub.choices["install"].add_argument("--db-url-file", type=Path)
     sub.choices["install"].add_argument("--public-host", default="")
-    sub.choices["install"].add_argument("--publisher-key-file", type=Path)
+    for name in ("install", "upgrade"):
+        sub.choices[name].add_argument("--publisher-key-file", type=Path)
     sub.choices["install"].add_argument("--trust-package-publisher", action="store_true")
     for name in ("install", "upgrade"):
         sub.choices[name].add_argument("--allow-unsigned", action="store_true")
@@ -824,7 +875,8 @@ def main(argv: list[str] | None = None) -> int:
                     trust_package_publisher=args.trust_package_publisher, allow_unsigned=args.allow_unsigned)
         elif args.command == "upgrade":
             upgrade(args.package.resolve(), layout, restore_backup=args.restore_backup,
-                    allow_unsigned=args.allow_unsigned, allow_downgrade=args.allow_downgrade)
+                    allow_unsigned=args.allow_unsigned, allow_downgrade=args.allow_downgrade,
+                    publisher_key_file=args.publisher_key_file)
         else:
             uninstall(layout, remove_data=args.remove_data, confirm=args.confirm_remove_data)
     except InstallError as exc:
