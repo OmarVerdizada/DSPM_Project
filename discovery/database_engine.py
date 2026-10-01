@@ -24,7 +24,7 @@ class DatabaseDiscoveryEngine(DSPMDiscoveryEngine):
     def __init__(self, config: ScanConfig, source: database_scanner.DatabaseSource, *, connection=None) -> None:
         config.incremental_enabled = False
         config.persistent_cache_enabled = False
-        config.use_sample_when_empty = False
+        config.walk_local_path = False
         super().__init__(config)
         self.source = source
         self._connection = connection

@@ -101,7 +101,7 @@ def _scan_metrics(root: Path) -> dict:
     tenant = "perf-gate"
     store.create_tenant(tenant, tenant)
     scope = incremental_scope_key("local", str(root), {"max_depth": 6})
-    common = dict(tenant_id=tenant, local_path=str(root), max_depth=6, use_sample_when_empty=True,
+    common = dict(tenant_id=tenant, local_path=str(root), max_depth=6, walk_local_path=True,
                   persistent_cache_enabled=False, incremental_scope=scope)
 
     full, full_s, ttff = _timed_run(ScanConfig(**common, incremental_enabled=False), capture_ttff=True)

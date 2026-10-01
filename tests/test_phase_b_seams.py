@@ -148,7 +148,7 @@ class APartitionedScanAppliesTheRulesEverywhereTest(unittest.TestCase):
         config = ScanConfig(
             tenant_id=self.tenant,
             local_path=str(self.estate),
-            use_sample_when_empty=True,
+            walk_local_path=True,
             persistent_cache_enabled=False,
             incremental_enabled=False,
             max_workers=1,

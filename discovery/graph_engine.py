@@ -20,7 +20,7 @@ from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 class GraphDiscoveryEngine(DSPMDiscoveryEngine):
 
     def __init__(self, config: ScanConfig, source: graph_scanner.GraphSource, checkpoint: dict | None) -> None:
-        config.use_sample_when_empty = False
+        config.walk_local_path = False
         super().__init__(config)
         self.source = source
         self.checkpoint = checkpoint

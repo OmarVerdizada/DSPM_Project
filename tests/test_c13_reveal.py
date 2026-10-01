@@ -326,7 +326,7 @@ class ExitReviewRevealTest(_ScannedCase):
         (private / "server.log").write_text(f"another workspace logged {OTHER_CARD}\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"DSPM_DATA_DIR": str(private)}):
             report = DSPMDiscoveryEngine(ScanConfig(tenant_id="t-rev", local_path=str(self.folder),
-                                                    use_sample_when_empty=True, incremental_enabled=False)).run().to_dict()
+                                                    walk_local_path=True, incremental_enabled=False)).run().to_dict()
         paths = [str(item.get("path") or "") for item in report.get("files") or []]
         self.assertTrue(any(path.endswith("payroll.txt") for path in paths), paths)
         self.assertFalse(any("install-data" in path for path in paths), paths)

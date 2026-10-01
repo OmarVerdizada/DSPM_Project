@@ -77,7 +77,7 @@ class AKilledScanResumesTest(_LocalTest):
 
     def _settings(self, name: str) -> dict:
         return dict(
-            tenant_id=TENANT, local_path=str(self.estate), max_depth=4, use_sample_when_empty=True,
+            tenant_id=TENANT, local_path=str(self.estate), max_depth=4, walk_local_path=True,
             persistent_cache_enabled=False, incremental_enabled=False, max_workers=2,
             cache_dir=str(self.base / f"{name}-cache"),
         )

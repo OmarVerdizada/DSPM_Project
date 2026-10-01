@@ -258,9 +258,9 @@ def run_one_scan(mode: str, tenant: str, corpus: str) -> dict:
         store.create_tenant(tenant, tenant)
     except Exception:  # the tenant exists (default, or the incremental rerun)
         pass
-    # use_sample_when_empty is the engine's switch for walking local_path (the name is
+    # walk_local_path is the engine's switch for walking local_path (the name is
     # historical); off, a local scan collects nothing - and "the corpus was scanned" says so.
-    config = ScanConfig(tenant_id=tenant, local_path=corpus, use_sample_when_empty=True,
+    config = ScanConfig(tenant_id=tenant, local_path=corpus, walk_local_path=True,
                         persistent_cache_enabled=mode in ("partitioned", "incremental"),
                         cache_dir=os.environ["C14_CACHE"], incremental_enabled=mode == "incremental",
                         compliance_enabled=mode == "compliance",

@@ -73,7 +73,10 @@ class ScanConfig:
     domain: str = "WORKGROUP"
     local_path: str = "enterprise_test_data"
     max_depth: int = 4
-    use_sample_when_empty: bool = True
+    # With no server named, walk `local_path` on this host. Engines that collect from
+    # elsewhere (Graph, SFTP, databases) turn it off so the base engine never falls back
+    # to the local folder. (Was `use_sample_when_empty`, which described neither.)
+    walk_local_path: bool = True
     asset_overrides: list[dict] = field(default_factory=list)
     allowed_extensions: list[str] = field(default_factory=list)
     extension_filter_enabled: bool = False
@@ -1342,7 +1345,7 @@ class DSPMDiscoveryEngine:
             self.last_scan_diagnostics = scanner.last_scan_diagnostics
             return records
 
-        if self.config.use_sample_when_empty:
+        if self.config.walk_local_path:
             walk_diagnostics: dict = {}
             records = scan_directory(
                 self.config.local_path,

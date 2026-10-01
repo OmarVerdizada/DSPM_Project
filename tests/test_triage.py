@@ -87,7 +87,7 @@ class TriageSignatureTests(unittest.TestCase):
 
 class TriageDetectorIntegrationTests(unittest.TestCase):
     def _engine(self) -> DSPMDiscoveryEngine:
-        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-test", use_sample_when_empty=False))
+        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-test", walk_local_path=False))
 
     def test_run_detectors_skips_binary_and_reports_triage(self) -> None:
         engine = self._engine()
@@ -120,7 +120,7 @@ class TriageSamplingTests(unittest.TestCase):
     record PARTIAL/truncated so findings inherit the truncation contract."""
 
     def _engine(self) -> DSPMDiscoveryEngine:
-        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-sample", use_sample_when_empty=False))
+        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-sample", walk_local_path=False))
 
     def test_disabled_by_default_scans_full_content(self) -> None:
         big = "a@b.com " + ("x " * 6000) + " c@d.com"
@@ -150,7 +150,7 @@ class TriageOrderingTests(unittest.TestCase):
     order (results are stored by original index)."""
 
     def _engine(self) -> DSPMDiscoveryEngine:
-        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-order", use_sample_when_empty=False))
+        return DSPMDiscoveryEngine(ScanConfig(tenant_id="triage-order", walk_local_path=False))
 
     def test_order_puts_high_score_first(self) -> None:
         engine = self._engine()

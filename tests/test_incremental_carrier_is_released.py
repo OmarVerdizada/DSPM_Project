@@ -79,7 +79,7 @@ class _ReScanTest(unittest.TestCase):
             tenant_id=self.tenant,
             local_path=str(self.estate),
             max_depth=4,
-            use_sample_when_empty=True,
+            walk_local_path=True,
             persistent_cache_enabled=True,
             cache_dir=str(self.cache),
             incremental_scope=self.scope,

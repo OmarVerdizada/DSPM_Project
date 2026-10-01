@@ -184,7 +184,7 @@ def _scan_config(tenant: str, estate: Path, cache: Path, *, compliance: bool = F
     return ScanConfig(
         tenant_id=tenant,
         local_path=str(estate),
-        use_sample_when_empty=True,
+        walk_local_path=True,
         persistent_cache_enabled=False,
         cache_dir=str(cache),
         incremental_enabled=False,

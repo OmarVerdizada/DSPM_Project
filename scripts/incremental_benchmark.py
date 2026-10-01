@@ -111,7 +111,7 @@ def main() -> None:
             tenant_id=tenant,
             local_path=str(estate),
             max_depth=args.max_depth,
-            use_sample_when_empty=True,
+            walk_local_path=True,
             persistent_cache_enabled=True,
             cache_dir=str(cache_dir),
             incremental_scope=scope,

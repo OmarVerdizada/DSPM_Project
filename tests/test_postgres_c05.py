@@ -256,7 +256,7 @@ class APartitionWorkerKeepsToItsOwnDatabaseTest(unittest.TestCase):
             for name in ("a", "b"):
                 (root / name).mkdir()
                 (root / name / "note.txt").write_text("contact jane.doe@example.com\n", encoding="utf-8")
-            config = ScanConfig(tenant_id=tenant, local_path=str(root), max_depth=3, use_sample_when_empty=True,
+            config = ScanConfig(tenant_id=tenant, local_path=str(root), max_depth=3, walk_local_path=True,
                                 persistent_cache_enabled=False, incremental_enabled=False)
             report = run_partitioned(config, workers=2)
         finally:

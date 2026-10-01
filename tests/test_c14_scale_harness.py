@@ -231,7 +231,7 @@ class APartitionIsReleasedWhenItIsWrittenTest(unittest.TestCase):
         self.addCleanup(lambda: root.exists() and harness.shutil.rmtree(root, ignore_errors=True))
         harness.write_corpus(root, 60)
         store.create_tenant("t-c14-gc", "gc")
-        config = ScanConfig(tenant_id="t-c14-gc", local_path=str(root), use_sample_when_empty=True,
+        config = ScanConfig(tenant_id="t-c14-gc", local_path=str(root), walk_local_path=True,
                             persistent_cache_enabled=False, incremental_enabled=False)
         with mock.patch.object(partitioned_scan.gc, "collect", wraps=partitioned_scan.gc.collect) as collect:
             compact = partitioned_scan.run_partitioned_scan("t-c14-gc", config, max_files=20)

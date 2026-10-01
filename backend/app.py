@@ -6280,7 +6280,7 @@ def _endpoint_analysis_engine(
         ScanConfig(
             tenant_id=principal.tenant_id,
             server="",
-            use_sample_when_empty=False,
+            walk_local_path=False,
             compliance_enabled=bool(payload.compliance_enabled),
             compliance_frameworks=list(payload.compliance_frameworks or []),
             asset_overrides=[

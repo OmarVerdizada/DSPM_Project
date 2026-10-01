@@ -53,7 +53,7 @@ class ARuleAppliesWhereTheScanEmitsTest(unittest.TestCase):
         return DSPMDiscoveryEngine(
             ScanConfig(
                 tenant_id="tenant-b6",
-                use_sample_when_empty=False,
+                walk_local_path=False,
                 incremental_enabled=False,
                 persistent_cache_enabled=cache,
                 cache_dir=self.cache_dir,

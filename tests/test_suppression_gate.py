@@ -61,7 +61,7 @@ class TheSuppressionGateTest(unittest.TestCase):
                 local_path=str(self.local),
                 # The flag that means "walk this local path"; the tree is not empty,
                 # so no sample data is used.
-                use_sample_when_empty=True,
+                walk_local_path=True,
                 persistent_cache_enabled=True,
                 cache_dir=str(self.cache),
                 incremental_enabled=False,

@@ -112,7 +112,7 @@ def main() -> int:
             tenant_id="pb-benchmark",
             local_path=str(estate),
             max_depth=args.max_depth,
-            use_sample_when_empty=True,
+            walk_local_path=True,
             persistent_cache_enabled=False,
             incremental_enabled=False,
         )

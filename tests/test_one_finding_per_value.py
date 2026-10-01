@@ -156,7 +156,7 @@ class TheGateTest(unittest.TestCase):
         self.analyzed = DSPMDiscoveryEngine(
             ScanConfig(
                 tenant_id="tenant-b7",
-                use_sample_when_empty=False,
+                walk_local_path=False,
                 incremental_enabled=False,
                 persistent_cache_enabled=False,
                 cache_dir=str(Path(self._dir.name) / "cache"),

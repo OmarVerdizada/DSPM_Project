@@ -40,7 +40,7 @@ def _partition_config(config: ScanConfig, *, local_path: str, max_depth: int) ->
     """A partition's config: the SAME detection policy as the parent, but an
     isolated unit — no callbacks (it must pickle to a worker process), no
     incremental/cache state (a clean process boundary; the caller owns persistence
-    via the merged report), and its own subtree + depth budget. ``use_sample_when_empty``
+    via the merged report), and its own subtree + depth budget. ``walk_local_path``
     is inherited unchanged: for a local scan it is the "scan the filesystem" flag,
     so a partition must keep it on to actually scan its subtree."""
     return replace(

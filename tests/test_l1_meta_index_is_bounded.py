@@ -65,7 +65,7 @@ class _EstateTest(unittest.TestCase):
         settings = dict(
             tenant_id="l1-index",
             local_path=str(self.local),
-            use_sample_when_empty=True,
+            walk_local_path=True,
             persistent_cache_enabled=True,
             cache_dir=str(self.cache),
             max_workers=1,
