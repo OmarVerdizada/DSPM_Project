@@ -34,7 +34,9 @@ UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]
 COOKIE_VALUE_RE = re.compile(r"\b[A-Za-z0-9._~+/=-]{16,256}\b")
 GA_CLIENT_ID_RE = re.compile(r"\bGA\d\.\d\.\d{6,}\.\d{6,}\b", re.IGNORECASE)
 CLICK_ID_RE = re.compile(r"\b(?:gclid|fbclid|msclkid|ttclid|yclid|gbraid|wbraid)[=:]\s*[A-Za-z0-9_-]{12,}\b", re.IGNORECASE)
-PUSH_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{80,}:[A-Za-z0-9_-]{20,}\b")
+# Starts only where a run of token characters starts, and takes the run whole: from every
+# word boundary inside a run ("x-x-x...") the old \b start re-read the rest of it.
+PUSH_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{80,}+:[A-Za-z0-9_-]{20,}\b")
 TCF_STRING_RE = re.compile(r"\b(?:CO|CP|BO)[A-Za-z0-9._-]{40,}\b")
 MAC_ADDRESS_RE = re.compile(r"(?<![A-Fa-f0-9])(?:[A-Fa-f0-9]{2}[:-]){5}[A-Fa-f0-9]{2}(?![A-Fa-f0-9])")
 MAC_DOTTED_RE = re.compile(r"(?<![A-Fa-f0-9])(?:[A-Fa-f0-9]{4}\.){2}[A-Fa-f0-9]{4}(?![A-Fa-f0-9])")
@@ -75,10 +77,18 @@ CARD_CVV_RE = re.compile(r"(?<!\d)\d{3,4}(?!\d)")
 IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b", re.IGNORECASE)
 SWIFT_BIC_RE = re.compile(r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b", re.IGNORECASE)
 ROUTING_ACCOUNT_RE = re.compile(r"\b(?:routing|aba|account(?: number)?|hesab(?: nomresi)?)\s*[:=]?\s*[A-Z0-9 -]{8,34}\b", re.IGNORECASE)
-MONEY_AMOUNT_RE = re.compile(r"(?<!\w)(?:[$€£₼]|AZN|USD|EUR|GBP)?\s*\d{1,3}(?:[ ,]\d{3})*(?:\.\d{2})?\s*(?:AZN|USD|EUR|GBP|manat)?(?!\w)", re.IGNORECASE)
+# Whitespace belongs to an amount only after its currency. A leading \s* made every
+# position of a whitespace run a start that re-read the rest of the run - quadratic in
+# the run - and put the run into the matched text (values are fingerprinted stripped).
+MONEY_AMOUNT_RE = re.compile(r"(?<!\w)(?:(?:[$€£₼]|AZN|USD|EUR|GBP)\s*)?\d{1,3}(?:[ ,]\d{3})*(?:\.\d{2})?\s*(?:AZN|USD|EUR|GBP|manat)?(?!\w)", re.IGNORECASE)
 CREDIT_SCORE_RE = re.compile(r"\b(?:[3-8]\d{2}|900)\b")
+# A match starts where an identifier run starts, a lookahead finds the keyword in the
+# run, and the run is then taken whole. The old leading [A-Za-z0-9_.-]* re-read the rest
+# of the run from every word boundary in it, quadratic in the run ("a.a.a...", "9-9-...").
+# The value (group 1) is the same; a match may now start at the run's leading "." or "-".
 SECRET_ASSIGNMENT_RE = re.compile(
-    r"\b[A-Za-z0-9_.-]*(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|client[_-]?secret|private[_-]?key)[A-Za-z0-9_.-]*\s*[:=]\s*([^\s'\";,#]{6,512}|['\"][^'\"]{6,512}['\"])",
+    r"(?<![A-Za-z0-9_.-])(?=[A-Za-z0-9_.-]*?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|client[_-]?secret|private[_-]?key))"
+    r"[A-Za-z0-9_.-]*+\s*[:=]\s*([^\s'\";,#]{6,512}|['\"][^'\"]{6,512}['\"])",
     re.IGNORECASE,
 )
 PASSWORD_HASH_RE = re.compile(

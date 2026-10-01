@@ -243,7 +243,10 @@ RULES = [
     ),
     DetectionRule(
         name="email",
-        pattern=re.compile(r"\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b"),
+        # The local part starts where its run of characters starts, with a letter, digit or
+        # "_" after any leading ".+-", and is taken whole: a \b start re-read the rest of
+        # the run from every boundary in it ("x-x-x...").
+        pattern=re.compile(r"(?<![a-zA-Z0-9_.+-])[.+-]*+(?=[a-zA-Z0-9_])[a-zA-Z0-9_.+-]++@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b"),
         risk="MEDIUM",
         description="Email address detected",
     ),

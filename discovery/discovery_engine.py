@@ -38,7 +38,9 @@ from risk.risk_engine import RiskAssessment, _is_protected_content, calculate_ri
 from scripts.logger import get_logger
 
 logger = get_logger(__name__)
-GENERIC_DETECTOR_VERSION = "generic-regex-v4"  # B7: findings carry the canonical entity type and its fingerprints
+# v5: the e-mail pattern made linear on long runs - a match may now start at its local
+# part's leading "." "+" or "-" - so a v4 analysis is not reused as if unchanged.
+GENERIC_DETECTOR_VERSION = "generic-regex-v5"
 FINDING_MODEL_VERSION = "finding-merge-v1"  # B7: one finding per value, whatever found it
 PCI_DETECTOR_VERSION = "pci-detector-v3"  # A2: one PAN validator, issuer-gated
 # Bumped v2 -> v3 for SC-1: previews and the classification cache are now

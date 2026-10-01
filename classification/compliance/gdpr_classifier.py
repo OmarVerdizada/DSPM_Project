@@ -34,7 +34,10 @@ NON_PERSONAL_CONTEXT_RULE_TYPES = {
     "gdpr_vulnerability_pentest_report",
     "gdpr_security_config_firewall_rule",
 }
-GDPR_DETECTOR_VERSION = "gdpr-detector-v4"  # D2: confidence tiers, exact-match fingerprints
+# v5: the money-amount and secret-assignment patterns made linear - the matched text of an
+# amount no longer carries leading whitespace, a secret assignment may start at a leading
+# "." or "-" - so what a v4 scan kept is not reused as if it were the same detector.
+GDPR_DETECTOR_VERSION = "gdpr-detector-v5"
 # A value's exact-match fingerprints kept per finding, for the reference-set check (D2).
 EDM_FINGERPRINTS_PER_FINDING = 50
 GDPR_RULE_CATALOG_VERSION = "gdpr-rules-v2"
