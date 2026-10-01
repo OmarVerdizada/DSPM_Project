@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>SENTRO — DSPM Command Center</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1" />
     <link rel="stylesheet" href="/static/fonts/fonts.css?v=1" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=11" />
     <link rel="stylesheet" href="/static/styles/components.css?v=1" />
@@ -151,7 +152,7 @@
             <div class="tb-newscan" id="fx-newscan">
               <button type="button" id="fx-newscan-btn" class="tb-primary" aria-haspopup="true" aria-expanded="false" data-requires="scan.run">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-                New Scan
+                <span class="tb-primary-label">New Scan</span>
               </button>
               <div class="tb-newscan-menu" role="menu">
                 <button type="button" role="menuitem" data-tab-jump="file-servers">
@@ -543,35 +544,35 @@
             </defs>
           </svg>
           <section class="ledger-row" aria-label="Findings by severity">
-            <button type="button" class="ledger-cell plain-btn" data-sev="critical" data-risk-jump="CRITICAL"
-                    aria-label="Critical — open in Findings">
+            <button type="button" class="ledger-cell plain-btn" data-sev="critical" data-risk-jump="CRITICAL">
               <span class="ledger-cell-label">Critical</span>
               <strong class="ledger-cell-value" id="critical-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
             </button>
-            <button type="button" class="ledger-cell plain-btn" data-sev="high" data-risk-jump="HIGH"
-                    aria-label="High — open in Findings">
+            <button type="button" class="ledger-cell plain-btn" data-sev="high" data-risk-jump="HIGH">
               <span class="ledger-cell-label">High</span>
               <strong class="ledger-cell-value" id="high-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
             </button>
-            <button type="button" class="ledger-cell plain-btn" data-sev="medium" data-risk-jump="MEDIUM"
-                    aria-label="Medium — open in Findings">
+            <button type="button" class="ledger-cell plain-btn" data-sev="medium" data-risk-jump="MEDIUM">
               <span class="ledger-cell-label">Medium</span>
               <strong class="ledger-cell-value" id="medium-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
             </button>
-            <button type="button" class="ledger-cell plain-btn" data-sev="low" data-risk-jump="LOW"
-                    aria-label="Low — open in Findings">
+            <button type="button" class="ledger-cell plain-btn" data-sev="low" data-risk-jump="LOW">
               <span class="ledger-cell-label">Low</span>
               <strong class="ledger-cell-value" id="low-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
             </button>
-            <button type="button" class="ledger-cell plain-btn" data-sev="protected" data-risk-jump="PROTECTED"
-                    aria-label="Protected — open in Findings">
+            <button type="button" class="ledger-cell plain-btn" data-sev="protected" data-risk-jump="PROTECTED">
               <span class="ledger-cell-label">Protected</span>
               <strong class="ledger-cell-value" id="protected-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
             </button>
-            <button type="button" class="ledger-cell plain-btn" data-sev="total" data-risk-jump="ALL"
-                    aria-label="All files — open in Findings">
+            <button type="button" class="ledger-cell plain-btn" data-sev="total" data-risk-jump="ALL">
               <span class="ledger-cell-label">All files</span>
               <strong class="ledger-cell-value" id="total-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
             </button>
           </section>
 
@@ -582,7 +583,7 @@
           <div class="dash-board">
             <section class="visual-panel dash-card dash-card-posture" aria-labelledby="posture-card-title">
               <div class="panel-title">
-                <h4 id="posture-card-title">Security posture</h4>
+                <h3 id="posture-card-title">Security posture</h3>
                 <span id="posture-card-meta">No scan yet</span>
               </div>
               <div id="posture-card" class="dash-card-body"></div>
@@ -590,7 +591,7 @@
 
             <section class="visual-panel dash-card dash-card-frameworks" aria-labelledby="frameworks-card-title">
               <div class="panel-title">
-                <h4 id="frameworks-card-title">Compliance frameworks</h4>
+                <h3 id="frameworks-card-title">Compliance frameworks</h3>
                 <span id="frameworks-card-meta">No scan yet</span>
               </div>
               <div id="frameworks-card" class="dash-card-body"></div>
@@ -598,7 +599,7 @@
 
             <section class="visual-panel dash-card dash-card-classes" aria-labelledby="classes-card-title">
               <div class="panel-title">
-                <h4 id="classes-card-title">Top data classes</h4>
+                <h3 id="classes-card-title">Top data classes</h3>
                 <span id="classes-card-meta">No scan yet</span>
               </div>
               <div id="data-classes-card" class="dash-card-body"></div>
@@ -606,7 +607,7 @@
 
             <section class="visual-panel dash-card dash-card-coverage" aria-labelledby="coverage-card-title">
               <div class="panel-title">
-                <h4 id="coverage-card-title">Assessment coverage</h4>
+                <h3 id="coverage-card-title">Assessment coverage</h3>
                 <span id="coverage-card-meta">No scan yet</span>
               </div>
               <div id="coverage-card" class="dash-card-body"></div>
@@ -614,7 +615,7 @@
 
             <section class="visual-panel dash-card dash-card-stale" aria-labelledby="stale-card-title">
               <div class="panel-title">
-                <h4 id="stale-card-title">Stale sensitive data</h4>
+                <h3 id="stale-card-title">Stale sensitive data</h3>
                 <span id="stale-card-meta">No scan yet</span>
               </div>
               <div id="stale-card" class="dash-card-body"></div>
@@ -622,7 +623,7 @@
 
             <section class="visual-panel dash-card dash-card-locations" aria-labelledby="locations-card-title">
               <div class="panel-title">
-                <h4 id="locations-card-title">Where the risk is</h4>
+                <h3 id="locations-card-title">Where the risk is</h3>
                 <span id="locations-card-meta">No scan yet</span>
               </div>
               <div id="locations-card" class="dash-card-body"></div>
@@ -2038,7 +2039,7 @@
       </div>
     </div>
 
-    <div id="notice-host" class="notice-host" aria-live="polite" aria-label="Notifications"></div>
+    <div id="notice-host" class="notice-host" role="region" aria-live="polite" aria-label="Notifications"></div>
 
 
     <script src="/static/console/alerts.js?v=1"></script>

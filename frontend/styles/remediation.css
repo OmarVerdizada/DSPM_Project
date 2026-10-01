@@ -875,8 +875,9 @@
   transform: translateX(0);
 }
 
-body:has(#remediation-drawer-toggle:checked) .app-shell > main,
-body:has(#tab-risk dialog[open]) .app-shell > main {
+/* Set by app.js (syncRemediationOverlay): a :has() on <body> restyled the whole
+   document on every DOM change anywhere in the console. */
+body.remediation-overlay-open .app-shell > main {
   position: relative;
   z-index: var(--z-overlay);
 }

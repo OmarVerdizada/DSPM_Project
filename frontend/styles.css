@@ -2163,6 +2163,7 @@ progress::-moz-progress-bar {
 }
 
 .panel-title h4,
+:where(#tab-overview) .panel-title h3,
 .top-file-card h4 {
   margin: 0;
 }
@@ -2757,6 +2758,7 @@ main { padding: 22px; max-width: 1840px; width: 100%; }
 .visual-panel, .workspace, .asset-editor, .profile-section-card, .profile-side-panel, .login-card, .login-visual { border-radius: 24px !important; }
 .visual-panel { padding: 20px !important; }
 .panel-title { margin-bottom: 16px; }
+:where(#tab-overview) .panel-title h3,
 .panel-title h4 { font-size: 18px; letter-spacing: -.035em; }
 .panel-title span { color: var(--muted); font-weight: 800; }
 .context-strip {
@@ -4143,6 +4145,7 @@ body.sidebar-collapsed .sidebar { padding-inline: 12px !important; }
 .visual-panel { min-width: 0; min-height: 0 !important; border-radius: var(--radius-lg) !important; }
 .visual-panel .panel-title { min-width: 0; }
 .visual-panel .panel-title h4,
+:where(#tab-overview) .visual-panel .panel-title h3,
 .visual-panel .panel-title span { overflow-wrap: anywhere; }
 .summary-row { min-width: 0 !important; border-radius: var(--radius-sm) !important; }
 .summary-row > span,
@@ -8293,6 +8296,7 @@ body::after {
 }
 
 /* ── Panels, tables, forms ──────────────────────────────── */
+:where(#tab-overview) .visual-panel .panel-title h3,
 .visual-panel .panel-title h4 { letter-spacing: -.01em; }
 .visual-panel .panel-title span {
   font-family: 'JetBrains Mono', monospace;
@@ -9585,6 +9589,7 @@ select.tenant-switcher {
   transition: box-shadow .15s ease-out;
 }
 .ref-card:hover, .visual-panel:hover { box-shadow: var(--shadow) !important; transform: none; }
+:where(#tab-overview) .visual-panel .panel-title h3,
 .visual-panel .panel-title h4 { font-size: 15px; font-weight: 600; }
 .visual-panel .panel-title span,
 :root:not([data-theme="dark"]) .visual-panel .panel-title span,

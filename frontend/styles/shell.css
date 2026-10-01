@@ -382,6 +382,91 @@ abbr[title] {
   .tb-search:focus-within { width: 100%; }
 }
 
+/* On a phone the cluster is two rows, not three: the search, then the actions
+   on one line. New Scan keeps its plus and its name ("New Scan" is still what
+   a screen reader announces); only the visible label goes. */
+@media (max-width: 560px) {
+  .topbar { gap: var(--space-2); }
+  .topbar-left { flex: 1 1 100%; }
+  .topbar-actions { flex: 1 1 100%; flex-wrap: nowrap; gap: var(--space-2); }
+  .tb-primary-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .topbar .tenant-switcher { flex: 1 1 auto; min-width: 0; }
+}
+
+/* ── The nav as a drawer ──────────────────────────────────────
+   Up to 860px the nav is the 68px rail, and opening it used to stack the full
+   nav ABOVE the page: a screen of nav, the page pushed below the fold, and the
+   whole page jumping when it closed. Open, it is now a drawer over the page:
+   the rail keeps its column, the page stays where it is, and a scrim says
+   what a tap outside does (app.js closes it on that tap, on Escape, and when
+   a page is chosen). The legacy layers pin the sidebar sticky and size it
+   with important declarations, so these overrides have to be important too. */
+@media (max-width: 860px) {
+  body:not(.sidebar-collapsed) .app-shell {
+    grid-template-columns: var(--shell-rail-col, 68px) minmax(0, 1fr) !important; /* token-gate: allow — the legacy column rules are !important */
+  }
+  body:not(.sidebar-collapsed) .app-shell > main { grid-column: 2; }
+  body:not(.sidebar-collapsed) .app-shell > .sidebar {
+    position: fixed !important; /* token-gate: allow — a legacy rule pins the sidebar sticky with !important */
+    inset: 0 auto 0 0;
+    z-index: var(--z-overlay);
+    width: min(280px, 86vw);
+    height: 100dvh !important; /* token-gate: allow — a legacy rule sets 100vh with !important */
+    box-shadow: var(--elev-overlay);
+  }
+  body:not(.sidebar-collapsed) .app-shell::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--z-overlay) - 1);
+    background: var(--scrim);
+  }
+  /* A 768px rule hides the account name for the rail; the open drawer has
+     the room, and it is where someone looks to see who they are signed in as. */
+  body:not(.sidebar-collapsed) .side-profile .profile-toggle > .side-profile-copy { display: flex; }
+}
+
+/* On a phone every pixel of the rail is taken from the page: 56px still holds
+   the 44px targets, and the page's own gutters drop from four nested 16px to
+   12 and 8 - the Findings filters had 209px of a 375px screen. */
+@media (max-width: 560px) {
+  :root { --shell-rail-col: 56px; }
+  body.sidebar-collapsed .app-shell {
+    grid-template-columns: var(--shell-rail-col) minmax(0, 1fr) !important; /* token-gate: allow — the legacy rail column is !important */
+  }
+  body.sidebar-collapsed .app-shell > .sidebar {
+    width: var(--shell-rail-col) !important; /* token-gate: allow — the legacy rail width is !important */
+    min-width: var(--shell-rail-col) !important; /* token-gate: allow — as above */
+    max-width: var(--shell-rail-col) !important; /* token-gate: allow — as above */
+    padding-inline: var(--space-1) !important; /* token-gate: allow — the legacy rail padding is !important */
+  }
+  .app-shell > main > .tab-panel.active { padding-inline: var(--space-3); }
+  .app-shell > main .workspace,
+  .app-shell > main .inventory-command-bar,
+  .app-shell > main .inventory-facet-row { padding-inline: var(--space-2); }
+}
+
+/* In the rail the destination names are hidden from sight, not from assistive
+   technology: display:none removed them from the accessibility tree as well,
+   and each icon was announced by its tooltip ("Posture, inventory, latest
+   scan") instead of its name. */
+body.sidebar-collapsed .side-nav .tab > span {
+  display: block !important; /* token-gate: allow — a legacy rule hides the label with display:none */
+  position: absolute !important; /* token-gate: allow — legacy layers reposition the label with !important */
+  width: 1px !important; /* token-gate: allow — as above */
+  height: 1px !important; /* token-gate: allow — as above */
+  overflow: hidden !important; /* token-gate: allow — as above */
+  clip-path: inset(50%);
+  white-space: nowrap !important; /* token-gate: allow — as above */
+}
+
 
 /* ── The scan status box ──────────────────────────────────────
    A completed scan reports eight diagnostics. As one joined sentence they
@@ -469,7 +554,9 @@ abbr[title] {
   min-width: 0 !important;           /* token-gate: allow - see above */
   min-height: 0 !important;          /* token-gate: allow - see above */
   height: auto !important;           /* token-gate: allow - see above */
-  padding: 3px var(--space-3) !important;  /* token-gate: allow - 14px pins the height */
+  /* The legacy layer still draws each chip's icon at left:11px, 15px wide; the
+     text starts after it rather than under it. */
+  padding: 3px var(--space-3) 3px 32px !important;  /* token-gate: allow - 14px pins the height */
   border-right: 0;
   border-radius: 999px !important;   /* token-gate: allow - see above */
   background: color-mix(in srgb, var(--ink) 4%, var(--surface));

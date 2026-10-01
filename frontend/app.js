@@ -451,6 +451,11 @@ let accessToken = safeSessionGet("dspm-access-token") || "";
 if (accessToken) {
   document.body.classList.remove("auth-locked");
   document.body.classList.add("auth-ready");
+  // Up to 1024px the nav starts as the icon rail. sentro-fx.js keeps it there, but it runs
+  // after this script, by which time the shell has painted with the full nav stacked over
+  // the page - and the whole page then jumped (layout shift 0.97 on a phone). Decided here,
+  // before the first frame, the page is drawn once in the place it stays.
+  if (window.matchMedia?.("(max-width: 1024px)")?.matches) document.body.classList.add("sidebar-collapsed");
 } else {
   window.location.replace("/login");
 }
@@ -8014,8 +8019,9 @@ function renderPostureCard(summary, score) {
 let dashFit = "";
 
 function refitDashboardLists() {
-  const board = document.querySelector(".dash-board");
-  if (!board || !board.clientHeight) return;
+  // Whether the board is showing is a class, not a geometry: reading the board's height
+  // here forced a layout of its own on every render.
+  if (!document.querySelector(".dash-board") || !panelIsVisible("tab-overview")) return;
   // Three reads, then three writes. Reading a height after writing markup
   // forces the layout the write invalidated, so interleaving them paid for
   // three layouts of the whole document instead of one.
@@ -8096,10 +8102,37 @@ function dataClassKind(name) {
 // body's clientHeight is a fixed target to fill and reading it back after a
 // render cannot feed a loop. `min` keeps a card honest on a very short window
 // - it is better to clip one row than to render a list of two.
+//
+// Below the board's breakpoints (pages.css) the cards are in normal flow and as tall as
+// what is in them, so a card's height says nothing about how many rows fit - and reading
+// it forced a style pass of the whole document per card, per render: 800ms of a phone's
+// boot. There the lists take a fixed length and the page scrolls.
+const dashFlowLayout = window.matchMedia?.("(max-width: 1180px), (max-height: 640px)");
+const DASH_FLOW_ROWS = { "#data-classes-card": 8, "#locations-card": 10, "#posture-card": 5 };
+// In the one-screen layout a card's height comes from the grid, so it cannot change while
+// one render runs. The three are read together, before any of them is written - one
+// layout instead of one per card - and the readings are dropped when the task ends.
+let dashBodyHeights = null;
+
+function dashBodyHeight(body) {
+  if (!dashBodyHeights) {
+    dashBodyHeights = new Map();
+    for (const selector of Object.keys(DASH_FLOW_ROWS)) {
+      const card = document.querySelector(selector);
+      if (card) dashBodyHeights.set(card, card.clientHeight);
+    }
+    queueMicrotask(() => { dashBodyHeights = null; });
+  }
+  if (!dashBodyHeights.has(body)) dashBodyHeights.set(body, body.clientHeight);
+  return dashBodyHeights.get(body);
+}
+
 function dashListCapacity(bodySelector, rowHeight, { min, max, reserve = 0 }) {
+  if (dashFlowLayout?.matches) return DASH_FLOW_ROWS[bodySelector] ?? min;
   const body = document.querySelector(bodySelector);
-  if (!body || !body.clientHeight) return min;
-  const room = body.clientHeight - reserve;
+  const height = body ? dashBodyHeight(body) : 0;
+  if (!height) return min;
+  const room = height - reserve;
   return Math.max(min, Math.min(max, Math.floor(room / rowHeight)));
 }
 
@@ -8349,12 +8382,12 @@ function renderCoverageCard() {
   const tallest = Math.max(...columns.map(([, count]) => count), 1);
   card.innerHTML = `
     <p class="coverage-lede"><strong>${share}%</strong> classified</p>
-    <div class="col-chart" role="img"
+    <div class="col-chart" role="group"
          aria-label="${columns.map(([, count, label]) => `${count.toLocaleString()} ${label.toLowerCase()}`).join(", ")}">
       ${columns.map(([kind, count, label, jump]) => `
         <button type="button" class="col-item plain-btn" data-coverage-jump="${escapeHtml(jump)}" data-kind="${kind}"
                 data-style="--col-height:${Math.max(14, Math.round((count / tallest) * 100))}%"
-                aria-label="${escapeHtml(label)}, ${count.toLocaleString()} files — open in Findings">
+                aria-label="${count.toLocaleString()} ${escapeHtml(label)} files, open in Findings">
           <span class="col-value">${count.toLocaleString()}</span>
           <span class="col-bar"></span>
           <span class="col-label">${escapeHtml(label)}</span>
@@ -9309,6 +9342,7 @@ async function openRemediationFinding(findingId, { openDrawer = true } = {}) {
   selectedRemediationFindingId = finding.finding_id;
   selectedRemediationFinding = finding;
   if (openDrawer && remediationDrawerToggle) remediationDrawerToggle.checked = true;
+  syncRemediationOverlay();
   remediationDrawerBody.innerHTML = remediationDrawerLoadingMarkup();
   renderRemediationWorkspace();
   const context = captureTenantContext();
@@ -9346,18 +9380,35 @@ function remediationTomorrow() {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+// While the finding drawer or one of its dialogs is open, the page lifts <main> above the
+// shell (remediation.css). That was `body:has(... :checked), body:has(dialog[open])`, and a
+// :has() anchored on <body> made EVERY change to the DOM, anywhere in the console, restyle
+// the whole document: ~4ms per text change on a laptop, ~18ms on a phone - each table row
+// written, each frame of a count-up. A class, set by whatever opens or closes them, costs
+// nothing in between.
+function syncRemediationOverlay() {
+  const open = Boolean(remediationDrawerToggle?.checked)
+    || Boolean(document.querySelector("#tab-risk dialog[open], #tab-risk dialog.is-open"));
+  document.body.classList.toggle("remediation-overlay-open", open);
+}
+
 function remediationShowModal(modal) {
   if (!modal) return;
   modal.querySelectorAll("[data-remediation-modal-error]").forEach((element) => { element.textContent = ""; });
   if (typeof modal.showModal === "function") modal.showModal();
   else modal.classList.add("is-open");
+  syncRemediationOverlay();
 }
 
 function closeRemediationModal(modal) {
   if (!modal) return;
   if (typeof modal.close === "function") modal.close();
   else modal.classList.remove("is-open");
+  syncRemediationOverlay();
 }
+
+// A dialog also closes itself - Escape, or its form's method="dialog" dismiss layer.
+document.querySelectorAll("#tab-risk dialog").forEach((dialog) => dialog.addEventListener("close", syncRemediationOverlay));
 
 function openRemediationAction(action, findingId) {
   const finding = remediationFindingById(findingId);
@@ -12138,19 +12189,36 @@ auditTo?.addEventListener("input", debounce(() => renderAudit(latestAuditEvents)
 // collapse); the topbar hamburger stays as the small-screen off-canvas opener.
 // Both carry [data-sidebar-toggle] and share this handler.
 const sidebarToggles = document.querySelectorAll("[data-sidebar-toggle]");
-function setSidebarCollapsed(collapsed) {
+function setSidebarCollapsed(collapsed, { remember = true } = {}) {
   document.body.classList.toggle("sidebar-collapsed", collapsed);
   sidebarToggles.forEach((btn) => {
     btn.setAttribute("aria-expanded", String(!collapsed));
     btn.title = collapsed ? "Expand navigation" : "Collapse navigation";
   });
-  safeSessionSet("dspm-sidebar-collapsed", collapsed ? "1" : "");
+  if (remember) safeSessionSet("dspm-sidebar-collapsed", collapsed ? "1" : "");
 }
 
 sidebarToggles.forEach((btn) => {
   btn.addEventListener("click", () => {
     setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
   });
+});
+
+// Up to 860px the open nav is a drawer over the page (shell.css), so it closes the way the
+// other overlays here close: a tap outside it, Escape, or choosing a page in it. None of
+// these is a preference worth keeping for a wider window, so none of them is remembered.
+const drawerNav = window.matchMedia?.("(max-width: 860px)");
+function navDrawerOpen() {
+  return Boolean(drawerNav?.matches) && !document.body.classList.contains("sidebar-collapsed");
+}
+document.addEventListener("click", (event) => {
+  if (!navDrawerOpen()) return;
+  const inNav = event.target.closest?.(".sidebar");
+  if (inNav && !event.target.closest(".nav-sub-link")) return;
+  setSidebarCollapsed(true, { remember: false });
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && navDrawerOpen()) setSidebarCollapsed(true, { remember: false });
 });
 refreshExecutiveBtn.addEventListener("click", () => {
   loadRemediationFindings({ showLoading: false, resetPage: true })
@@ -12225,6 +12293,7 @@ function openRemediationFiltered(filters = {}) {
   applyRemediationFacets();
 }
 remediationDrawerToggle?.addEventListener("change", () => {
+  syncRemediationOverlay();
   if (remediationDrawerToggle.checked) return;
   remediationDetailRequest += 1;
   selectedRemediationFindingId = "";
@@ -12574,6 +12643,7 @@ tenantSwitcher.addEventListener("change", async () => {
   selectedRemediationFindingId = "";
   selectedRemediationFinding = null;
   if (remediationDrawerToggle) remediationDrawerToggle.checked = false;
+  syncRemediationOverlay();
   clearFindingsFacetState();
   expandedInventoryKeys.clear();
   inventoryDetailRequests.clear();
@@ -12687,6 +12757,13 @@ renderScanContextPanels();
 renderFindingsWorkspace();
 if (safeSessionGet("dspm-sidebar-collapsed") === "1") {
   setSidebarCollapsed(true);
+} else if (document.body.classList.contains("sidebar-collapsed")) {
+  // Collapsed for a narrow window at boot: the toggles say so too, without remembering it
+  // as a choice the next wide window would inherit.
+  sidebarToggles.forEach((btn) => {
+    btn.setAttribute("aria-expanded", "false");
+    btn.title = "Expand navigation";
+  });
 }
 updateHistoryFilterControls();
 updateAuditFilterControls();
