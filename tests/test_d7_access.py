@@ -48,6 +48,46 @@ class TheAnalysisTest(unittest.TestCase):
         self.assertTrue(verdict["wide_access"])
         self.assertFalse(verdict["writable"], "reading allowed, writing denied")
 
+    def test_a_deny_takes_only_the_rights_it_names(self) -> None:
+        # M4 exit review: a deny of Delete, ChangePermissions or TakeOwnership - each one of
+        # the write-ish bits - made "Domain Users: Allow Modify" look unable to write.
+        domain_users = "S-1-5-21-1-2-3-513"
+        for denied in ("Delete", "ChangePermissions", "TakeOwnership", "WriteAttributes, WriteExtendedAttributes"):
+            with self.subTest(denied=denied):
+                acl = {"entries": [entry("CORP\\Domain Users", "Modify", sid=domain_users),
+                                   entry("CORP\\Domain Users", denied, "deny", sid=domain_users)]}
+                self.assertTrue(analyze_acl(acl)["writable"], f"Modify less {denied} still writes the data")
+                self.assertEqual([(item.read, item.write) for item in effective_access(acl)], [(True, True)])
+        masks = {"entries": [entry("CORP\\Domain Users", "", sid=domain_users, mask=0x301BF),
+                             entry("CORP\\Domain Users", "", "deny", sid=domain_users, mask=0x10000)]}
+        self.assertTrue(analyze_acl(masks)["writable"], "the same from recorded masks")
+        data = {"entries": [entry("Everyone", "Modify", sid="S-1-1-0"),
+                            entry("Everyone", "WriteData, AppendData", "deny", sid="S-1-1-0")]}
+        self.assertFalse(analyze_acl(data)["writable"], "denying the data writes is what stops writing")
+        self.assertTrue(analyze_acl(data)["wide_access"], "and it leaves reading alone")
+        generic = {"entries": [entry("Everyone", "", sid="S-1-1-0", mask=0x40000000),
+                               entry("Everyone", "Write", "deny", sid="S-1-1-0")]}
+        self.assertFalse(analyze_acl(generic)["writable"], "a generic allow meets a specific deny bit for bit")
+        owner = {"entries": [entry("Everyone", "FullControl", sid="S-1-1-0"),
+                             entry("Everyone", "Write", "deny", sid="S-1-1-0")]}
+        self.assertTrue(analyze_acl(owner)["writable"], "ChangePermissions survives: it can grant itself write")
+
+    def test_an_explicit_entry_outranks_an_inherited_one(self) -> None:
+        # Windows evaluates explicit entries first: an explicit Allow Read on the file wins
+        # over an inherited Deny Read - the analyzer used to drop Everyone here.
+        everyone = "S-1-1-0"
+        inherited_deny = {"entries": [dict(entry("Everyone", "Read", "deny", sid=everyone), inherited=True),
+                                      dict(entry("Everyone", "Read", sid=everyone), inherited=False)]}
+        self.assertTrue(analyze_acl(inherited_deny)["wide_access"], "the explicit allow is evaluated first")
+        explicit_deny = {"entries": [dict(entry("Everyone", "Read", sid=everyone), inherited=True),
+                                     dict(entry("Everyone", "Read", "deny", sid=everyone), inherited=False)]}
+        self.assertFalse(analyze_acl(explicit_deny)["wide_access"], "an explicit deny still wins")
+        # Inherited entries keep the DACL's order: a nearer folder's allow precedes a farther
+        # folder's deny, and Windows grants it.
+        nearer_allow = {"entries": [dict(entry("Everyone", "Read", sid=everyone), inherited=True),
+                                    dict(entry("Everyone", "Read", "deny", sid=everyone), inherited=True)]}
+        self.assertTrue(analyze_acl(nearer_allow)["wide_access"])
+
     def test_broad_groups_are_named_exactly_or_known_by_sid(self) -> None:
         for principal, sid in (("BUILTIN\\Users", ""), ("Everyone", ""), ("CORP\\Domain Users", ""),
                                ("NT AUTHORITY\\Authenticated Users", ""), ("renamed", "S-1-5-11"),
@@ -89,6 +129,14 @@ class TheAnalysisTest(unittest.TestCase):
         typed = dict(legacy, types=["deny", "allow"])
         self.assertFalse(analyze_acl(typed)["wide_access"], "a PowerShell read that reported Deny")
 
+    def test_a_null_dacl_is_everyone_with_full_control(self) -> None:
+        # No access list at all lets everyone do everything; it was reported as no access.
+        principals, permissions, entries = win_security._read_dacl(None)
+        self.assertEqual((principals, permissions), (["Everyone"], ["FullControl"]))
+        self.assertEqual([(item["sid"], item["mask"], item["type"]) for item in entries], [("S-1-1-0", 0x1F01FF, "allow")])
+        verdict = analyze_acl({"principals": principals, "permissions": permissions, "entries": entries})
+        self.assertTrue(verdict["wide_access"] and verdict["writable"])
+
     def test_the_analysis_is_part_of_the_reuse_signature(self) -> None:
         from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
@@ -116,6 +164,49 @@ class TheWindowsReadTest(unittest.TestCase):
         access = {item.key: item for item in effective_access(acl)}
         self.assertTrue(access[GUESTS].read)
         self.assertFalse(access[GUESTS].write, "the deny removes write")
+
+    def test_the_dacl_as_windows_orders_it(self) -> None:
+        # A folder denies Guests reading, inherited by what is created in it; one file then
+        # allows Guests reading explicitly - Windows puts that first and grants it. Another
+        # allows Modify and denies only Delete: Guests can still write it.
+        folder = Path(tempfile.mkdtemp(prefix="d7-order-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        subprocess.run(["icacls", str(folder), "/deny", f"*{GUESTS}:(OI)(R)"], check=True, capture_output=True)
+        allowed, modify = folder / "allowed.txt", folder / "modify.txt"
+        for path in (allowed, modify):
+            path.write_text("x", encoding="utf-8")
+        subprocess.run(["icacls", str(allowed), "/grant", f"*{GUESTS}:(R)"], check=True, capture_output=True)
+        acl = win_security.security_for_path(str(allowed))
+        guests = [(item["type"], item["inherited"]) for item in acl["entries"] if item["sid"] == GUESTS]
+        self.assertEqual(guests, [("allow", False), ("deny", True)], "explicit first, as the DACL holds them")
+        self.assertTrue({item.key: item for item in effective_access(acl)}[GUESTS].read)
+        for grant in (["/grant", f"*{GUESTS}:(M)"], ["/deny", f"*{GUESTS}:(DE)"]):
+            subprocess.run(["icacls", str(modify), *grant], check=True, capture_output=True)
+        access = {item.key: item for item in effective_access(win_security.security_for_path(str(modify)))}
+        self.assertTrue(access[GUESTS].write, "denying Delete leaves Modify's writing")
+
+    def test_a_null_dacl_is_read_as_everyone_and_an_empty_one_as_no_one(self) -> None:
+        import ctypes
+
+        # A NULL DACL, on a file of this test's own in a temporary folder of its own.
+        folder = Path(tempfile.mkdtemp(prefix="d7-null-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        target = folder / "open.txt"
+        target.write_text("x", encoding="utf-8")
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi32.SetNamedSecurityInfoW.argtypes = [ctypes.c_wchar_p, ctypes.c_int, ctypes.c_ulong, ctypes.c_void_p,
+                                                   ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        dacl_protected = 0x4 | 0x80000000  # DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+        self.assertEqual(advapi32.SetNamedSecurityInfoW(str(target), 1, dacl_protected, None, None, None, None), 0)
+        acl = win_security.security_for_path(str(target))
+        self.assertEqual([(item["sid"], item["type"], item["mask"]) for item in acl["entries"]],
+                         [("S-1-1-0", "allow", 0x1F01FF)])
+        self.assertTrue(analyze_acl(acl)["writable"], "everyone can write a file with no access list")
+        # An EMPTY DACL - present, no entries - grants nothing.
+        self.assertTrue(win_security.available())
+        buffer = ctypes.create_string_buffer(64)
+        self.assertTrue(advapi32.InitializeAcl(buffer, 64, 2))
+        self.assertEqual(win_security._read_dacl(ctypes.addressof(buffer)), ([], [], []))
 
 
 @unittest.skipUnless(sys.platform == "win32", "icacls sets the fixture's ACLs")

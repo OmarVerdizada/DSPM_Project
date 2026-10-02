@@ -31,6 +31,8 @@ _ERROR_SUCCESS = 0
 _ACCESS_ALLOWED_ACE_TYPE = 0
 _ACCESS_DENIED_ACE_TYPE = 1
 _INHERITED_ACE = 0x10
+_FILE_ALL_ACCESS = 0x1F01FF
+_EVERYONE_SID = "S-1-1-0"
 
 # .NET System.Security.AccessControl.FileSystemRights, ascending by value.
 # Enum.ToString() for a [Flags] enum walks these largest-first, subtracting and
@@ -209,6 +211,16 @@ def rights_to_names(mask: int) -> str:
     return ", ".join(parts) if parts else str(mask)
 
 
+def _null_dacl() -> tuple[list[str], list[str], list[dict]]:
+    """What a NULL DACL means: no access list at all, so Windows lets everyone do
+    everything. Reported as the one entry that says so - Everyone, full control, the
+    stand-in .NET itself uses for a NULL DACL - marked as standing in for no list."""
+    rights = rights_to_names(_FILE_ALL_ACCESS)
+    entry = {"principal": "Everyone", "sid": _EVERYONE_SID, "rights": rights, "mask": _FILE_ALL_ACCESS,
+             "type": "allow", "inherited": False, "null_dacl": True}
+    return ["Everyone"], [rights], [entry]
+
+
 def _read_dacl(dacl_ptr: Any) -> tuple[list[str], list[str], list[dict]]:
     """(principals, permissions) parallel lists, mirroring Get-Acl's .Access, and the
     entries themselves: principal, SID, rights, access mask, allow or deny, inherited.
@@ -218,7 +230,10 @@ def _read_dacl(dacl_ptr: Any) -> tuple[list[str], list[str], list[dict]]:
     carry the type; the lists stay as they were for reports and baselines."""
     ctypes = _ctypes
     if not dacl_ptr:
-        return [], [], []
+        # GetNamedSecurityInfoW succeeded and gave no DACL: a NULL (or absent) DACL, which
+        # grants everyone full control - not "no access", which it was reported as. An
+        # EMPTY DACL (present, no entries) is the one that grants nothing; that is below.
+        return _null_dacl()
 
     class ACL_SIZE_INFORMATION(ctypes.Structure):
         _fields_ = [

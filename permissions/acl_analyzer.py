@@ -22,6 +22,20 @@ What changed with D7, and why:
 * Service and indexer identities (NT SERVICE, IIS, NETWORK/LOCAL SERVICE, and the
   accounts named in ``DSPM_INDEXER_PRINCIPALS``) are flagged: a search indexer that
   can read everything is broad access by another name.
+
+What the M4 exit review changed, and why:
+
+* A deny cancelled a whole verdict, not the rights it named: "Domain Users: Allow
+  Modify, Deny Delete" read as "cannot write", because Delete is one of the write-ish
+  bits. Entries are now evaluated as access masks, bit by bit, the way Windows does:
+  what the allows grant less what an earlier deny took. "Can write" means writing or
+  appending the data survives (or changing the permissions or the owner, either of which
+  lets the holder grant itself write) - not that every write-ish bit does.
+* The ``inherited`` flag was recorded and never read, so an inherited "Everyone: Deny
+  Read" outranked an explicit "Everyone: Allow Read" on the file - which Windows grants.
+  Entries are evaluated in Windows' canonical order: explicit denies, explicit allows,
+  then the inherited entries in the order the DACL holds them (nearest ancestor first,
+  each level's denies before its allows).
 """
 
 from __future__ import annotations
@@ -31,7 +45,7 @@ from dataclasses import dataclass
 
 # A change here changes what a scan concludes about a file, so incremental reuse must
 # not replay an older verdict: this is part of the engine's version signature.
-ACL_ANALYSIS_VERSION = "acl-2"
+ACL_ANALYSIS_VERSION = "acl-3"
 
 # Well-known SIDs of groups every (or nearly every) user is in.
 BROAD_SIDS = {
@@ -64,14 +78,33 @@ SERVICE_DOMAINS = {"nt service", "iis apppool"}
 # Access-mask bits (winnt.h). Generic rights appear on inherited-only entries and on
 # some copied ACLs.
 _FILE_READ_DATA = 0x1
-_WRITE_BITS = 0x2 | 0x4 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000  # data, append, EA, attrs, delete, DAC, owner
+_FILE_WRITE_DATA = 0x2
+_FILE_APPEND_DATA = 0x4
+_WRITE_DAC = 0x40000
+_WRITE_OWNER = 0x80000
 _GENERIC_ALL = 0x10000000
+_GENERIC_EXECUTE = 0x20000000
 _GENERIC_WRITE = 0x40000000
 _GENERIC_READ = 0x80000000
-# Rights names as .NET renders them (Get-Acl, and rights_to_names).
-_READ_NAMES = {"readdata", "listdirectory", "read", "readandexecute", "modify", "fullcontrol"}
-_WRITE_NAMES = {"writedata", "createfiles", "appenddata", "createdirectories", "write", "modify", "fullcontrol",
-                "delete", "changepermissions", "takeownership"}
+# What each generic right stands for on a file (FILE_GENERIC_READ and the rest), so an
+# allow written in generic rights and a deny written in file rights meet bit for bit.
+_GENERIC_MAP = ((_GENERIC_READ, 0x120089), (_GENERIC_WRITE, 0x120116), (_GENERIC_EXECUTE, 0x1200A0),
+                (_GENERIC_ALL, 0x1F01FF))
+# The rights that make a verdict. Reading is reading the data. Writing is writing or
+# appending it - or changing the permissions or the owner, since either lets the holder
+# grant itself write. Delete, attributes and extended attributes alone change no content,
+# so a deny of one of them leaves "can write" standing.
+_READ = _FILE_READ_DATA
+_WRITE = _FILE_WRITE_DATA | _FILE_APPEND_DATA | _WRITE_DAC | _WRITE_OWNER
+# Rights names as .NET renders them (Get-Acl, and rights_to_names), with their masks.
+_RIGHT_NAMES = {
+    "readdata": 0x1, "listdirectory": 0x1, "writedata": 0x2, "createfiles": 0x2, "appenddata": 0x4,
+    "createdirectories": 0x4, "readextendedattributes": 0x8, "writeextendedattributes": 0x10,
+    "executefile": 0x20, "traverse": 0x20, "deletesubdirectoriesandfiles": 0x40, "readattributes": 0x80,
+    "writeattributes": 0x100, "write": 0x116, "delete": 0x10000, "readpermissions": 0x20000,
+    "read": 0x20089, "readandexecute": 0x200A9, "modify": 0x301BF, "changepermissions": _WRITE_DAC,
+    "takeownership": _WRITE_OWNER, "synchronize": 0x100000, "fullcontrol": 0x1F01FF,
+}
 
 
 def indexer_principals() -> set[str]:
@@ -130,19 +163,37 @@ def classify_principal(principal: str, sid: str = "") -> tuple[bool, bool, bool]
     return broad, privileged, service
 
 
-def _rights(entry: dict) -> tuple[bool, bool]:
-    """(grants read, grants write) for one entry, from its mask or its rights names."""
+def _mask(entry: dict) -> int:
+    """One entry's access mask - recorded, or built from its rights names (Get-Acl renders
+    bits it has no name for, generic rights among them, as a number) - with each generic
+    right replaced by the file rights it stands for."""
     mask = entry.get("mask")
-    if isinstance(mask, int) and mask:
-        read = bool(mask & (_FILE_READ_DATA | _GENERIC_READ | _GENERIC_ALL))
-        write = bool(mask & (_WRITE_BITS | _GENERIC_WRITE | _GENERIC_ALL))
-        return read, write
-    names = {part.strip().replace(" ", "").lower() for part in str(entry.get("rights") or "").split(",")}
-    numeric = next((int(part) for part in names if part.lstrip("-").isdigit()), 0)
-    if numeric:
-        numeric &= 0xFFFFFFFF
-        return bool(numeric & (_GENERIC_READ | _GENERIC_ALL)), bool(numeric & (_GENERIC_WRITE | _GENERIC_ALL))
-    return bool(names & _READ_NAMES), bool(names & _WRITE_NAMES)
+    if not (isinstance(mask, int) and not isinstance(mask, bool) and mask):
+        mask = 0
+        for part in str(entry.get("rights") or "").split(","):
+            name = part.strip().replace(" ", "").lower()
+            mask |= (int(name) & 0xFFFFFFFF) if name.lstrip("-").isdigit() else _RIGHT_NAMES.get(name, 0)
+    mask &= 0xFFFFFFFF
+    for generic, specific in _GENERIC_MAP:
+        if mask & generic:
+            mask = (mask & ~generic) | specific
+    return mask
+
+
+def _is_deny(entry: dict) -> bool:
+    return str(entry.get("type") or "allow").lower().startswith("deny")
+
+
+def _evaluation_order(entries: list[dict]) -> list[dict]:
+    """Windows' canonical order: explicit denies, explicit allows, then the inherited
+    entries as the DACL holds them. Within the inherited ones the recorded order is kept:
+    the DACL lists the nearest ancestor's entries first, each level's denies before its
+    allows, and a nearer level's allow outranks a farther level's deny. An entry that
+    does not say whether it was inherited (older records, Get-Acl) counts as explicit."""
+    explicit = [entry for entry in entries if not entry.get("inherited")]
+    inherited = [entry for entry in entries if entry.get("inherited")]
+    return ([entry for entry in explicit if _is_deny(entry)] + [entry for entry in explicit if not _is_deny(entry)]
+            + inherited)
 
 
 def entries_of(acl: dict) -> list[dict]:
@@ -160,11 +211,14 @@ def entries_of(acl: dict) -> list[dict]:
 
 
 def effective_access(acl: dict) -> list[Access]:
-    """Each principal's effective read and write, allow entries less the denies of the
-    same right for the same principal; principals with neither are left out."""
-    allowed: dict[str, list] = {}
-    denied: dict[str, list] = {}
+    """Each principal's effective read and write; principals with neither are left out.
+
+    Evaluated as Windows evaluates a DACL for one principal: walking the entries in
+    canonical order, each right (mask bit) is decided by the first entry that names it -
+    granted by an allow, refused by a deny - and what was granted is the access. A deny
+    therefore takes only the rights it names, and only from allows it comes before."""
     names: dict[str, tuple[str, str]] = {}
+    keyed: list[dict] = []
     for entry in entries_of(acl or {}):
         principal = str(entry.get("principal") or "").strip()
         sid = str(entry.get("sid") or "").strip()
@@ -172,18 +226,21 @@ def effective_access(acl: dict) -> list[Access]:
             continue
         key = principal_key(principal, sid)
         names.setdefault(key, (principal or sid, sid))
-        read, write = _rights(entry)
-        bucket = denied if str(entry.get("type") or "allow").lower().startswith("deny") else allowed
-        flags = bucket.setdefault(key, [False, False])
-        flags[0] = flags[0] or read
-        flags[1] = flags[1] or write
+        keyed.append({**entry, "_key": key})
+    granted: dict[str, int] = {}
+    decided: dict[str, int] = {}
+    for entry in _evaluation_order(keyed):
+        key = entry["_key"]
+        undecided = _mask(entry) & ~decided.get(key, 0)
+        decided[key] = decided.get(key, 0) | undecided
+        if not _is_deny(entry):
+            granted[key] = granted.get(key, 0) | undecided
     result: list[Access] = []
-    for key, (read, write) in allowed.items():
-        deny_read, deny_write = denied.get(key, [False, False])
-        can_read, can_write = read and not deny_read, write and not deny_write
+    for key, (principal, sid) in names.items():
+        rights = granted.get(key, 0)
+        can_read, can_write = bool(rights & _READ), bool(rights & _WRITE)
         if not (can_read or can_write):
             continue
-        principal, sid = names[key]
         broad, privileged, service = classify_principal(principal, sid)
         result.append(Access(principal, sid, key, can_read, can_write, broad, privileged, service))
     return result
