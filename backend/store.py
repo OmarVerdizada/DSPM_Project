@@ -9848,15 +9848,20 @@ def finish_alert_delivery(tenant_id: str, delivery_id: int, *, status: str, atte
     outcome from a worker whose lease ran out must not overwrite the one that took over."""
     now = datetime.now(timezone.utc).isoformat()
     delivered_at = now if status == "delivered" else ""
-    held = " AND lease_owner = ? AND status = 'pending'" if owner else ""
+    values = (status, int(attempts), str(error)[:300], float(next_attempt_at), now, delivered_at, tenant_id,
+              int(delivery_id))
     with _lock:
         with _connect() as conn:
+            if owner:
+                return bool(conn.execute(
+                    "UPDATE alert_deliveries SET status = ?, attempts = ?, last_error = ?, next_attempt_at = ?, "
+                    "lease_until = 0, lease_owner = '', last_attempt_at = ?, delivered_at = ? "
+                    "WHERE tenant_id = ? AND id = ? AND lease_owner = ? AND status = 'pending'",
+                    (*values, owner)).rowcount)
             return bool(conn.execute(
                 "UPDATE alert_deliveries SET status = ?, attempts = ?, last_error = ?, next_attempt_at = ?, "
                 "lease_until = 0, lease_owner = '', last_attempt_at = ?, delivered_at = ? "
-                "WHERE tenant_id = ? AND id = ?" + held,
-                (status, int(attempts), str(error)[:300], float(next_attempt_at), now, delivered_at, tenant_id,
-                 int(delivery_id), *((owner,) if owner else ()))).rowcount)
+                "WHERE tenant_id = ? AND id = ?", values).rowcount)
 
 
 def renew_alert_delivery_lease(tenant_id: str, delivery_id: int, *, owner: str, until: float) -> bool:
