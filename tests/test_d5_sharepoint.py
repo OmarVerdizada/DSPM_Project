@@ -618,6 +618,16 @@ class TheLibrariesTest(D5Case):
         self.assertEqual(report["scan_diagnostics"]["drives"], 2)
         self.assertIn("sharepoint://contoso.test/Archive/old-cards.txt", {entry["path"] for entry in report["files"]})
 
+    def test_a_cancelled_scan_keeps_the_checkpoint_of_libraries_it_did_not_reach(self) -> None:
+        # Dropped, the next scan would read those libraries from the start and download
+        # every file again.
+        self.graph.drives.append({"id": "drive-2", "name": "Archive"})
+        self.graph.put("z", "old-cards.txt", f"Card {CARD}\n".encode(), drive="drive-2")
+        _, first, _ = graph_scanner.scan(self.source(), None)
+        _, kept, facts = graph_scanner.scan(self.source(), first, cancel_check=lambda: True)
+        self.assertEqual(facts["scan_aborted_reason"], "cancelled")
+        self.assertEqual(kept["drives"]["drive-2"], first["drives"]["drive-2"])
+
 
 class TheScopeTest(D5Case):
     """A scan given no name is named for what it sees, and prunes only that."""
