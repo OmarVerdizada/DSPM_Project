@@ -8297,6 +8297,13 @@ def _normalized_finding_type_facet_rows(conn, tenant_id: str):
 
 
 def _inventory_facets_cache_seconds() -> float:
+    from backend import live_cache
+
+    if live_cache.enabled():
+        # The shared cache calls the builder exactly when another process's write moved
+        # the estate generation. A per-process answer up to 30 s old was rebuilt there and
+        # stored under the NEW generation, so every backend served the stale facets.
+        return 0.0
     try:
         value = float(os.getenv("DSPM_INVENTORY_FACETS_CACHE_SECONDS", "30"))
     except ValueError:

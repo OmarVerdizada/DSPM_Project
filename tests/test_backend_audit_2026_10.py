@@ -333,5 +333,30 @@ class TwoAnalystsAtOnceBothKeepTheirChangeTest(unittest.TestCase):
         self.assertEqual(in_report, status, "the saved report lost one of the two changes")
 
 
+class SharedFacetsFollowAnotherBackendsWriteTest(unittest.TestCase):
+    """With the shared cache on, the facets builder runs exactly when another process's
+    write moved the estate generation - and it answered from its own 30-second memory,
+    storing the stale facets under the new generation for every backend."""
+
+    def test_a_write_elsewhere_is_counted(self) -> None:
+        from backend import live_cache, store
+
+        tenant = f"audit-facets-{uuid4().hex[:8]}"
+        store.create_tenant(tenant, "Facets")
+        with patch.dict("os.environ", {"DSPM_LIVE_CACHE": "1"}):
+            live_cache.reset_for_tests()
+            store.save_scan_history(tenant, {"scan_id": "f1", "source": "local", "summary": {},
+                                             "files": [_file("/share/one.txt", "email")]})
+            self.assertEqual(store.inventory_facets(tenant)["total"], 1)
+            # Another backend saves a scan: the shared generation moves, and this process
+            # keeps the memory it had (restored after the save's own invalidation).
+            cached = dict(store._inventory_facets_cache)
+            store.save_scan_history(tenant, {"scan_id": "f2", "source": "local", "summary": {},
+                                             "files": [_file("/share/one.txt", "email"), _file("/share/two.txt", "phone")]})
+            store._inventory_facets_cache.update(cached)
+            self.assertEqual(store.inventory_facets(tenant)["total"], 2)
+            live_cache.reset_for_tests()
+
+
 if __name__ == "__main__":
     unittest.main()
