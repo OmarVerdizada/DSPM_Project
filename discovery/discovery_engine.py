@@ -569,6 +569,16 @@ class DSPMDiscoveryEngine:
             if stopped:
                 for future in all_futures:
                     future.cancel()
+            # A record that never got a future was refused by `submit` - the scan was
+            # cancelled or ran out of time - so it was never analyzed. If everything that
+            # was submitted happened to finish, nothing above stopped, and the partial
+            # report called itself complete: the prunes then deleted every file it
+            # never looked at.
+            if (
+                stopped
+                or len(selected_futures) < len(normalized_records)
+                or (self.last_scan_diagnostics or {}).get("collection_cancelled")
+            ):
                 self._mark_truncated(len(analyzed), len(normalized_records))
 
         with state_lock:
@@ -1380,6 +1390,7 @@ class DSPMDiscoveryEngine:
                 include_names=self.config.local_entry_names,
                 containment_root=self.config.scan_root,
                 resolve_root=not self.config.scan_root,
+                cancel_check=self._cancelled,
             )
             diagnostics = {
                 "mode": "local",
@@ -1399,6 +1410,11 @@ class DSPMDiscoveryEngine:
             self.last_scan_diagnostics = diagnostics
             records = self._exclude_cache_records(records)
             self.last_scan_diagnostics["records"] = len(records)
+            if walk_diagnostics.get("walk_cancelled"):
+                # The walk stopped part way: what it never reached is not gone, and a
+                # report that called itself complete would prune it from the estate.
+                self.last_scan_diagnostics["collection_cancelled"] = True
+                self._mark_truncated(0, len(records))
             return records
 
         self.last_scan_diagnostics = {"mode": "disabled", "records": 0}

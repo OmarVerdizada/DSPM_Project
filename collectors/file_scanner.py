@@ -597,6 +597,7 @@ def scan_directory(
     include_names: Iterable[str] | None = None,
     containment_root: str | Path | None = None,
     resolve_root: bool = True,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> list[dict]:
     """Walk a folder - or read one file - into file records.
 
@@ -612,6 +613,10 @@ def scan_directory(
       this run's own folder, which a junction to a sibling folder would fail.
     - ``resolve_root=False`` keeps ``path`` as the walk spelled it, so a run inside a
       junction reports the paths a whole walk reports.
+
+    ``cancel_check`` is asked before each entry. Once it says stop, the walk returns
+    what it has and sets ``diagnostics["walk_cancelled"]``: the caller has to treat
+    such a walk as incomplete, or everything it never reached reads as deleted.
     """
     root_path = Path(path).expanduser()
     if resolve_root:
@@ -1095,6 +1100,13 @@ def scan_directory(
             return
 
         for item in entries:
+            if cancel_check is not None and cancel_check():
+                # A cancelled or over-budget scan used to keep walking - reading,
+                # hashing and owner-checking every remaining file - for a report that
+                # would only be thrown away or truncated.
+                if diagnostics is not None:
+                    diagnostics["walk_cancelled"] = True
+                return
             try:
                 if item.is_symlink() or not _resolved_entry(item).is_relative_to(containment):
                     continue
