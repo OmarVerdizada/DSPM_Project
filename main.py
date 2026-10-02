@@ -108,8 +108,13 @@ def serve(args: argparse.Namespace) -> None:
 
     # C11: one set of handlers - rotating file when DSPM_LOG_DIR is set, standard error
     # always - and every line through the redacting filter, uvicorn's included.
+    from backend.config import is_production_value
+
     logging_setup.configure("backend")
-    is_production = os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}
+    # The same reading of DSPM_ENV as the configuration's: "production " (a trailing space)
+    # was production to config, which enforced production's rules, and not to this check,
+    # which then skipped the bind boundary and allowed --reload.
+    is_production = is_production_value(os.getenv("DSPM_ENV"))
     if args.reload and is_production:
         raise SystemExit("--reload is disabled when DSPM_ENV=production")
     if is_production:

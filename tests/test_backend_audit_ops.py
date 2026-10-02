@@ -335,5 +335,36 @@ class AFailedManualBackupTest(_Install):
         run.assert_called_once()
 
 
+# ── 11: one reading of DSPM_ENV ──────────────────────────────────────────────────────
+class ProductionWithATrailingSpaceTest(unittest.TestCase):
+    """config strips DSPM_ENV, so "production " enforced production's rules - while `serve`
+    and the vault, reading it unstripped, treated the install as a development one."""
+
+    def serve(self, **overrides):
+        import argparse
+
+        import main
+
+        args = argparse.Namespace(**{"host": "127.0.0.1", "port": 8000, "reload": False, "workers": 1, **overrides})
+        with mock.patch.dict(os.environ, {"DSPM_ENV": "production ", "DSPM_ALLOW_EXTERNAL_BIND": ""}), \
+                mock.patch("backend.logging_setup.configure"), mock.patch.object(main.uvicorn, "run") as run:
+            with self.assertRaises(SystemExit) as refused:
+                main.serve(args)
+        run.assert_not_called()
+        return str(refused.exception)
+
+    def test_serve_refuses_reload(self) -> None:
+        self.assertIn("--reload", self.serve(reload=True))
+
+    def test_serve_checks_where_it_listens(self) -> None:
+        self.assertIn("not loopback", self.serve(host="0.0.0.0"))
+
+    def test_the_vault_needs_its_key(self) -> None:
+        from backend import vault
+
+        with mock.patch.dict(os.environ, {"DSPM_ENV": "production "}):
+            self.assertTrue(vault._is_production())
+
+
 if __name__ == "__main__":
     unittest.main()

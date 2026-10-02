@@ -13,7 +13,10 @@ _KEY_HELP = (
 
 
 def _is_production() -> bool:
-    return os.getenv("DSPM_ENV", "local").lower() in {"prod", "production"}
+    # backend.config's reading, which strips the value: "production " is production.
+    from backend.config import is_production_value
+
+    return is_production_value(os.getenv("DSPM_ENV"))
 
 
 def _is_valid_fernet_key(key: bytes) -> bool:
