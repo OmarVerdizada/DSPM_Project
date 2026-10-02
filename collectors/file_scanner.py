@@ -1290,4 +1290,9 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
         if isinstance(record.get("database"), dict):
             # D6: a sampled database column carries its table, row count and sample size.
             normalized[-1]["database"] = dict(record["database"])
+        if record.get("stable_object_id"):
+            # A connector that names its objects by id (SharePoint's drive and item) keeps
+            # that name through to the estate, where it - not the path - is the asset: two
+            # files of one name in two folders stay two, and a moved file stays one.
+            normalized[-1]["stable_object_id"] = str(record["stable_object_id"])
     return normalized

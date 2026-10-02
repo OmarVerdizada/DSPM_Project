@@ -31,7 +31,8 @@ class GraphDiscoveryEngine(DSPMDiscoveryEngine):
     def _collect_records(self, record_callback: Callable[[dict], None] | None = None) -> list[dict]:
         records, kept, diagnostics = graph_scanner.scan(
             self.source, self.checkpoint, reuse_probe=self._reuse_probe,
-            read_text=SMBScanner._preview_content_from_bytes)
+            read_text=SMBScanner._preview_content_from_bytes,
+            cancel_check=self._cancelled)  # M14: a cancel or the deadline also cuts a Retry-After wait short
         self.next_checkpoint = kept
         self.last_scan_diagnostics = diagnostics
         if record_callback is not None:

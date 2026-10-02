@@ -5,6 +5,7 @@ no root, no sudo, no agent installed. What the account may not read is reported,
 escalated around. Each file becomes a record like any other collector's:
 
     sftp://build01.corp.local/home/alice/notes.txt
+    sftp://build01.corp.local:2222/home/alice/notes.txt    (a port other than 22)
 
 - **The host is who it says**: the server's host key must match the SHA-256 fingerprint the
   source names (as `ssh-keygen -lf` prints it). An unknown or changed key is refused -
@@ -13,7 +14,9 @@ escalated around. Each file becomes a record like any other collector's:
   (list, stat, open for reading); symbolic links are not followed, so a link cannot walk
   the scan out of the paths it was given.
 - **Bounded**: depth, a file count and the text limit a file is read to (a longer one is
-  PARTIAL), and the extension policy decides what is opened.
+  PARTIAL), and the extension policy decides what is opened. Every answer is waited for
+  at most the source's timeout, and the scan's cancel and deadline are asked per file: a
+  host that stops answering ends the scan, not complete, instead of holding it.
 - **Who can read it**: the mode bits become access entries the D7 analysis reads - the
   owner, the group and, for world-readable files, Everyone (S-1-1-0) - so a world-readable
   key or export is flagged like a share Everyone can read.
@@ -35,6 +38,8 @@ import socket
 import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+from discovery.incremental import snapshot_is_failed_read
 
 EVERYONE_SID = "S-1-1-0"
 _READ, _WRITE = 0o4, 0o2
@@ -109,7 +114,17 @@ def connect(source: SftpSource):
             transport.auth_password(source.username, source.password)
         if not transport.is_authenticated():
             raise SftpScanError(f"{source.host} refused the account {source.username}.")
-        return transport, paramiko.SFTPClient.from_transport(transport)
+        # Keepalives find a connection dropped without a word, and keep a firewall from
+        # forgetting a quiet one while a large file is read.
+        transport.set_keepalive(max(1, int(source.timeout)))
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        if sftp is None:
+            raise SftpScanError(f"SSH on {source.host}:{source.port} did not open an SFTP session.")
+        # Every answer is waited for at most the source's timeout. paramiko waits forever by
+        # default, so a hung NFS mount or a silently dropped connection held the scan - and
+        # the server worker running it - for as long as it lasted.
+        sftp.get_channel().settimeout(source.timeout)
+        return transport, sftp
     except paramiko.AuthenticationException as exc:
         transport.close()
         raise SftpScanError(f"{source.host} refused the account {source.username}.") from exc
@@ -145,23 +160,59 @@ def _stamp(seconds) -> str:
         return ""
 
 
+def root_path(path: str) -> str:
+    """A path the source names, as the walk starts from it."""
+    return posixpath.normpath("/" + str(path).strip().lstrip("/"))
+
+
+def authority(source: SftpSource) -> str:
+    """The host as a location names it: with the port when it is not 22, so two SSH
+    servers on one host are two sources, not one."""
+    host = f"[{source.host}]" if ":" in source.host else source.host
+    return host if int(source.port) == 22 else f"{host}:{int(source.port)}"
+
+
 def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=None, sftp=None) -> tuple[list[dict], dict]:
     """(records, diagnostics) for the source's paths."""
+    import paramiko
+
     transport = None
     if sftp is None:
         transport, sftp = connect(source)
     records: list[dict] = []
     diagnostics = {"mode": "sftp", "host": source.host, "paths": list(source.paths), "directories": 0,
                    "files": 0, "reused": 0, "read": 0, "unreadable": [], "unreadable_dirs": [],
-                   "symlinks_skipped": 0, "record_limit_reached": False}
+                   "symlinks_skipped": 0, "record_limit_reached": False, "scan_errors": []}
     allowed = {item.lower().lstrip(".") for item in source.allowed_extensions or []}
+    prefix = f"sftp://{authority(source)}"
+    # The session stopped answering (the channel timeout) or is gone. TimeoutError is an
+    # OSError, so these are caught before the OSError that means "may not read this".
+    lost = (TimeoutError, EOFError, paramiko.SSHException)
 
-    def walk(folder: str, depth: int) -> None:
+    def stopped() -> bool:
+        if diagnostics.get("scan_aborted_reason"):
+            return True
         if cancel_check and cancel_check():
             diagnostics["scan_aborted_reason"] = "cancelled"
+            return True
+        return False
+
+    def stop(path: str, exc: BaseException) -> None:
+        # An SFTP server answers one request at a time, so what hung this one (an NFS
+        # mount, a dropped connection) holds every later one too: the scan stops here, not
+        # complete, rather than wait out the timeout once per file left.
+        diagnostics["scan_aborted_reason"] = "sftp_session_lost"
+        diagnostics["scan_errors"].append({"path": path, "error": type(exc).__name__})
+
+    def walk(folder: str, depth: int) -> None:
+        if stopped():
             return
         try:
             entries = sftp.listdir_attr(folder)
+        except lost as exc:
+            diagnostics["unreadable_dirs"].append({"path": folder, "error": type(exc).__name__})
+            stop(folder, exc)
+            return
         except OSError as exc:
             # What is under it was not seen: the scan is not complete, so a named scan
             # does not prune it (the engine reads unreadable_dirs as incomplete).
@@ -169,6 +220,9 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
             return
         diagnostics["directories"] += 1
         for entry in sorted(entries, key=lambda item: item.filename):
+            # Asked per file, not only per folder: one folder can hold the rest of the scan.
+            if stopped():
+                return
             if len(records) >= source.max_files:
                 diagnostics["record_limit_reached"] = True
                 return
@@ -191,12 +245,12 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
                 continue
             diagnostics["files"] += 1
             size, modified = int(entry.st_size or 0), _stamp(entry.st_mtime)
-            location = f"sftp://{source.host}{path}"
+            location = f"{prefix}{path}"
             record = {"source": "sftp", "path": location, "name": name, "extension": extension, "size": size,
                       "modified_at": modified, "is_dir": False, "is_hidden": name.startswith("."),
                       "owner": f"uid:{entry.st_uid}", "acl": access(entry), "content": "", "reuse_key": location}
             snapshot = reuse_probe(location, size, modified) if reuse_probe else None
-            if isinstance(snapshot, dict):
+            if isinstance(snapshot, dict) and not snapshot_is_failed_read(snapshot):
                 record.update({
                     "cache_reused": True, "incremental_reused": bool(snapshot.get("baseline_result")),
                     "baseline_result": snapshot.get("baseline_result") if isinstance(snapshot.get("baseline_result"), dict) else None,
@@ -212,11 +266,15 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
             try:
                 with sftp.open(path, "rb") as handle:
                     data = handle.read(source.max_read_bytes)
-            except OSError as exc:
-                record.update({"scan_error": f"not readable by {source.username} ({type(exc).__name__})",
-                               "content_status": "unreadable", "content_scannable": False})
+            except (*lost, OSError) as exc:
+                reason = (f"not read: the host stopped answering ({type(exc).__name__})" if isinstance(exc, lost)
+                          else f"not readable by {source.username} ({type(exc).__name__})")
+                record.update({"scan_error": reason, "content_status": "unreadable", "content_scannable": False})
                 diagnostics["unreadable"].append({"path": path, "error": type(exc).__name__})
                 records.append(record)
+                if isinstance(exc, lost):
+                    stop(path, exc)
+                    return
                 continue
             complete = len(data) >= size
             diagnostics["read"] += 1
@@ -228,7 +286,7 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
 
     try:
         for root in source.paths:
-            walk(posixpath.normpath("/" + str(root).strip().lstrip("/")), 0)
+            walk(root_path(root), 0)
     finally:
         if transport is not None:
             transport.close()

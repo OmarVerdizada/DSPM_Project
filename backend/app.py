@@ -3655,6 +3655,19 @@ def _graph_source(payload: SharePointScanRequest, principal: Principal):
         download_hosts=hosts or graph_scanner.GraphSource.__dataclass_fields__["download_hosts"].default)
 
 
+def _connector_scan_label(readable: str, scope_key: str) -> str:
+    """The automatic name of a connector scan that was given none.
+
+    A complete scan prunes by its name (store._prune_unseen_assets): every asset of an
+    earlier scan of that name that this one did not see leaves the estate. So two scans
+    that see different things - another path, port or extension filter - must not share
+    a name. The scope's digest ends it, and it is the readable part that is cut to fit,
+    never the digest: two long site addresses cut to 80 characters used to be one name.
+    """
+    suffix = f" #{scope_key[:12]}"
+    return readable[:80 - len(suffix)].rstrip() + suffix
+
+
 @app.post("/api/sharepoint/scan")
 @evidence_scoped
 def sharepoint_scan(payload: SharePointScanRequest, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
@@ -3665,15 +3678,22 @@ def sharepoint_scan(payload: SharePointScanRequest, principal: Principal = Depen
 
     _require_scan_licence()
     source = _graph_source(payload, principal)
+    # The checkpoint follows the site whatever the filter: it holds every file of the site,
+    # and a file is reused only while its size and modified time match. The scope - the
+    # baseline a complete scan prunes, and its automatic name - follows what it sees.
     key = f"sharepoint:{source.site.lower()}"
+    allowed_extensions, extension_filter_enabled = _scan_extension_settings(
+        payload.allowed_extensions, payload.extension_filter_enabled)
+    scope = incremental_scope_key("sharepoint", source.site, {"allowed_extensions": allowed_extensions})
     checkpoint = None if payload.full else store_module.get_source_checkpoint(principal.tenant_id, key)
-    label = (payload.scan_label.strip() or f"SharePoint {source.site}")[:80]
+    label = payload.scan_label.strip()[:80] or _connector_scan_label(
+        " ".join(["SharePoint", source.site, *allowed_extensions]), scope)
     config = ScanConfig(tenant_id=principal.tenant_id, compliance_enabled=payload.compliance_enabled,
                         compliance_frameworks=list(payload.compliance_frameworks),
-                        allowed_extensions=list(payload.allowed_extensions),
-                        extension_filter_enabled=payload.extension_filter_enabled,
-                        incremental_enabled=True, incremental_scope=key,
-                        baseline_probe=_incremental_probe(principal.tenant_id, key, True),
+                        allowed_extensions=allowed_extensions,
+                        extension_filter_enabled=extension_filter_enabled,
+                        incremental_enabled=True, incremental_scope=scope,
+                        baseline_probe=_incremental_probe(principal.tenant_id, scope, True),
                         suppression_rules=suppression_rules_for_scan(principal.tenant_id),
                         exact_match=_exact_match_for_scan(principal.tenant_id))
     engine = GraphDiscoveryEngine(config, source, checkpoint)
@@ -3743,12 +3763,20 @@ def sftp_scan(payload: SftpScanRequest, principal: Principal = Depends(require_p
         password="" if key else str(account.get("password") or ""),
         private_key=str(account.get("password") or "") if key else "",
         host_key_fingerprint=payload.host_key_fingerprint, paths=list(payload.paths), max_depth=payload.max_depth)
-    label = (payload.scan_label.strip() or f"SFTP {host}")[:80]
-    scope = f"sftp:{host.lower()}"
+    allowed_extensions, extension_filter_enabled = _scan_extension_settings(
+        payload.allowed_extensions, payload.extension_filter_enabled)
+    # Everything that changes what the scan sees is in its scope, and so in its automatic
+    # name: a scan of /srv must not prune /home's assets, nor port 2222 port 22's.
+    where = sftp_scanner.authority(source)
+    paths = sorted({sftp_scanner.root_path(item) for item in source.paths})
+    scope = incremental_scope_key("sftp", where, {
+        "port": source.port, "paths": paths, "max_depth": source.max_depth,
+        "allowed_extensions": allowed_extensions, "include_hidden": source.include_hidden})
+    label = payload.scan_label.strip()[:80] or _connector_scan_label(" ".join(["SFTP", where, *paths]), scope)
     config = ScanConfig(tenant_id=principal.tenant_id, compliance_enabled=payload.compliance_enabled,
                         compliance_frameworks=list(payload.compliance_frameworks),
-                        allowed_extensions=list(payload.allowed_extensions),
-                        extension_filter_enabled=payload.extension_filter_enabled,
+                        allowed_extensions=allowed_extensions,
+                        extension_filter_enabled=extension_filter_enabled,
                         incremental_enabled=True, incremental_scope=scope,
                         baseline_probe=_incremental_probe(principal.tenant_id, scope, True),
                         suppression_rules=suppression_rules_for_scan(principal.tenant_id),
@@ -3759,7 +3787,7 @@ def sftp_scan(payload: SftpScanRequest, principal: Principal = Depends(require_p
         raise HTTPException(status_code=400, detail=client_message(exc, "The host could not be scanned.")) from exc
     except Exception as exc:
         raise _safe_operation_error("SFTP scan failed", exc) from exc
-    data["source"] = f"sftp://{host}"
+    data["source"] = f"sftp://{where}"
     payload.scan_label = label
     _apply_compliance(data, payload)
     _persist_scan(data, payload, principal)

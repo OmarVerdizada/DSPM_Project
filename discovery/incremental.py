@@ -68,6 +68,18 @@ def reuse_snapshot_from_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def snapshot_is_failed_read(snapshot: dict[str, Any] | None) -> bool:
+    """True when a cached result records a read that failed, not the file's content.
+
+    A remote collector reuses an unchanged file by its size and modified time. Neither
+    changes when the account is granted read access, nor when a download link that had
+    expired is replaced, so a cached failure would be replayed for as long as the file
+    stays unchanged. Such a result is read again instead.
+    """
+
+    return isinstance(snapshot, dict) and str(snapshot.get("content_status") or "") == "unreadable"
+
+
 def apply_reuse_snapshot(record: dict[str, Any], snapshot: dict[str, Any], object_key: str) -> dict[str, Any]:
     """Overlay reusable state on freshly enumerated metadata without content I/O."""
 

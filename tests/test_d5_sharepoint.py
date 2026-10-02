@@ -12,10 +12,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,20 +37,32 @@ CARD = "4111 1111 1111 1111"
 
 
 class FakeGraph:
-    """Token endpoint, Graph and a download host, all one HTTPS server on localhost."""
+    """Token endpoint, Graph and a download host, all one HTTPS server on localhost.
+
+    The change list answers as real Graph does: an item names its parent folder by id
+    (parentReference.id) and never by path, the root and the folders are items of their
+    own, and a renamed folder comes back alone, without what is in it."""
 
     def __init__(self, certfile: Path, keyfile: Path) -> None:
         self.files: dict[str, dict] = {}
+        self.folders: dict[str, dict] = {}
+        self.drives = [{"id": "drive-1", "name": "Documents"}]
         self.deleted: set[str] = set()
-        self.changed_since: dict[str, set[str]] = {}
         self.cursor = 0
         self.token_requests: list[dict] = []
         self.downloads: list[str] = []
         self.ranges: list[str] = []
+        self.refusals: list[tuple[str, int]] = []   # the queued answers sent, in order
         self.forbidden = False
         self.redirect_download = ""
         self.ignore_range = False          # a download host that sends the whole file anyway
         self.gone: set[str] = set()        # items whose download answers 404
+        self.vanished: set[str] = set()    # items Graph answers 404 for: deleted after the change list was read
+        self.refused: set[str] = set()     # items whose download answers 403
+        self.expire_listed_links = False   # download links taken from the change list have expired
+        self.expired_tokens: set[str] = set()  # delta links Graph no longer honours (410)
+        self.answers: dict[str, list[tuple[int, dict]]] = {}  # path: answers sent before the real one
+        self.page_drives = False           # the site's library list, one library per page
         self.next_link_host = ""           # a next link pointing at another host
         self.drop_delta_link = False       # a change list that ends without a delta link
         self.garbage_drives = False        # an answer that is not JSON
@@ -58,11 +72,13 @@ class FakeGraph:
             def log_message(self, *args) -> None:
                 pass
 
-            def reply(self, status: int, payload=None, raw: bytes | None = None) -> None:
+            def reply(self, status: int, payload=None, raw: bytes | None = None, headers: dict | None = None) -> None:
                 data = raw if raw is not None else json.dumps(payload or {}).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json" if raw is None else "application/octet-stream")
                 self.send_header("Content-Length", str(len(data)))
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(data)
 
@@ -76,10 +92,19 @@ class FakeGraph:
 
             def do_GET(self) -> None:
                 parts = urlsplit(self.path)
+                queued = graph.answers.get(parts.path)
+                if queued:
+                    status, headers = queued.pop(0)
+                    graph.refusals.append((parts.path, status))
+                    return self.reply(status, {"error": {"code": "activityLimitReached"}}, headers=headers)
                 if parts.path.startswith("/download/"):
                     item_id = parts.path.rsplit("/", 1)[1]
-                    if item_id in graph.gone:
+                    if item_id in graph.gone or item_id not in graph.files:
                         return self.reply(404)
+                    if item_id in graph.refused:
+                        return self.reply(403)
+                    if graph.expire_listed_links and "issued=delta" in parts.query:
+                        return self.reply(401)
                     item = graph.files[item_id]
                     graph.downloads.append(item["name"])
                     graph.ranges.append(self.headers.get("Range", ""))
@@ -92,18 +117,29 @@ class FakeGraph:
                     return self.reply(401)
                 if graph.forbidden:
                     return self.reply(403)
-                if parts.path == "/v1.0/sites/contoso.test:/sites/Finance":
+                if parts.path.startswith("/v1.0/sites/contoso.test:/sites/"):
                     return self.reply(200, {"id": "site-1"})
                 if parts.path == "/v1.0/sites/site-1/drives":
                     if graph.garbage_drives:
                         return self.reply(200, raw=b"<html>maintenance</html>")
-                    return self.reply(200, {"value": [{"id": "drive-1", "name": "Documents"}]})
-                if parts.path == "/v1.0/drives/drive-1/root/delta":
+                    if not graph.page_drives:
+                        return self.reply(200, {"value": graph.drives})
+                    page = int(parse_qs(parts.query).get("page", ["0"])[0])
+                    more = {"@odata.nextLink": f"{graph.base}/v1.0/sites/site-1/drives?page={page + 1}"}
+                    return self.reply(200, {"value": graph.drives[page:page + 1],
+                                            **(more if page + 1 < len(graph.drives) else {})})
+                found = re.fullmatch(r"/v1\.0/drives/([^/]+)/root/delta", parts.path)
+                if found:
                     token = parse_qs(parts.query).get("token", [""])[0]
-                    return self.reply(200, graph.delta(token))
-                if parts.path.startswith("/v1.0/drives/drive-1/items/"):
-                    item_id = parts.path.rsplit("/", 1)[1]
-                    return self.reply(200, graph.item(item_id))
+                    if token in graph.expired_tokens:
+                        return self.reply(410, {"error": {"code": "resyncRequired"}})
+                    return self.reply(200, graph.delta(found.group(1), token))
+                found = re.fullmatch(r"/v1\.0/drives/([^/]+)/items/([^/]+)", parts.path)
+                if found:
+                    item_id = found.group(2)
+                    if item_id in graph.vanished or item_id not in graph.files:
+                        return self.reply(404)
+                    return self.reply(200, graph.entry(item_id, issued="now"))
                 self.reply(404)
 
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -114,34 +150,68 @@ class FakeGraph:
         self.base = f"https://localhost:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
-    def put(self, item_id: str, name: str, content: bytes, folder: str = "") -> None:
+    def folder(self, path: str, drive: str = "drive-1") -> str:
+        """The id of the folder at `path` in `drive`, made (with its parents) when new."""
+        parent = f"{drive}-root"
+        if parent not in self.folders:
+            self.folders[parent] = {"name": "root", "parent": "", "drive": drive, "version": 0, "root": True}
+        for name in (part for part in path.split("/") if part):
+            found = next((key for key, value in self.folders.items()
+                          if value["parent"] == parent and value["name"] == name), None)
+            if found is None:
+                self.cursor += 1
+                found = f"folder-{len(self.folders)}"
+                self.folders[found] = {"name": name, "parent": parent, "drive": drive, "version": self.cursor}
+            parent = found
+        return parent
+
+    def rename_folder(self, folder_id: str, name: str) -> None:
         self.cursor += 1
-        self.files[item_id] = {"name": name, "content": content, "folder": folder, "version": self.cursor}
+        self.folders[folder_id].update(name=name, version=self.cursor)
 
-    def item(self, item_id: str) -> dict:
+    def put(self, item_id: str, name: str, content: bytes, folder: str = "", drive: str = "drive-1") -> None:
+        parent = self.folder(folder, drive)
+        self.cursor += 1
+        self.files[item_id] = {"name": name, "content": content, "parent": parent, "drive": drive,
+                               "version": self.cursor}
+
+    def entry(self, item_id: str, issued: str = "delta") -> dict:
         item = self.files[item_id]
+        version = item["version"]
         return {"id": item_id, "name": item["name"], "size": len(item["content"]), "file": {},
-                "lastModifiedDateTime": f"2026-09-29T00:00:{item['version']:02d}Z",
-                "parentReference": {"path": f"/drive/root:{item['folder']}"},
-                "@microsoft.graph.downloadUrl": self.redirect_download or f"{self.base}/download/{item_id}"}
+                "lastModifiedDateTime": f"2026-09-29T00:{version // 60:02d}:{version % 60:02d}Z",
+                "parentReference": {"driveId": item["drive"], "id": item["parent"]},
+                "@microsoft.graph.downloadUrl": self.redirect_download or f"{self.base}/download/{item_id}?issued={issued}"}
 
-    def delta(self, token: str) -> dict:
+    def folder_entry(self, folder_id: str) -> dict:
+        folder = self.folders[folder_id]
+        if folder.get("root"):
+            return {"id": folder_id, "name": "root", "root": {}, "folder": {"childCount": 0},
+                    "parentReference": {"driveId": folder["drive"]}}
+        return {"id": folder_id, "name": folder["name"], "folder": {"childCount": 0},
+                "parentReference": {"driveId": folder["drive"], "id": folder["parent"]}}
+
+    def delta(self, drive: str, token: str) -> dict:
         since = int(token or 0)
-        changed = [self.item(item_id) for item_id, item in self.files.items() if item["version"] > since]
+        files = [self.entry(key) for key, value in self.files.items()
+                 if value["drive"] == drive and (not since or value["version"] > since)]
+        folders = [self.folder_entry(key) for key, value in self.folders.items()
+                   if value["drive"] == drive and (not since or value["version"] > since)]
         gone = [{"id": item_id, "deleted": {"state": "deleted"}} for item_id in self.deleted if since]
-        values = changed + gone
+        # Files before their folders: Graph does not promise a parent comes first.
+        values = files + folders + gone
         # One page per two items, to exercise the next link.
         if len(values) > 2 and not getattr(self, "_second_page", False):
             self._second_page = True
             self._rest = values[2:]
             host = self.next_link_host or self.base
-            return {"value": values[:2], "@odata.nextLink": f"{host}/v1.0/drives/drive-1/root/delta?token={since}&page=2"}
+            return {"value": values[:2], "@odata.nextLink": f"{host}/v1.0/drives/{drive}/root/delta?token={since}&page=2"}
         if getattr(self, "_second_page", False):
             self._second_page = False
             values = self._rest
         if self.drop_delta_link:
             return {"value": values}
-        return {"value": values, "@odata.deltaLink": f"{self.base}/v1.0/drives/drive-1/root/delta?token={self.cursor}"}
+        return {"value": values, "@odata.deltaLink": f"{self.base}/v1.0/drives/{drive}/root/delta?token={self.cursor}"}
 
     def stop(self) -> None:
         self.server.shutdown()
@@ -196,9 +266,22 @@ class D5Case(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text[:400])
         return response.json()
 
+    def inventory(self) -> list[dict]:
+        return self.client.get("/api/inventory?limit=200", headers=self.headers).json()["items"]
+
     def inventory_paths(self) -> set[str]:
-        items = self.client.get("/api/inventory?limit=200", headers=self.headers).json()["items"]
-        return {item["path"] for item in items}
+        return {item["path"] for item in self.inventory()}
+
+    def source(self, **extra) -> graph_scanner.GraphSource:
+        """The site as the collector is given it, for a call without the API."""
+        return graph_scanner.GraphSource(
+            tenant="contoso-tenant", client_id="11111111-app", client_secret=SECRET, site="contoso.test:/sites/Finance",
+            authority=self.graph.base, graph=self.graph.base, ca_pem=self.ca.read_text(encoding="utf-8"),
+            download_hosts=("localhost",), **extra)
+
+    @staticmethod
+    def by_name(report: dict) -> dict[str, dict]:
+        return {entry["path"].rsplit("/", 1)[1]: entry for entry in report["files"]}
 
 
 class TheInitialScanTest(D5Case):
@@ -259,13 +342,14 @@ class TheInitialScanTest(D5Case):
         self.assertEqual((entry["scan_completeness"], entry["bytes_scanned"]), ("PARTIAL", 65536))
 
     def test_a_file_that_cannot_be_read_is_reported_and_the_scan_goes_on(self) -> None:
-        self.graph.gone.add("c")
+        self.graph.refused.add("c")
         report = self.scan()
-        entries = {item["path"].rsplit("/", 1)[1]: item for item in report["files"]}
+        entries = self.by_name(report)
         self.assertEqual(sorted(entries), ["contacts.txt", "customers.txt", "notes.txt"])
         self.assertEqual(entries["notes.txt"]["content_status"], "unreadable")
         self.assertTrue(entries["customers.txt"]["findings"])
-        self.assertEqual(report["scan_diagnostics"]["unreadable"], [{"path": "/Documents/notes.txt", "error": "HTTP 404"}])
+        self.assertEqual(report["scan_diagnostics"]["unreadable"], [{"path": "/Documents/notes.txt", "error": "HTTP 403"}])
+        self.assertTrue(report["scan_diagnostics"]["incremental"]["complete"], "a refusal is an answer about the file")
 
     def test_the_file_cap_leaves_the_scan_incomplete_so_nothing_is_pruned(self) -> None:
         self.scan()
@@ -379,6 +463,178 @@ class TheDurableReuseTest(D5Case):
         report = self.scan()
         self.assertEqual(self.graph.downloads, [])
         self.assertEqual(report["scan_diagnostics"]["reused"], 3)
+
+    def test_a_file_that_could_not_be_read_is_read_again_next_time(self) -> None:
+        # Read access granted since changes neither the size nor the modified time: the
+        # failure is not replayed from the cache for as long as the file stays unchanged.
+        self.graph.refused.add("a")
+        self.assertEqual(self.by_name(self.scan())["customers.txt"]["content_status"], "unreadable")
+        self.graph.refused.clear()
+        self.graph.downloads.clear()
+        entry = self.by_name(self.scan())["customers.txt"]
+        self.assertEqual(self.graph.downloads, ["customers.txt"])
+        self.assertTrue(entry["findings"])
+
+    def test_each_file_is_downloaded_by_a_link_asked_for_just_before(self) -> None:
+        # A download link lasts about an hour; one taken from the change list has expired
+        # by the time a long scan reaches the file.
+        self.graph.expire_listed_links = True
+        report = self.scan()
+        self.assertEqual(report["scan_diagnostics"]["unreadable"], [])
+        self.assertEqual(sorted(self.graph.downloads), ["contacts.txt", "customers.txt", "notes.txt"])
+        self.assertTrue(self.by_name(report)["customers.txt"]["findings"])
+
+
+class ThePathsTest(D5Case):
+    """Graph's change list names a file's folder by id, never by path."""
+
+    def test_two_files_of_one_name_in_two_folders_are_two_assets(self) -> None:
+        self.graph.put("f1", "budget.txt", f"Card {CARD}\n".encode(), folder="/Finance/2026")
+        self.graph.put("f2", "budget.txt", b"Nothing sensitive here.\n", folder="/HR")
+        report = self.scan()
+        budgets = sorted(entry["path"] for entry in report["files"] if entry["path"].endswith("/budget.txt"))
+        self.assertEqual(budgets, ["sharepoint://contoso.test/Documents/Finance/2026/budget.txt",
+                                   "sharepoint://contoso.test/Documents/HR/budget.txt"])
+        paths = [item["path"] for item in self.inventory()]
+        self.assertEqual(len(paths), 5)
+        self.assertIn("sharepoint://contoso.test/Documents/Finance/2026/budget.txt", paths)
+        self.assertIn("sharepoint://contoso.test/Documents/HR/budget.txt", paths)
+
+    def test_a_renamed_folder_moves_its_files_on_the_next_scan(self) -> None:
+        self.graph.put("d", "plan.txt", b"Plan.\n", folder="/HR/2026")
+        self.scan()
+        before = {item["name"]: item["id"] for item in self.inventory()}
+        self.graph.downloads.clear()
+        self.graph.rename_folder(self.graph.folder("/HR"), "People")
+        report = self.scan()
+        self.assertEqual(sorted(entry["path"] for entry in report["files"]), [
+            "sharepoint://contoso.test/Documents/People/2026/plan.txt",
+            "sharepoint://contoso.test/Documents/People/contacts.txt",
+            "sharepoint://contoso.test/Documents/customers.txt",
+            "sharepoint://contoso.test/Documents/notes.txt"])
+        self.assertEqual(self.graph.downloads, [], "the files did not change: reused, under their new paths")
+        paths = self.inventory_paths()
+        self.assertIn("sharepoint://contoso.test/Documents/People/contacts.txt", paths)
+        self.assertNotIn("sharepoint://contoso.test/Documents/HR/contacts.txt", paths)
+        self.assertEqual({item["name"]: item["id"] for item in self.inventory()}, before,
+                         "the same assets, moved - not new ones in place of the old")
+
+    def test_a_checkpoint_of_the_old_shape_is_read_again_in_full(self) -> None:
+        # Version 1 kept a path per file, from a parentReference.path real Graph never sent.
+        self.scan()
+        key = "sharepoint:contoso.test:/sites/finance"
+        old = store.get_source_checkpoint("t-d5", key)
+        old.pop("version")
+        for drive in old["drives"].values():
+            drive.pop("folders")
+            drive["items"] = {item_id: {"path": f"/Documents/{facts['name']}", "size": facts["size"],
+                                        "modified": facts["modified"]} for item_id, facts in drive["items"].items()}
+        store.save_source_checkpoint("t-d5", key, old)
+        self.graph.downloads.clear()
+        report = self.scan()
+        self.assertIn("sharepoint://contoso.test/Documents/HR/contacts.txt", {entry["path"] for entry in report["files"]})
+        self.assertEqual(self.graph.downloads, [], "every file is still offered to reuse")
+        self.assertEqual(store.get_source_checkpoint("t-d5", key)["version"], graph_scanner.CHECKPOINT_VERSION)
+
+
+class TheThrottlingTest(D5Case):
+    """A file Graph throttles, cannot serve for a moment, or that was deleted mid-scan."""
+
+    def test_a_throttled_download_waits_as_told_and_is_read(self) -> None:
+        self.graph.answers["/download/a"] = [(429, {"Retry-After": "2"})]
+        with mock.patch.object(graph_scanner, "_sleep", side_effect=time.sleep) as slept:
+            report = self.scan()
+        self.assertEqual(self.graph.refusals, [("/download/a", 429)])
+        self.assertGreaterEqual(sum(call.args[0] for call in slept.call_args_list), 1.9, "Retry-After honoured")
+        self.assertTrue(self.by_name(report)["customers.txt"]["findings"])
+        self.assertTrue(report["scan_diagnostics"]["incremental"]["complete"])
+
+    def test_a_moment_of_unavailability_is_asked_again(self) -> None:
+        self.graph.answers["/v1.0/drives/drive-1/items/b"] = [(503, {})]
+        report = self.scan()
+        self.assertEqual(self.graph.refusals, [("/v1.0/drives/drive-1/items/b", 503)])
+        self.assertTrue(self.by_name(report)["contacts.txt"]["findings"])
+        self.assertEqual(report["scan_diagnostics"]["unreadable"], [])
+
+    def test_a_file_still_throttled_after_the_retries_leaves_the_scan_incomplete(self) -> None:
+        self.graph.answers["/download/a"] = [(429, {"Retry-After": "0"})] * 10
+        report = self.scan()
+        facts = report["scan_diagnostics"]
+        self.assertEqual(len(self.graph.refusals), graph_scanner.MAX_RETRIES + 1, "asked again a bounded number of times")
+        self.assertEqual(self.by_name(report)["customers.txt"]["content_status"], "unreadable")
+        self.assertEqual(facts["scan_errors"], [{"path": "/Documents/customers.txt", "error": "HTTP 429"}])
+        self.assertFalse(facts["incremental"]["complete"], "so nothing is pruned for it")
+        self.assertEqual(self.by_name(report)["notes.txt"]["scan_completeness"], "COMPLETE", "the rest was read")
+        self.assertIsNotNone(store.get_source_checkpoint("t-d5", "sharepoint:contoso.test:/sites/finance"))
+
+    def test_a_file_deleted_after_the_change_list_was_read_is_not_in_the_scan(self) -> None:
+        self.graph.vanished.add("b")   # Graph no longer knows the item
+        self.graph.gone.add("c")       # its download link answers 404
+        report = self.scan()
+        facts = report["scan_diagnostics"]
+        self.assertEqual(sorted(self.by_name(report)), ["customers.txt"])
+        self.assertEqual((facts["gone"], facts["unreadable"]), (2, []))
+        self.assertTrue(facts["incremental"]["complete"])
+
+    def test_a_cancelled_scan_does_not_wait_out_a_retry_after(self) -> None:
+        self.graph.answers["/download/a"] = [(429, {"Retry-After": "15"})] * 5
+        started = time.monotonic()
+        records, _, facts = graph_scanner.scan(self.source(), None, cancel_check=lambda: bool(self.graph.refusals))
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(facts["scan_aborted_reason"], "cancelled")
+        self.assertEqual([record["content_status"] for record in records], ["unreadable"])
+
+    def test_retry_after_is_read_in_seconds_or_as_a_date_and_capped(self) -> None:
+        self.assertEqual(graph_scanner._retry_after("2", 0), 2.0)
+        self.assertEqual(graph_scanner._retry_after("86400", 0), graph_scanner.RETRY_WAIT_CAP_SECONDS)
+        self.assertEqual(graph_scanner._retry_after("Wed, 21 Oct 2015 07:28:00 GMT", 0), 0.0)
+        self.assertEqual(graph_scanner._retry_after("", 2), 4.0)
+        self.assertEqual(graph_scanner._retry_after("nan", 0), graph_scanner.RETRY_WAIT_CAP_SECONDS)
+
+
+class TheLibrariesTest(D5Case):
+
+    def test_an_expired_delta_link_reads_the_library_again_in_the_same_scan(self) -> None:
+        self.scan()
+        self.graph.expired_tokens.add(str(self.graph.cursor))
+        self.graph.downloads.clear()
+        self.graph.put("b", "contacts.txt", b"Email: leyla.aliyeva@example.org\n", folder="/HR")
+        del self.graph.files["c"]   # deleted while the link was stale: absent from the full list
+        report = self.scan()
+        facts = report["scan_diagnostics"]
+        self.assertEqual(facts["resynced"], 1)
+        self.assertEqual(self.graph.downloads, ["contacts.txt"], "what did not change is still reused")
+        self.assertNotIn("sharepoint://contoso.test/Documents/notes.txt", self.inventory_paths())
+        self.graph.downloads.clear()
+        again = self.scan()
+        self.assertEqual((again["scan_diagnostics"]["resynced"], self.graph.downloads), (0, []),
+                         "the next scan goes on from the new link")
+
+    def test_every_library_of_a_paged_list_is_read(self) -> None:
+        self.graph.drives.append({"id": "drive-2", "name": "Archive"})
+        self.graph.page_drives = True
+        self.graph.put("z", "old-cards.txt", f"Card {CARD}\n".encode(), drive="drive-2")
+        report = self.scan()
+        self.assertEqual(report["scan_diagnostics"]["drives"], 2)
+        self.assertIn("sharepoint://contoso.test/Archive/old-cards.txt", {entry["path"] for entry in report["files"]})
+
+
+class TheScopeTest(D5Case):
+    """A scan given no name is named for what it sees, and prunes only that."""
+
+    def test_a_scan_with_an_extension_filter_does_not_prune_other_types(self) -> None:
+        self.graph.put("e", "ledger.csv", b"id,amount\n1,10\n")
+        self.scan(scan_label="")
+        self.scan(scan_label="", allowed_extensions=["txt"], extension_filter_enabled=True)
+        self.assertIn("sharepoint://contoso.test/Documents/ledger.csv", self.inventory_paths())
+
+    def test_two_long_site_addresses_are_two_scopes(self) -> None:
+        site = "contoso.test:/sites/" + "finance-department-records-" * 4
+        for name in ("east", "west"):
+            response = self.client.post("/api/sharepoint/scan", headers=self.headers,
+                                        json={"site": site + name, "credential_ref": self.ref})
+            self.assertEqual(response.status_code, 200, response.text[:400])
+        self.assertEqual(len(self.inventory()), 6, "the second site's scan did not prune the first's files")
 
 
 if __name__ == "__main__":

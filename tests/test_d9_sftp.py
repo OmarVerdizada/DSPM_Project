@@ -14,6 +14,7 @@ import shutil
 import socket
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -58,6 +59,8 @@ class _Sftp(paramiko.SFTPServerInterface):
 
     def list_folder(self, path):
         real = self.fixture.real(path)
+        if path in self.fixture.hang:
+            self.fixture.release.wait(HANG_SECONDS)   # a hung NFS mount: no answer
         if path in self.fixture.denied:
             return paramiko.SFTP_PERMISSION_DENIED
         return [self._attributes(f"{path.rstrip('/')}/{name}", name) for name in os.listdir(real)]
@@ -71,10 +74,25 @@ class _Sftp(paramiko.SFTPServerInterface):
         if path in self.fixture.denied or flags & (os.O_WRONLY | os.O_RDWR):
             return paramiko.SFTP_PERMISSION_DENIED
         self.fixture.opened.append(path)
-        handle = paramiko.SFTPHandle(flags)
+        handle = _HangingHandle(flags, self.fixture) if path in self.fixture.hang else paramiko.SFTPHandle(flags)
         handle.readfile = open(self.fixture.real(path), "rb")  # noqa: SIM115 - the handle closes it
         handle.filename = self.fixture.real(path)
         return handle
+
+
+HANG_SECONDS = 15
+
+
+class _HangingHandle(paramiko.SFTPHandle):
+    """A file whose read is never answered (until the fixture stops)."""
+
+    def __init__(self, flags, fixture):
+        super().__init__(flags)
+        self.fixture = fixture
+
+    def read(self, offset, length):
+        self.fixture.release.wait(HANG_SECONDS)
+        return super().read(offset, length)
 
 
 class Fixture:
@@ -82,6 +100,8 @@ class Fixture:
         self.root = root
         self.modes: dict[str, tuple[int, int]] = {}
         self.denied: set[str] = set()
+        self.hang: set[str] = set()          # paths the server stops answering for
+        self.release = threading.Event()
         self.opened: list[str] = []
         self.sessions: list[paramiko.Transport] = []
         self.host_key = paramiko.Ed25519Key.generate() if hasattr(paramiko.Ed25519Key, "generate") else None
@@ -116,6 +136,7 @@ class Fixture:
 
     def stop(self) -> None:
         self.running = False
+        self.release.set()
         self.sock.close()
         for transport in self.sessions:
             transport.close()
@@ -144,6 +165,8 @@ class D9Case(unittest.TestCase):
         self.source = sftp_scanner.SftpSource(host="linux01.corp.test", username="alice", password=ALICE_PASSWORD,
                                               host_key_fingerprint=sftp_scanner.fingerprint(self.fixture.host_key),
                                               port=self.fixture.port, paths=["/home/alice"], address="127.0.0.1")
+        # The fixture is not on port 22, so its locations name the port.
+        self.at = f"sftp://linux01.corp.test:{self.fixture.port}"
 
 
 class TheCollectorTest(D9Case):
@@ -151,12 +174,12 @@ class TheCollectorTest(D9Case):
     def test_the_home_directory_is_read_as_an_ordinary_account(self) -> None:
         records, facts = sftp_scanner.scan(self.source)
         by_path = {record["path"]: record for record in records}
-        self.assertEqual(sorted(by_path), ["sftp://linux01.corp.test/home/alice/.ssh/id_backup",
-                                           "sftp://linux01.corp.test/home/alice/docs/payments.txt",
-                                           "sftp://linux01.corp.test/home/alice/docs/readme.txt",
-                                           "sftp://linux01.corp.test/home/alice/shadow-copy"])
-        self.assertIn(CARD, by_path["sftp://linux01.corp.test/home/alice/docs/payments.txt"]["content"])
-        refused = by_path["sftp://linux01.corp.test/home/alice/shadow-copy"]
+        self.assertEqual(sorted(by_path), [f"{self.at}/home/alice/.ssh/id_backup",
+                                           f"{self.at}/home/alice/docs/payments.txt",
+                                           f"{self.at}/home/alice/docs/readme.txt",
+                                           f"{self.at}/home/alice/shadow-copy"])
+        self.assertIn(CARD, by_path[f"{self.at}/home/alice/docs/payments.txt"]["content"])
+        refused = by_path[f"{self.at}/home/alice/shadow-copy"]
         self.assertEqual(refused["content_status"], "unreadable", "reported, not escalated around")
         self.assertEqual(facts["unreadable"], [{"path": "/home/alice/shadow-copy", "error": "PermissionError"}])
         self.assertEqual(facts["symlinks_skipped"], 1)
@@ -202,6 +225,41 @@ class TheCollectorTest(D9Case):
         payments = next(record for record in records if record["path"].endswith("payments.txt"))
         self.assertEqual((payments["scan_completeness"], payments["bytes_scanned"]), ("PARTIAL", 10))
 
+    def test_a_location_names_the_port_unless_it_is_22(self) -> None:
+        self.assertEqual(sftp_scanner.authority(sftp_scanner.SftpSource(host="h1", username="u", host_key_fingerprint="",
+                                                                         port=22)), "h1")
+        self.assertEqual(sftp_scanner.authority(self.source), f"linux01.corp.test:{self.fixture.port}")
+
+    def test_cancel_and_the_deadline_are_asked_per_file(self) -> None:
+        # One folder can hold the rest of the scan: the engine's cancel (or its deadline)
+        # is asked before each file, not only on entering a folder.
+        records, facts = sftp_scanner.scan(
+            self.source, cancel_check=lambda: "/home/alice/docs/payments.txt" in self.fixture.opened)
+        self.assertEqual(facts["scan_aborted_reason"], "cancelled")
+        self.assertNotIn("/home/alice/docs/readme.txt", self.fixture.opened)
+
+    def test_a_folder_the_host_stops_answering_for_ends_the_scan_within_its_timeout(self) -> None:
+        self.fixture.hang.add("/home/alice/docs")
+        self.source.timeout = 1.0
+        started = time.monotonic()
+        records, facts = sftp_scanner.scan(self.source)
+        self.assertLess(time.monotonic() - started, HANG_SECONDS / 2, "not held until the server answers")
+        self.assertEqual(facts["scan_aborted_reason"], "sftp_session_lost")
+        self.assertEqual(facts["unreadable_dirs"], [{"path": "/home/alice/docs", "error": "TimeoutError"}])
+        self.assertNotIn(f"{self.at}/home/alice/shadow-copy", {record["path"] for record in records},
+                         "nothing after it is waited for")
+
+    def test_a_file_the_host_stops_answering_for_ends_the_scan_within_its_timeout(self) -> None:
+        self.fixture.hang.add("/home/alice/docs/payments.txt")
+        self.source.timeout = 1.0
+        started = time.monotonic()
+        records, facts = sftp_scanner.scan(self.source)
+        self.assertLess(time.monotonic() - started, HANG_SECONDS / 2)
+        self.assertEqual(facts["scan_aborted_reason"], "sftp_session_lost")
+        payments = next(record for record in records if record["path"].endswith("payments.txt"))
+        self.assertEqual(payments["content_status"], "unreadable")
+        self.assertNotIn("/home/alice/docs/readme.txt", self.fixture.opened)
+
 
 class TheScanTest(D9Case):
     """Through the API and the engine: findings, who can read them, and resuming."""
@@ -242,7 +300,7 @@ class TheScanTest(D9Case):
         payments = next(entry for entry in report["files"] if entry["path"].endswith("payments.txt"))
         self.assertTrue(payments["findings"])
         broad = self.client.get("/api/access/files?kind=broad", headers=self.headers).json()
-        self.assertIn("sftp://linux01.corp.test/home/alice/.ssh/id_backup", json.dumps(broad))
+        self.assertIn(f"{self.at}/home/alice/.ssh/id_backup", json.dumps(broad))
 
     def test_a_scan_that_stopped_part_way_resumes_where_it_stopped(self) -> None:
         with mock.patch.object(sftp_scanner.SftpSource, "__init__", _capped(sftp_scanner.SftpSource.__init__, 2)):
@@ -266,9 +324,44 @@ class TheScanTest(D9Case):
         facts = report["scan_diagnostics"]
         self.assertEqual(facts["unreadable_dirs"], [{"path": "/home/alice/docs", "error": "PermissionError"}])
         self.assertFalse(facts["incremental"]["complete"], "what is under it was not seen")
-        inventory = json.dumps(self.client.get("/api/inventory?limit=200", headers=self.headers).json())
-        self.assertIn("sftp://linux01.corp.test/home/alice/docs/payments.txt", inventory,
+        self.assertIn(f"{self.at}/home/alice/docs/payments.txt", self.inventory_paths(),
                       "a folder that could not be listed is not pruned as if it were gone")
+
+    def inventory_paths(self) -> set[str]:
+        return {item["path"] for item in self.client.get("/api/inventory?limit=200", headers=self.headers).json()["items"]}
+
+    def test_a_file_it_could_not_read_is_read_again_once_it_may(self) -> None:
+        # Granting read changes neither the size nor the modified time: the refusal is not
+        # replayed from the cache for as long as the file stays unchanged.
+        self.scan()
+        self.fixture.denied.discard("/home/alice/shadow-copy")
+        self.fixture.opened.clear()
+        report = self.scan()
+        self.assertIn("/home/alice/shadow-copy", self.fixture.opened)
+        shadow = next(entry for entry in report["files"] if entry["path"].endswith("shadow-copy"))
+        self.assertNotEqual(shadow["content_status"], "unreadable")
+
+    def test_a_scan_of_other_paths_does_not_prune_these(self) -> None:
+        self.scan(scan_label="", paths=["/home/alice/docs"])
+        self.scan(scan_label="", paths=["/home/alice/.ssh"])
+        paths = self.inventory_paths()
+        self.assertIn(f"{self.at}/home/alice/docs/payments.txt", paths)
+        self.assertIn(f"{self.at}/home/alice/.ssh/id_backup", paths)
+
+    def test_two_ssh_servers_on_one_host_are_two_sources(self) -> None:
+        other_root = self.tmp / "other"
+        (other_root / "home" / "alice").mkdir(parents=True)
+        (other_root / "home" / "alice" / "payroll.txt").write_text(f"Card {CARD}\n", encoding="utf-8")
+        other = Fixture(other_root)
+        self.addCleanup(other.stop)
+        self.scan(scan_label="")
+        response = self.client.post("/api/sftp/scan", headers=self.headers, json={
+            "host": "linux01.corp.test", "port": other.port, "credential_ref": self.ref,
+            "host_key_fingerprint": sftp_scanner.fingerprint(other.host_key), "paths": ["/home/alice"]})
+        self.assertEqual(response.status_code, 200, response.text[:400])
+        paths = self.inventory_paths()
+        self.assertIn(f"sftp://linux01.corp.test:{other.port}/home/alice/payroll.txt", paths)
+        self.assertIn(f"{self.at}/home/alice/docs/payments.txt", paths, "the other port's scan did not prune these")
 
     def test_reuse_survives_a_lost_scan_cache(self) -> None:
         # The durable baseline in the database answers when the local cache is gone.

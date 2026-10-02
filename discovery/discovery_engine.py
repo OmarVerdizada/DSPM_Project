@@ -1618,7 +1618,7 @@ class DSPMDiscoveryEngine:
             "accessed_at", "attributes", "sha256", "file_hash", "content_hash",
             "content_status", "content_scannable", "scan_error", "protected",
             "protection_type", "scan_completeness", "bytes_scanned", "total_bytes",
-            "truncated", "reuse_key",
+            "truncated", "reuse_key", "stable_object_id",
         ):
             if key in record:
                 public_record[key] = copy.deepcopy(record[key])
