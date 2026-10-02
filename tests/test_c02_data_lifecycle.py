@@ -30,7 +30,7 @@ from unittest.mock import MagicMock, patch
 
 from cryptography.fernet import Fernet
 
-from backend import backup, config, housekeeping, store
+from backend import backup, config, db, housekeeping, store
 from collectors import file_scanner
 from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
@@ -365,6 +365,10 @@ class ACacheBelongsToOneWorkspaceTest(_ScanTest):
         self.assertTrue(scan_cache.tenant_cache_dir(self.cache, self.a).exists())
 
     def test_resetting_the_default_workspace_empties_its_cache(self) -> None:
+        if db.is_postgres():
+            # It resets the default workspace: on PostgreSQL the suite shares one database,
+            # and every later test would find its default workspace emptied.
+            self.skipTest("resets the default workspace of the shared PostgreSQL database")
         with suppress(Exception):
             store.create_tenant("default", "Default")
         store.create_user("admin", "kept-hash", "admin", "default", "Admin")
