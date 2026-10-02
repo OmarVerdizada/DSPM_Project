@@ -200,6 +200,9 @@ def audit_forward(args: argparse.Namespace) -> None:
     total = {"sent": 0, "failed": 0, "pending": 0}
     while True:
         result = drain()
+        if result.get("paused"):
+            raise SystemExit("The database schema is newer than this release: nothing was sent. Run the "
+                             "matching release's audit forward.")
         total["sent"] += result["sent"]
         total["failed"] += result["failed"]
         total["pending"] = result["pending"]

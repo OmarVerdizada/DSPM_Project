@@ -32,7 +32,7 @@ from unittest import mock
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from backend import backup, housekeeping, migrations, security, store
+from backend import backup, housekeeping, migrations, schema_guard, security, store
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -64,6 +64,9 @@ class _Install(unittest.TestCase):
         migrations.upgrade()
         if store.get_tenant("default") is None:
             store.create_tenant("default", "Default")
+        # The process's schema state is shared (backend.schema_guard): ask the database afresh.
+        schema_guard.reset()
+        self.addCleanup(schema_guard.reset)
 
     def manifest(self, name: str, *, age_hours: float, verified: bool = True, directory: Path | None = None) -> Path:
         """A set on disk as retention and readiness see it (its payload is not a real dump)."""
@@ -162,6 +165,7 @@ class TheScheduleTest(_Install):
         with store._connect() as conn:
             conn.execute("INSERT INTO schema_migrations (revision, name, checksum, applied_at) VALUES (?, ?, ?, ?)",
                          (migrations.expected_revision() + 1, "from a newer release", "x", "2026-10-01T00:00:00+00:00"))
+        schema_guard.reset()
         with mock.patch.object(backup, "run_backup_set") as run, \
                 mock.patch.object(housekeeping, "run_if_due") as retention:
             self.assertIn("skipped", housekeeping.run_due_jobs())

@@ -22,7 +22,7 @@ import threading
 import uuid
 from typing import Callable
 
-from backend import partitioned_scan, store
+from backend import partitioned_scan, schema_guard, store
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +54,12 @@ def resume_stale_scans(resume: Callable[[dict], object], *, stale_after_seconds:
     ``resume`` receives the scan's record with the job id it continues under - its old
     one, so a console still polling that job sees it running again. It raises
     :class:`ResumeLater` to leave the scan to a later sweep; any other error marks the
-    scan failed, since it would fail the same way next time.
+    scan failed, since it would fail the same way next time. On a database a newer release
+    has upgraded nothing is taken over (C0.4): the scans wait for that release.
     """
-    stale = partitioned_scan.partition_lease_seconds() if stale_after_seconds is None else max(0, int(stale_after_seconds))
+    if schema_guard.stand_down("scan resumer"):
+        return []
+    stale =partitioned_scan.partition_lease_seconds() if stale_after_seconds is None else max(0, int(stale_after_seconds))
     # A finalize cannot show it is alive while its write runs, so it is given far longer.
     finalizing = partitioned_scan.finalize_stale_seconds() if stale_after_seconds is None else stale
     taken: list[str] = []

@@ -383,9 +383,13 @@ def kick() -> None:
 
 
 def run_pass() -> None:
-    """One pass: what is due to be delivered, tickets, and the installation's own health."""
-    from backend import ops_alerts
+    """One pass: what is due to be delivered, tickets, and the installation's own health.
+    On a database a newer release has upgraded nothing is claimed or recorded (C0.4): the
+    deliveries and tickets stay queued for that release."""
+    from backend import ops_alerts, schema_guard
 
+    if schema_guard.stand_down("alert deliverer"):
+        return
     drain()
     drain_tickets()
     ops_alerts.maybe_evaluate()  # D11: the queue, backups, the SIEM

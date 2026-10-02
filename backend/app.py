@@ -557,37 +557,17 @@ app.include_router(reporting_router)
 # upgrade, a manual migration) is noticed within DSPM_SCHEMA_CHECK_SECONDS, and from then
 # on this build answers its data routes with 503 and the reason instead of writing rows in
 # a shape the newer code does not expect. Health and readiness keep answering - readiness
-# already reports the mismatch - so the operator sees why.
-_SCHEMA_GUARD: dict = {"checked": float("-inf"), "problem": "", "revision": None}
+# already reports the mismatch - so the operator sees why. The state is backend.schema_guard's,
+# shared with the scan worker and every background writer.
+from backend import schema_guard as _schema_guard
+
+_SCHEMA_GUARD: dict = _schema_guard.STATE
 _SCHEMA_GUARD_OPEN = {"/api/health", "/api/ready"}
-
-
-def _schema_check_seconds() -> float:
-    try:
-        return max(1.0, float(os.getenv("DSPM_SCHEMA_CHECK_SECONDS", "30")))
-    except ValueError:
-        return 30.0
 
 
 def schema_problem() -> str:
     """Why this build must not serve data now ("" when it may). Cached for the interval."""
-    now = time.monotonic()
-    if now - _SCHEMA_GUARD["checked"] < _schema_check_seconds():
-        return _SCHEMA_GUARD["problem"]
-    _SCHEMA_GUARD["checked"] = now
-    revision = _schema_revision_or_none()
-    problem = ""
-    if revision is not None and revision["applied"] > revision["expected"]:
-        problem = (f"The database schema is at revision {revision['applied']}, newer than this build's "
-                   f"{revision['expected']}: another Sentro release has upgraded it. This server stops "
-                   f"serving data until the matching release is running.")
-    if problem and not _SCHEMA_GUARD["problem"]:
-        from scripts.logger import get_logger
-
-        get_logger("backend.app").error(problem)
-    _SCHEMA_GUARD["problem"] = problem
-    _SCHEMA_GUARD["revision"] = revision if problem else None
-    return problem
+    return _schema_guard.problem()
 
 
 @app.middleware("http")
@@ -613,7 +593,7 @@ async def schema_guard(request: Request, call_next):
         if problem:
             # The console reads `reason` to tell the operator once, on every page, what
             # happened and what to do; `detail` stays the sentence for everything else.
-            revision = _SCHEMA_GUARD.get("revision") or {}
+            revision = _schema_guard.revision()
             return JSONResponse(status_code=503, content={
                 "detail": problem, "reason": "schema_mismatch",
                 "applied": revision.get("applied"), "expected": revision.get("expected")})

@@ -666,11 +666,21 @@ _reconciler_thread: threading.Thread | None = None
 _reconciler_thread_lock = threading.Lock()
 
 
+def reconcile_pass() -> dict | None:
+    """One pass of the automated reconciler; ``None`` - nothing compared, repaired or
+    recorded - on a database a newer release has upgraded (C0.4)."""
+    from backend import schema_guard
+
+    if schema_guard.stand_down("search reconciler"):
+        return None
+    return run_search_reconciliation(repair=config_from_env().reconcile_repair)
+
+
 def _reconciler_loop() -> None:
     while not _reconciler_stop.is_set():
         config = config_from_env()
         try:
-            run_search_reconciliation(repair=config.reconcile_repair)
+            reconcile_pass()
         except Exception as exc:  # pragma: no cover - live optional service guard
             logger.warning("Automated search reconciliation failed: %s", type(exc).__name__)
         if _reconciler_stop.wait(max(1, config.reconcile_interval_seconds)):

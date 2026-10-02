@@ -24,7 +24,7 @@ from contextlib import suppress
 from datetime import datetime
 from typing import Callable
 
-from backend import store
+from backend import schema_guard, store
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,11 @@ def run_due_schedules(
 
     ``start`` is given the claimed schedule and starts its scan. If it raises - a full
     job queue, a credential that is gone from the vault - the run is recorded as failed
-    and the sweep moves on; the schedule keeps its place.
+    and the sweep moves on; the schedule keeps its place. On a database a newer release
+    has upgraded nothing is claimed (C0.4): the schedules wait, due, for that release.
     """
+    if schema_guard.stand_down("scan scheduler"):
+        return []
     started: list[str] = []
     from backend import licensing
 

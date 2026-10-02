@@ -29,7 +29,7 @@ import time
 import uuid
 from typing import Callable
 
-from backend import partitioned_scan, store
+from backend import partitioned_scan, schema_guard, store
 from backend.work_queue import Delivery, PartitionQueue
 
 logger = logging.getLogger(__name__)
@@ -95,31 +95,15 @@ def _maintain(queue: PartitionQueue, rebuild: Callable[[dict], object], worker_i
     return queue.reclaim(worker_id, idle_seconds=lease)
 
 
-_SCHEMA_STATE = {"checked": float("-inf"), "newer": False}
+# The process's one schema state (backend.schema_guard), under the name the worker used.
+_SCHEMA_STATE = schema_guard.STATE
 
 
 def _schema_is_newer() -> bool:
     """True while the database's schema revision is ahead of this build's (checked at most
-    every DSPM_SCHEMA_CHECK_SECONDS)."""
-    try:
-        interval = max(1.0, float(os.getenv("DSPM_SCHEMA_CHECK_SECONDS", "30")))
-    except ValueError:
-        interval = 30.0
-    if time.monotonic() - _SCHEMA_STATE["checked"] < interval:
-        return _SCHEMA_STATE["newer"]
-    _SCHEMA_STATE["checked"] = time.monotonic()
-    try:
-        from backend import migrations, store
-
-        with store._connect() as conn:
-            newer = migrations.current_revision(conn) > migrations.expected_revision()
-    except Exception:
-        newer = False  # an unreachable database is the queue's problem, handled below
-    if newer and not _SCHEMA_STATE["newer"]:
-        logger.error("The database schema is newer than this worker's build; taking no work until "
-                     "the matching release runs.")
-    _SCHEMA_STATE["newer"] = newer
-    return newer
+    every DSPM_SCHEMA_CHECK_SECONDS). An unreachable database is not a mismatch: it is the
+    queue's problem, handled in run_worker."""
+    return schema_guard.stand_down("scan worker")
 
 
 def run_worker(

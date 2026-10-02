@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from backend import backup, db, store
+from backend import backup, db, schema_guard, store
 
 logger = logging.getLogger(__name__)
 
@@ -183,22 +183,11 @@ def run_backup_if_due(*, now: datetime | None = None) -> dict | None:
     return outcome
 
 
-def _schema_is_newer() -> bool:
-    """The database is at a revision this build does not know: another release upgraded it."""
-    try:
-        from backend import migrations
-
-        with store._connect() as conn:
-            return migrations.current_revision(conn) > migrations.expected_revision()
-    except Exception:
-        return False
-
-
 def run_due_jobs(report_dir: Path | None = None) -> dict:
     """One pass of the loop: retention, then the backup, each only when due. Nothing runs on
-    a database a newer release has upgraded (C0.4) - not even a backup, whose audit row
-    would be a write in a shape this build may not know."""
-    if _schema_is_newer():
+    a database a newer release has upgraded (C0.4, backend.schema_guard) - not even a
+    backup, whose audit row would be a write in a shape this build may not know."""
+    if schema_guard.stand_down("housekeeping"):
         return {"skipped": "the database schema is newer than this build"}
     ran: dict = {}
     for name, job in (("retention", lambda: run_if_due(report_dir=report_dir)), ("backup", run_backup_if_due)):

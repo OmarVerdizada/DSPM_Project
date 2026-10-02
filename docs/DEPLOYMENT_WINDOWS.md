@@ -319,10 +319,13 @@ Every later upgrade starts from the launcher that upgrade placed.
 
 A backend that is still running an older release when the database is migrated - a second
 node, or a service that was not stopped - notices within `DSPM_SCHEMA_CHECK_SECONDS` (30):
-its data routes answer 503 with `reason: schema_mismatch` and both revisions (readiness
-answers too, and only reads; the scan worker, housekeeping and the backup schedule stand
-down), and its console shows one notice: the database was upgraded to revision N, this
-service runs revision M, restart the Sentro service.
+its data routes answer 503 with `reason: schema_mismatch` and both revisions; readiness
+answers too, and only reads. Every background writer stands down at the top of its next
+pass: the scan worker, scan scheduler, scan resumer, SIEM forwarder, alert deliverer, the
+installation's own alerts, the search reconciler, housekeeping and the backup schedule.
+Queued work waits for the matching release, and each logs once that it paused. A pass
+already under way finishes its current item. The console shows one notice: the database
+was upgraded to revision N, this service runs revision M, restart the Sentro service.
 
 The previous release stays under `releases\` for rollback; older ones are removed.
 `<DataRoot>\install.json` records every install, upgrade and uninstall, with the backup

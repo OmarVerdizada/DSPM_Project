@@ -105,9 +105,14 @@ def evaluate() -> list[str]:
 
 
 def maybe_evaluate() -> None:
-    """Called from the deliverer's loop; runs at most once an interval, never raises."""
+    """Called from the deliverer's loop; runs at most once an interval, never raises. Raises
+    and records nothing on a database a newer release has upgraded (C0.4)."""
     global _last_run
+    from backend import schema_guard
+
     if time.monotonic() - _last_run < interval_seconds():
+        return
+    if schema_guard.stand_down("installation's own alerting"):
         return
     _last_run = time.monotonic()
     try:

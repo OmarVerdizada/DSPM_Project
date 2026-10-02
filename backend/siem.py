@@ -183,11 +183,16 @@ def drain(*, limit: int = 200, now: float | None = None, owner: str = "") -> dic
 
     A connection that cannot be opened, or a send that fails, stops the pass: the rest
     are put back with the same back-off rather than hammering a receiver that is down.
+    On a database a newer release has upgraded nothing is claimed (C0.4): the events stay
+    queued for that release to send.
     """
-    from backend import store
+    from backend import schema_guard, store
 
     from backend import siem_settings
 
+    # First: even reading the settings can write once (importing DSPM_SIEM_URL).
+    if schema_guard.stand_down("SIEM forwarder"):
+        return {"sent": 0, "failed": 0, "pending": 0, "paused": True}
     target = siem_target()
     if target is None:
         return {"sent": 0, "failed": 0, "pending": 0}
