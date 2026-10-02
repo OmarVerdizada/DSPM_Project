@@ -1288,10 +1288,11 @@ button.ledger-cell:hover { background: var(--band-wash); }
 #results-body .badge.LOW,
 #risk-rules-body .logic-signal-card .badge.LOW { --pill: var(--sev-low); }
 
-/* The alerts' and Risk logic's asset chips on the legacy 12-16% wash
+/* The alerts', Who can read's and Risk logic's asset chips on the legacy 12-16% wash
    measured 4.1-4.3:1; on the card's own surface with a hairline, as the
    Remediation board's chips are, they measure 4.8-5.0. */
 #tab-alerts .badge,
+#tab-access .badge,
 #risk-rules-body .logic-asset .badge {
   background: var(--surface) !important; /* token-gate: allow - the legacy wash is important */
   border: 1px solid color-mix(in srgb, currentColor 34%, transparent);

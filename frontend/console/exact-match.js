@@ -44,12 +44,48 @@ function exactMatchValues(text) {
   return [...seen];
 }
 
-// A .csv file gives each row's first field; any other file, its lines.
+// The first field of one CSV row: quoted ("Aliyeva, Leyla" stays whole, "" is a quote)
+// or up to the delimiter.
+function exactMatchFirstField(line, delimiter) {
+  const text = String(line || "").trim();
+  if (!text.startsWith('"')) return text.split(delimiter)[0].trim();
+  let value = "";
+  for (let index = 1; index < text.length; index += 1) {
+    if (text[index] === '"') {
+      if (text[index + 1] === '"') {
+        value += '"';
+        index += 1;
+      } else {
+        break;
+      }
+    } else {
+      value += text[index];
+    }
+  }
+  return value.trim();
+}
+
+// A .csv file gives each row's first field - comma, semicolon (the Excel export in
+// Azerbaijani, Russian or German) or tab, whichever the first line uses most; any other
+// file, its lines.
 function exactMatchFileText(name, text) {
   if (!/\.csv$/i.test(String(name || ""))) return String(text || "");
-  return String(text || "").split(/\r?\n/)
-    .map((line) => line.split(",")[0].trim().replace(/^"(.*)"$/, "$1").trim())
-    .join("\n");
+  const lines = String(text || "").split(/\r?\n/);
+  const first = lines.find((line) => line.trim()) || "";
+  const delimiter = [",", ";", "\t"].map((mark) => [mark, first.split(mark).length])
+    .sort((left, right) => right[1] - left[1])[0][0];
+  return lines.map((line) => exactMatchFirstField(line, delimiter)).join("\n");
+}
+
+// A workspace switch clears the form: values typed for one customer must not be added to
+// the next one's set by the next click.
+function resetExactMatchForm() {
+  const parts = exactMatchParts();
+  parts.form?.reset();
+  if (parts.values) parts.values.value = "";
+  if (parts.count) parts.count.textContent = "";
+  if (parts.status) parts.status.textContent = "";
+  if (parts.body) parts.body.innerHTML = "";
 }
 
 function renderExactMatchCount() {

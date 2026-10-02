@@ -92,16 +92,23 @@ class HeaderClusterTests(unittest.TestCase):
         switch = APP_JS[APP_JS.index("function switchTab(tabName) {"):]
         self.assertIn("document.body.dataset.tab = resolvedTab;", switch[:2000])
 
-    def test_the_cluster_belongs_to_the_dashboard(self) -> None:
-        self.assertIn('body[data-tab]:not([data-tab="overview"]) .topbar { display: none; }', SHELL_CSS)
-        # Guarded on PRESENCE too: a load straight onto the dashboard never
-        # calls switchTab, so the attribute is absent there and a bare :not()
-        # would hide the cluster on the one page it belongs to.
-        self.assertNotIn(':not([data-tab="overview"]) .topbar { display: none; }\n\nbody:not', SHELL_CSS)
-        # And the 640px each title row reserved for it comes back.
-        self.assertIn("--shell-head-reserve", SHELL_CSS)
-        reserve = SHELL_CSS[SHELL_CSS.index('body[data-tab]:not([data-tab="overview"]) :is('):]
-        self.assertIn("padding-right: 0;", reserve[:260])
+    def test_the_header_is_on_every_page_with_the_pages_title(self) -> None:
+        """The product owner's review (2026-10-02): search, New Scan, theme and the
+        workspace selector were kept to the dashboard, so switching customer or
+        searching meant going back to it first. The header is on every page and
+        carries the page's title; the page's own h2 stays for assistive technology."""
+        self.assertNotIn(".topbar { display: none; }", SHELL_CSS)
+        self.assertNotIn('body[data-tab]:not([data-tab="overview"])', SHELL_CSS)
+        index = Path("frontend/index.html").read_text(encoding="utf-8")
+        self.assertIn('<div class="page-title tb-title" id="tb-title" aria-hidden="true">Dashboard</div>', index)
+        switch = APP_JS[APP_JS.index("function switchTab(tabName) {"):]
+        self.assertIn('headerTitle.textContent = activePanel.querySelector(".page-title")?.textContent.trim()', switch[:2600])
+        self.assertIn(".tab-panel > :is(.section-header, .asset-header) .page-title {", SHELL_CSS)
+        # A title row that carries more than the title puts it under the header, not beneath it.
+        self.assertIn("padding-top: calc(var(--shell-topbar-h) + var(--space-3));", SHELL_CSS)
+        for sheet in ("history.css", "reports.css"):
+            css = Path("frontend/styles", sheet).read_text(encoding="utf-8")
+            self.assertNotIn("No topbar cluster on this page", css)
 
 
 class TenantNameTests(unittest.TestCase):

@@ -14,6 +14,23 @@
    ============================================================ */
 
 @layer components {
+  /* `hidden` means hidden. A page rule giving a panel display:flex outranked the
+     browser's own [hidden] rule, and "Who can read" showed an empty Files panel
+     before anyone was picked. An important declaration in a layer outranks every
+     unlayered one, so no page rule can undo this again. */
+  [hidden] { display: none !important; } /* token-gate: allow - the one global guarantee `hidden` needs */
+
+  /* The console's icons are stroke drawings (Lucide symbols). A page without a rule
+     of its own painted them as solid black shapes - the refresh arrow on Who can
+     read and Alerts was a black blob. A default here; a page's own rule still wins. */
+  .f-ico {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
   /* Read by a screen reader, not seen. */
   .sr-only {
     position: absolute;

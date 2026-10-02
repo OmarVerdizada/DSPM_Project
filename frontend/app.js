@@ -4103,6 +4103,9 @@ function switchTab(tabName) {
   // thing that toggles .active on a panel, and the popstate handler routes
   // through here too, so this covers every way the console navigates.
   document.body.dataset.tab = resolvedTab;
+  // The header carries the page's title on every page (shell.css).
+  const headerTitle = document.querySelector("#tb-title");
+  if (headerTitle) headerTitle.textContent = activePanel.querySelector(".page-title")?.textContent.trim() || "";
   syncNavGroups();
   const targetUrl = tabUrl(resolvedTab);
   if (location.pathname + location.hash !== targetUrl && PATH_DEFAULT_TAB[location.pathname]) {
@@ -8253,10 +8256,16 @@ function renderLocationsCard() {
     // Reporting that as "no scan yet" sent one operator looking for a scan
     // that had already run; the two states now read differently.
     const missing = estateFacets && !Array.isArray(estateFacets.locations);
-    setCardMeta("#locations-card-meta", missing ? "Unavailable" : "No scan yet");
+    // Locations are file shares and their folders. A workspace whose scans so far read
+    // local folders, endpoints or cloud sites has files but no share - "no scan yet"
+    // was wrong there too.
+    const scanned = Number(estateFacets?.total || 0) > 0;
+    setCardMeta("#locations-card-meta", missing ? "Unavailable" : scanned ? "No shares" : "No scan yet");
     card.innerHTML = missing
       ? '<p class="dash-empty">This service build does not report locations. Restart the Sentro service to pick them up.</p>'
-      : '<p class="dash-empty">Locations appear after the first scan.</p>';
+      : scanned
+        ? '<p class="dash-empty">Locations are file shares and their folders. The scans in this workspace so far read local folders, endpoints or cloud sites, which have no share.</p>'
+        : '<p class="dash-empty">Locations appear after the first scan.</p>';
     return;
   }
   const shares = rows.filter((entry) => !entry.depth);
@@ -12672,6 +12681,11 @@ tenantSwitcher.addEventListener("change", async () => {
   closeAssetDetailModal();
   assetModalFile = null;
   closeAnyOpenScanWizard();
+  // The console/ pages keep their own state: none of the old workspace's may stay on screen.
+  resetAccessPage();
+  resetExactMatchForm();
+  if (panelIsVisible("tab-access")) loadAccessPrincipals();
+  if (panelIsVisible("tab-settings")) loadExactMatchSets();
   rowOverrides = loadRowOverrides();
   assetRules = loadAssetRules();
   customExtensions = loadCustomExtensions();

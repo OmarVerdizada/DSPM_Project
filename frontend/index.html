@@ -141,6 +141,8 @@
 
       <main>
         <section class="topbar">
+          <!-- The page's title, shown in the header; the page's own h2 stays for assistive technology. -->
+          <div class="page-title tb-title" id="tb-title" aria-hidden="true">Dashboard</div>
           <div class="topbar-left">
             <div class="tb-search" role="search">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -764,7 +766,7 @@
                     <div class="inventory-export-actions">
                       <button type="button" id="remediation-apply-filters" class="facet-apply"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-search"/></svg>Search</button>
                       <button type="button" id="remediation-reset-filters" class="secondary-btn mini-btn" data-remediation-reset><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-list-filter"/></svg>Clear filters</button>
-                      <button type="button" id="refresh-executive-btn" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+                      <button type="button" id="refresh-executive-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
                     </div>
                   </div>
                 </div>
@@ -960,7 +962,7 @@
                   is never shown again.</p>
               </div>
               <div class="panel-actions">
-                <button type="button" id="refresh-edm-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+                <button type="button" id="refresh-edm-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
               </div>
             </div>
             <form id="edm-form" class="edm-form" autocomplete="off">
@@ -1148,7 +1150,7 @@
                     <option value="">All</option>
                   </select>
                 </label>
-                <button type="button" id="refresh-alerts-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+                <button type="button" id="refresh-alerts-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
               </div>
             </div>
             <div class="panel-table-wrap">
@@ -1190,7 +1192,7 @@
                   </select>
                 </label>
                 <button type="button" id="access-kind-files" class="secondary-btn" hidden>Their files</button>
-                <button type="button" id="refresh-access-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+                <button type="button" id="refresh-access-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
               </div>
             </div>
             <div class="panel-table-wrap">
@@ -1260,7 +1262,7 @@
                 </label>
                 <input id="history-from" class="history-date hidden" type="date" title="From date" />
                 <input id="history-to" class="history-date hidden" type="date" title="To date" />
-                <button type="button" id="refresh-history-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+                <button type="button" id="refresh-history-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
               </div>
             </div>
             <div class="panel-table-wrap">
@@ -1296,7 +1298,7 @@
                 </label>
                 <input id="audit-from" class="history-date hidden" type="date" title="Audit from date" />
                 <input id="audit-to" class="history-date hidden" type="date" title="Audit to date" />
-                <button type="button" id="refresh-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh</button>
+                <button type="button" id="refresh-audit-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
                 <button type="button" id="verify-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>Verify integrity</button>
               </div>
             </div>
@@ -1833,7 +1835,7 @@
                 <h3>Users and roles</h3>
                 <p>Manage tenant access levels and reset local passwords.</p>
               </div>
-              <button type="button" id="refresh-users-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh users</button>
+              <button type="button" id="refresh-users-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh users</button>
             </div>
             <div class="table-wrap">
               <table class="logic-table">
@@ -1898,7 +1900,7 @@
                 <h3>Tenant list</h3>
                 <p>Available tenants are used by registration, user management, and the <abbr title="Managed security service provider — one customer workspace per tenant">MSSP</abbr> switcher.</p>
               </div>
-              <button type="button" id="refresh-tenants-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-refresh-cw"/></svg>Refresh tenants</button>
+              <button type="button" id="refresh-tenants-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh tenants</button>
             </div>
             <div class="table-wrap">
               <table class="logic-table">

@@ -115,7 +115,7 @@ class ContrastTests(unittest.TestCase):
         for level in SEVERITIES:
             self.assertReadable(rgb(LIGHT[f"--sev-{level}"], LIGHT), rgb(LIGHT["--surface"], LIGHT), f"light alert {level}")
             self.assertReadable(rgb(dark_status[f"--status-{level}"], DARK), rgb(DARK["--surface"], DARK), f"dark alert {level}")
-        self.assertIn("#tab-alerts .badge,\n#risk-rules-body .logic-asset .badge {\n  background: var(--surface) !important;", PAGES)
+        self.assertIn("#tab-alerts .badge,\n#tab-access .badge,\n#risk-rules-body .logic-asset .badge {\n  background: var(--surface) !important;", PAGES)
 
     def test_white_on_the_accent(self) -> None:
         white = (255, 255, 255, 1.0)

@@ -24,17 +24,14 @@
 #tab-reports.tab-panel.active {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
   height: 100dvh;
   overflow: hidden;
 }
 
 #tab-reports > .section-header {
-  /* No topbar cluster on this page, so the 640px the shell reserves for one is
-     dead width. */
   flex: 0 0 auto;
   margin-bottom: 0;
-  padding-right: 0;
 }
 
 /* The rail gets room for its longest select value; the document gives some

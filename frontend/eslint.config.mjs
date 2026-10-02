@@ -20,8 +20,10 @@ const FROM_FEATURES = {
   remediationTicketSection: "readonly",
   // console/access.js
   loadAccessPrincipals: "readonly",
+  resetAccessPage: "readonly",
   // console/exact-match.js
   loadExactMatchSets: "readonly",
+  resetExactMatchForm: "readonly",
 };
 const FROM_APP = {
   accessToken: "readonly",

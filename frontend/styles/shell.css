@@ -70,20 +70,78 @@
   padding-right: var(--shell-head-reserve);
   min-height: 34px;
 }
-/* ── The header cluster is the dashboard's ────────────────────
-   Search, New Scan, the theme toggle, the connection pill and the tenant
-   selector sat over every page's title row, reserving 640px of it on eight
-   panels for controls that answer questions the dashboard asks. They stay on
-   the dashboard; every other page gets its full title row back.
+/* ── The header is on every page ──────────────────────────────
+   Search, New Scan, the theme, the connection and the workspace selector are
+   the console's, not the dashboard's: they were hidden on every other page,
+   so switching customer or searching meant going back to the dashboard first.
+   An application header stays where it is on every page (the product owner's
+   review, 2026-10-02); each page's title row keeps the room for it. */
 
-   The guard is on the attribute's PRESENCE as well as its value: a load
-   straight onto /dashboard never calls switchTab, so the attribute is absent
-   there and a bare :not() would hide the cluster on the one page it belongs
-   to. */
-body[data-tab]:not([data-tab="overview"]) .topbar { display: none; }
+/* The header is one row across the page: the title on the left, the cluster on
+   the right. Each page's own h2 is hidden from sight only (assistive technology
+   still reads it, in its place), and the row it stood in becomes the space the
+   header sits in. Where a page's title row carries more - Asset rules'
+   description and buttons, Risk logic's subtitle - that comes on the next row:
+   overlaying the cluster on them is why the header was once kept to the
+   dashboard. Below 820px the header is in the page's flow and the page shows
+   its own title as before. */
+@media (min-width: 821px) {
+  .topbar { left: var(--shell-gutter); }
+  .tb-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .tab-panel > :is(.section-header, .asset-header) .page-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  #tab-logic > .section-header {
+    padding-top: calc(var(--shell-topbar-h) + var(--space-3));
+    padding-right: 0;
+  }
+  :root:root:root #tab-settings > .asset-header {
+    padding: calc(var(--shell-topbar-h) + var(--space-3)) 0 0 !important; /* token-gate: allow - a legacy rule zeroes this padding with important */
+  }
+}
+@media (max-width: 820px) {
+  .tb-title { display: none; }
+}
 
-body[data-tab]:not([data-tab="overview"]) :is(.section-header, .asset-header, .report-header, .history-toolbar) {
-  padding-right: 0;
+/* One rhythm under every title row: 16px, then the page's first box. Pages
+   had 12px (Reports, Remediation), 32px (History, Who can read - a 16px gap
+   AND a 16px margin) and 20px (Asset rules). */
+.tab-panel.active > :is(.section-header, .asset-header) { margin-bottom: var(--space-4); }
+.tab-panel.active:is(#tab-overview, #tab-history, #tab-access, #tab-reports) > :is(.section-header, .asset-header) {
+  margin-bottom: 0;
+}
+#tab-risk .remediation-page-content { gap: var(--space-4); }
+
+/* One refresh control, the Remediation page's: outlined, 32px, the
+   counter-clockwise arrow. */
+.refresh-btn.secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  min-height: 32px;
+  margin: 0;
+  padding: 0 var(--space-3);
+  white-space: nowrap;
+}
+.refresh-btn .btn-ico { width: 15px; height: 15px; }
+
+/* A checkbox clicked with the mouse drew the legacy 4px input focus ring - on a
+   box the legacy input height had stretched to 36px - so a frame appeared
+   round the tick. The ring is for the keyboard. */
+:root input:is([type="checkbox"], [type="radio"]):focus:not(:focus-visible) {
+  box-shadow: none !important; /* token-gate: allow - the legacy input focus ring is important */
 }
 
 .title-with-action {

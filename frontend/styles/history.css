@@ -19,11 +19,6 @@
   gap: var(--space-4);
 }
 
-#tab-history > .section-header {
-  /* No topbar cluster on this page, so the width the shell reserves for one
-     is dead. */
-  padding-right: 0;
-}
 
 /* ── A panel ──────────────────────────────────────────────────
    Flat, one hairline, no lift. The card that rose 2px on hover belonged to a
@@ -362,7 +357,6 @@
   gap: var(--space-4);
 }
 
-#tab-access > .section-header { padding-right: 0; }
 
 .access-row { cursor: pointer; }
 
@@ -426,10 +420,20 @@
 .access-toggle {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
   color: var(--ink-muted);
   font-size: var(--text-xs);
   white-space: nowrap;
+  cursor: pointer;
+}
+/* A checkbox, not a 36px input field. */
+.access-toggle input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--indigo);
 }
 
 #access-files-more { align-self: center; }

@@ -17,6 +17,9 @@ const ACCESS_KIND_LABELS = {
 const ACCESS_FILES_PAGE = 100;
 let accessChosen = null; // {key, kind, label} - whose files the second panel lists
 let accessFilesOffset = 0;
+// Every files request is numbered; an answer for an older one (another principal picked,
+// a second "Show more" while the first was on its way) is dropped, not shown.
+let accessFilesRequest = 0;
 
 function accessParts() {
   return {
@@ -59,7 +62,7 @@ function renderAccessPrincipals(rows) {
     const exposed = rows.filter((row) => row.readable_sensitive_files > 0).length;
     parts.context.textContent = rows.length
       ? `${accessCount(rows.length)} ${kind ? `${ACCESS_KIND_LABELS[kind].toLowerCase()} ` : ""}principal${rows.length === 1 ? "" : "s"}; `
-        + `${accessCount(exposed)} can read files that hold findings. Pick one to see the files.`
+        + `${accessCount(exposed)} can read files that hold findings. Pick one to see its files.`
       : "";
   }
   if (!rows.length) {
@@ -67,6 +70,11 @@ function renderAccessPrincipals(rows) {
       ? "No principal of this kind can read a scanned file."
       : "No access recorded yet. Each scan reads its files' permissions; run one to see who can read what."}</td></tr>`;
     return;
+  }
+  // The page opens on the principal that can read the most files holding findings
+  // (the list's first row), rather than on an empty second panel.
+  if (!accessChosen && !kind) {
+    accessChosen = { key: rows[0].key, kind: "", label: rows[0].principal || rows[0].key };
   }
   parts.principals.innerHTML = rows.map((row) => {
     const chosen = Boolean(accessChosen && accessChosen.key === row.key);
@@ -91,6 +99,7 @@ async function loadAccessPrincipals() {
     const data = await api(`/api/access/principals?limit=500${kind ? `&kind=${encodeURIComponent(kind)}` : ""}`, null, "GET");
     if (!isCurrentTenantContext(context)) return;
     renderAccessPrincipals(data.principals || []);
+    if (accessChosen) loadAccessFiles();
   } catch (error) {
     if (!isCurrentTenantContext(context)) return;
     if (parts.principals) {
@@ -116,7 +125,9 @@ async function loadAccessFiles({ append = false } = {}) {
   if (!accessToken || !accessChosen) return;
   const parts = accessParts();
   const context = captureTenantContext();
+  const request = ++accessFilesRequest;
   if (!append) accessFilesOffset = 0;
+  if (parts.more) parts.more.disabled = true;
   const query = new URLSearchParams({
     sensitive_only: String(Boolean(parts.sensitive?.checked)),
     writable_only: String(Boolean(parts.writable?.checked)),
@@ -133,7 +144,7 @@ async function loadAccessFiles({ append = false } = {}) {
   }
   try {
     const data = await api(`/api/access/files?${query}`, null, "GET");
-    if (!isCurrentTenantContext(context) || !parts.files) return;
+    if (request !== accessFilesRequest || !isCurrentTenantContext(context) || !parts.files) return;
     const files = data.files || [];
     const rows = files.map((file) => accessFileRow(file, Boolean(accessChosen.kind))).join("");
     if (append) {
@@ -144,15 +155,33 @@ async function loadAccessFiles({ append = false } = {}) {
         : "No files."}</td></tr>`;
     }
     accessFilesOffset += files.length;
-    if (parts.more) parts.more.hidden = files.length < ACCESS_FILES_PAGE;
+    if (parts.more) {
+      parts.more.hidden = files.length < ACCESS_FILES_PAGE;
+      parts.more.disabled = false;
+    }
     if (parts.filesNote) {
       parts.filesNote.textContent = `${accessCount(accessFilesOffset)} file${accessFilesOffset === 1 ? "" : "s"} shown, riskiest first`
         + `${parts.sensitive?.checked ? "; only files that hold findings" : ""}.`;
     }
   } catch (error) {
-    if (!isCurrentTenantContext(context)) return;
+    if (request !== accessFilesRequest || !isCurrentTenantContext(context)) return;
+    if (parts.more) parts.more.disabled = false;
     if (parts.files) parts.files.innerHTML = `<tr><td colspan="4" class="empty">Files unavailable: ${escapeHtml(error.message)}</td></tr>`;
   }
+}
+
+// A workspace switch forgets what was picked and shows nothing of the old workspace:
+// its principals, picked or not, are not the new one's.
+function resetAccessPage() {
+  const parts = accessParts();
+  accessChosen = null;
+  accessFilesOffset = 0;
+  accessFilesRequest += 1;
+  if (parts.principals) parts.principals.innerHTML = "";
+  if (parts.files) parts.files.innerHTML = "";
+  if (parts.context) parts.context.textContent = "";
+  if (parts.filesPanel) parts.filesPanel.hidden = true;
+  if (parts.kind) parts.kind.value = "";
 }
 
 function chooseAccessPrincipal(row) {
