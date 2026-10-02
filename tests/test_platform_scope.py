@@ -95,6 +95,8 @@ class EveryStoreFunctionHasAScopeTest(unittest.TestCase):
             # D3: the deliverer spans workspaces; retention prunes old deliveries
             "alert_deliveries": ["delivery", "housekeeping", "metrics"],
             "finding_tickets": ["delivery", "metrics"],
+            # The tenant portfolio counts each workspace's incremental baseline (revision 0037)
+            "scan_object_baselines": ["platform-admin"],
         })
         every = {purpose for purposes in store.PLATFORM_ACCESS.values() for purpose in purposes}
         self.assertLessEqual(every | {"migration", "backup"}, set(db.PLATFORM_PURPOSES))

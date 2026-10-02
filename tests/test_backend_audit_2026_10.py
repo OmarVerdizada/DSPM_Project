@@ -418,5 +418,30 @@ class TheSearchEngineAnswersOnlyWhatItCanFilterTest(unittest.TestCase):
         self.assertIn("items", page)
 
 
+class StartupHygieneRunsInEachWorkspaceTest(unittest.TestCase):
+    """The startup demo-sample purge ran with no scope: on PostgreSQL row-level security
+    showed it nothing, so it never removed anything there."""
+
+    def test_the_purge_runs_once_per_workspace_in_its_scope(self) -> None:
+        from backend import db, store
+
+        seen = []
+
+        def record(tenant_id=None):
+            seen.append((tenant_id, db.current_tenant_scope()))
+            return 0
+
+        with patch.object(store, "_demo_assets_allowed_in_inventory", return_value=False),                 patch.object(store, "purge_demo_sample_assets", record):
+            store._purge_demo_sample_assets_everywhere()
+        self.assertTrue(seen)
+        self.assertTrue(all(tenant and scope == tenant for tenant, scope in seen), seen)
+
+    def test_the_portfolio_may_count_baselines(self) -> None:
+        from backend import store
+
+        self.assertIn("platform-admin", store.PLATFORM_ACCESS["scan_object_baselines"])
+        self.assertIn("'platform-admin'", store.tenant_policy_predicate("scan_object_baselines"))
+
+
 if __name__ == "__main__":
     unittest.main()

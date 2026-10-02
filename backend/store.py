@@ -477,6 +477,9 @@ PLATFORM_ACCESS: dict[str, frozenset] = {
     "assets": frozenset({"search-indexer", "housekeeping"}),
     # D7: the demo-sample purge removes an asset's access rows with the asset.
     "asset_access": frozenset({"housekeeping"}),
+    # The platform tenant portfolio counts each workspace's incremental baseline; without
+    # the purpose PostgreSQL showed it 0 for every workspace (revision 0037).
+    "scan_object_baselines": frozenset({"platform-admin"}),
 }
 
 
@@ -1300,6 +1303,13 @@ _BYTE_COUNT_COLUMNS = (
     ("scan_reports", "report_bytes"),
     ("scan_partitions", "records_bytes"),
 )
+
+
+def admit_portfolio_baseline_count(conn) -> None:
+    """Revision 0037: the platform-admin purpose may count `scan_object_baselines`, so
+    the tenant portfolio's incremental-baseline column is not 0 for every workspace on
+    PostgreSQL. Counts only; re-runs revision 0004 so the policies admit it."""
+    add_tenant_rls(conn)
 
 
 def widen_byte_counts(conn) -> None:
@@ -3520,8 +3530,23 @@ def purge_demo_sample_assets(tenant_id: str | None = None) -> int:
 # One-time hygiene migration at startup: estates written before the demo-scan
 # exclusion existed may still carry synthetic sample assets. Idempotent and a
 # no-op once clean (or when DSPM_DEMO_ASSETS_IN_INVENTORY=1 opts back in).
+def _purge_demo_sample_assets_everywhere() -> int:
+    """The startup purge, one workspace at a time in that workspace's scope. Run with no
+    scope, as it was, PostgreSQL's row-level security showed it no rows: it never did
+    anything there."""
+    if _demo_assets_allowed_in_inventory():
+        return 0
+    with _connect() as conn:
+        tenants = [str(row["tenant_id"]) for row in conn.execute("SELECT tenant_id FROM tenants").fetchall()]
+    purged = 0
+    for tenant in tenants:
+        with db.tenant_scope(tenant):
+            purged += purge_demo_sample_assets(tenant)
+    return purged
+
+
 try:
-    purge_demo_sample_assets()
+    _purge_demo_sample_assets_everywhere()
 except Exception as exc:  # pragma: no cover - never block startup on hygiene
     logger.warning("Demo-sample estate purge skipped: %s", type(exc).__name__)
 
@@ -11240,6 +11265,8 @@ NO_TENANT_TABLES = {
     "revoke_sessions_for_user", "get_app_setting", "set_app_setting", "get_search_reconciliation",
     "mark_session_mfa",
     "save_search_reconciliation", "tenant_isolation_coverage", "tenants_under_legal_hold",
+    # Reads the tenant list, then purges each workspace inside that workspace's own scope.
+    "_purge_demo_sample_assets_everywhere",
 }
 
 
