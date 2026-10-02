@@ -358,5 +358,36 @@ class SharedFacetsFollowAnotherBackendsWriteTest(unittest.TestCase):
             live_cache.reset_for_tests()
 
 
+class EverySortWalksEveryFindingOnceTest(unittest.TestCase):
+    """The remediation cursor stored the raw column, but `category` orders by
+    COALESCE(NULLIF(category, ''), data_type): with empty categories an ascending walk
+    returned page one forever and a descending one stopped after it."""
+
+    def test_following_cursors_returns_each_finding_once(self) -> None:
+        from backend import store
+
+        tenant = f"audit-sort-{uuid4().hex[:8]}"
+        store.create_tenant(tenant, "Sort")
+        types = ["email", "phone", "iban", "passport_number", "credit_card", "aws_access_key"]
+        store.save_scan_history(tenant, {"scan_id": "sort-1", "source": "local", "summary": {},
+                                         "files": [_file(f"/share/{name}.txt", name) for name in types]})
+        with store._connect() as conn:
+            conn.execute("UPDATE findings SET category = '' WHERE tenant_id = ?", (tenant,))
+        store._invalidate_remediation_query_cache(tenant)
+        for sort in sorted(store.REMEDIATION_SORTS):
+            for direction in ("asc", "desc"):
+                with self.subTest(sort=sort, direction=direction):
+                    seen, after = [], ""
+                    for _ in range(10):
+                        page = store.list_remediation_findings(tenant, scope="all", status="all", sort=sort,
+                                                               direction=direction, after=after, limit=2)
+                        seen.extend(item["finding_id"] if "finding_id" in item else item["id"] for item in page["items"])
+                        after = page["next_cursor"] or ""
+                        if not page["has_more"]:
+                            break
+                    self.assertEqual(len(seen), len(types), seen)
+                    self.assertEqual(len(set(seen)), len(types), seen)
+
+
 if __name__ == "__main__":
     unittest.main()

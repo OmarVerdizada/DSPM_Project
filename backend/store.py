@@ -7072,7 +7072,8 @@ def list_remediation_findings(
     with _connect() as conn:
         total = _remediation_filtered_total(conn, tenant_id, where, base_params)
         rows = conn.execute(
-            f"SELECT * FROM findings WHERE {page_where} ORDER BY {expression} {sort_direction}, id {sort_direction} LIMIT ?",
+            f"SELECT *, {expression} AS sort_value FROM findings WHERE {page_where} "
+            f"ORDER BY {expression} {sort_direction}, id {sort_direction} LIMIT ?",
             (*page_params, page_size + 1),
         ).fetchall()
     has_more = len(rows) > page_size
@@ -7080,13 +7081,11 @@ def list_remediation_findings(
     next_cursor = None
     if has_more and page_rows:
         last = page_rows[-1]
-        if sort_key == "severity":
-            sort_value = int(last["severity_rank"] or 0)
-        elif sort_key == "sla_due":
-            sort_value = str(last["sla_due"] or "9999-12-31T23:59:59+00:00")
-        else:
-            column = {"finding_name": "display_name", "asset": "affected_asset"}.get(sort_key, sort_key)
-            sort_value = str(last[column] or "") if is_text else int(last[column] or 0)
+        # The cursor carries the value the rows are ORDERED by. It used to be read back
+        # from the raw column, which for `category` is not the expression: an empty
+        # category orders by its data type, so a page ending on one restarted the walk
+        # (ascending looped on page one forever) or ended it (descending stopped early).
+        sort_value = str(last["sort_value"] or "") if is_text else int(last["sort_value"] or 0)
         next_cursor = _encode_remediation_cursor(sort_key, sort_direction, sort_value, str(last["id"] or ""))
     items = [_remediation_row(row) for row in page_rows]
     return {
