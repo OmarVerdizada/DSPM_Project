@@ -1437,6 +1437,22 @@ def add_refresh_tokens(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_expiry ON refresh_tokens (expires_at)")
 
 
+def _scoped_steps(scope, iterator):
+    """Yield from `iterator`, entering `scope()` around each step rather than across yields.
+
+    A scope held across a yield belongs to whichever context resumed the generator first:
+    a streamed response resumes each step in a fresh copy of the request's context, so the
+    second batch ran with no tenant (RLS returned nothing - the export stopped at 1,000
+    rows) and the final reset raised ValueError for a token from another context."""
+    while True:
+        with scope():
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return
+        yield item
+
+
 def _tenant_scoped(func, all_tenants_purpose: str | None = None):
     """Run a store function inside db.tenant_scope(<its tenant_id>).
 
@@ -1462,8 +1478,7 @@ def _tenant_scoped(func, all_tenants_purpose: str | None = None):
     if inspect.isgeneratorfunction(func):
         @functools.wraps(func)
         def generator(*args, **kwargs):
-            with scope_for(args, kwargs):
-                yield from func(*args, **kwargs)
+            yield from _scoped_steps(lambda: scope_for(args, kwargs), func(*args, **kwargs))
         generator._tenant_scoped = True
         return generator
 
@@ -1486,8 +1501,7 @@ def _platform_scoped(purpose: str):
             # Around the iteration, not the call: a generator's queries run as it is read.
             @functools.wraps(func)
             def generator(*args, **kwargs):
-                with db.platform_scope(purpose):
-                    yield from func(*args, **kwargs)
+                yield from _scoped_steps(lambda: db.platform_scope(purpose), func(*args, **kwargs))
             generator._platform_purpose = purpose
             return generator
 
@@ -3624,7 +3638,12 @@ _FINDING_UPSERT_SQL = (
     "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
     "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
     "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text, "
-    "severity_rank = excluded.severity_rank"
+    "severity_rank = excluded.severity_rank "
+    # A row belongs to the newest scan that saw the finding. Re-saving an older report - any
+    # lifecycle action on a finding only that scan holds re-saves the whole report - wrote
+    # its stale status, owner, severity and last_seen over every finding it shares with a
+    # newer scan: a resolved finding came back OPEN.
+    "WHERE excluded.is_current = 1 OR findings.scan_id = excluded.scan_id"
 )
 
 

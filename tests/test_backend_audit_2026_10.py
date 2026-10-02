@@ -8,6 +8,7 @@ import unittest
 from contextlib import suppress
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 from backend.compliance_service import allowed_framework_ids
 from classification.compliance.canonical_model import apply_canonical_finding_model
@@ -125,6 +126,121 @@ class DemoDataNeverReplacesWhatItDidNotWriteTest(unittest.TestCase):
             with suppress(OSError):
                 (root / "_manifest.json").unlink()
             self.assertFalse(is_generated_dataset(root))
+
+
+class AStreamedStoreGeneratorKeepsItsTenantTest(unittest.TestCase):
+    """A store generator held its tenant scope across `yield`. Starlette resumes each step of
+    a streamed response in a fresh copy of the request's context, so from the second batch
+    on the export ran with no tenant - on PostgreSQL RLS returned nothing and the inventory
+    export stopped at 1,000 rows - and the final reset raised ValueError."""
+
+    def _drain_like_starlette(self, iterator) -> list:
+        import asyncio
+
+        from starlette.concurrency import iterate_in_threadpool
+
+        async def drain():
+            return [item async for item in iterate_in_threadpool(iterator)]
+
+        return asyncio.run(drain())
+
+    def test_every_step_runs_in_the_callers_tenant(self) -> None:
+        from backend import db, store
+
+        def steps(tenant_id: str):
+            for _ in range(4):
+                yield db.current_tenant_scope()
+
+        scoped = store._tenant_scoped(steps)
+        self.assertEqual(self._drain_like_starlette(scoped("tenant-a")), ["tenant-a"] * 4)
+        self.assertIsNone(db.current_tenant_scope(), "the scope leaked out of the generator")
+
+    def test_a_platform_generator_names_its_purpose_on_every_step(self) -> None:
+        from backend import db, store
+
+        purpose = sorted(db.PLATFORM_PURPOSES)[0]
+
+        def steps():
+            for _ in range(3):
+                yield db.current_platform_scope()
+
+        scoped = store._platform_scoped(purpose)(steps)
+        self.assertEqual(self._drain_like_starlette(scoped()), [purpose] * 3)
+
+    def test_the_inventory_export_streams_every_batch(self) -> None:
+        from backend import db, store
+
+        seen = []
+        real_connect = store._connect
+
+        def watching_connect(*args, **kwargs):
+            seen.append(db.current_tenant_scope())
+            return real_connect(*args, **kwargs)
+
+        tenant = f"audit-export-{uuid4().hex[:8]}"
+        store.create_tenant(tenant, "Export")
+        files = [{"path": f"/share/file_{index:03d}.txt", "name": f"file_{index:03d}.txt", "extension": ".txt",
+                  "size": 10, "modified_at": "2026-09-01T00:00:00+00:00", "risk": {"level": "LOW", "score": 5},
+                  "findings": []} for index in range(25)]
+        store.save_scan_history(tenant, {"scan_id": "export-1", "source": "local", "summary": {}, "files": files})
+        with patch.object(store, "_connect", watching_connect):
+            rows = self._drain_like_starlette(store.iter_inventory_export_rows(tenant, batch_size=10))
+        self.assertEqual(len(rows), 25)
+        self.assertGreaterEqual(len(seen), 4, "one query per batch")
+        self.assertEqual(set(seen), {tenant}, f"scopes seen per query: {seen}")
+
+
+def _file(path: str, finding_type: str, risk: str = "HIGH") -> dict:
+    return {"path": path, "name": path.rsplit("/", 1)[-1], "extension": ".txt", "size": 10,
+            "modified_at": "2026-09-01T00:00:00+00:00", "risk": {"level": risk, "score": 80},
+            "findings": [{"finding_id": f"f-{path.rsplit('/', 1)[-1]}", "type": finding_type, "risk": risk,
+                          "framework": "gdpr", "count": 1, "status": "OPEN"}]}
+
+
+class AnOlderReportNeverOverwritesANewerFindingTest(unittest.TestCase):
+    """Scan s1 saw a.txt and b.txt, scan s2 only a.txt. An analyst resolves a.txt's finding;
+    then any action on b.txt's finding re-saves s1 - and s1's copy of a.txt's finding was
+    written over the row s2 owns: resolved went back to OPEN with s1's last_seen."""
+
+    def setUp(self) -> None:
+        from backend import store
+
+        self.store = store
+        self.tenant = f"audit-older-{uuid4().hex[:8]}"
+        store.create_tenant(self.tenant, "Older report")
+        store.save_scan_history(self.tenant, {"scan_id": "s1", "source": "local", "summary": {},
+                                              "timestamp": "2026-09-01T00:00:00+00:00",
+                                              "files": [_file("/share/a.txt", "email"), _file("/share/b.txt", "phone")]})
+        store.save_scan_history(self.tenant, {"scan_id": "s2", "source": "local", "summary": {},
+                                              "timestamp": "2026-09-02T00:00:00+00:00",
+                                              "files": [_file("/share/a.txt", "email")]})
+
+    def _rows(self) -> dict:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT id, file_path, status, scan_id, last_seen FROM findings WHERE tenant_id = ?",
+                                (self.tenant,)).fetchall()
+        return {row["file_path"]: dict(row) for row in rows}
+
+    def test_an_action_on_an_older_scans_finding_keeps_the_newer_triage(self) -> None:
+        before = self._rows()
+        a, b = before["/share/a.txt"], before["/share/b.txt"]
+        self.assertEqual((a["scan_id"], b["scan_id"]), ("s2", "s1"))
+        self.store.update_finding_lifecycle(self.tenant, a["id"], "resolve", {"comment": "fixed"}, "analyst")
+        self.assertEqual(self._rows()["/share/a.txt"]["status"], "RESOLVED")
+
+        self.store.update_finding_lifecycle(self.tenant, b["id"], "comment", {"comment": "looked at it"}, "analyst")
+        after = self._rows()
+        self.assertEqual(after["/share/a.txt"]["status"], "RESOLVED", "an older report undid the triage")
+        self.assertEqual(after["/share/a.txt"]["scan_id"], "s2")
+        self.assertEqual(after["/share/a.txt"]["last_seen"], a["last_seen"])
+
+    def test_the_owning_scan_still_writes_its_own_rows(self) -> None:
+        b = self._rows()["/share/b.txt"]
+        self.store.update_finding_lifecycle(self.tenant, b["id"], "assign", {"owner": "hr-team"}, "analyst")
+        with self.store._connect() as conn:
+            owner = conn.execute("SELECT owner FROM findings WHERE tenant_id = ? AND id = ?",
+                                 (self.tenant, b["id"])).fetchone()["owner"]
+        self.assertEqual(owner, "hr-team")
 
 
 if __name__ == "__main__":
