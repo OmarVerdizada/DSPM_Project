@@ -19,6 +19,11 @@ What it removes is deliberately narrow:
   and deleting them is an instruction, not a default.
 
 Scan reports, findings and assets are never touched here.
+
+C0.3: the same loop takes the installation's backup set every ``DSPM_BACKUP_SCHEDULE_HOURS``
+(``run_backup_if_due``), claimed the same way, so one backend takes it however many run.
+And neither job runs against a database a newer release has upgraded (C0.4): a process
+at revision N writes nothing to an N+1 database.
 """
 
 from __future__ import annotations
@@ -30,9 +35,12 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from backend import store
+from backend import backup, db, store
 
 logger = logging.getLogger(__name__)
+
+# A failed scheduled backup is tried again after this long, not a whole interval later.
+BACKUP_RETRY_SECONDS = 3600
 
 
 def retention_interval_seconds() -> int:
@@ -131,34 +139,116 @@ def run_if_due(*, report_dir: Path | None = None, now: datetime | None = None) -
     return summary
 
 
+def backup_check_seconds(interval: int) -> int:
+    """How often the loop looks whether a backup is due: a twenty-fourth of the schedule,
+    between a minute and a quarter of an hour - so a daily set is taken within 15 minutes
+    of falling due, well inside the 26-hour warning."""
+    return max(60, min(900, int(interval) // 24))
+
+
+def backup_schedule_active() -> bool:
+    """Whether this backend takes scheduled backups: a schedule is set, and the install names
+    its backup key (production always does - it refuses to start without DSPM_BACKUP_KEY)."""
+    return backup.schedule_seconds() > 0 and (backup.is_production() or backup.key_configured())
+
+
+def run_backup_if_due(*, now: datetime | None = None) -> dict | None:
+    """Take a backup set if one is due; returns its outcome, or ``None`` when not due.
+
+    Due when the newest VERIFIED set is about to be older than the schedule, or the last
+    attempt failed. A set the upgrade or an operator took (``backup create --verify``)
+    therefore counts, instead of being followed by a second one. The claim through the
+    database decides which backend takes it; a failure makes the next claim possible after
+    BACKUP_RETRY_SECONDS rather than a whole interval.
+    """
+    if not backup_schedule_active():
+        return None
+    interval = backup.schedule_seconds()
+    check = backup_check_seconds(interval)
+    moment = now or datetime.now(timezone.utc)
+    verified = next((item for item in backup.backup_sets() if item["verified"]), None)
+    attempt = backup.last_attempt()
+    failed = bool(attempt) and not attempt.get("ok")
+    if not failed and verified is not None and (moment - verified["created_at"]).total_seconds() + check < interval:
+        return None
+    if not store.claim_housekeeping_run("backup", interval_seconds=interval - check, now=moment):
+        return None
+    # C10: the backup's own work across every tenant is named as the backup purpose (pg_dump
+    # and the row counts name it in their sessions); its audit row is the installation's.
+    with db.platform_scope(backup.BACKUP_PURPOSE):
+        outcome = backup.run_backup_set(trigger="schedule")
+    if not outcome["ok"]:
+        store.retry_housekeeping_run("backup", interval_seconds=interval - check,
+                                     retry_seconds=BACKUP_RETRY_SECONDS, now=moment)
+    return outcome
+
+
+def _schema_is_newer() -> bool:
+    """The database is at a revision this build does not know: another release upgraded it."""
+    try:
+        from backend import migrations
+
+        with store._connect() as conn:
+            return migrations.current_revision(conn) > migrations.expected_revision()
+    except Exception:
+        return False
+
+
+def run_due_jobs(report_dir: Path | None = None) -> dict:
+    """One pass of the loop: retention, then the backup, each only when due. Nothing runs on
+    a database a newer release has upgraded (C0.4) - not even a backup, whose audit row
+    would be a write in a shape this build may not know."""
+    if _schema_is_newer():
+        return {"skipped": "the database schema is newer than this build"}
+    ran: dict = {}
+    for name, job in (("retention", lambda: run_if_due(report_dir=report_dir)), ("backup", run_backup_if_due)):
+        try:
+            ran[name] = job()
+        except Exception as exc:  # one job failing must not keep the other from running
+            logger.warning("Housekeeping (%s) failed: %s", name, type(exc).__name__)
+            ran[name] = {"error": type(exc).__name__}
+    return ran
+
+
 _stop = threading.Event()
 _thread: threading.Thread | None = None
 _thread_lock = threading.Lock()
 
 
-def _loop(report_dir: Path | None, interval: int) -> None:
-    while True:
-        try:
-            run_if_due(report_dir=report_dir)
-        except Exception as exc:  # pragma: no cover - housekeeping must never end the thread
-            logger.warning("Housekeeping failed: %s", type(exc).__name__)
+def _wait_seconds() -> int:
+    """How long the loop sleeps between passes (0: nothing to do, no loop)."""
+    waits = []
+    interval = retention_interval_seconds()
+    if interval > 0:
         # Look often enough that a backend which is only up for part of the day still
         # takes its turn, but let the claim decide whether anything runs.
-        if _stop.wait(min(max(60, interval // 24), 3600)):
+        waits.append(min(max(60, interval // 24), 3600))
+    if backup_schedule_active():
+        waits.append(backup_check_seconds(backup.schedule_seconds()))
+    return min(waits) if waits else 0
+
+
+def _loop(report_dir: Path | None, wait: int) -> None:
+    while True:
+        try:
+            run_due_jobs(report_dir)
+        except Exception as exc:  # pragma: no cover - housekeeping must never end the thread
+            logger.warning("Housekeeping failed: %s", type(exc).__name__)
+        if _stop.wait(wait):
             return
 
 
 def start_housekeeping(report_dir: Path | None = None) -> bool:
-    """Start the housekeeping sweep; returns whether it runs."""
+    """Start the housekeeping sweep (retention and the backup schedule); returns whether it runs."""
     global _thread
-    interval = retention_interval_seconds()
-    if interval <= 0:
+    wait = _wait_seconds()
+    if wait <= 0:
         return False
     with _thread_lock:
         if _thread is not None and _thread.is_alive():
             return True
         _stop.clear()
-        _thread = threading.Thread(target=_loop, args=(report_dir, interval), name="housekeeping", daemon=True)
+        _thread = threading.Thread(target=_loop, args=(report_dir, wait), name="housekeeping", daemon=True)
         _thread.start()
     return True
 

@@ -277,16 +277,13 @@ def migrate_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _record_backup_attempt(ok: bool, error: str) -> None:
-    """D11: what the last backup attempt did, for /metrics and the installation's alerts -
-    the time and the error's type, never its text (a failing pg_dump can echo a URL)."""
-    from datetime import datetime, timezone
-
+def _record_backup_attempt(ok: bool, error: str, stage: str = "create") -> None:
+    """D11: what the last backup attempt did, for /metrics, readiness and the installation's
+    alerts - the time and the error's type, never its text (a failing pg_dump can echo a URL)."""
     try:
-        from backend import store
+        from backend import backup
 
-        store.set_app_setting("backup.last_attempt", json.dumps(
-            {"at": datetime.now(timezone.utc).isoformat(), "ok": bool(ok), "error": str(error)[:80]}))
+        backup.record_attempt(ok, error, stage=stage, trigger="command line")
     except Exception:  # recording must never change what the backup itself did
         pass
 
@@ -305,12 +302,22 @@ def backup_command(args: argparse.Namespace) -> int:
         except Exception as exc:
             _record_backup_attempt(False, type(exc).__name__)
             raise
-        _record_backup_attempt(True, "")
         document = {"manifest": str(manifest),
                     "schema_revision": json.loads(manifest.read_text(encoding="utf-8")).get("schema_revision")}
         if args.verify:
-            report = backup.verify_backup(manifest)
+            try:
+                report = backup.verify_backup(manifest)
+                if report["ok"]:
+                    # C0.3: a verified set is what retention keeps and readiness measures.
+                    backup.mark_verified(manifest)
+            except Exception as exc:
+                _record_backup_attempt(False, type(exc).__name__, "verify")
+                raise
             document.update({"verified": report["ok"], "problems": report["problems"]})
+            _record_backup_attempt(report["ok"], "" if report["ok"] else backup.BackupVerifyError.__name__,
+                                   "done" if report["ok"] else "verify")
+        else:
+            _record_backup_attempt(True, "")
         if args.keep:
             document["pruned"] = backup.prune_backups(keep=args.keep)
         emit(document, f"backup {manifest}" + ("" if not args.verify else
@@ -333,8 +340,9 @@ def backup_command(args: argparse.Namespace) -> int:
     for path in backup.list_manifests():
         manifest = json.loads(path.read_text(encoding="utf-8"))
         rows.append({"manifest": str(path), "created_at": manifest.get("created_at"), "kind": manifest.get("kind"),
-                     "schema_revision": manifest.get("schema_revision")})
-    emit({"backups": rows}, "\n".join(f"{row['created_at']}  {row['kind']:<8} rev {row['schema_revision']}  {row['manifest']}"
+                     "schema_revision": manifest.get("schema_revision"), "verified": bool(manifest.get("verified_at"))})
+    emit({"backups": rows}, "\n".join(f"{row['created_at']}  {row['kind']:<8} rev {row['schema_revision']}  "
+                                      f"{'verified  ' if row['verified'] else 'unverified'}  {row['manifest']}"
                                       for row in rows) or "no backups")
     return 0
 

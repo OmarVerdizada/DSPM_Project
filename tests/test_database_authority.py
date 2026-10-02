@@ -57,8 +57,11 @@ class DatabaseAuthorityTests(unittest.TestCase):
         self.assertTrue(payload["database"]["identity"])
 
     def test_readiness_probes_the_database_and_schema_revision(self) -> None:
-        """/api/ready (Phase 6, DB-09) is the truthful gate: a bounded DB
-        read+write probe plus a schema-revision match, 503 when unservable."""
+        """/api/ready (Phase 6, DB-09) is the truthful gate: a bounded DB read
+        probe plus a schema-revision match, 503 when unservable. It was a read AND
+        write probe until C0.4: readiness stays open while the schema guard stops the
+        data routes, so its probe row was a write landing on a database a newer release
+        had upgraded (tests/test_c03_unattended_recovery.py proves it writes nothing)."""
         from fastapi.testclient import TestClient
         from backend.app import app
         from backend import migrations

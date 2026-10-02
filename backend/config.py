@@ -140,6 +140,13 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_ARTIFACT_DIR", "path"),
     ("DSPM_BACKUP_DIR", "path"),
     ("DSPM_BACKUP_MAX_AGE_HOURS", "float", {"minimum": 0}),
+    # C0.3: the backend's own backup schedule (0: off), the age past which production
+    # readiness fails, the off-host copy, and how many verified sets / days retention keeps.
+    ("DSPM_BACKUP_SCHEDULE_HOURS", "float", {"default": "24", "minimum": 0, "maximum": 744}),
+    ("DSPM_BACKUP_READY_MAX_AGE_HOURS", "float", {"default": "48", "minimum": 0}),
+    ("DSPM_BACKUP_COPY_DIR", "path"),
+    ("DSPM_RETAIN_BACKUP_SETS", "int", {"default": "7", "minimum": 1, "maximum": 1000}),
+    ("DSPM_RETAIN_BACKUP_DAYS", "int", {"default": "0", "minimum": 0}),
     ("DSPM_REPORT_DIR", "path"),
     ("DSPM_REPORT_ARTIFACTS", "bool"),
     ("DSPM_PLAINTEXT_REPORT_EXPORT", "bool"),

@@ -22,20 +22,27 @@ Design:
 The key resolves from ``DSPM_BACKUP_KEY`` (required in production) or a local
 dev keyfile outside ``data/`` (``~/.dspm/backup_key``), mirroring the JWT and
 evidence key patterns so a data/ copy never contains its own backup key.
+
+C0.3 (the end of this module): the backend takes a verified set on its own schedule,
+copies it off the host when told where, keeps what retention says, and records every
+outcome where /api/ready, /metrics and the installation's alerts read it.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import struct
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+
+logger = logging.getLogger(__name__)
 
 CHUNK_BYTES = 8 * 1024 * 1024
 MANIFEST_SUFFIX = ".manifest.json"
@@ -663,3 +670,367 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# C0.3: backups nobody has to remember. backend.housekeeping runs run_backup_set on the
+# DSPM_BACKUP_SCHEDULE_HOURS schedule, claimed through the database so several backends
+# take one set between them. A set counts once it VERIFIED (mark_verified): retention
+# keeps verified sets, and readiness measures the age of the newest verified one.
+# ---------------------------------------------------------------------------
+
+ATTEMPT_SETTING = "backup.last_attempt"
+# The installation's own workspace: its audit trail and alerts are the installation's.
+INSTALLATION_TENANT = "default"
+
+
+class BackupVerifyError(RuntimeError):
+    """A set was written and did not verify."""
+
+
+def _number(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+def is_production() -> bool:
+    """Read at the call, not at import: readiness and the schedule follow DSPM_ENV as it is."""
+    return os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}
+
+
+def schedule_seconds() -> int:
+    """How often the backend takes a set itself: DSPM_BACKUP_SCHEDULE_HOURS (24 by default;
+    0 turns the schedule off, for an install that backs up some other way). Less than an
+    hour is read as an hour, more than 31 days as 31 days."""
+    hours = _number("DSPM_BACKUP_SCHEDULE_HOURS", 24.0)
+    if hours <= 0:
+        return 0
+    return int(min(max(hours, 1.0), 31 * 24.0) * 3600)
+
+
+def retain_sets() -> int:
+    """DSPM_RETAIN_BACKUP_SETS: how many verified sets retention keeps (7; at least 1)."""
+    return max(1, int(_number("DSPM_RETAIN_BACKUP_SETS", 7)))
+
+
+def retain_days() -> float:
+    """DSPM_RETAIN_BACKUP_DAYS: a set younger than this is kept whatever the count (0: off)."""
+    return _number("DSPM_RETAIN_BACKUP_DAYS", 0.0)
+
+
+def copy_dir() -> Path | None:
+    """DSPM_BACKUP_COPY_DIR: the off-host location each verified set is copied to (unset: none)."""
+    raw = os.getenv("DSPM_BACKUP_COPY_DIR", "").strip()
+    return Path(raw) if raw else None
+
+
+def warn_age_hours() -> float:
+    """DSPM_BACKUP_MAX_AGE_HOURS (26): a newest verified set older than this is a warning
+    (and the installation's backup_stale alert); 0 turns the warning off."""
+    return _number("DSPM_BACKUP_MAX_AGE_HOURS", 26.0)
+
+
+def ready_age_hours() -> float:
+    """DSPM_BACKUP_READY_MAX_AGE_HOURS (48, the roadmap's proposal): a newest verified set
+    older than this FAILS readiness in production. Never below the warning threshold - an
+    install that raised that one is not failed before it is warned - and 0 turns the
+    failure off (the warning stays)."""
+    hours = _number("DSPM_BACKUP_READY_MAX_AGE_HOURS", 48.0)
+    return max(hours, warn_age_hours()) if hours > 0 else 0.0
+
+
+def key_configured() -> bool:
+    """Whether this install names its backup key: DSPM_BACKUP_KEY, or an existing key file at
+    DSPM_LOCAL_BACKUP_KEY_PATH. Outside production the schedule needs one. backup_key()
+    would otherwise make a key up on the spot, and sets only an un-escrowed key opens are
+    not a recovery plan. Production refuses to run without DSPM_BACKUP_KEY at all."""
+    if os.getenv("DSPM_BACKUP_KEY", "").strip():
+        return True
+    configured = os.getenv("DSPM_LOCAL_BACKUP_KEY_PATH", "").strip()
+    return bool(configured) and Path(configured).is_file()
+
+
+def _created_at(document: dict) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(str(document.get("created_at") or ""))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def backup_sets(directory: Path | None = None) -> list[dict]:
+    """The readable sets in a directory, newest first: ``manifest`` (its path), ``created_at``,
+    ``verified`` (a verification passed and was recorded) and ``data`` (the manifest).
+
+    Ordered by when each was taken, not by name: a PostgreSQL set (``sentro_<stamp>``)
+    sorts before a SQLite one (``sentro_sqlite_<stamp>``) whatever their times. A manifest
+    that cannot be read - half written, or damaged - is left out, and so is never pruned.
+    """
+    found: list[dict] = []
+    for path in list_manifests(directory):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        created = _created_at(document) if isinstance(document, dict) else None
+        if created is None:
+            continue
+        found.append({"manifest": path, "created_at": created, "verified": bool(document.get("verified_at")),
+                      "data": document})
+    found.sort(key=lambda item: item["created_at"], reverse=True)
+    return found
+
+
+def _write_json_whole(path: Path, document: dict) -> None:
+    """Write beside, then rename over: a reader sees the old manifest or the new one, never half."""
+    staged = path.with_name(path.name + ".partial")
+    staged.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    os.replace(staged, path)
+
+
+def mark_verified(manifest_path: Path) -> None:
+    """Record in a set's manifest that it verified (``verified_at``). Only such a set counts
+    for retention and for readiness."""
+    manifest_path = Path(manifest_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["verified_at"] = datetime.now(timezone.utc).isoformat()
+    _write_json_whole(manifest_path, document)
+
+
+def _named_file(directory: Path, name) -> Path:
+    """A file a manifest names: a plain name beside the manifest. A manifest is data, and
+    one naming ..\\..\\something must not make retention delete, or the copy carry, it."""
+    text = str(name or "")
+    if not text or text in {".", ".."} or Path(text).name != text or "/" in text or "\\" in text:
+        raise ValueError(f"The manifest names {text!r}, which is not a file beside it.")
+    return directory / text
+
+
+def set_files(manifest_path: Path, document: dict) -> list[tuple[Path, str | None]]:
+    """A set's encrypted files - the database, and the artifact archive when there is one -
+    each with the digest its manifest records."""
+    manifest_path = Path(manifest_path)
+    files = [(_named_file(manifest_path.parent, document.get("file")), document.get("ciphertext_sha256"))]
+    artifacts = document.get("artifacts") or {}
+    if artifacts.get("file"):
+        files.append((_named_file(manifest_path.parent, artifacts["file"]), artifacts.get("archive_sha256")))
+    return files
+
+
+def _remove_set(item: dict) -> None:
+    files = set_files(item["manifest"], item["data"])
+    # The manifest goes first, so no reader finds a set whose files are already gone.
+    item["manifest"].unlink(missing_ok=True)
+    for path, _digest in files:
+        path.unlink(missing_ok=True)
+
+
+def apply_retention(directory: Path | None = None, *, keep_sets: int | None = None,
+                    keep_days: float | None = None, now: datetime | None = None) -> list[str]:
+    """Remove the sets retention no longer keeps; returns the names of the manifests removed.
+
+    Kept: every set at least as new as the Nth-newest VERIFIED set (DSPM_RETAIN_BACKUP_SETS),
+    and every set younger than DSPM_RETAIN_BACKUP_DAYS. Until N verified sets exist nothing
+    is removed - so the newest verified set is never removed, and a run of failed or
+    unverified sets never thins out the ones that still restore.
+    """
+    count = max(1, int(retain_sets() if keep_sets is None else keep_sets))
+    days = float(retain_days() if keep_days is None else keep_days)
+    moment = now or datetime.now(timezone.utc)
+    sets = backup_sets(directory)
+    verified = [item for item in sets if item["verified"]]
+    if len(verified) < count:
+        return []
+    oldest_kept = verified[count - 1]["created_at"]
+    young = moment - timedelta(days=days) if days > 0 else None
+    removed: list[str] = []
+    for item in sets:
+        if item["created_at"] >= oldest_kept or (young is not None and item["created_at"] >= young):
+            continue
+        try:
+            _remove_set(item)
+        except (OSError, ValueError) as exc:
+            logger.warning("Retention could not remove the backup set %s: %s", item["manifest"].name,
+                           type(exc).__name__)
+            continue
+        removed.append(item["manifest"].name)
+    return removed
+
+
+def _copy_whole(source: Path, target: Path, digest: str | None) -> None:
+    staged = target.with_name(target.name + ".partial")
+    try:
+        shutil.copyfile(source, staged)
+        if digest and sha256_file(staged) != digest:
+            raise ValueError(f"The copy of {source.name} does not match the digest its manifest records.")
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def copy_set(manifest_path: Path, destination: Path) -> Path:
+    """Copy a verified set off the host; returns the copied manifest.
+
+    The encrypted files go first, each written under a temporary name, checked against the
+    digest the manifest records and renamed into place; the manifest goes last. A reader of
+    the destination therefore never finds a set it does not hold whole. Only the files the
+    manifest names travel - never a key: the backup key is escrowed apart from the backups
+    (docs/DEPLOYMENT_WINDOWS.md, "Off-host copies and key recovery").
+    """
+    manifest_path = Path(manifest_path)
+    destination = Path(destination)
+    if destination.resolve() == manifest_path.parent.resolve():
+        raise ValueError("DSPM_BACKUP_COPY_DIR names the backup directory itself; name a location off this host.")
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    destination.mkdir(parents=True, exist_ok=True)
+    for source, digest in set_files(manifest_path, document):
+        _copy_whole(source, destination / source.name, digest)
+    target = destination / manifest_path.name
+    _copy_whole(manifest_path, target, None)
+    return target
+
+
+def record_attempt(ok: bool, error: str = "", *, stage: str = "", trigger: str = "") -> None:
+    """What the last backup attempt did, for readiness, /metrics and the installation's
+    alerts (D11): when, how far it got, and the error's TYPE - never its text, which for a
+    failing pg_dump can echo a connection string."""
+    try:
+        from backend import store
+
+        store.set_app_setting(ATTEMPT_SETTING, json.dumps({
+            "at": datetime.now(timezone.utc).isoformat(), "ok": bool(ok), "error": str(error)[:80],
+            "stage": str(stage)[:20], "trigger": str(trigger)[:20]}))
+    except Exception as exc:  # recording must never change what the backup itself did
+        logger.warning("Could not record the backup attempt: %s", type(exc).__name__)
+
+
+def last_attempt() -> dict:
+    from backend import store
+
+    try:
+        value = json.loads(store.get_app_setting(ATTEMPT_SETTING) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _audit(action: str, detail: dict) -> None:
+    try:
+        from backend import store
+
+        store.audit(INSTALLATION_TENANT, "sentro", action, detail)
+    except Exception as exc:
+        logger.warning("Could not audit %s: %s", action, type(exc).__name__)
+
+
+def _retain(directory: Path | None) -> tuple[list[str], str]:
+    try:
+        return apply_retention(directory), ""
+    except Exception as exc:  # the set is taken; a retention fault must not undo that
+        logger.warning("Backup retention failed: %s", type(exc).__name__)
+        return [], type(exc).__name__
+
+
+def run_backup_set(*, trigger: str = "schedule") -> dict:
+    """Take one set unattended: create, verify, mark verified, copy it off the host when
+    DSPM_BACKUP_COPY_DIR names where, then apply retention here and there.
+
+    Every outcome is recorded (record_attempt) and audited in the installation's trail as
+    ``backup.created`` or ``backup.failed``, naming the stage reached and the error's type.
+    Neither names a key, a key's path, the off-host location or an error's text.
+    """
+    stage, manifest = "create", None
+    destination = copy_dir()
+    try:
+        manifest = create_backup()
+        stage = "verify"
+        report = verify_backup(manifest)
+        if not report["ok"]:
+            logger.error("The backup set %s did not verify: %s", manifest.name, "; ".join(report["problems"])[:600])
+            raise BackupVerifyError(f"{len(report['problems'])} problem(s)")
+        mark_verified(manifest)
+        if destination is not None:
+            stage = "copy"
+            copy_set(manifest, destination)
+    except Exception as exc:
+        error = type(exc).__name__
+        record_attempt(False, error, stage=stage, trigger=trigger)
+        _audit("backup.failed", {"stage": stage, "error": error, "trigger": trigger,
+                                 "manifest": manifest.name if manifest else ""})
+        logger.error("The %s backup failed at %s: %s", trigger, stage, error)
+        if stage == "copy":
+            # The local set verified. While the off-host location is down every retry adds
+            # one, so local retention still runs; the copies are pruned once it is back.
+            _retain(None)
+        return {"ok": False, "stage": stage, "error": error, "manifest": str(manifest) if manifest else None}
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    removed, retention_error = _retain(None)
+    removed_copies, copy_retention_error = _retain(destination) if destination is not None else ([], "")
+    record_attempt(True, stage="done", trigger=trigger)
+    detail = {"manifest": manifest.name, "kind": document.get("kind"), "schema_revision": document.get("schema_revision"),
+              "ciphertext_bytes": document.get("ciphertext_bytes"),
+              "artifact_objects": (document.get("artifacts") or {}).get("objects", 0), "verified": True,
+              "copied_off_host": destination is not None, "sets_removed": len(removed),
+              "copies_removed": len(removed_copies), "trigger": trigger}
+    if retention_error or copy_retention_error:
+        detail["retention_error"] = retention_error or copy_retention_error
+    _audit("backup.created", detail)
+    logger.info("Backup set %s taken and verified%s; retention removed %s set(s)", manifest.name,
+                " and copied off the host" if destination is not None else "", len(removed))
+    return {"ok": True, "manifest": str(manifest), "copied": destination is not None, "removed": removed,
+            "removed_copies": removed_copies}
+
+
+def readiness(*, production: bool, installed_at: str | None = None, now: datetime | None = None,
+              directory: Path | None = None) -> dict:
+    """The backup half of /api/ready: ``failures``, ``warnings`` and ``probe`` facts.
+
+    In production a failed last attempt, or a newest VERIFIED set older than
+    ready_age_hours(), fails readiness - and so does having no verified set at all once the
+    database itself is older than that (``installed_at``, its first recorded revision), so a
+    fresh install is not unready before its first backup could have run. Outside production
+    each of these is a warning, as backup age always was. Reads files and one setting; writes
+    nothing.
+    """
+    moment = now or datetime.now(timezone.utc)
+    failures: list[str] = []
+    warnings: list[str] = []
+    serious = failures if production else warnings
+    sets = backup_sets(directory)
+    verified = next((item for item in sets if item["verified"]), None)
+
+    def age_of(item: dict | None) -> float | None:
+        return None if item is None else max(0.0, (moment - item["created_at"]).total_seconds())
+
+    newest_age, verified_age = age_of(sets[0] if sets else None), age_of(verified)
+    warn_hours, fail_hours = warn_age_hours(), ready_age_hours()
+    attempt = last_attempt()
+    if attempt and not attempt.get("ok"):
+        serious.append(f"the last backup attempt ({attempt.get('at')}) failed at "
+                       f"{attempt.get('stage') or 'create'}: {attempt.get('error') or 'see the backup log'}")
+    if verified_age is None:
+        database_age = None
+        if installed_at:
+            installed = _created_at({"created_at": installed_at})
+            database_age = None if installed is None else (moment - installed).total_seconds()
+        if fail_hours and database_age is not None and database_age > fail_hours * 3600:
+            serious.append(f"no verified backup, and the database is {database_age / 3600:.0f}h old "
+                           f"(threshold {fail_hours:g}h)")
+        else:
+            warnings.append("no verified backup yet" if sets else "no backup manifest found")
+    elif fail_hours and verified_age > fail_hours * 3600:
+        serious.append(f"newest verified backup is {verified_age / 3600:.1f}h old (threshold {fail_hours:g}h)")
+    elif warn_hours and verified_age > warn_hours * 3600:
+        warnings.append(f"newest verified backup is {verified_age / 3600:.1f}h old (threshold {warn_hours:g}h)")
+    probe = {
+        "backup_age_seconds": None if newest_age is None else round(newest_age, 1),
+        "verified_backup_age_seconds": None if verified_age is None else round(verified_age, 1),
+        "backup_last_attempt": ({key: attempt.get(key) for key in ("at", "ok", "stage", "trigger")}
+                                if attempt else None),
+    }
+    return {"failures": failures, "warnings": warnings, "probe": probe}

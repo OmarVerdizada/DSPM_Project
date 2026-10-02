@@ -4440,6 +4440,20 @@ def claim_housekeeping_run(name: str, *, interval_seconds: int, now: datetime | 
     return started == 1
 
 
+def retry_housekeeping_run(name: str, *, interval_seconds: int, retry_seconds: int,
+                           now: datetime | None = None) -> None:
+    """Make a job claimed by :func:`claim_housekeeping_run` due again ``retry_seconds`` from
+    now instead of a whole interval: a daily backup that failed is retried within the hour,
+    not the next day. The claim itself still decides who runs it."""
+    moment = now or datetime.now(timezone.utc)
+    retry = max(1, min(int(retry_seconds), int(interval_seconds)))
+    due_from = (moment - timedelta(seconds=max(1, int(interval_seconds)) - retry)).isoformat()
+    with _lock:
+        with _connect() as conn:
+            conn.execute("UPDATE app_settings SET value = ?, updated_at = ? WHERE key = ? AND value > ?",
+                         (due_from, moment.isoformat(), f"housekeeping.{name}.last_run", due_from))
+
+
 # --- B3: scans that run unattended -------------------------------------------
 
 # A schedule is a scan, not a cron tick: anything under five minutes is a mistake
@@ -11112,7 +11126,7 @@ PLATFORM_FUNCTIONS = {
 SCOPED_INSIDE = {"record_job", "reset_default_tenant_data", "delete_tenant_with_data"}
 
 NO_TENANT_TABLES = {
-    "_connect", "claim_housekeeping_run", "clear_login_failures", "count_login_failures",
+    "_connect", "claim_housekeeping_run", "retry_housekeeping_run", "clear_login_failures", "count_login_failures",
     "record_login_failure", "take_throttle_slot", "consume_one_time_token", "is_token_revoked", "revoke_token_jti",
     "consume_refresh_token", "count_refresh_tokens_for_user", "issue_refresh_token",
     "revoke_refresh_family", "revoke_refresh_tokens_for_user", "count_sessions_for_user",

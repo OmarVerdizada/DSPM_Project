@@ -881,6 +881,8 @@ async function api(path, payload, method = "POST", options = {}) {
     }
   }
 
+  if (response.status === 503) await noticeSchemaMismatch(response);
+
   if (!response.ok) {
     const message = await readErrorMessage(response);
     if (response.status === 401) {
@@ -890,6 +892,26 @@ async function api(path, payload, method = "POST", options = {}) {
   }
 
   return response.json();
+}
+
+// C0.4: when another release has upgraded the database, this server refuses its data
+// routes with a 503 whose `reason` says so. Every panel then fails at once; one notice,
+// shown once and kept until dismissed, says what happened and what to do about it.
+let schemaMismatchNoticed = false;
+
+async function noticeSchemaMismatch(response) {
+  if (schemaMismatchNoticed) return;
+  const problem = await response.clone().json().catch(() => null);
+  if (problem?.reason !== "schema_mismatch" || schemaMismatchNoticed) return;
+  schemaMismatchNoticed = true;
+  const notice = showToast("Restart the Sentro service",
+    `The database was upgraded to revision ${problem.applied}; this service runs revision ${problem.expected}. `
+    + "Restart the Sentro service (or finish the upgrade), then reload this page.", "danger");
+  if (!notice) return;
+  notice.dataset.life = "0";
+  notice.dataset.persistent = "1";
+  window.clearTimeout(Number(notice.dataset.timer || 0));
+  notice.querySelector(".notice-life")?.remove();
 }
 
 // One refresh at a time. Twenty panels loading at once produce twenty 401s, and each
@@ -1901,8 +1923,10 @@ function showToast(title, message = "", tone = "info") {
   armNoticeTimer(notice);
 
   // A burst of notices - a scan finishing on several hosts - must not grow
-  // into a column that covers the page it is reporting on.
-  const live = Array.from(noticeHost.children).filter((item) => item.dataset.leaving !== "1");
+  // into a column that covers the page it is reporting on. A persistent one
+  // (the schema notice) leaves only when it is dismissed.
+  const live = Array.from(noticeHost.children)
+    .filter((item) => item.dataset.leaving !== "1" && item.dataset.persistent !== "1");
   live.slice(0, Math.max(0, live.length - NOTICE_LIMIT)).forEach(dismissNotice);
   return notice;
 }
@@ -10717,6 +10741,8 @@ const AUDIT_ACTIONS = {
   "licence.installed": "Installed a licence",
   "licence.refused": "A licence file was refused",
   "ops.recovered": "An installation problem cleared (queue, backup or SIEM)",
+  "backup.created": "Took and verified a scheduled backup",
+  "backup.failed": "A scheduled backup failed",
   "credential.deleted": "Deleted a saved credential",
   "credential.preflight": "Checked a saved credential's privilege",
   "vault.key_rotated": "Rotated the vault key",

@@ -220,8 +220,64 @@ $app = 'C:\Program Files\Sentro\current'
 `backup create --verify` writes the encrypted database (SQLite online backup, or
 `pg_dump` for PostgreSQL) and the artifact archive, then decrypts both into a temporary
 folder and checks every digest, the integrity check and the row counts before it reports
-success. The database password is passed to `pg_dump` through its environment, never its
-command line.
+success, and marks the set verified in its manifest. The database password is passed to
+`pg_dump` through its environment, never its command line.
+
+### Scheduled backups
+
+The backend takes a verified set on its own every `DSPM_BACKUP_SCHEDULE_HOURS` (24), so no
+Task Scheduler job is needed. The run is claimed through the database: with several
+backends one of them takes it. A verified set the upgrade or an operator took counts, and a
+failed run is retried after an hour. Each run is audited in the `default` workspace's trail
+(`backup.created` / `backup.failed`, with the stage and the error's type - never its text, a
+key or a path) and recorded as the last backup attempt, which `/metrics`
+(`sentro_backup_last_attempt_success`) and the installation's own alerts read. Set
+`DSPM_BACKUP_SCHEDULE_HOURS = 0` only if backups are taken some other way.
+
+Retention follows each scheduled set: every set at least as new as the
+`DSPM_RETAIN_BACKUP_SETS`-th (7) newest verified set is kept, and so is every set younger
+than `DSPM_RETAIN_BACKUP_DAYS` (0, off). Until that many sets have verified, nothing is
+removed - a run of failed backups never costs a set that restores.
+
+In production `/api/ready` - which the installer, the upgrade and a load balancer wait on -
+**fails** when the last backup attempt failed, or the newest verified set is older than
+`DSPM_BACKUP_READY_MAX_AGE_HOURS` (48, never less than `DSPM_BACKUP_MAX_AGE_HOURS`), or no
+set has verified and the database is older than that. A new install is ready before its
+first backup. `DSPM_BACKUP_MAX_AGE_HOURS` (26) stays the warning and alert threshold. Fix
+the backup (`backup create --verify` shows what fails) and readiness recovers by itself.
+
+### Off-host copies and key recovery
+
+Set `DSPM_BACKUP_COPY_DIR` to the approved off-host location, for example a share on the
+backup server:
+
+```toml
+DSPM_BACKUP_COPY_DIR = '\\backup01\sentro$\prod'
+```
+
+The backend service runs as a virtual account (`NT SERVICE\SentroBackend`, or the
+`-ServicePrefix` you chose), and a virtual account reaches a network share as the host's
+computer account: grant `<DOMAIN>\<host>$` Modify on that share and folder, and nothing on
+it to anyone the backups need not reach. After each set verifies,
+its encrypted files and then its manifest are copied there. Each file is written under a
+temporary name, checked against the digest its manifest records, and renamed into place,
+so the location never holds a partial set. Retention applies there too. A copy that fails
+is a failed backup (`backup.failed`, stage `copy`), and the local set is kept.
+
+**No key is ever copied.** A backup set and the key that opens it must not travel together.
+Recovery on a new host needs, besides a backup set:
+
+| Key | Where it lives | How it is recovered |
+|---|---|---|
+| backup key (`<DataRoot>\secrets\backup_key`) | the customer's key custody (password vault, HSM, sealed envelope) | written back to `secrets\backup_key` by an administrator |
+| artifact key (`secrets\artifact_key`) | the same custody | as above: the artifact objects in the set stay encrypted with it |
+| vault key ring (`secrets\vault_keyring.json`) | `vault escrow export` (above), kept apart from the backups and from its passphrase | `vault escrow recover <escrow> --out <DSPM_VAULT_KEYRING>` |
+
+Escrow the backup and artifact keys once at install (they do not rotate), and the vault
+escrow after every rotation. The restore drill: on a disposable host or database, put the
+escrowed keys in place, copy a set from the off-host location, and run `backup verify
+<manifest>` and `backup restore <manifest> --yes`; reconcile the row counts the restore
+reports and check that a stored report opens.
 
 ## Upgrade
 
@@ -260,6 +316,13 @@ Every later upgrade starts from the launcher that upgrade placed.
    --clean --single-transaction`); the database's contents it replaces are backed up first.
    Extensions (`pg_trgm`, `btree_gin`) belong to the database administrator and are left
    as they are.
+
+A backend that is still running an older release when the database is migrated - a second
+node, or a service that was not stopped - notices within `DSPM_SCHEMA_CHECK_SECONDS` (30):
+its data routes answer 503 with `reason: schema_mismatch` and both revisions (readiness
+answers too, and only reads; the scan worker, housekeeping and the backup schedule stand
+down), and its console shows one notice: the database was upgraded to revision N, this
+service runs revision M, restart the Sentro service.
 
 The previous release stays under `releases\` for rollback; older ones are removed.
 `<DataRoot>\install.json` records every install, upgrade and uninstall, with the backup

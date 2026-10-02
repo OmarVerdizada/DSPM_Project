@@ -558,7 +558,7 @@ app.include_router(reporting_router)
 # on this build answers its data routes with 503 and the reason instead of writing rows in
 # a shape the newer code does not expect. Health and readiness keep answering - readiness
 # already reports the mismatch - so the operator sees why.
-_SCHEMA_GUARD = {"checked": float("-inf"), "problem": ""}
+_SCHEMA_GUARD: dict = {"checked": float("-inf"), "problem": "", "revision": None}
 _SCHEMA_GUARD_OPEN = {"/api/health", "/api/ready"}
 
 
@@ -586,6 +586,7 @@ def schema_problem() -> str:
 
         get_logger("backend.app").error(problem)
     _SCHEMA_GUARD["problem"] = problem
+    _SCHEMA_GUARD["revision"] = revision if problem else None
     return problem
 
 
@@ -610,7 +611,12 @@ async def schema_guard(request: Request, call_next):
     if path.startswith("/api/") and path not in _SCHEMA_GUARD_OPEN:
         problem = schema_problem()
         if problem:
-            return JSONResponse(status_code=503, content={"detail": problem})
+            # The console reads `reason` to tell the operator once, on every page, what
+            # happened and what to do; `detail` stays the sentence for everything else.
+            revision = _SCHEMA_GUARD.get("revision") or {}
+            return JSONResponse(status_code=503, content={
+                "detail": problem, "reason": "schema_mismatch",
+                "applied": revision.get("applied"), "expected": revision.get("expected")})
     return await call_next(request)
 
 
@@ -1408,16 +1414,20 @@ def readiness() -> "JSONResponse":
     """Readiness (roadmap Phase 6, DB-09): can this instance actually serve?
 
     Liveness (/api/health) answers "is the process up"; readiness performs a
-    bounded database READ and WRITE probe and verifies the schema revision
-    matches this build, returning 503 with reasons when it cannot serve.
-    Advisory signals that must not take a healthy instance out of rotation
-    (backup age) are reported as warnings, never failures.
+    bounded database READ probe - the server answers, and the application's own
+    revision history reads - and verifies the schema revision matches this build,
+    returning 503 with reasons when it cannot serve. It writes nothing (C0.4): it
+    is open while the schema guard has stopped the data routes, and a probe row
+    written then would be a write landing on a database a newer release upgraded.
+    C0.3: in production a stale or failed backup is a failure; elsewhere, and for
+    every other advisory signal, a warning.
     """
     from fastapi.responses import JSONResponse
 
     failures: list[str] = []
     warnings: list[str] = []
     probe: dict = {}
+    installed_at = None
     started = time.perf_counter()
     try:
         from backend import migrations, store
@@ -1427,13 +1437,11 @@ def readiness() -> "JSONResponse":
             if row is None or int(row["one"]) != 1:
                 failures.append("database read probe returned no row")
             applied = migrations.current_revision(conn)
+            installed_at = migrations.installed_at(conn)
         expected = migrations.expected_revision()
         probe["schema_revision"] = {"applied": applied, "expected": expected}
         if applied != expected:
             failures.append(f"schema revision {applied} != expected {expected}")
-        store.set_app_setting(
-            "ops.readiness_probe", datetime.now(timezone.utc).isoformat()
-        )
     except Exception as exc:
         failures.append(f"database probe failed: {type(exc).__name__}")
     probe["probe_seconds"] = round(time.perf_counter() - started, 3)
@@ -1461,13 +1469,16 @@ def readiness() -> "JSONResponse":
     except Exception as exc:
         warnings.append(f"tenant isolation check unavailable: {type(exc).__name__}")
 
-    age = _backup_age_or_none()
-    probe["backup_age_seconds"] = age
-    max_age_hours = float(os.getenv("DSPM_BACKUP_MAX_AGE_HOURS", "26"))
-    if age is None:
-        warnings.append("no backup manifest found")
-    elif age > max_age_hours * 3600:
-        warnings.append(f"newest backup is {age / 3600:.1f}h old (threshold {max_age_hours:g}h)")
+    try:
+        from backend import backup as backup_module
+
+        state = backup_module.readiness(production=backup_module.is_production(), installed_at=installed_at)
+        probe.update(state["probe"])
+        failures.extend(state["failures"])
+        warnings.extend(state["warnings"])
+    except Exception as exc:
+        probe["backup_age_seconds"] = None
+        warnings.append(f"backup state unavailable: {type(exc).__name__}")
     if os.getenv("DSPM_ALLOW_PRIVATE_TARGETS", "").strip():
         # C5: an install upgraded with the old switch set would otherwise not know why
         # its scans are now refused (production) or unrestricted (development, no list).

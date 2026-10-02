@@ -128,6 +128,16 @@ def current_revision(conn) -> int:
     return int(row["r"] or 0) if row and row["r"] is not None else 0
 
 
+def installed_at(conn) -> str | None:
+    """When the first revision was recorded - how old this database is. Readiness reads it
+    to tell a fresh install that has not had its first backup yet from one whose backups
+    stopped (C0.3). Pure read, like current_revision."""
+    if not _table_exists(conn):
+        return None
+    row = conn.execute("SELECT MIN(applied_at) AS first_applied FROM schema_migrations").fetchone()
+    return str(row["first_applied"]) if row and row["first_applied"] else None
+
+
 def checksum_drift(conn) -> list[dict]:
     """Applied revisions whose source no longer matches what was recorded.
 

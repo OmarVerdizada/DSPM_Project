@@ -71,6 +71,10 @@ def pytest_configure(config: pytest.Config) -> None:
     # tests is about the work factor, so it runs at the clamp floor - faster than the
     # suite ran before C8. The tests that ARE about the work factor set it themselves.
     os.environ.setdefault("DSPM_PBKDF2_ROUNDS", "210000")
+    # C0.3: a backend started by a test (a TestClient's lifespan, a server subprocess) would
+    # otherwise take its first scheduled backup set on the spot. The tests about the schedule
+    # turn it on themselves.
+    os.environ.setdefault("DSPM_BACKUP_SCHEDULE_HOURS", "0")
 
     if db.is_postgres() and os.getenv("DSPM_PG_TEST_RESET") != "1":
         pytest.exit(
@@ -108,6 +112,10 @@ def pytest_configure(config: pytest.Config) -> None:
         # the same leak the session database above fixes, one tier down.
         os.environ.setdefault("DSPM_ARTIFACT_DIR", str(_session_root / "artifacts"))
         os.environ.setdefault("DSPM_LOCAL_ARTIFACT_KEY_PATH", str(_session_root / "artifact_key"))
+        # The backup tier likewise: no test writes a set into data/backups, or makes or
+        # reads the developer's own ~/.dspm/backup_key.
+        os.environ.setdefault("DSPM_BACKUP_DIR", str(_session_root / "backups"))
+        os.environ.setdefault("DSPM_LOCAL_BACKUP_KEY_PATH", str(_session_root / "backup_key"))
         from backend import store as _store
         from backend import security as _security
         global STORE_IMPORTED_WITH
