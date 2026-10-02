@@ -364,6 +364,8 @@
   background: var(--hover-wash);
   box-shadow: inset 3px 0 0 var(--indigo);
 }
+/* The muted SID measured 4.49:1 on the picked row's wash. */
+.access-row.is-chosen .access-sid { color: color-mix(in srgb, var(--ink-muted) 80%, var(--ink)); }
 
 .access-row:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring-color);
