@@ -17,6 +17,12 @@ ENTITY_TYPE_BY_DATA_CLASS = {
     "email": "EMAIL_ADDRESS",
     "phone": "PHONE_NUMBER",
     "government_id": "GOVERNMENT_ID",
+    # The name GDPR's passport rule already registers under, so one passport found by
+    # both detectors is one entity.
+    "passport": "PASSPORT_NUMBER",
+    "bank_account": "BANK_ACCOUNT_NUMBER",
+    "bic": "SWIFT_BIC",
+    "employee_id": "EMPLOYEE_ID",
     "secret": "CREDENTIAL",
     "private_key": "PRIVATE_KEY",
     "connection_string": "CONNECTION_STRING",
@@ -211,7 +217,8 @@ def _entity_framework_mapping_details(entity_type: str, finding: dict) -> list[d
     elif entity_type == "PAN":
         mappings.append(_mapping("PCI DSS", "cardholder_data", "Primary Account Number"))
         mappings.append(_mapping("GDPR", "personal_data", "Payment card data"))
-    elif entity_type in {"EMAIL_ADDRESS", "PHONE_NUMBER", "POSTAL_ADDRESS", "DATE_OF_BIRTH", "GOVERNMENT_ID", "PASSPORT_NUMBER"}:
+    elif entity_type in {"EMAIL_ADDRESS", "PHONE_NUMBER", "POSTAL_ADDRESS", "DATE_OF_BIRTH", "GOVERNMENT_ID", "PASSPORT_NUMBER",
+                         "EMPLOYEE_ID"}:
         mappings.append(_mapping("GDPR", "personal_data", entity_type.replace("_", " ").title()))
     elif entity_type in {"CVV", "PIN", "PIN_BLOCK", "TRACK_DATA", "SERVICE_CODE", "CARD_EXPIRATION_DATE"}:
         pci_area = "sensitive_authentication_data" if entity_type in {"CVV", "PIN", "PIN_BLOCK", "TRACK_DATA"} else "cardholder_data"

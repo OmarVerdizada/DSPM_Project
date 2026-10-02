@@ -25,13 +25,19 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-PAN_VALIDATOR_VERSION = "pan-validator-v1"
+# v2: a card is looked for inside a run that is not one as a whole, and a line break
+# no longer joins two numbers into one run.
+PAN_VALIDATOR_VERSION = "pan-validator-v2"
 
 # 12-19 digits with at most one separator between them, not glued to another
 # alphanumeric. The lookarounds are what keep a card out of a longer hex digest
 # or account string. NBSP is in the separator class on purpose: text extracted
-# from DOCX, PDF and OCR routinely uses it.
-PAN_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d[\s -]?){11,18}\d(?![A-Za-z0-9])")
+# from DOCX, PDF and OCR routinely uses it. A line break is not, and nor is any
+# other vertical whitespace: through \s it was, and a column of four-digit codes
+# on separate lines joined into "cards" - 4000..4159 read as ten issuer-valid
+# PANs and a CRITICAL PCI finding. A card is written on one line.
+PAN_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d[ \t\u00a0-]?){11,18}\d(?![A-Za-z0-9])")
+_DIGIT_GROUP_RE = re.compile(r"\d+")
 
 # The window a supporting element has to appear in. 300 characters is Microsoft
 # Purview's proximity for the credit-card sensitive information type, and it is
@@ -314,6 +320,50 @@ def validate_pan(
     )
 
 
+def _issued_card(raw: str) -> str:
+    """The digits of `raw` when it is card-shaped, Luhn-valid, at a length its issuer
+    uses and not a structural non-card - or ""."""
+
+    digits = normalize_candidate(raw)
+    if digits and is_luhn_valid(digits) and card_issuer(digits)[1] and not structural_exclusion(digits):
+        return digits
+    return ""
+
+
+def card_windows(run: str) -> list[tuple[int, int]]:
+    """(start, end) of the stretches of one candidate run to judge as cards.
+
+    The candidate pattern takes the LONGEST run of digits and separators, so a card
+    followed on its line by an expiry or a CVV - "4111 1111 1111 1111 05/27", "Card
+    number 4111111111111111 123", a tab-separated row - arrives as one 18- or 19-digit
+    run. That run failed the card-shape check whole and the card inside it was never
+    tried, in all three detectors. A run that is an issued card as it stands is still
+    judged as it stands. Otherwise it is cut into its digit groups and, from each group,
+    the longest window of WHOLE groups that is an issued card is taken, left to right -
+    the way the report-time mask (masking._card_spans) already reads a run. A run with
+    no such window is judged whole, as before, so a number the validator would have
+    accepted at LOW confidence still reaches it.
+    """
+
+    if _issued_card(run):
+        return [(0, len(run))]
+    groups = [(match.start(), match.end()) for match in _DIGIT_GROUP_RE.finditer(run)]
+    windows: list[tuple[int, int]] = []
+    first = 0
+    while first < len(groups):
+        found = None
+        for last in range(len(groups) - 1, first - 1, -1):
+            if _issued_card(run[groups[first][0]:groups[last][1]]):
+                found = last
+                break
+        if found is None:
+            first += 1
+            continue
+        windows.append((groups[first][0], groups[found][1]))
+        first = found + 1
+    return windows or [(0, len(run))]
+
+
 def pan_hits(content: str, *, path_hint: str = "") -> list[PanHit]:
     """Every accepted card in a document, with the file's own density applied.
 
@@ -327,27 +377,31 @@ def pan_hits(content: str, *, path_hint: str = "") -> list[PanHit]:
     if not text:
         return []
 
-    matches = list(PAN_CANDIDATE_RE.finditer(text))
-    if not matches:
+    candidates = [
+        (match.group(0)[start:end], match.start() + start, match.start() + end)
+        for match in PAN_CANDIDATE_RE.finditer(text)
+        for start, end in card_windows(match.group(0))
+    ]
+    if not candidates:
         return []
 
     distinct: set[str] = set()
-    for match in matches:
-        digits = normalize_candidate(match.group(0))
-        if digits and is_luhn_valid(digits) and card_issuer(digits)[1] and not structural_exclusion(digits):
+    for raw, _start, _end in candidates:
+        digits = _issued_card(raw)
+        if digits:
             distinct.add(digits)
     density = len(distinct)
 
     hits: list[PanHit] = []
-    for match in matches:
+    for raw, start, end in candidates:
         verdict = validate_pan(
-            match.group(0),
-            context=context_window(text, match.start(), match.end()),
+            raw,
+            context=context_window(text, start, end),
             path_hint=path_hint,
             density=density,
         )
         if verdict is not None:
-            hits.append(PanHit(raw=match.group(0), start=match.start(), end=match.end(), verdict=verdict))
+            hits.append(PanHit(raw=raw, start=start, end=end, verdict=verdict))
     return hits
 
 

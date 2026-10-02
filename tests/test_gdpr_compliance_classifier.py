@@ -272,7 +272,10 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
 
         self.assertIn("gdpr_full_name", finding_types)
         self.assertIn("gdpr_fin_pin", finding_types)
-        self.assertEqual(full_name["samples"], ["Ömə***də"])
+        # A name masks like any value with no class of its own: two characters each end
+        # (masking.GENERIC). It was first-three-last-two for every GDPR value, which is
+        # how a seven-character FIN showed five of them.
+        self.assertEqual(full_name["samples"], ["Öm**********də"])
 
     def test_unicode_homoglyph_email_does_not_create_false_positive(self):
         findings = classify_gdpr_content(
@@ -650,7 +653,8 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
         # it carries them, and every row that said them again was one row of waste.
         self.assertNotIn("finding_id", occurrence)
         self.assertEqual(occurrence["offset_start"], 16)
-        self.assertEqual(occurrence["redacted_sample"], "oma***om")
+        # The email mask every detector uses (masking.EMAIL), not first-three-last-two.
+        self.assertEqual(occurrence["redacted_sample"], "o***@example.com")
 
     def test_discovery_engine_marks_incremental_cache_hits(self):
         record = {

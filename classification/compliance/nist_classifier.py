@@ -10,6 +10,7 @@ import time
 import unicodedata
 from typing import Any
 
+from classification import masking
 from classification.compliance.canonical_entities import canonical_entity_fingerprint
 from classification.compliance.evidence_keys import evidence_hmac_key
 from classification.compliance.nist_catalog import load_nist_catalog, nist_catalog_readonly, nist_catalog_status
@@ -20,7 +21,6 @@ from backend.finding_contracts import get_finding_display_name
 
 
 NIST_DETECTOR_TIMEOUT_SECONDS = float(os.getenv("DSPM_NIST_DETECTOR_TIMEOUT_SECONDS", "8"))
-SENSITIVE_TYPE_MARKERS = ("secret", "token", "password", "key", "passport", "ssn", "account", "credential")
 
 
 def classify_nist_content(
@@ -124,7 +124,7 @@ def _score_rule(rule: dict[str, Any], content: str, evidence_blob: str, path_blo
         positive.append({"group": "path_context", "signals": path_hits[:10], "score": delta})
         matched_groups.add("path_context")
 
-    regex_hits = _regex_hits(content, detection.get("regex_patterns") or [])
+    regex_hits = _regex_hits(content, detection.get("regex_patterns") or [], _value_data_class(rule))
     if regex_hits:
         delta = int(weights.get("regex", 25))
         score += delta
@@ -187,6 +187,9 @@ def _finding_from_score(rule: dict[str, Any], score_row: dict[str, Any], metadat
     confidence_score = int(score_row["score"])
     review_status = "CONFIRMED" if score_row["status"] == "confirmed" else "NEEDS_REVIEW"
     sample_seed = _sample_seed(rule, score_row)
+    # A regex hit is a value and is masked for its class; without one the sample is a
+    # catalog keyword, which is not.
+    sample_class = _value_data_class(rule) if score_row.get("regex_hits") else masking.GENERIC
     secure_fp = _secure_fingerprint(sample_seed, tenant_id) if sample_seed else _secure_fingerprint(rule.get("rule_id", ""), tenant_id)
     canonical_entity_type = _canonical_type(rule)
     canonical_fingerprints = [canonical_entity_fingerprint(canonical_entity_type, secure_fp, tenant_id)] if canonical_entity_type else []
@@ -247,8 +250,8 @@ def _finding_from_score(rule: dict[str, Any], score_row: dict[str, Any], metadat
         "source_object": metadata.get("object_name") or "",
         "source_table": metadata.get("table") or "",
         "source_column": metadata.get("column") or "",
-        "samples": [_masked_preview(sample_seed)] if sample_seed else [],
-        "masked_preview": _masked_preview(sample_seed),
+        "samples": [_masked_preview(sample_seed, sample_class)] if sample_seed else [],
+        "masked_preview": _masked_preview(sample_seed, sample_class),
         "secure_value_fingerprints": [secure_fp],
         "canonical_entity_type": canonical_entity_type,
         "canonical_entity_fingerprints": canonical_fingerprints,
@@ -374,7 +377,7 @@ def _compiled_rule_pattern(raw: str, ignore_case: bool):
         return None
 
 
-def _regex_hits(content: str, patterns: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _regex_hits(content: str, patterns: list[dict[str, Any]], data_class: str = masking.GENERIC) -> list[dict[str, str]]:
     hits = []
     # `content[:250_000]` is the same slice for every pattern of every rule, and
     # taking it inside the loop copied the file's text 154 times - the single
@@ -389,7 +392,8 @@ def _regex_hits(content: str, patterns: list[dict[str, Any]]) -> list[dict[str, 
             continue
         for match in compiled.finditer(scanned):
             value = match.group(0)
-            hits.append({"pattern_id": str(pattern.get("id") or ""), "masked_preview": _masked_preview(value), "fingerprint_seed": value})
+            hits.append({"pattern_id": str(pattern.get("id") or ""), "masked_preview": _masked_preview(value, data_class),
+                         "fingerprint_seed": value})
             if len(hits) >= 10:
                 return hits
     return hits
@@ -438,15 +442,24 @@ def _sample_seed(rule: dict[str, Any], score_row: dict[str, Any]) -> str:
     return keywords[0] if keywords else str(rule.get("rule_id") or "")
 
 
-def _masked_preview(value: str) -> str:
+def _masked_preview(value: str, data_class: str = masking.GENERIC) -> str:
+    """The value masked for its class. It used to keep the first three and last two
+    characters of anything - an SSN read "123...89" - and that text reaches reports."""
     text = str(value or "")
     if not text:
         return ""
-    if any(marker in text.casefold() for marker in SENSITIVE_TYPE_MARKERS):
-        return redact(text)
-    if len(text) <= 6:
-        return redact(text)
-    return f"{text[:3]}...{text[-2:]}"
+    return redact(text, data_class)
+
+
+def _value_data_class(rule: dict[str, Any]) -> str:
+    """What a rule's regex values are. Every NIST value pattern is an identifier (an id,
+    token, account or passport number); a credential rule's is a secret."""
+    canonical = _canonical_type(rule)
+    if canonical == "SECRET":
+        return masking.SECRET
+    if canonical == "PASSPORT_NUMBER":
+        return masking.PASSPORT
+    return masking.GOVERNMENT_ID
 
 
 def _secure_fingerprint(value: str, tenant_id: str) -> str:

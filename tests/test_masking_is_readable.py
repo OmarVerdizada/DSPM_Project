@@ -25,6 +25,9 @@ ALL_CLASSES = (
     masking.PAN, masking.IBAN, masking.EMAIL, masking.PHONE, masking.GOVERNMENT_ID,
     masking.SECRET, masking.PRIVATE_KEY, masking.CONNECTION_STRING, masking.PASSWORD,
     masking.GENERIC,
+    # 2026-10 detection audit: routing numbers and BICs masked as IBANs (all of a short
+    # value shown), employee numbers as government IDs.
+    masking.PASSPORT, masking.BANK_ACCOUNT, masking.BIC, masking.EMPLOYEE_ID,
 )
 
 SAMPLE_VALUES = (

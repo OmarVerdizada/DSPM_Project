@@ -7,7 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 NIST_FRAMEWORK_ID = "nist_sp800_60_enterprise"
 NIST_DISPLAY_NAME = "NIST SP 800-60 Enterprise"
-NIST_DETECTOR_VERSION = "nist-sp800-60-detector-v1"
+# v2 (2026-10 detection audit): samples are masked by data class, not as first three and
+# last two characters.
+NIST_DETECTOR_VERSION = "nist-sp800-60-detector-v2"
 
 DetectionMode = Literal[
     "DOCUMENT_MARKING_AND_CONTEXT",

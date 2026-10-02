@@ -42,9 +42,14 @@ from scripts.logger import get_logger
 logger = get_logger(__name__)
 # v5: the e-mail pattern made linear on long runs - a match may now start at its local
 # part's leading "." "+" or "-" - so a v4 analysis is not reused as if unchanged.
-GENERIC_DETECTOR_VERSION = "generic-regex-v5"
+# v6 (2026-10 detection audit): a card followed by its expiry or CVV is found, and lines
+# no longer join into cards; the ID rules need an identifier rather than any next word and
+# mask, count and fingerprint the value without its label; bank and identity values have
+# mask classes (and entity types) of their own.
+GENERIC_DETECTOR_VERSION = "generic-regex-v6"
 FINDING_MODEL_VERSION = "finding-merge-v1"  # B7: one finding per value, whatever found it
-PCI_DETECTOR_VERSION = "pci-detector-v3"  # A2: one PAN validator, issuer-gated
+# v4 (2026-10 detection audit): the same PAN candidate change as the generic v6.
+PCI_DETECTOR_VERSION = "pci-detector-v4"  # A2: one PAN validator, issuer-gated
 # Bumped v2 -> v3 for SC-1: previews and the classification cache are now
 # produced by the universal evidence sanitizer, so every pre-existing findings
 # cache entry and preview sidecar must be regenerated rather than reused.

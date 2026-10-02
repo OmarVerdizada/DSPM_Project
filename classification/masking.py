@@ -37,7 +37,11 @@ from __future__ import annotations
 
 import re
 
-MASK_VERSION = "mask-v1"
+# v2 (2026-10 detection audit): a mask never shows as much as it hides, a long value
+# is not printed as a wall of stars, an IBAN-class value too short to be an IBAN shows
+# only its last four, and passports, bank account numbers, BICs and employee numbers
+# have classes of their own.
+MASK_VERSION = "mask-v2"
 
 # Data classes, by what the mask has to preserve.
 PAN = "pan"
@@ -45,6 +49,10 @@ IBAN = "iban"
 EMAIL = "email"
 PHONE = "phone"
 GOVERNMENT_ID = "government_id"
+PASSPORT = "passport"
+BANK_ACCOUNT = "bank_account"
+BIC = "bic"
+EMPLOYEE_ID = "employee_id"
 SECRET = "secret"
 PRIVATE_KEY = "private_key"
 CONNECTION_STRING = "connection_string"
@@ -57,6 +65,10 @@ CLASS_LABELS = {
     EMAIL: "Email address",
     PHONE: "Phone number",
     GOVERNMENT_ID: "Government identifier",
+    PASSPORT: "Passport number",
+    BANK_ACCOUNT: "Bank account or routing number",
+    BIC: "SWIFT/BIC",
+    EMPLOYEE_ID: "Employee identifier",
     SECRET: "Credential",
     PRIVATE_KEY: "Private key",
     CONNECTION_STRING: "Connection string",
@@ -66,18 +78,24 @@ CLASS_LABELS = {
 
 # Which class each generic detection rule produces. A rule absent from this map
 # masks generically, which is the safe direction.
+#
+# The class also names the canonical entity a value registers as (B7), so it has to
+# be what the value IS: routing numbers and BICs were IBANs here - and so masked as
+# IBANs, which for a nine- to twelve-character value showed all of it - an employee
+# number was a government ID, and a passport found by this detector and the same
+# passport found by GDPR were two different entities.
 RULE_DATA_CLASSES = {
     "credit_card": PAN,
     "iban": IBAN,
     "email": EMAIL,
     "phone_number": PHONE,
-    "passport_number": GOVERNMENT_ID,
+    "passport_number": PASSPORT,
     "national_id": GOVERNMENT_ID,
     "ssn": GOVERNMENT_ID,
     "azerbaijan_fin": GOVERNMENT_ID,
-    "employee_id": GOVERNMENT_ID,
-    "routing_account": IBAN,
-    "swift_bic": IBAN,
+    "employee_id": EMPLOYEE_ID,
+    "routing_account": BANK_ACCOUNT,
+    "swift_bic": BIC,
     "private_key": PRIVATE_KEY,
     "saml_private_key": PRIVATE_KEY,
     "gcp_service_account": PRIVATE_KEY,
@@ -108,6 +126,49 @@ def data_class_for_rule(rule_name: str) -> str:
     return GENERIC
 
 
+# The compliance detectors' finding types, by the class their values are. GDPR and NIST
+# masked every value as its first three and last two characters, whatever it was: a
+# seven-character FIN showed five of them, a passport C12345678 read "C12***78" and a
+# password "Hunter2!" read "Hun***2!" - where the generic detector printed the same
+# password as stars. The report-time mask only knows cards, IBANs and keys, so these went
+# into reports as they were. A type absent from here takes its category's class, then
+# GENERIC.
+COMPLIANCE_TYPE_DATA_CLASSES = {
+    "gdpr_email_address": EMAIL,
+    "gdpr_phone_number": PHONE,
+    "gdpr_fin_pin": GOVERNMENT_ID,
+    "gdpr_national_id": GOVERNMENT_ID,
+    "gdpr_passport_number": PASSPORT,
+    "gdpr_tax_record": GOVERNMENT_ID,
+    "gdpr_payment_card_data": PAN,
+    "gdpr_bank_account_data": IBAN,
+    "gdpr_password_secret": PASSWORD,
+    "gdpr_account_recovery_secret": PASSWORD,
+    "gdpr_mfa_seed_recovery_code": PASSWORD,
+    "gdpr_api_token_oauth_secret": SECRET,
+    "gdpr_session_token_jwt": SECRET,
+    "gdpr_encryption_key_material": SECRET,
+    "gdpr_private_key_certificate_secret": SECRET,
+    "gdpr_database_connection_string": CONNECTION_STRING,
+}
+COMPLIANCE_CATEGORY_DATA_CLASSES = {
+    "government_ids": GOVERNMENT_ID,
+    "credentials_secrets": SECRET,
+    "identity_access": SECRET,
+}
+
+
+def data_class_for_finding_type(finding_type: str, category: str = "") -> str:
+    """The data class a compliance detector's finding type produces."""
+
+    name = str(finding_type or "").lower()
+    if name in COMPLIANCE_TYPE_DATA_CLASSES:
+        return COMPLIANCE_TYPE_DATA_CLASSES[name]
+    if name in RULE_DATA_CLASSES:
+        return RULE_DATA_CLASSES[name]
+    return COMPLIANCE_CATEGORY_DATA_CLASSES.get(str(category or "").lower(), GENERIC)
+
+
 def class_label(data_class: str) -> str:
     return CLASS_LABELS.get(str(data_class or GENERIC), CLASS_LABELS[GENERIC])
 
@@ -116,20 +177,27 @@ def _stars(count: int) -> str:
     return "*" * max(1, count)
 
 
+# A partial value says what is there, not how long it is: past a dozen hidden
+# characters the stars stop growing, so a 150-character note does not print as 150
+# stars. (The card and IBAN masks keep their own, fixed layouts.)
+_MAX_HIDDEN_STARS = 12
+
+
 def _keep_ends(value: str, lead: int, tail: int) -> str:
     """`lead` characters, stars for the middle, `tail` characters.
 
-    Falls back to full masking when the value is too short for the reveal to
-    leave anything hidden - a four-character "secret" shown as itself is not a
-    mask.
+    Falls back to full masking unless at least as much stays hidden as is shown.
+    The first rule only asked that SOMETHING stay hidden, so a five-character
+    value under a two-and-two reveal showed four of its five characters.
     """
 
-    if len(value) <= lead + tail:
-        return _stars(len(value) or 3)
+    hidden = len(value) - lead - tail
+    if hidden <= 0 or hidden < lead + tail:
+        return _stars(min(len(value) or 3, _MAX_HIDDEN_STARS))
     # `value[-0:]` is the WHOLE string, not the empty one - a tail of zero would
     # append the very value being masked.
     suffix = value[-tail:] if tail else ""
-    return f"{value[:lead]}{_stars(len(value) - lead - tail)}{suffix}"
+    return f"{value[:lead]}{_stars(min(hidden, _MAX_HIDDEN_STARS))}{suffix}"
 
 
 def _mask_pan(value: str) -> str:
@@ -144,6 +212,11 @@ def _mask_iban(value: str) -> str:
     compact = re.sub(r"\s", "", value).upper()
     if len(compact) <= 8:
         return _stars(len(compact))
+    if len(compact) < 16:
+        # Too short to be an IBAN laid out as one. The first-eight-last-four reveal
+        # overlaps on nine to twelve characters - "DEUTDEFF500" read "DEUTDEFF*F500",
+        # a routing number all of itself - so only the end is shown.
+        return _keep_ends(compact, 0, 4)
     # Country and bank identifier stay: they are what routes a question to the
     # right finance team, and neither identifies an account on its own.
     return f"{compact[:8]}{_stars(len(compact) - 12)}{compact[-4:]}"
@@ -171,7 +244,10 @@ def _mask_connection_string(value: str) -> str:
 
     match = re.match(r"^([a-zA-Z][\w+.-]*://)([^@/\s]*@)?(.*)$", str(value).strip())
     if not match:
-        return _keep_ends(str(value), 4, 0)
+        # "Server=db01;..." keeps its first key. A value with no "=" is not a
+        # connection string but the password a connection detector pulled out of one
+        # (GDPR reports those under this type), and shows nothing.
+        return _keep_ends(str(value), 4, 0) if "=" in str(value) else _stars(min(len(str(value)), _MAX_HIDDEN_STARS))
     scheme, credential, rest = match.group(1), match.group(2) or "", match.group(3)
     host = rest.split("/", 1)[0].split("?", 1)[0]
     return f"{scheme}{_stars(8) + '@' if credential else ''}{host or _stars(6)}"
@@ -183,6 +259,12 @@ _MASKS = {
     EMAIL: _mask_email,
     PHONE: _mask_phone,
     GOVERNMENT_ID: lambda value: _keep_ends(re.sub(r"\s", "", str(value)), 0, 2),
+    PASSPORT: lambda value: _keep_ends(re.sub(r"\s", "", str(value)), 0, 2),
+    EMPLOYEE_ID: lambda value: _keep_ends(re.sub(r"\s", "", str(value)), 0, 2),
+    # The last four, as a bank prints an account number.
+    BANK_ACCOUNT: lambda value: _keep_ends(re.sub(r"\s", "", str(value)), 0, 4),
+    # The bank code, which says whose BIC it is; branch and location are hidden.
+    BIC: lambda value: _keep_ends(re.sub(r"\s", "", str(value)).upper(), 4, 0),
     SECRET: lambda value: _keep_ends(str(value).strip(), 4, 4),
     PRIVATE_KEY: lambda _value: "[private key]",
     CONNECTION_STRING: _mask_connection_string,

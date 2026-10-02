@@ -6,6 +6,7 @@ import threading
 import time
 
 from classification import exact_match
+from classification.masking import PRIVATE_KEY, data_class_for_finding_type
 from classification.compliance.country_identifiers import validate_country_identifier
 from classification.compliance.gdpr_confidence import (
     apply_confidence,
@@ -37,7 +38,10 @@ NON_PERSONAL_CONTEXT_RULE_TYPES = {
 # v5: the money-amount and secret-assignment patterns made linear - the matched text of an
 # amount no longer carries leading whitespace, a secret assignment may start at a leading
 # "." or "-" - so what a v4 scan kept is not reused as if it were the same detector.
-GDPR_DETECTOR_VERSION = "gdpr-detector-v5"
+# v6 (2026-10 detection audit): a card followed by its expiry or CVV is found; a national
+# ID series is written in capitals (and "OR" needs an ID word), a passport number has a
+# digit, and samples are masked by data class.
+GDPR_DETECTOR_VERSION = "gdpr-detector-v6"
 # A value's exact-match fingerprints kept per finding, for the reference-set check (D2).
 EDM_FINGERPRINTS_PER_FINDING = 50
 GDPR_RULE_CATALOG_VERSION = "gdpr-rules-v2"
@@ -149,6 +153,7 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
         edm_fingerprints: list[str] = []
         is_secret = detector_class(rule.finding_type) == "secret"
         secret_literal = False
+        data_class = data_class_for_finding_type(rule.finding_type, rule.category)
         for value in rule.detector(content or "", metadata):
             if is_secret and not secret_literal:
                 secret_literal = looks_like_secret_literal(value)
@@ -166,7 +171,8 @@ def classify_gdpr_content(content: str, metadata: dict | None = None, custom_key
                 edm_fingerprint = exact_match.fingerprint(edm_type, value, tenant_id, key=edm_key)
                 if edm_fingerprint and edm_fingerprint not in edm_fingerprints:
                     edm_fingerprints.append(edm_fingerprint)
-            redacted = redact(value)
+            # A key block found by the certificate rule is named, never sampled.
+            redacted = redact(value, PRIVATE_KEY if "PRIVATE KEY" in str(value).upper() else data_class)
             if redacted not in matches:
                 matches.append(redacted)
             if len(occurrences) < 20:

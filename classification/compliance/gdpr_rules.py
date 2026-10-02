@@ -72,6 +72,7 @@ from classification.compliance.keywords import (
 )
 from classification.compliance.models import GDPRRule
 from classification.pan_validator import (
+    card_windows,
     context_window as local_pan_context,
     pan_hits,
     validate_pan,
@@ -256,7 +257,15 @@ def detect_fin(content: str, _: dict) -> list[str]:
 
 
 def detect_national_ids(content: str, _: dict) -> list[str]:
-    return [match.group(0).upper().replace(" ", "").replace("-", "") for match in NATIONAL_ID_RE.finditer(content)]
+    matches = []
+    for match in NATIONAL_ID_RE.finditer(content):
+        value = match.group(0).replace(" ", "").replace("-", "")
+        # "OR" is also a word, and a heading in capitals ("ORDER 10020030 OR 10020031")
+        # still writes it in capitals: that series has to come with an ID word.
+        if value.startswith("OR") and not has_keyword_context(content, match.start(), GOVERNMENT_ID_KEYWORDS, window=80):
+            continue
+        matches.append(value)
+    return matches
 
 
 def detect_passports(content: str, _: dict) -> list[str]:
@@ -670,6 +679,13 @@ def detect_criminal_records(content: str, _: dict) -> list[str]:
     return matches
 
 
+def _cards_in_run(run: str, context: str, density: int) -> list[str]:
+    """The validated cards inside one digit run. A card followed by its expiry or CVV
+    ("4111 1111 1111 1111 05/27") is one run, and judged whole it is no card."""
+    return [run[start:end] for start, end in card_windows(run)
+            if validate_pan(run[start:end], context=context, density=density)]
+
+
 def detect_payment_card_data(content: str, _: dict) -> list[str]:
     matches: list[str] = []
     # This detector was already the strictest of the three - it asked for a
@@ -678,11 +694,9 @@ def detect_payment_card_data(content: str, _: dict) -> list[str]:
     # additional AND, so the set of accepted numbers can only shrink.
     density = len({hit.verdict.digits for hit in pan_hits(content)})
     for match in PAYMENT_CARD_RE.finditer(content):
-        value = match.group(0)
         if not has_keyword_context(content, match.start(), PAYMENT_CARD_KEYWORDS, window=120):
             continue
-        if validate_pan(value, context=local_pan_context(content, match.start(), match.end()), density=density):
-            matches.append(value)
+        matches.extend(_cards_in_run(match.group(0), local_pan_context(content, match.start(), match.end()), density))
     for pattern in (MASKED_CARD_RE, CARD_EXPIRY_RE):
         for match in pattern.finditer(content):
             if has_keyword_context(content, match.start(), PAYMENT_CARD_KEYWORDS, window=100):
@@ -690,8 +704,9 @@ def detect_payment_card_data(content: str, _: dict) -> list[str]:
     for value in context_values(content, PAYMENT_CARD_KEYWORDS, max_chars=260):
         candidate = re.split(r"[\r\n;|]", value, maxsplit=1)[0].strip(" :=,-")
         card = PAYMENT_CARD_RE.search(candidate)
-        if card and validate_pan(card.group(0), context=candidate, density=density):
-            matches.append(card.group(0))
+        cards = _cards_in_run(card.group(0), candidate, density) if card else []
+        if cards:
+            matches.extend(cards)
         elif MASKED_CARD_RE.search(candidate) or CARD_EXPIRY_RE.search(candidate):
             matches.append(candidate[:140])
         elif CARD_CVV_RE.fullmatch(candidate) and len(candidate) in (3, 4):

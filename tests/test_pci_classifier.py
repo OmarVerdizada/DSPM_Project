@@ -86,7 +86,9 @@ class PCIClassifierTests(unittest.TestCase):
         self.assertEqual(pan["protection_state"], "READABLE_FULL")
         self.assertIn("first_seen", pan)
         self.assertIn("last_seen", pan)
-        self.assertEqual(pan["status"], "UNREVIEWED")
+        # The lifecycle starts OPEN; the detector's own "unreviewed" stays its review_status.
+        self.assertEqual(pan["status"], "OPEN")
+        self.assertEqual(pan["review_status"], "unreviewed")
         self.assertTrue(pan["evidence_ids"])
         occurrence = pan["occurrences"][0]
         self.assertTrue(occurrence["occurrence_id"].startswith("occurrence_"))

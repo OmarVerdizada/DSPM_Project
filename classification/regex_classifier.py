@@ -127,7 +127,12 @@ RULES = [
     DetectionRule(
         name="connection_string",
         pattern=re.compile(
-            r"\b(?:server|host|data source)\s*=\s*[^;\n]{2,};(?:[^;\n=]+\s*=\s*[^;\n]+;?){2,}",
+            # Every further pair ends at its ';', a line end or the end of the text, and no
+            # part runs further than a connection string's does. With the ';' optional the
+            # pairs had no boundary, and with unbounded values every "server=" on a long line
+            # scanned to its end: a line that failed to match backtracked quadratically
+            # (16 KB took 4.5 s - a crafted file stalled a detector worker).
+            r"\b(?:server|host|data source)\s*=\s*[^;\n]{2,256};(?:[^;\n=]{1,128}=[^;\n]{0,512}(?:;|(?=\n)|\Z)){2,}",
             re.IGNORECASE,
         ),
         risk="HIGH",
@@ -352,35 +357,52 @@ RULES = [
         description="IBAN bank account identifier detected (mod-97 valid)",
         validator=_iban_ok,
     ),
+    # The identifier rules below match their LABEL case-insensitively and their VALUE
+    # case-sensitively, as uppercase letters and digits with at least one digit. With
+    # the whole pattern case-insensitive any next word was the value: "Please bring your
+    # passport photos" and "passthrough mode" were HIGH passport numbers, "National ID
+    # required" a national ID. The value is its own group (value_group=1), so it - not
+    # the label with it - is what is masked, counted and fingerprinted, and a passport
+    # found here and by GDPR is one entity.
     DetectionRule(
         name="passport_number",
-        pattern=re.compile(r"\b(?:passport|pass\.?|pasport)\s*(?:no\.?|number|#)?\s*[:=]?\s*[A-Z0-9]{6,12}\b", re.IGNORECASE),
+        pattern=re.compile(
+            r"\b(?i:passport|pass\.|pasport)(?i:\s*(?:no\.?|number|#))?\s*[:=]?\s*((?=[A-Z]*\d)[A-Z0-9]{6,12})\b"),
         risk="HIGH",
         description="Passport identifier context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="national_id",
-        pattern=re.compile(r"\b(?:national id|tax id|tin|ssn|social security)\s*[:=]?\s*[A-Z0-9\-]{6,18}\b", re.IGNORECASE),
+        # An SSN written as one (123-45-6789) is the ssn rule's; reporting it here too
+        # made one value two findings under two names.
+        pattern=re.compile(
+            r"\b(?:(?i:national id|tax id|tin)|(?i:ssn|social security(?: number| no\.?)?)(?![\s:=]*\d{3}-\d{2}-\d{4}\b))"
+            r"\s*[:=]?\s*((?=[A-Z-]*\d)[A-Z0-9-]{6,18})\b"),
         risk="HIGH",
         description="Government identifier context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="ssn",
-        pattern=re.compile(r"\b(?:ssn|social security(?: number)?)\s*[:=]?\s*\d{3}-\d{2}-\d{4}\b", re.IGNORECASE),
+        pattern=re.compile(r"\b(?:ssn|social security(?: number)?)\s*[:=]?\s*(\d{3}-\d{2}-\d{4})\b", re.IGNORECASE),
         risk="HIGH",
         description="US social security number context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="routing_account",
-        pattern=re.compile(r"\b(?:routing|aba|account(?: number)?)\s*[:=]?\s*\d{8,17}\b", re.IGNORECASE),
+        pattern=re.compile(r"\b(?:routing|aba|account(?: number)?)\s*[:=]?\s*(\d{8,17})\b", re.IGNORECASE),
         risk="HIGH",
         description="Bank routing or account number context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="employee_id",
-        pattern=re.compile(r"\b(?:employee id|emp id|personnel no\.?)\s*[:=]?\s*[A-Z0-9\-]{4,16}\b", re.IGNORECASE),
+        pattern=re.compile(r"\b(?i:employee id|emp id|personnel no\.?)\s*[:=]?\s*((?=[A-Z-]*\d)[A-Z0-9-]{4,16})\b"),
         risk="MEDIUM",
         description="Employee identifier context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="phone_number",

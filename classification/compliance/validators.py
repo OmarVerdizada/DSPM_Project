@@ -8,13 +8,19 @@ import re
 import threading
 from datetime import date
 
+from classification import masking
+
 
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9](?:[A-Za-z0-9._%+-]{0,62}[A-Za-z0-9])?@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}\b")
 PHONE_RE = re.compile(r"(?<![\w@])(?:\+994|0|\+\d{1,3})[\s().-]?\d{2,3}[\s().-]?\d{3}[\s().-]?\d{2}[\s().-]?\d{2}(?![\w@])")
 DATE_RE = re.compile(r"\b(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b")
 FIN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]{7}(?![A-Za-z0-9])")
-NATIONAL_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:AZE|OR|AA)[ -]?\d{7,8}(?![A-Za-z0-9])", re.IGNORECASE)
-PASSPORT_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{8}(?![A-Za-z0-9])")
+# A series is written in capitals. Case-insensitive, the English word "or" was one:
+# "Ship order 10020030 or 10020031" reported a HIGH national ID.
+NATIONAL_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:AZE|OR|AA)[ -]?\d{7,8}(?![A-Za-z0-9])")
+# A passport number has a digit in it. Without one, any nine-letter word near the word
+# "passport" was one: "bring your passport and identity DOCUMENTS to RECEPTION".
+PASSPORT_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?=[A-Za-z]{0,7}\d)[A-Za-z0-9]{8}(?![A-Za-z0-9])")
 MRZ_RE = re.compile(r"\bP<[A-Z]{3}[A-Z0-9<]{20,}", re.IGNORECASE)
 DIGITAL_SIGNATURE_RE = re.compile(
     r"(?:<SignatureValue>[^<]{40,}</SignatureValue>|/ByteRange\s*\[|/SubFilter\s*/adbe\.pkcs7|signature[_-]?(?:value|hash|digest)\s*[:=]\s*[A-Za-z0-9+/=_-]{32,})",
@@ -103,12 +109,15 @@ PRIVATE_KEY_BLOCK_RE = re.compile(
     r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----[\s\S]{40,}?-----END (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----",
     re.IGNORECASE,
 )
+# In a raw string "\\r" is a backslash and an "r": these patterns forbade the letters r and n
+# in a value and wanted a literal backslash after each ';', so no ordinary connection string
+# ("Server=db01;Database=hr;...") and no mongodb+srv URI ever matched.
 DATABASE_URI_RE = re.compile(
-    r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|mssql|sqlserver|oracle|jdbc:[a-z0-9]+)://[^\s'\"<>]{8,512}",
+    r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|mssql|sqlserver|oracle|jdbc:[a-z0-9]+)://[^\s'\"<>]{8,512}",
     re.IGNORECASE,
 )
 DB_KV_CONNECTION_RE = re.compile(
-    r"\b(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\\r\\n]{1,160}(?:;\\s*(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\\r\\n]{1,160}){1,}",
+    r"\b(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\r\n]{1,160}(?:;\s*(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\r\n]{1,160}){1,}",
     re.IGNORECASE,
 )
 MFA_RECOVERY_CODE_RE = re.compile(r"\b[A-Z0-9]{4,8}(?:[-\s][A-Z0-9]{4,8}){1,5}\b", re.IGNORECASE)
@@ -133,11 +142,14 @@ PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv"}
 
 
-def redact(value: str) -> str:
-    value = " ".join(str(value or "").strip().split())
-    if len(value) <= 6:
-        return "***"
-    return f"{value[:3]}***{value[-2:]}"
+def redact(value: str, data_class: str = masking.GENERIC) -> str:
+    """What a GDPR or NIST sample shows: the value masked for its class (A6).
+
+    This used to keep the first three and last two characters of anything, so a
+    seven-character FIN showed five of them and a password "Hunter2!" read
+    "Hun***2!" - while the generic detector showed the same password as stars.
+    """
+    return masking.mask(" ".join(str(value or "").strip().split()), data_class)
 
 
 # ── The keyword helpers ──────────────────────────────────────────────────
