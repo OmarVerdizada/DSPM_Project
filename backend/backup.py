@@ -1020,11 +1020,16 @@ def last_attempt() -> dict:
     return value if isinstance(value, dict) else {}
 
 
+# Who the audit trail names for a scheduled backup: the product, as the other background
+# writers are named ("sentro:delivery", ...).
+ACTOR = "sentro:backup"
+
+
 def _audit(action: str, detail: dict) -> None:
     try:
         from backend import store
 
-        store.audit(INSTALLATION_TENANT, "sentro", action, detail)
+        store.audit(INSTALLATION_TENANT, ACTOR, action, detail)
     except Exception as exc:
         logger.warning("Could not audit %s: %s", action, type(exc).__name__)
 
@@ -1061,8 +1066,8 @@ def run_backup_set(*, trigger: str = "schedule") -> dict:
     except Exception as exc:
         error = type(exc).__name__
         record_attempt(False, error, stage=stage, trigger=trigger)
-        _audit("backup.failed", {"stage": stage, "error": error, "trigger": trigger,
-                                 "manifest": manifest.name if manifest else ""})
+        failed = {"stage": stage, "error": error, "trigger": trigger, "manifest": manifest.name if manifest else ""}
+        _audit("backup.failed", failed)
         logger.error("The %s backup failed at %s: %s", trigger, stage, error)
         if stage == "copy":
             # The local set verified. While the off-host location is down every retry adds
