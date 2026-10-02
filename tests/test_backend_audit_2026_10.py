@@ -544,5 +544,59 @@ class TriageAloneCannotSilenceTheWorkspaceTest(unittest.TestCase):
         update.assert_not_called()
 
 
+class AccessListsAreBoundedTest(unittest.TestCase):
+    """/api/access/files took a bare int offset: a 20-digit value reached SQLite as an
+    integer it cannot hold and the API answered 500."""
+
+    def test_out_of_range_paging_is_a_400(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from backend.app import app
+        from backend.security import create_token
+
+        client = TestClient(app, raise_server_exceptions=False)
+        headers = {"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"}
+        for path in ("/api/access/files?kind=broad&offset=100000000000000000000",
+                     "/api/access/files?kind=broad&limit=100000", "/api/access/principals?limit=-1"):
+            with self.subTest(path=path):
+                self.assertEqual(client.get(path, headers=headers).status_code, 400)
+        self.assertEqual(client.get("/api/access/files?kind=broad&offset=10", headers=headers).status_code, 200)
+        self.assertEqual(client.get("/api/access/principals?limit=500", headers=headers).status_code, 200)
+
+
+class AMissingSavedCredentialIsA404EverywhereTest(unittest.TestCase):
+    """A deleted saved credential gave 500 on the connection test and endpoint routes and
+    a 400 "check target, credentials" on /api/scan; a full scan queue was reported as a
+    target or credential problem too."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from fastapi.testclient import TestClient
+
+        from backend.app import app
+        from backend.security import create_token
+
+        cls.client = TestClient(app, raise_server_exceptions=False)
+        cls.headers = {"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"}
+
+    def test_every_route_says_the_credential_is_gone(self) -> None:
+        body = {"server": "", "local_path": "enterprise_test_data", "credential_ref": "cred-that-was-deleted"}
+        endpoint = {"host": "10.0.0.5", "credential_ref": "cred-that-was-deleted"}
+        with patch("backend.app._validate_scan_target"), patch("backend.app._prepare_local_scan_data"),                 patch("backend.app._require_scan_licence"):
+            for path, payload in (("/api/test-connection", body), ("/api/scan", body),
+                                  ("/api/endpoint/test-connection", endpoint), ("/api/endpoint/scan", endpoint)):
+                with self.subTest(path=path):
+                    response = self.client.post(path, json=payload, headers=self.headers)
+                    self.assertEqual(response.status_code, 404, response.text)
+                    self.assertEqual(response.json()["detail"], "Saved credential not found")
+
+    def test_a_full_queue_is_not_a_target_problem(self) -> None:
+        from backend.app import _safe_operation_error
+
+        refused = _safe_operation_error("Scan failed", RuntimeError("Too many active scans for this tenant"))
+        self.assertEqual(refused.status_code, 429)
+        self.assertEqual(refused.detail["code"], "scan_capacity")
+
+
 if __name__ == "__main__":
     unittest.main()

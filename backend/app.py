@@ -768,6 +768,20 @@ async def validation_exception_handler(_: Request, __: RequestValidationError) -
     return JSONResponse(status_code=400, content={"detail": "Invalid request. Check required fields and formats."})
 
 
+class SavedCredentialMissing(LookupError):
+    """A scan, a connection test or an endpoint action named a saved credential that is
+    not there (deleted, or another workspace's). The vault's KeyError reached the generic
+    handler as a 500 on the test and endpoint routes and as a 400 "check target,
+    credentials" on /api/scan; the database, SFTP and SharePoint routes already said 404."""
+
+    client_safe = True
+
+
+@app.exception_handler(SavedCredentialMissing)
+async def saved_credential_missing_handler(_: Request, __: SavedCredentialMissing) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": "Saved credential not found"})
+
+
 @app.exception_handler(InventoryReadUnavailable)
 async def inventory_unavailable_handler(_: Request, __: InventoryReadUnavailable) -> JSONResponse:
     return JSONResponse(
@@ -3451,7 +3465,7 @@ def endpoint_scan(payload: EndpointScanRequest, principal: Principal = Depends(r
         data = _run_endpoint_scan_payload(config, payload, principal)
         audit(principal.tenant_id, principal.subject, "endpoint.scan.completed", {"scan_id": data.get("scan_id"), "host": payload.host})
         return _compact_scan_report(data) if payload.compact_result else data
-    except HTTPException:
+    except (HTTPException, SavedCredentialMissing):
         raise
     except Exception as exc:
         raise _safe_operation_error("Endpoint operation failed", exc) from exc
@@ -3524,7 +3538,7 @@ def scan(payload: ScanRequest, principal: Principal = Depends(require_permission
         _persist_scan(data, payload, principal)
         audit(principal.tenant_id, principal.subject, "scan.completed", {"scan_id": data.get("scan_id")})
         return _compact_scan_report(data) if payload.compact_result else data
-    except HTTPException:
+    except (HTTPException, SavedCredentialMissing):
         raise
     except Exception as exc:
         raise _safe_operation_error("Scan failed", exc) from exc
@@ -4157,7 +4171,7 @@ _ACCESS_KINDS = {"", "broad", "privileged", "service"}
 
 
 @app.get("/api/access/principals")
-def access_principals(kind: str = "", limit: int = 200,
+def access_principals(kind: str = Query(default="", max_length=20), limit: int = Query(default=200, ge=1, le=1000),
                       principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     """D7: who can read files in this workspace's estate - each principal, how many files it
     can read and write, and how many of those hold findings; `kind` narrows it to broad
@@ -4168,8 +4182,11 @@ def access_principals(kind: str = "", limit: int = 200,
 
 
 @app.get("/api/access/files")
-def access_files(key: str = "", kind: str = "", sensitive_only: bool = True, writable_only: bool = False,
-                 limit: int = 100, offset: int = 0,
+def access_files(key: str = Query(default="", max_length=256), kind: str = Query(default="", max_length=20),
+                 sensitive_only: bool = True, writable_only: bool = False,
+                 # Bounded like every sibling list: a 20-digit offset reached SQLite as an
+                 # integer it cannot hold and answered 500.
+                 limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0, le=1_000_000),
                  principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     """D7: the files a principal (its `key` from /api/access/principals) can read - or
     write - or, with `kind`, the files a broad group, privileged or service/indexer
@@ -5093,6 +5110,14 @@ def _safe_operation_error(message: str, exc: Exception) -> HTTPException:
     elif "cancel" in lowered:
         code = "scan_cancelled"
         hint = "The scan was cancelled by the user."
+    elif "too many active scans" in lowered:
+        # The workspace's scan slots are full - nothing is wrong with the target, so the
+        # "check the target, credentials" hint pointed the operator the wrong way.
+        return HTTPException(status_code=429, detail={
+            "message": "This workspace is already running as many scans as it may",
+            "code": "scan_capacity",
+            "hint": "Wait for a running scan to finish, or cancel one, then start this again.",
+        }, headers={"Retry-After": "30"})
     return HTTPException(status_code=400, detail={"message": message, "code": code, "hint": hint})
 
 
@@ -6379,6 +6404,13 @@ def _smb_encryption_required(payload) -> bool:
     return bool(getattr(payload, "smb_encryption", False)) or smb_encryption_required()
 
 
+def _resolve_saved_credential(tenant_id: str, credential_ref: str) -> dict:
+    try:
+        return vault.resolve(tenant_id, credential_ref)
+    except KeyError as exc:
+        raise SavedCredentialMissing("Saved credential not found") from exc
+
+
 def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
     username = payload.username.strip()
     password = payload.password
@@ -6389,7 +6421,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         payload.extension_filter_enabled,
     )
     if payload.credential_ref:
-        secret = vault.resolve(tenant_id, payload.credential_ref)
+        secret = _resolve_saved_credential(tenant_id, payload.credential_ref)
         username = secret.get("username", "")
         password = secret.get("password", "")
         domain = secret.get("domain", domain)
@@ -6469,7 +6501,7 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         payload.extension_filter_enabled,
     )
     if payload.credential_ref:
-        secret = vault.resolve(tenant_id, payload.credential_ref)
+        secret = _resolve_saved_credential(tenant_id, payload.credential_ref)
         username = secret.get("username", "")
         password = secret.get("password", "")
         domain = secret.get("domain", domain)
