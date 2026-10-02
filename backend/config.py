@@ -541,6 +541,14 @@ def production_problems(effective: Effective) -> list[str]:
     if not truthy(get("DSPM_SCAN_CACHE_ENCRYPT") or "1"):
         problems.append("DSPM_SCAN_CACHE_ENCRYPT=0 is refused in production: it writes every scanned file's path, "
                         "owner and findings to the scan cache in clear.")
+    # A switch that is on by default and set to nothing: whether that means "the default"
+    # or "off" is up to each reader, and production does not leave that to chance.
+    for name, setting in SETTINGS.items():
+        resolved = effective.values.get(name)
+        if (setting.kind == "bool" and truthy(setting.default) and resolved is not None
+                and resolved.source != "default" and not str(resolved.value or "").strip()):
+            problems.append(f"{name} is set to nothing, which is refused in production: write 1 or 0, or "
+                            "remove it to keep the default (on).")
     if get("DSPM_DEV_ADMIN_PASSWORD"):
         problems.append("DSPM_DEV_ADMIN_PASSWORD is for local installs; production uses DSPM_ADMIN_PASSWORD(_FILE).")
     for name in sorted(TEST_ONLY):
@@ -607,12 +615,17 @@ def _remote_without_verified_tls(url: str) -> bool:
 
 def apply(effective: Effective, environ: MutableMapping[str, str]) -> None:
     """Put file and secret-file values into the environment the product reads, and write
-    every true/false setting as 1 or 0 so each reader sees the same answer."""
+    every true/false setting as 1 or 0 so each reader sees the same answer.
+
+    An empty switch is left empty. Its readers take empty as "not set: the default" - the
+    scan cache's sealing, WinRM's TLS requirement in production, report bodies in the
+    artifact tier - and production_problems judged it the same way; rewritten to 0 after
+    that check, it turned each of them off."""
     for name, resolved in effective.values.items():
         if resolved.source in {"file", "secret file"} and resolved.value is not None and name not in environ:
             environ[name] = resolved.value
         setting = SETTINGS.get(name)
-        if setting and setting.kind == "bool" and name in environ:
+        if setting and setting.kind == "bool" and name in environ and str(environ[name]).strip():
             environ[name] = "1" if truthy(environ[name]) else "0"
 
 

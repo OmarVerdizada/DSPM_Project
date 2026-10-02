@@ -335,6 +335,47 @@ class AFailedManualBackupTest(_Install):
         run.assert_called_once()
 
 
+# ── 1: an empty switch ───────────────────────────────────────────────────────────────
+PRODUCTION = {
+    "DSPM_ENV": "production", "DSPM_SECRET_KEY": "jwt-secret-" + "k" * 40, "DSPM_VAULT_KEY": "vault-key-" + "v" * 34,
+    "DSPM_ARTIFACT_KEY": "artifact-key-" + "a" * 31, "DSPM_BACKUP_KEY": "backup-key-" + "b" * 33,
+    "DSPM_EVIDENCE_HMAC_KEY": "evidence-key-" + "e" * 30, "DSPM_ADMIN_PASSWORD": "Kestrel-admin-pass-4471",
+    "DSPM_DB_URL": "postgresql://sentro_app:db-pass-9922@127.0.0.1:5432/sentro",
+}
+
+
+class AnEmptySwitchTest(unittest.TestCase):
+    """bootstrap() rewrote a switch set to nothing as 0 - after production_problems had read
+    it as the default. The scan cache was then written in clear, WinRM allowed cleartext in
+    production, and report bodies went back into the database."""
+
+    def test_it_reaches_its_readers_as_unset(self) -> None:
+        from backend import config
+        from collectors import winrm_endpoint_scanner
+        from discovery import scan_cache
+
+        environ = dict(PRODUCTION, DSPM_REQUIRE_WINRM_SSL="", DSPM_REPORT_ARTIFACTS="", DSPM_SQLITE_HOLD_OPEN="true")
+        config.bootstrap(None, environ)
+        self.assertEqual((environ["DSPM_REQUIRE_WINRM_SSL"], environ["DSPM_REPORT_ARTIFACTS"]), ("", ""))
+        self.assertEqual(environ["DSPM_SQLITE_HOLD_OPEN"], "1", "a switch that says something is still 1 or 0")
+        with mock.patch.dict(os.environ, environ):
+            self.assertTrue(winrm_endpoint_scanner._winrm_ssl_required(), "cleartext WinRM in production")
+            self.assertTrue(store.report_artifacts_enabled())
+        local = {"DSPM_SCAN_CACHE_ENCRYPT": ""}
+        config.bootstrap(None, local)
+        with mock.patch.dict(os.environ, local):
+            self.assertTrue(scan_cache.encryption_enabled(), "the scan cache was written in clear")
+
+    def test_production_refuses_one_that_is_on_by_default(self) -> None:
+        from backend import config
+
+        refused = config.resolve(dict(PRODUCTION, DSPM_SCAN_CACHE_ENCRYPT=""), None).errors
+        self.assertTrue(any(error.startswith("DSPM_SCAN_CACHE_ENCRYPT is set to nothing") for error in refused), refused)
+        with self.assertRaises(config.ConfigError):
+            config.bootstrap(None, dict(PRODUCTION, DSPM_SCAN_CACHE_ENCRYPT=""))
+        self.assertEqual(config.resolve(dict(PRODUCTION), None).errors, [])
+
+
 # ── 11: one reading of DSPM_ENV ──────────────────────────────────────────────────────
 class ProductionWithATrailingSpaceTest(unittest.TestCase):
     """config strips DSPM_ENV, so "production " enforced production's rules - while `serve`
