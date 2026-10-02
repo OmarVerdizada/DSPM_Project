@@ -323,7 +323,7 @@ class TheConnectionTest(unittest.TestCase):
             with self.subTest(sslmode=sslmode), mock.patch.object(psycopg, "connect") as dialled:
                 database_scanner.connect(source(sslmode=sslmode, address="10.1.2.3").bounded())
                 kwargs = dialled.call_args.kwargs
-                self.assertEqual(kwargs["require_auth"], "scram-sha-256")
+                self.assertEqual(kwargs["require_auth"], "scram-sha-256,none")
                 self.assertEqual(kwargs.get("channel_binding"), binding)
                 self.assertEqual((kwargs["hostaddr"], kwargs["sslmode"]), ("10.1.2.3", sslmode))
 

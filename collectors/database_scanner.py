@@ -200,8 +200,11 @@ def connect(source: DatabaseSource):
                                     "refuse a server that asks for the password in the clear, so no database is "
                                     "scanned with it. Install psycopg[binary] from requirements-postgres.txt.")
         # Only SCRAM-SHA-256 is offered the password; under TLS the exchange is bound to
-        # the server's certificate. Unknown to psycopg, both go to libpq as they are.
-        auth = {"require_auth": "scram-sha-256"}
+        # the server's certificate. "none" lets a server that asks for no password at all
+        # (trust) be read: it is sent nothing, so it learns nothing - what is refused is a
+        # server asking for the password in the clear or as MD5. Unknown to psycopg, both
+        # settings go to libpq as they are.
+        auth = {"require_auth": "scram-sha-256,none"}
         if source.sslmode in TLS_SSLMODES:
             auth["channel_binding"] = "require"
         try:
