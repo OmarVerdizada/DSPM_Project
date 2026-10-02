@@ -31,6 +31,7 @@ from collectors.smb_scanner import SMBConfig, SMBScanner
 from discovery import scan_cache, triage
 from discovery.detector_pool import build_pool
 from discovery.detector_stage import DETECTOR_STAGE_VERSION, run_detector_stage, timed_detector
+from discovery.incremental import record_analysis_failed
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
 from discovery.suppression import compile_rules
 from classification.compliance.gdpr_confidence import confirm as confirm_exact_match
@@ -1102,6 +1103,11 @@ class DSPMDiscoveryEngine:
                 if finding_digest and not self._finding_digest_exists(finding_digest):
                     data = {}
                 snapshot = data.get("snapshot")
+                if isinstance(snapshot, dict) and record_analysis_failed(snapshot.get("baseline_result")):
+                    # Rehydrated from a durable row that held a failed analysis (an older
+                    # build wrote those as reusable): a failure, not the file's findings.
+                    # Read it again; the durable probe below refuses it too.
+                    snapshot = None
                 if isinstance(snapshot, dict):
                     with self._incremental_lock:
                         self._incremental_counts["unchanged"] += 1

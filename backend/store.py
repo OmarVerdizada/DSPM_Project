@@ -3262,12 +3262,14 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
         return
 
     from backend.domain import asset_identity
+    from discovery.incremental import record_analysis_failed
 
     source = str(report.get("source") or "local")
     now = datetime.now(timezone.utc).isoformat()
     rows: list[tuple] = []
     rows_written = 0
     skipped = 0
+    failed = 0
     archive_mtimes = {
         str(record.get("path") or ""): str(record.get("modified_at") or record.get("mtime") or "")
         for record in report.get("files") or []
@@ -3311,6 +3313,11 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
             continue
         stable_object_id = str(record.get("stable_object_id") or record.get("asset_id") or "")
         asset_id = asset_identity(tenant_id, source, stable_object_id, path)
+        # A file whose analysis failed is still an object of this scope - the prunes
+        # count it as seen - but under no version signature, so the next scan's probe
+        # reads it again instead of replaying "nothing found" until the file changes.
+        reusable = not record_analysis_failed(record)
+        failed += 0 if reusable else 1
         rows.append(
             (
                 tenant_id,
@@ -3320,7 +3327,7 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
                 int(record.get("size") or record.get("total_bytes") or 0),
                 mtime,
                 content_hash,
-                version_signature,
+                version_signature if reusable else "",
                 scan_id,
                 now,
                 now,
@@ -3338,6 +3345,7 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
         incremental["baseline_committed"] = True
         incremental["baseline_rows_written"] = rows_written
         incremental["baseline_rows_skipped"] = skipped
+        incremental["baseline_rows_not_reusable"] = failed
         incremental["deleted_objects"] = 0
         incremental["prune_skipped"] = True
         return
@@ -3345,6 +3353,7 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
     incremental["baseline_committed"] = True
     incremental["baseline_rows_written"] = rows_written
     incremental["baseline_rows_skipped"] = skipped
+    incremental["baseline_rows_not_reusable"] = failed
     _prune_incremental_baseline(conn, tenant_id, incremental, scope_key, scan_id)
 
 
@@ -3424,8 +3433,12 @@ def probe_incremental_object(
         return {"state": "changed"}
     if not isinstance(detail, dict):
         return {"state": "changed"}
-    from discovery.incremental import reuse_snapshot_from_result
+    from discovery.incremental import record_analysis_failed, reuse_snapshot_from_result
 
+    if record_analysis_failed(detail):
+        # A row an older build wrote for a file whose analysis failed: the size and
+        # mtime match, but what it holds is a failure, not the file's findings.
+        return {"state": "changed"}
     snapshot = reuse_snapshot_from_result(detail)
     if str(detail.get("extension") or "").lower() == ".zip":
         prefix = f"{object_key}::"

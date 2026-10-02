@@ -80,6 +80,27 @@ def snapshot_is_failed_read(snapshot: dict[str, Any] | None) -> bool:
     return isinstance(snapshot, dict) and str(snapshot.get("content_status") or "") == "unreadable"
 
 
+def record_analysis_failed(record: dict[str, Any] | None) -> bool:
+    """True when an analyzed record says the file was never actually analyzed.
+
+    A record whose analysis raised carries ``detector_metrics.record_failed`` and no
+    findings. A failed read carries a ``scan_error`` without being protected content -
+    a sealed or encrypted file's ``scan_error`` describes the file, and stays true until
+    the file changes. Reused on an unchanged size and mtime, a failure would be replayed
+    as "nothing found" until someone edited the file, so such a record is never offered
+    for reuse.
+    """
+
+    if not isinstance(record, dict):
+        return False
+    metrics = record.get("detector_metrics")
+    if isinstance(metrics, dict) and metrics.get("record_failed"):
+        return True
+    if snapshot_is_failed_read(record):
+        return True
+    return bool(str(record.get("scan_error") or "").strip()) and not record.get("protected")
+
+
 def apply_reuse_snapshot(record: dict[str, Any], snapshot: dict[str, Any], object_key: str) -> dict[str, Any]:
     """Overlay reusable state on freshly enumerated metadata without content I/O."""
 
