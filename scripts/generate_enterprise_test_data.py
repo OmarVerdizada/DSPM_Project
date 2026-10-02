@@ -196,10 +196,33 @@ token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.syntheticpayload{index:04d}.syntheti
 """
 
 
+MANIFEST = "_manifest.json"
+
+
+class NotAGeneratedDataset(ValueError):
+    """The folder holds something this generator did not write."""
+
+
+def is_generated_dataset(root: Path) -> bool:
+    """Whether `root` is safe to replace: absent, an empty folder, or a dataset this
+    generator wrote (its manifest is written first, so an interrupted run still counts)."""
+    if not root.exists():
+        return True
+    if not root.is_dir() or root.is_symlink():
+        return False
+    return (root / MANIFEST).is_file() or not any(root.iterdir())
+
+
 def generate(root: Path, files_per_department: int) -> None:
+    # Regenerating replaces the folder, so it must be one this generator made: given the
+    # install folder or its data folder, the old rmtree deleted the product and its database.
+    if not is_generated_dataset(root):
+        raise NotAGeneratedDataset(f"{root} holds files this generator did not write; refusing to replace it.")
     if root.exists():
         shutil.rmtree(root)
     root.mkdir(parents=True)
+    write_text(root / MANIFEST, json.dumps({"company": COMPANY, "file_count": 0, "generated": date.today().isoformat(),
+                                             "files": [], "in_progress": True}, indent=2))
 
     people = [person(index) for index in range(180)]
     created_files: list[dict[str, object]] = []

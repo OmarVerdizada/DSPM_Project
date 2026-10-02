@@ -61,7 +61,10 @@ def apply_canonical_finding_model(finding: dict, file_obj: dict, *, seen_at: str
             "retention_state": _retention_state(finding, file_obj),
             "first_seen": str(finding.get("first_seen") or timestamp),
             "last_seen": str(finding.get("last_seen") or timestamp),
-            "status": str(finding.get("status") or finding.get("review_status") or "OPEN").upper(),
+            # A detector's review_status ("unreviewed", NIST's "CONFIRMED") says how sure the
+            # detector is, not what an analyst decided: read as lifecycle, it filed every PCI
+            # finding as NEW beside OPEN GDPR ones, and a high-scoring NIST match as CONFIRMED.
+            "status": str(finding.get("status") or "OPEN").upper(),
             "owner": str(finding.get("owner") or finding.get("data_owner") or file_obj.get("owner") or file_obj.get("department") or "unknown"),
             "sla_due": str(finding.get("sla_due") or _sla_due(timestamp, severity)),
             "parent_finding_id": finding.get("parent_finding_id"),

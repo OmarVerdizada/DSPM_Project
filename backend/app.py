@@ -209,6 +209,7 @@ from backend.reporting.posture import PostureInputs, compute_posture, posture_fr
 from backend.store import posture_inputs, set_request_origin
 from risk.risk_engine import get_risk_rules
 from scripts.generate_enterprise_test_data import generate as generate_enterprise_test_data
+from scripts.generate_enterprise_test_data import is_generated_dataset
 from scripts.report import generate_report
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -5163,6 +5164,15 @@ def _safe_demo_output(output: str) -> Path:
     resolved = (BASE_DIR / target).resolve()
     if not resolved.is_relative_to(BASE_DIR.resolve()):
         raise HTTPException(status_code=400, detail="Demo data output must stay inside the project")
+    # Generating replaces the folder. "." named the install itself and "data" the database
+    # and backups, and scan.run - an operator's or an API key's permission - deleted them.
+    if resolved == BASE_DIR.resolve() or any(
+            resolved == private.resolve() or resolved.is_relative_to(private.resolve()) or private.resolve().is_relative_to(resolved)
+            for private in product_private_paths()):
+        raise HTTPException(status_code=400, detail="Demo data cannot be written to the install folder or its data folder")
+    if not is_generated_dataset(resolved):
+        raise HTTPException(status_code=409, detail="That folder holds files the demo generator did not write, and "
+                            "generating would replace them. Choose a new folder name.")
     return resolved
 
 

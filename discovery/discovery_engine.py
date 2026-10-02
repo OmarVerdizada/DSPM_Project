@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from classification.compliance.canonical_entities import apply_canonical_entity_registry
 from classification.compliance.canonical_model import apply_canonical_finding_model
 from classification.compliance.gdpr_classifier import GDPR_DETECTOR_VERSION, GDPR_RULE_CATALOG_VERSION
+from classification.compliance.keyword_library import SUPPORTED_FRAMEWORKS as KEYWORD_CATALOG_FRAMEWORKS
 from classification.compliance.keyword_library import custom_keyword_groups_for_scan, keyword_catalog_status
 from classification.compliance.nist_catalog import nist_catalog_status
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
@@ -1809,7 +1810,9 @@ class DSPMDiscoveryEngine:
         """
         if not self.config.compliance_enabled:
             return {}
-        return {framework: self._custom_keywords_for_framework(framework) for framework in sorted(framework_ids)}
+        # HIPAA, NIST CSF and ISO 27001 are report overlays with no keyword catalog of their own.
+        return {framework: self._custom_keywords_for_framework(framework) for framework in sorted(framework_ids)
+                if framework in KEYWORD_CATALOG_FRAMEWORKS}
 
     def _set_detector_pool_diagnostics(self) -> None:
         diagnostics = dict(self.last_scan_diagnostics or {})
@@ -1833,6 +1836,11 @@ class DSPMDiscoveryEngine:
         versions = [f"gdpr_rules:{GDPR_RULE_CATALOG_VERSION}"]
         if self.config.compliance_enabled:
             for framework_id in sorted(framework_ids):
+                if framework_id not in KEYWORD_CATALOG_FRAMEWORKS:
+                    # A report overlay (HIPAA, NIST CSF, ISO 27001): its profile does not change
+                    # what a file holds, so it has no catalog to version. Asking the keyword
+                    # library about it failed the whole scan at the end of collection.
+                    continue
                 status = nist_catalog_status() if framework_id == NIST_FRAMEWORK_ID else keyword_catalog_status(self.config.tenant_id, framework_id)
                 statuses[framework_id] = status
                 versions.append(f"{framework_id}:{status.get('catalog_hash') or status.get('catalog_version') or status.get('last_known_good_version') or 'built-in'}")
