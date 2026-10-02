@@ -24,6 +24,7 @@ from discovery.parallelism import host_admission_budget, resolve_parallelism
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
 from collectors.net_guard import TargetNotAllowed, resolve_and_pin
 from collectors import win_security
+from collectors.smb3_transport import ACL_TRANSPORT, ACL_TRANSPORT_NOTE
 from collectors.ocr import extract_text_from_image, is_ocr_scannable
 from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
 from collectors.file_scanner import (
@@ -526,6 +527,10 @@ class SMBScanner:
                 "io_workers": self._io_worker_count(),
                 "host_admission": budget.stats(),
                 **({"scan_aborted_reason": aborted_reason} if aborted_reason else {}),
+                # D1: the file bytes came over the encrypted session; the owners and ACLs
+                # did not (collectors.smb3_transport says why). Said with the scan.
+                **({"acl_transport": ACL_TRANSPORT, "acl_transport_note": ACL_TRANSPORT_NOTE}
+                   if self.config.require_encryption else {}),
             }
             return records
         finally:

@@ -128,13 +128,18 @@ class TheAdapterTest(unittest.TestCase):
 class TheNegotiationTest(unittest.TestCase):
     """What the adapter does with each answer the server can give (smbprotocol mocked)."""
 
-    def connect(self, *, supports_encryption=True, encrypt_data=True, auth_fails=False):
+    def connect(self, *, supports_encryption=True, encrypt_data=True, auth_fails=False, session_error=None,
+                negotiate_error=None):
         from smbprotocol.exceptions import SMBAuthenticationError
 
         connection = mock.Mock(supports_encryption=supports_encryption, dialect=0x0311)
         session = mock.Mock(encrypt_data=encrypt_data)
         if auth_fails:
             session.connect.side_effect = SMBAuthenticationError("refused")
+        if session_error is not None:
+            session.connect.side_effect = session_error
+        if negotiate_error is not None:
+            connection.connect.side_effect = negotiate_error
         with (mock.patch("smbprotocol.connection.Connection", return_value=connection) as made_connection,
               mock.patch("smbprotocol.session.Session", return_value=session) as made_session):
             adapter = smb3_transport.Smb3Connection("svc", "pw", "sentro", "fs", domain="CORP", shares=["Finance"])
@@ -172,6 +177,53 @@ class TheNegotiationTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(adapter.encrypted)
         self.made[2].disconnect.assert_called_once_with(True)
+
+    def test_a_wrong_password_is_a_refused_login_and_the_connection_is_closed(self) -> None:
+        # M4 exit review: a wrong password is STATUS_LOGON_FAILURE, which smbprotocol raises
+        # as LogonFailure - not SMBAuthenticationError. It escaped, leaked the connection
+        # (socket and worker thread) and the operator was told the server was unreachable.
+        from smbprotocol.exceptions import LogonFailure, PasswordExpired, SMBResponseException, WrongPassword
+        from smbprotocol.header import SMB2HeaderResponse
+
+        locked = SMB2HeaderResponse()
+        locked["status"] = 0xC0000234  # STATUS_ACCOUNT_LOCKED_OUT, which smbprotocol has no class for
+        for refusal in (LogonFailure(), WrongPassword(), PasswordExpired(), SMBResponseException(locked)):
+            with self.subTest(refusal=type(refusal).__name__, status=hex(refusal.status)):
+                ok, adapter = self.connect(session_error=refusal)
+                self.assertFalse(ok, "a refused login answers False, as pysmb does")
+                self.assertFalse(adapter.encrypted)
+                self.made[2].disconnect.assert_called_once_with(True)
+
+    def test_any_other_failure_still_closes_the_connection(self) -> None:
+        for where, error in (("session", RuntimeError("worker died")), ("negotiate", TimeoutError("no answer"))):
+            with self.subTest(where=where), self.assertRaises(type(error)):
+                if where == "session":
+                    self.connect(session_error=error)
+                else:
+                    self.connect(negotiate_error=error)
+            self.made[2].disconnect.assert_called_once_with(True)
+
+    def test_the_scan_says_the_login_was_rejected_and_leaks_nothing(self) -> None:
+        from smbprotocol.exceptions import LogonFailure
+
+        made = []
+
+        def new_connection(*_args, **_kwargs):
+            made.append(mock.Mock(supports_encryption=True, dialect=0x0311))
+            return made[-1]
+
+        session = mock.Mock(encrypt_data=True)
+        session.connect.side_effect = LogonFailure()
+        scanner = SMBScanner(SMBConfig(server="fs.corp.test", username="svc", password="wrong", domain="CORP",
+                                       require_encryption=True, allowed_shares=("Finance",)))
+        with (mock.patch("collectors.smb_scanner.resolve_and_pin", return_value="10.1.2.3"),
+              mock.patch("smbprotocol.connection.Connection", side_effect=new_connection),
+              mock.patch("smbprotocol.session.Session", return_value=session),
+              self.assertRaisesRegex(ConnectionError, "SMB authentication was rejected")):
+            scanner.scan()
+        self.assertTrue(made, "a credential was tried")
+        for connection in made:
+            connection.disconnect.assert_called_once_with(True)
 
 
 class TheScanWiringTest(unittest.TestCase):
@@ -290,6 +342,54 @@ class TheRequestTest(unittest.TestCase):
                     evidence_reveal._read_smb("t-d1", asset, source)
         self.assertEqual([(config.require_encryption, config.allowed_shares) for config in made],
                          [(True, ("Finance",)), (False, None)], "encrypted again, never in the clear")
+
+    def test_an_installation_that_requires_encryption_re_reads_every_smb_finding_encrypted(self) -> None:
+        # M4 exit review: a finding an older "smb" scan recorded was re-read over pysmb, in
+        # the clear, on an installation whose DSPM_SMB_REQUIRE_ENCRYPTION forbids exactly that.
+        from backend import app as app_module
+        from backend import evidence_reveal
+
+        made = []
+
+        class Scanner:
+            def __init__(self, config):
+                made.append(config)
+                self.connection = None
+
+            def connect(self):
+                return False
+
+        asset = {"share": "Finance", "path": "Payroll/2026.xlsx", "reuse_key": "smb://fs.corp.test/Finance/Payroll/2026.xlsx"}
+        source = {"source_kind": "smb", "server": "fs.corp.test", "credential_ref": "ref-d1", "credential_kind": "saved"}
+        with (mock.patch.dict(os.environ, {"DSPM_SMB_REQUIRE_ENCRYPTION": "1"}),
+              mock.patch("collectors.smb_scanner.SMBScanner", Scanner),
+              mock.patch("backend.vault.CredentialVault") as vault):
+            vault.return_value.resolve.return_value = {"username": "svc", "password": "pw", "domain": "CORP"}
+            self.assertTrue(app_module._smb_encryption_required(None), "the scan side reads the same setting")
+            with self.assertRaises(evidence_reveal.RevealRefused):
+                evidence_reveal._read_smb("t-d1", asset, source)
+        self.assertEqual([(config.require_encryption, config.allowed_shares) for config in made],
+                         [(True, ("Finance",))], "the installation's requirement holds for the re-read")
+
+    def test_an_encrypted_scan_says_its_acls_came_through_windows(self) -> None:
+        # The file bytes come over the encrypted session; owners and ACLs through Windows'
+        # own SMB client. The scan's diagnostics say so (README: SMB 3 encryption).
+        class Empty(smb3_transport.Smb3Connection):
+            def connect(self, ip, port=445, timeout=30):
+                return True
+
+            def listPath(self, service_name, path, search=0, pattern="*", timeout=30):
+                return []
+
+        scanner = SMBScanner(SMBConfig(server="fs.corp.test", username="svc", password="x", require_encryption=True,
+                                       allowed_shares=("Finance",)))
+        with (mock.patch("collectors.smb_scanner.resolve_and_pin", return_value="10.1.2.3"),
+              mock.patch.object(smb3_transport, "Smb3Connection", Empty)):
+            scanner.scan()
+        diagnostics = scanner.last_scan_diagnostics
+        self.assertEqual(diagnostics.get("shares_scanned"), ["Finance"])
+        self.assertEqual(diagnostics.get("acl_transport"), "windows-smb-client")
+        self.assertIn("not the encrypted SMB 3 session", diagnostics.get("acl_transport_note", ""))
 
 
 @unittest.skipUnless(LIVE, "needs this host's SMB server and a readable share (Windows)")

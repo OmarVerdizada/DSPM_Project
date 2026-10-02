@@ -437,6 +437,13 @@ def truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in _TRUE
 
 
+def smb_encryption_required() -> bool:
+    """D1: the installation requires SMB 3 encryption of every SMB read - a scan's, and a
+    reveal's re-read of a file an older, unencrypted scan found. Read in one place so the
+    two cannot disagree about what the setting says."""
+    return truthy(os.getenv("DSPM_SMB_REQUIRE_ENCRYPTION"))
+
+
 def resolve(environ: Mapping[str, str], path: Path | None = None) -> Effective:
     """Effective settings from the environment and an optional file. Pure: changes nothing."""
     effective = Effective(path=path)

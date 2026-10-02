@@ -6312,8 +6312,9 @@ def _endpoint_analysis_engine(
 
 def _smb_encryption_required(payload) -> bool:
     """D1: this scan asked for it, or the installation requires it of every SMB scan."""
-    configured = os.getenv("DSPM_SMB_REQUIRE_ENCRYPTION", "0").strip().lower() in {"1", "true", "yes", "on"}
-    return bool(getattr(payload, "smb_encryption", False)) or configured
+    from backend.config import smb_encryption_required
+
+    return bool(getattr(payload, "smb_encryption", False)) or smb_encryption_required()
 
 
 def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:

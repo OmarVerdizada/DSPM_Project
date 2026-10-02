@@ -103,6 +103,7 @@ def _read_local(asset: dict) -> tuple[str, str, int]:
 
 
 def _read_smb(tenant_id: str, asset: dict, source: dict) -> tuple[str, str, int]:
+    from backend.config import smb_encryption_required
     from backend.vault import CredentialVault
     from collectors.file_scanner import detect_extension
     from collectors.smb_scanner import SMBConfig, SMBScanner
@@ -116,8 +117,11 @@ def _read_smb(tenant_id: str, asset: dict, source: dict) -> tuple[str, str, int]
         account = CredentialVault().resolve(tenant_id, str(source["credential_ref"]))
     except KeyError:
         _refuse("credential_gone", "The saved credential this scan used has been deleted.")
-    # D1: a file the scan read over encrypted SMB 3 is read again the same way, never in the clear.
-    encrypted = str(source.get("source_kind") or "") == "smb3"
+    # D1: a file the scan read over encrypted SMB 3 is read again the same way, never in the
+    # clear - and so is every file, whatever its scan recorded, once the installation
+    # requires encryption: a finding from an older "smb" scan would otherwise be re-read
+    # over pysmb in the clear on an installation that has forbidden exactly that.
+    encrypted = str(source.get("source_kind") or "") == "smb3" or smb_encryption_required()
     scanner = SMBScanner(SMBConfig(server=server, tenant_id=tenant_id, username=account.get("username", ""),
                                    password=account.get("password", ""), domain=account.get("domain", "WORKGROUP"),
                                    require_encryption=encrypted, allowed_shares=(share,) if encrypted else None))
