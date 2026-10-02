@@ -229,7 +229,7 @@ class S7PlaintextAtRestTests(unittest.TestCase):
         """The `finally` was already there. `pg_dump` ran OUTSIDE it, so a dump
         that succeeded and then failed its returncode check stayed on disk."""
         source = Path("backend/backup.py").read_text(encoding="utf-8")
-        body = source[source.index("counts = capture_table_counts(dsn)"):source.index("return manifest_path")]
+        body = source[source.index("def create_logical_backup"):source.index("return manifest_path")]
         self.assertLess(body.index("try:"), body.index("subprocess.run"))
         self.assertIn("plain.unlink(missing_ok=True)", body)
 

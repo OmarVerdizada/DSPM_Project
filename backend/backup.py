@@ -30,7 +30,9 @@ outcome where /api/ready, /metrics and the installation's alerts read it.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import logging
 import os
@@ -38,6 +40,8 @@ import re
 import shutil
 import struct
 import subprocess
+import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -170,6 +174,93 @@ def decrypt_file(source: Path, dest: Path) -> str:
         return decrypt_stream(fernet, src, out)
 
 
+class _DecryptedReader(io.RawIOBase):
+    """The plaintext of a chunked-Fernet stream, read on demand - one frame in memory at a
+    time, nothing written anywhere. Lets tarfile list an artifact archive as it decrypts."""
+
+    def __init__(self, fernet: Fernet, src) -> None:
+        self._fernet, self._src = fernet, src
+        self._frame, self._offset = b"", 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, target) -> int:
+        while self._offset >= len(self._frame):
+            header = self._src.read(4)
+            if not header:
+                return 0
+            if len(header) != 4:
+                raise ValueError("Truncated payload: bad chunk header")
+            (token_len,) = struct.unpack(">I", header)
+            token = self._src.read(token_len)
+            if len(token) != token_len:
+                raise ValueError("Truncated payload: incomplete chunk")
+            self._frame, self._offset = self._fernet.decrypt(token), 0
+        count = min(len(target), len(self._frame) - self._offset)
+        target[:count] = memoryview(self._frame)[self._offset:self._offset + count]
+        self._offset += count
+        return count
+
+
+# ---------------------------------------------------------------------------
+# The plaintext a backup works from - pg_dump's archive, the SQLite snapshot, the decrypted
+# copy verify and restore read - is staged in a private folder of the service account's
+# temporary directory, never in the backup directory. Staged there, a process stopped
+# mid-backup (a service stop, a reboot) left a whole database in clear where production
+# refuses to start beside one (plaintext_dump_problem): the product caused its own outage.
+# A folder left by a killed process is swept by the next backup, and at startup.
+# ---------------------------------------------------------------------------
+
+STAGING_PREFIX = "sentro-backup-staging-"
+# Older than any backup can run (pg_dump's own timeout is an hour), so a sweep never takes
+# a folder a backup in another process is still using.
+STAGING_STALE_SECONDS = 6 * 3600
+
+
+def sweep_staging(root: Path | None = None, *, older_than: float = STAGING_STALE_SECONDS) -> int:
+    """Remove the staging folders of backups that never finished; returns how many."""
+    folder = Path(root) if root is not None else Path(tempfile.gettempdir())
+    cutoff = time.time() - max(0.0, older_than)
+    removed = 0
+    try:
+        candidates = [path for path in folder.iterdir() if path.name.startswith(STAGING_PREFIX) and path.is_dir()]
+    except OSError:
+        return 0
+    for path in candidates:
+        try:
+            newest = max([path.stat().st_mtime] + [item.stat().st_mtime for item in path.iterdir()])
+        except OSError:
+            continue
+        if newest > cutoff:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            removed += 1
+    return removed
+
+
+@contextlib.contextmanager
+def _staging():
+    """A private folder for one backup's plaintext, removed when the work is done. mkdtemp
+    creates it readable by this account only (on Windows from Python 3.13)."""
+    sweep_staging()
+    folder = Path(tempfile.mkdtemp(prefix=STAGING_PREFIX))
+    try:
+        yield folder
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def _discard(*paths: Path) -> None:
+    """Remove what a backup that failed part-way had already written beside the manifest it
+    never wrote: a set without its manifest is invisible to retention and to every tool, and
+    each one was a whole encrypted database left until the disk filled."""
+    for path in paths:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
 def _pg_bin(tool: str) -> str:
     root = os.getenv("DSPM_PG_BIN", r"C:\Program Files\PostgreSQL\18\bin")
     candidate = Path(root) / f"{tool}.exe"
@@ -190,26 +281,88 @@ def _backup_session(env: dict) -> dict:
     return env
 
 
-def capture_table_counts(dsn: str) -> dict[str, int]:
-    """Per-table row counts at dump time - the drill's reconciliation basis."""
-    counts: dict[str, int] = {}
-    import psycopg
+def capture_table_counts(dsn: str, *, conn=None) -> dict[str, int]:
+    """Per-table row counts - the drill's reconciliation basis. Through ``conn`` when the
+    caller holds the dump's snapshot (_exported_snapshot), else in a session of its own."""
+    if conn is None:
+        import psycopg
 
-    with psycopg.connect(dsn, connect_timeout=15, autocommit=True) as conn:
-        conn.execute("SELECT set_config('app.platform', %s, false)", (BACKUP_PURPOSE,))
-        tables = [
-            r[0] for r in conn.execute(
-                "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
-            ).fetchall()
-        ]
-        for table in sorted(tables):
-            counts[table] = conn.execute(
-                f'SELECT COUNT(*) FROM "{table}"'
-            ).fetchone()[0]
+        with psycopg.connect(dsn, connect_timeout=15, autocommit=True) as own:
+            own.execute("SELECT set_config('app.platform', %s, false)", (BACKUP_PURPOSE,))
+            return capture_table_counts(dsn, conn=own)
+    counts: dict[str, int] = {}
+    tables = [
+        r[0] for r in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()"
+        ).fetchall()
+    ]
+    for table in sorted(tables):
+        counts[table] = conn.execute(
+            f'SELECT COUNT(*) FROM "{table}"'
+        ).fetchone()[0]
     return counts
 
 
-def capture_artifacts(archive_base: Path) -> dict:
+@contextlib.contextmanager
+def _exported_snapshot(dsn: str):
+    """One REPEATABLE READ transaction, held open while pg_dump runs: pg_dump dumps its
+    exported snapshot (--snapshot), and the row counts and schema revision are read in it.
+
+    Counted in a session of their own before pg_dump started, the counts were one moment and
+    the dump another, so on a live server a row written in between made the restore drill
+    fail a good backup. Yields (snapshot id, table counts, schema revision)."""
+    import psycopg
+
+    conn = psycopg.connect(dsn, connect_timeout=15, autocommit=True)
+    try:
+        conn.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        # pg_dump imports the snapshot when it starts; a server-side idle timeout must not
+        # end this transaction before then.
+        conn.execute("SET LOCAL idle_in_transaction_session_timeout = 0")
+        conn.execute("SELECT set_config('app.platform', %s, false)", (BACKUP_PURPOSE,))
+        snapshot = str(conn.execute("SELECT pg_export_snapshot()").fetchone()[0])
+        counts = capture_table_counts(dsn, conn=conn)
+        revision = _pg_schema_revision(dsn, conn=conn)
+        yield snapshot, counts, revision
+    finally:
+        # Once pg_dump has imported the snapshot this session has done its work: a
+        # connection lost meanwhile must not fail a dump that finished.
+        with contextlib.suppress(Exception):
+            conn.execute("ROLLBACK")
+        conn.close()
+
+
+def _member_name(member) -> str:
+    """The name of a member of an artifact archive, or ValueError when it is not one ours.
+
+    capture_artifacts writes regular files and nothing else, so a symlink, device or
+    directory member means this archive is not one of ours. Skipping such a member only
+    kept it out of the inventory - extraction still wrote it - so it is refused."""
+    if not member.isfile():
+        raise ValueError(f"Refusing non-file archive member: {member.name!r}")
+    name = member.name.replace("\\", "/")
+    if name.startswith("/") or ".." in name.split("/"):
+        raise ValueError(f"Refusing unsafe archive member: {member.name!r}")
+    return name
+
+
+def artifact_inventory(archive: Path) -> dict:
+    """The object count and inventory digest of an encrypted artifact archive, read as a
+    stream. Verify needs only these, and extracting every object into the temporary folder
+    to count them wrote the whole artifact store there once per backup."""
+    import tarfile
+
+    inventory: list[str] = []
+    with open(archive, "rb") as src:
+        plain = io.BufferedReader(_DecryptedReader(Fernet(backup_key()), src), buffer_size=1 << 20)
+        with tarfile.open(fileobj=plain, mode="r|") as tar:
+            for member in tar:
+                inventory.append(_member_name(member).rsplit(".", 1)[0])
+    digest = hashlib.sha256("\n".join(sorted(inventory)).encode("utf-8")).hexdigest()
+    return {"objects": len(inventory), "inventory_sha256": digest}
+
+
+def capture_artifacts(archive_base: Path, staging: Path | None = None) -> dict:
     """Capture the artifact tier into the backup set.
 
     Objects are already individually encrypted with the artifact key, so the
@@ -236,7 +389,9 @@ def capture_artifacts(archive_base: Path) -> dict:
     import tarfile
 
     archive = archive_base.with_suffix(archive_base.suffix + ".enc")
-    plain_archive = archive_base
+    # The tar holds ciphertext only, but a killed process left it in the backup directory,
+    # where nothing removed it; staged, the next backup sweeps it.
+    plain_archive = staging / archive_base.name if staging is not None else archive_base
     try:
         with tarfile.open(plain_archive, "w") as tar:
             for name, path in members:
@@ -270,16 +425,7 @@ def restore_artifacts(archive: Path, destination: Path) -> dict:
         inventory: list[str] = []
         with tarfile.open(plain, "r") as tar:
             for member in tar.getmembers():
-                # capture_artifacts writes regular files and nothing else, so a
-                # symlink, device or directory member means this archive is not
-                # one of ours. Skipping such a member only kept it out of the
-                # inventory - extraction still wrote it - so it is refused.
-                if not member.isfile():
-                    raise ValueError(f"Refusing non-file archive member: {member.name!r}")
-                name = member.name.replace("\\", "/")
-                if name.startswith("/") or ".." in name.split("/"):
-                    raise ValueError(f"Refusing unsafe archive member: {member.name!r}")
-                inventory.append(name.rsplit(".", 1)[0])
+                inventory.append(_member_name(member).rsplit(".", 1)[0])
             # Belt and braces: every member was validated above, and the "data"
             # filter refuses absolute paths, traversal and special files again at
             # extraction time. It is always available - the supported floor is
@@ -296,48 +442,56 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
     directory = out_dir or backup_dir()
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    plain = directory / f"sentro_{stamp}.dump"
     encrypted = directory / f"sentro_{stamp}.dump.enc"
+    artifacts_base = directory / f"sentro_{stamp}.artifacts.tar"
     manifest_path = directory / f"sentro_{stamp}{MANIFEST_SUFFIX}"
 
-    counts = capture_table_counts(dsn)
-    revision = _pg_schema_revision(dsn)
     # C11: the password goes to pg_dump through its environment, not its command line.
     conninfo, tool_env = pg_tool_environment(dsn)
-    # The try starts BEFORE pg_dump, not after it. The finally below was already
-    # here, but a dump that succeeded and then failed the returncode check - or
-    # timed out after writing part of a file - left an unencrypted copy of the
-    # whole database in the backup directory. One was sitting in data/backups on
-    # this tree next to seven encrypted ones.
-    try:
-        # Row security stays on and the session names the backup purpose. The data is
-        # written as INSERTs: PostgreSQL refuses COPY FROM into a table with row-level
-        # security, so a COPY-format dump could not be restored under FORCEd policies.
-        completed = subprocess.run(
-            [_pg_bin("pg_dump"), "--format=custom", "--no-password", "--enable-row-security",
-             "--inserts", "--rows-per-insert=500", f"--dbname={conninfo}", "--file", str(plain)],
-            capture_output=True, text=True, timeout=3600, env=_backup_session(tool_env),
-        )
-        if completed.returncode != 0:
-            raise RuntimeError(f"pg_dump failed: {completed.stderr.strip()[:400]}")
-        plain_sha, cipher_sha = encrypt_file(plain, encrypted)
-        manifest = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "kind": "logical",
-            "format": INSERT_FORMAT,
-            "file": encrypted.name,
-            "plaintext_bytes": plain.stat().st_size,
-            "ciphertext_bytes": encrypted.stat().st_size,
-            "plaintext_sha256": plain_sha,
-            "ciphertext_sha256": cipher_sha,
-            "schema_revision": revision,
-            "table_counts": counts,
-            "artifacts": capture_artifacts(directory / f"sentro_{stamp}.artifacts.tar"),
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    finally:
-        # The unencrypted dump never stays on disk.
-        plain.unlink(missing_ok=True)
+    with _staging() as staging:
+        plain = staging / f"sentro_{stamp}.dump"
+        # The try starts BEFORE pg_dump, not after it. The finally below was already
+        # here, but a dump that succeeded and then failed the returncode check - or
+        # timed out after writing part of a file - left an unencrypted copy of the
+        # whole database in the backup directory. One was sitting in data/backups on
+        # this tree next to seven encrypted ones.
+        try:
+            with _exported_snapshot(dsn) as (snapshot, counts, revision):
+                # Row security stays on and the session names the backup purpose. The data is
+                # written as INSERTs: PostgreSQL refuses COPY FROM into a table with row-level
+                # security, so a COPY-format dump could not be restored under FORCEd policies.
+                completed = subprocess.run(
+                    [_pg_bin("pg_dump"), "--format=custom", "--no-password", "--enable-row-security",
+                     "--inserts", "--rows-per-insert=500", f"--snapshot={snapshot}", f"--dbname={conninfo}",
+                     "--file", str(plain)],
+                    capture_output=True, text=True, timeout=3600, env=_backup_session(tool_env),
+                )
+            if completed.returncode != 0:
+                raise RuntimeError(f"pg_dump failed: {completed.stderr.strip()[:400]}")
+            plain_sha, cipher_sha = encrypt_file(plain, encrypted)
+            plain_bytes = plain.stat().st_size
+            plain.unlink(missing_ok=True)
+            manifest = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "kind": "logical",
+                "format": INSERT_FORMAT,
+                "file": encrypted.name,
+                "plaintext_bytes": plain_bytes,
+                "ciphertext_bytes": encrypted.stat().st_size,
+                "plaintext_sha256": plain_sha,
+                "ciphertext_sha256": cipher_sha,
+                "schema_revision": revision,
+                "table_counts": counts,
+                "artifacts": capture_artifacts(artifacts_base, staging),
+            }
+            _write_json_whole(manifest_path, manifest)
+        except BaseException:
+            _discard(encrypted, artifacts_base.with_suffix(artifacts_base.suffix + ".enc"),
+                     manifest_path.with_name(manifest_path.name + ".partial"))
+            raise
+        finally:
+            # The unencrypted dump never stays on disk.
+            plain.unlink(missing_ok=True)
     return manifest_path
 
 
@@ -448,29 +602,30 @@ def list_manifests(directory: Path | None = None) -> list[Path]:
     return sorted(directory.glob(f"*{MANIFEST_SUFFIX}"))
 
 
-def latest_backup_age_seconds(directory: Path | None = None) -> float | None:
-    manifests = list_manifests(directory)
-    if not manifests:
+def latest_backup_age_seconds(directory: Path | None = None, *, verified: bool = False) -> float | None:
+    """Age of the newest set - of the newest VERIFIED one with ``verified`` - or None.
+
+    Read through backup_sets: by when each set was taken, a half-written or damaged
+    manifest skipped. The last manifest by NAME was a SQLite set (``sentro_sqlite_...``
+    sorts after ``sentro_2026...``) long after an install moved to PostgreSQL, so the age
+    was weeks while an hour-old set existed, and one unreadable manifest raised."""
+    sets = [item for item in backup_sets(directory) if item["verified"] or not verified]
+    if not sets:
         return None
-    newest = json.loads(manifests[-1].read_text(encoding="utf-8"))
-    created = datetime.fromisoformat(newest["created_at"])
-    return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+    return max(0.0, (datetime.now(timezone.utc) - sets[0]["created_at"]).total_seconds())
 
 
 def prune_backups(keep: int = 7, directory: Path | None = None) -> int:
-    """Keep the newest ``keep`` backup sets; remove older ones. Returns removed count."""
-    manifests = list_manifests(directory)
-    removed = 0
-    for manifest_path in manifests[:-keep] if keep > 0 else []:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        payload = manifest_path.parent / str(data.get("file") or "")
-        payload.unlink(missing_ok=True)
-        artifact_file = (data.get("artifacts") or {}).get("file")
-        if artifact_file:
-            (manifest_path.parent / str(artifact_file)).unlink(missing_ok=True)
-        manifest_path.unlink(missing_ok=True)
-        removed += 1
-    return removed
+    """``backup create --keep N``: retention keeping the newest N VERIFIED sets; returns how
+    many sets were removed.
+
+    It is apply_retention - the schedule's own rule. Sorting by file name and keeping the
+    last N removed the PostgreSQL sets (``sentro_2026...`` sorts before ``sentro_sqlite_...``)
+    including the one just taken, counted unverified sets as kept ones, and deleted any
+    path a manifest named."""
+    if keep <= 0:
+        return 0
+    return len(apply_retention(directory, keep_sets=keep))
 
 
 # ---------------------------------------------------------------------------
@@ -510,14 +665,16 @@ def pg_tool_environment(dsn: str) -> tuple[str, dict]:
         return dsn, env
 
 
-def _pg_schema_revision(dsn: str) -> int | None:
-    import psycopg
+def _pg_schema_revision(dsn: str, *, conn=None) -> int | None:
+    if conn is None:
+        import psycopg
 
-    with psycopg.connect(dsn, connect_timeout=15) as conn:
-        row = conn.execute("SELECT to_regclass('schema_migrations')").fetchone()
-        if row is None or row[0] is None:
-            return None
-        return int(conn.execute("SELECT COALESCE(MAX(revision), 0) FROM schema_migrations").fetchone()[0])
+        with psycopg.connect(dsn, connect_timeout=15) as own:
+            return _pg_schema_revision(dsn, conn=own)
+    row = conn.execute("SELECT to_regclass('schema_migrations')").fetchone()
+    if row is None or row[0] is None:
+        return None
+    return int(conn.execute("SELECT COALESCE(MAX(revision), 0) FROM schema_migrations").fetchone()[0])
 
 
 def _sqlite_facts(path: Path) -> dict:
@@ -546,39 +703,47 @@ def create_sqlite_backup(db_path: Path, out_dir: Path | None = None) -> Path:
     directory = out_dir or backup_dir()
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    snapshot = directory / f"sentro_sqlite_{stamp}.sqlite"
     encrypted = directory / f"sentro_sqlite_{stamp}.sqlite.enc"
+    artifacts_base = directory / f"sentro_sqlite_{stamp}.artifacts.tar"
     manifest_path = directory / f"sentro_sqlite_{stamp}{MANIFEST_SUFFIX}"
     if not Path(db_path).exists():
         raise RuntimeError(f"There is no database at {db_path} to back up.")
-    try:
-        source = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
-        target = sqlite3.connect(snapshot)
+    with _staging() as staging:
+        snapshot = staging / f"sentro_sqlite_{stamp}.sqlite"
         try:
-            source.backup(target)
+            source = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
+            target = sqlite3.connect(snapshot)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+                source.close()
+            facts = _sqlite_facts(snapshot)
+            if facts["integrity"] != "ok":
+                raise RuntimeError(f"The database failed its integrity check: {facts['integrity']}")
+            plain_sha, cipher_sha = encrypt_file(snapshot, encrypted)
+            plain_bytes = snapshot.stat().st_size
+            snapshot.unlink(missing_ok=True)
+            manifest = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "kind": "sqlite",
+                "format": "sqlite-online-backup+chunked-fernet",
+                "file": encrypted.name,
+                "plaintext_bytes": plain_bytes,
+                "ciphertext_bytes": encrypted.stat().st_size,
+                "plaintext_sha256": plain_sha,
+                "ciphertext_sha256": cipher_sha,
+                "schema_revision": facts["schema_revision"],
+                "table_counts": facts["table_counts"],
+                "artifacts": capture_artifacts(artifacts_base, staging),
+            }
+            _write_json_whole(manifest_path, manifest)
+        except BaseException:
+            _discard(encrypted, artifacts_base.with_suffix(artifacts_base.suffix + ".enc"),
+                     manifest_path.with_name(manifest_path.name + ".partial"))
+            raise
         finally:
-            target.close()
-            source.close()
-        facts = _sqlite_facts(snapshot)
-        if facts["integrity"] != "ok":
-            raise RuntimeError(f"The database failed its integrity check: {facts['integrity']}")
-        plain_sha, cipher_sha = encrypt_file(snapshot, encrypted)
-        manifest = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "kind": "sqlite",
-            "format": "sqlite-online-backup+chunked-fernet",
-            "file": encrypted.name,
-            "plaintext_bytes": snapshot.stat().st_size,
-            "ciphertext_bytes": encrypted.stat().st_size,
-            "plaintext_sha256": plain_sha,
-            "ciphertext_sha256": cipher_sha,
-            "schema_revision": facts["schema_revision"],
-            "table_counts": facts["table_counts"],
-            "artifacts": capture_artifacts(directory / f"sentro_sqlite_{stamp}.artifacts.tar"),
-        }
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    finally:
-        snapshot.unlink(missing_ok=True)
+            snapshot.unlink(missing_ok=True)
     return manifest_path
 
 
@@ -596,8 +761,6 @@ def verify_backup(manifest_path: Path) -> dict:
     """Decrypt a backup set into a temporary folder and check it against its manifest:
     every digest, and for SQLite the integrity check and every table's row count; for
     PostgreSQL that pg_restore can read the archive's table of contents. Nothing is kept."""
-    import tempfile
-
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     problems: list[str] = []
@@ -606,8 +769,8 @@ def verify_backup(manifest_path: Path) -> dict:
         return {"ok": False, "manifest": str(manifest_path), "problems": [f"{payload.name} is missing"]}
     if sha256_file(payload) != manifest.get("ciphertext_sha256"):
         problems.append(f"{payload.name} does not match its recorded digest")
-    with tempfile.TemporaryDirectory(prefix="sentro-verify-") as scratch:
-        plain = Path(scratch) / "payload"
+    with _staging() as scratch:
+        plain = scratch / "payload"
         try:
             plain_sha = decrypt_file(payload, plain)
         except Exception as exc:  # wrong key, truncation, tampering
@@ -633,10 +796,15 @@ def verify_backup(manifest_path: Path) -> dict:
             if not archive.exists():
                 problems.append(f"{archive.name} is missing")
             else:
-                restored = restore_artifacts(archive, Path(scratch) / "artifacts")
-                if restored["objects"] != artifacts.get("objects") or \
-                        restored["inventory_sha256"] != artifacts.get("inventory_sha256"):
-                    problems.append("the artifact archive does not hold the objects recorded")
+                try:
+                    listed_objects = artifact_inventory(archive)
+                except Exception as exc:  # wrong key, truncation, tampering, a member not ours
+                    problems.append(f"{archive.name} cannot be read with this install's backup key "
+                                    f"({type(exc).__name__})")
+                else:
+                    if listed_objects["objects"] != artifacts.get("objects") or \
+                            listed_objects["inventory_sha256"] != artifacts.get("inventory_sha256"):
+                        problems.append("the artifact archive does not hold the objects recorded")
     return {"ok": not problems, "manifest": str(manifest_path), "kind": manifest.get("kind"),
             "schema_revision": manifest.get("schema_revision"), "problems": problems}
 
@@ -652,7 +820,6 @@ def restore_postgres_backup(manifest_path: Path, dsn: str, artifact_dir: Path | 
     administrator's (the application role cannot create or drop them), so they are
     left as they are."""
     import re
-    import tempfile
 
     manifest_path = Path(manifest_path)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -664,16 +831,19 @@ def restore_postgres_backup(manifest_path: Path, dsn: str, artifact_dir: Path | 
     report = verify_backup(manifest_path)
     if not report["ok"]:
         raise RuntimeError("The backup did not verify, so nothing was restored: " + "; ".join(report["problems"]))
-    previous = create_logical_backup(dsn, manifest_path.parent)
+    # The database being replaced is backed up into this install's own backup directory.
+    # Beside the restored manifest it went wherever that copy was - restoring from the
+    # off-host copy wrote it to the off-host share.
+    previous = create_logical_backup(dsn)
     conninfo, tool_env = pg_tool_environment(dsn)
-    with tempfile.TemporaryDirectory(prefix="sentro-restore-") as scratch:
-        plain = Path(scratch) / "restore.dump"
+    with _staging() as scratch:
+        plain = scratch / "restore.dump"
         decrypt_file(manifest_path.parent / manifest["file"], plain)
         listed = subprocess.run([_pg_bin("pg_restore"), "--list", str(plain)], capture_output=True, text=True)
         if listed.returncode != 0:
             raise RuntimeError(f"pg_restore cannot read the archive: {listed.stderr.strip()[:300]}")
         entries = [line for line in listed.stdout.splitlines() if not re.search(r"\bEXTENSION\b", line)]
-        order = Path(scratch) / "restore.list"
+        order = scratch / "restore.list"
         order.write_text("\n".join(entries) + "\n", encoding="utf-8")
         completed = subprocess.run(
             [_pg_bin("pg_restore"), "--clean", "--if-exists", "--no-owner", "--single-transaction", "--exit-on-error",
@@ -903,6 +1073,28 @@ def mark_verified(manifest_path: Path) -> None:
     _write_json_whole(manifest_path, document)
 
 
+def keep_one_failed_set(manifest_path: Path) -> list[str]:
+    """Record that a set did not verify (``verify_failed_at``) and remove the sets that
+    failed before it; returns the names of the manifests removed.
+
+    A failed set never counts, but it is newer than every verified set, so retention keeps
+    it - and the schedule retries a failure hourly, each retry a whole database, until the
+    disk filled. The newest failed set stays for whoever looks into why."""
+    manifest_path = Path(manifest_path)
+    removed: list[str] = []
+    try:
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        document["verify_failed_at"] = datetime.now(timezone.utc).isoformat()
+        _write_json_whole(manifest_path, document)
+        for item in backup_sets(manifest_path.parent):
+            if item["manifest"] != manifest_path and item["data"].get("verify_failed_at") and not item["verified"]:
+                _remove_set(item)
+                removed.append(item["manifest"].name)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not clear the backup sets that failed to verify: %s", type(exc).__name__)
+    return removed
+
+
 def _named_file(directory: Path, name) -> Path:
     """A file a manifest names: a plain name beside the manifest. A manifest is data, and
     one naming ..\\..\\something must not make retention delete, or the copy carry, it."""
@@ -1069,6 +1261,8 @@ def run_backup_set(*, trigger: str = "schedule") -> dict:
         failed = {"stage": stage, "error": error, "trigger": trigger, "manifest": manifest.name if manifest else ""}
         _audit("backup.failed", failed)
         logger.error("The %s backup failed at %s: %s", trigger, stage, error)
+        if stage == "verify" and manifest is not None:
+            keep_one_failed_set(manifest)
         if stage == "copy":
             # The local set verified. While the off-host location is down every retry adds
             # one, so local retention still runs; the copies are pruned once it is back.
@@ -1096,7 +1290,8 @@ def readiness(*, production: bool, installed_at: str | None = None, now: datetim
               directory: Path | None = None) -> dict:
     """The backup half of /api/ready: ``failures``, ``warnings`` and ``probe`` facts.
 
-    In production a failed last attempt, or a newest VERIFIED set older than
+    In production a failed last attempt (unless a set taken after it has verified), or a
+    newest VERIFIED set older than
     ready_age_hours(), fails readiness - and so does having no verified set at all once the
     database itself is older than that (``installed_at``, its first recorded revision), so a
     fresh install is not unready before its first backup could have run. Outside production
@@ -1116,7 +1311,10 @@ def readiness(*, production: bool, installed_at: str | None = None, now: datetim
     newest_age, verified_age = age_of(sets[0] if sets else None), age_of(verified)
     warn_hours, fail_hours = warn_age_hours(), ready_age_hours()
     attempt = last_attempt()
-    if attempt and not attempt.get("ok"):
+    failed_at = _created_at({"created_at": attempt.get("at")}) if attempt else None
+    # A failure a later verified set has made good is history, not the state of the backups.
+    superseded = verified is not None and failed_at is not None and verified["created_at"] > failed_at
+    if attempt and not attempt.get("ok") and not superseded:
         serious.append(f"the last backup attempt ({attempt.get('at')}) failed at "
                        f"{attempt.get('stage') or 'create'}: {attempt.get('error') or 'see the backup log'}")
     if verified_age is None:

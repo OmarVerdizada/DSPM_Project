@@ -186,6 +186,13 @@ def run_backup_if_due(*, now: datetime | None = None) -> dict | None:
     failed = bool(attempt) and not attempt.get("ok")
     if not failed and verified is not None and (moment - verified["created_at"]).total_seconds() + check < interval:
         return None
+    failed_at = backup._created_at({"created_at": attempt.get("at")}) if failed else None
+    if failed_at is not None and attempt.get("trigger") != "schedule":
+        # A failed `backup create` never went through the claim, so nothing made the schedule
+        # retry it: production readiness stayed failed until the next daily claim, up to a day.
+        # Due an hour after that attempt, as a failed scheduled run is (only ever earlier).
+        store.retry_housekeeping_run("backup", interval_seconds=interval - check,
+                                     retry_seconds=BACKUP_RETRY_SECONDS, now=failed_at)
     if not store.claim_housekeeping_run("backup", interval_seconds=interval - check, now=moment):
         return None
     # C10: the backup's own work across every tenant is named as the backup purpose (pg_dump
@@ -245,6 +252,12 @@ def _loop(report_dir: Path | None, wait: int) -> None:
 def start_housekeeping(report_dir: Path | None = None) -> bool:
     """Start the housekeeping sweep (retention and the backup schedule); returns whether it runs."""
     global _thread
+    # A backup the last process was killed in the middle of left its plaintext staged; it
+    # goes now, whether or not this backend takes backups itself.
+    try:
+        backup.sweep_staging()
+    except Exception as exc:  # never a reason not to start
+        logger.warning("Sweeping interrupted backups failed: %s", type(exc).__name__)
     wait = _wait_seconds()
     if wait <= 0:
         return False

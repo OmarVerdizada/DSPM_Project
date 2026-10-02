@@ -34,12 +34,14 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "The last backup attempt failed; run main.py backup create --verify."
+      # The newest VERIFIED set: a set that failed its verification restores nothing, and
+      # hourly retries of one kept sentro_backup_age_seconds fresh.
       - alert: SentroBackupStale
-        expr: sentro_backup_age_seconds > 93600 or sentro_backup_age_seconds < 0
+        expr: sentro_backup_verified_age_seconds > 93600 or sentro_backup_verified_age_seconds < 0
         for: 15m
         labels: {severity: critical}
         annotations:
-          summary: "The newest backup is older than 26 hours (or there is none)."
+          summary: "The newest verified backup is older than 26 hours (or there is none)."
       - alert: SentroSiemFailing
         expr: sentro_siem_outbox_failing > 0 and sentro_siem_outbox_oldest_seconds > 900
         labels: {severity: warning}

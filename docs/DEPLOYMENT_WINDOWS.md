@@ -220,7 +220,17 @@ $app = 'C:\Program Files\Sentro\current'
 `pg_dump` for PostgreSQL) and the artifact archive, then decrypts both into a temporary
 folder and checks every digest, the integrity check and the row counts before it reports
 success, and marks the set verified in its manifest. The database password is passed to
-`pg_dump` through its environment, never its command line.
+`pg_dump` through its environment, never its command line. For PostgreSQL the row counts in
+the manifest are read in the snapshot `pg_dump` dumps (`--snapshot`), so they match the dump
+on a live server; `backup restore` names any table whose count differs after the restore and
+exits 1. `--keep N` is the retention below: the newest N verified sets, and every set newer
+than those, are kept; after a failed verify nothing is removed.
+
+The plaintext a backup works from - `pg_dump`'s archive, the SQLite snapshot, the copy
+verify and restore decrypt - is staged in a private `sentro-backup-staging-*` folder of the
+service account's `%TEMP%` (which therefore needs room for one copy of the database), never
+in the backup directory. A folder a stopped process left is removed by the next backup and at
+startup.
 
 ### Scheduled backups
 
@@ -236,10 +246,15 @@ key or a path) and recorded as the last backup attempt, which `/metrics`
 Retention follows each scheduled set: every set at least as new as the
 `DSPM_RETAIN_BACKUP_SETS`-th (7) newest verified set is kept, and so is every set younger
 than `DSPM_RETAIN_BACKUP_DAYS` (0, off). Until that many sets have verified, nothing is
-removed - a run of failed backups never costs a set that restores.
+removed - a run of failed backups never costs a set that restores. Of the sets that failed
+their verification only the newest is kept (marked `verify_failed_at`), and a backup that
+fails before its manifest is written removes what it had written, so hourly retries do not
+fill the disk. A failed `backup create` from the command line makes the schedule try again
+within the hour, as a failed scheduled run does.
 
 In production `/api/ready` - which the installer, the upgrade and a load balancer wait on -
-**fails** when the last backup attempt failed, or the newest verified set is older than
+**fails** when the last backup attempt failed (unless a set taken after it has verified),
+or the newest verified set is older than
 `DSPM_BACKUP_READY_MAX_AGE_HOURS` (48, never less than `DSPM_BACKUP_MAX_AGE_HOURS`), or no
 set has verified and the database is older than that. A new install is ready before its
 first backup. `DSPM_BACKUP_MAX_AGE_HOURS` (26) stays the warning and alert threshold. Fix
@@ -288,7 +303,8 @@ paths and owners are not masked anywhere.
 |---|---|---|---|
 | Database | `<DataRoot>\db` (SQLite) or PostgreSQL | not encrypted by Sentro: use BitLocker or the database server's own encryption | until erased (workspace erasure, retention for event rows) |
 | Report bodies | `<DataRoot>\artifacts\<workspace>` | gzip + Fernet, `artifact_key` | removed with the workspace; unreferenced ones with `DSPM_RETENTION_PRUNE_ARTIFACTS=1` |
-| Backups | `<DataRoot>\backups` | Fernet, `backup_key` | `backup create --keep N`; **production will not start beside an unencrypted dump here** |
+| Backups | `<DataRoot>\backups` | Fernet, `backup_key` | retention (`DSPM_RETAIN_BACKUP_SETS`, or `backup create --keep N`) keeps the newest verified sets; **production will not start beside an unencrypted dump here** |
+| Backup staging | the service account's `%TEMP%\sentro-backup-staging-*` | **plaintext** database while a backup, verify or restore runs | removed when it ends; a stopped process's by the next backup and at startup |
 | Scan cache | `<DataRoot>\cache\tenants\<workspace>` | sealed with `artifact_key` (`DSPM_SCAN_CACHE_ENCRYPT`, on) | removed with the workspace; rebuilt by the next scan if deleted |
 | Plaintext report files | `<DataRoot>\reports\*.json` | **plaintext** - not written unless `DSPM_PLAINTEXT_REPORT_EXPORT=1` (refused in production) | deleted after `DSPM_RETAIN_REPORT_FILE_DAYS` (90; a held workspace's are kept) |
 | `main.py scan --output` | wherever it is pointed | **plaintext** - refused unless `DSPM_PLAINTEXT_REPORT_EXPORT=1`, always in production | the operator's |

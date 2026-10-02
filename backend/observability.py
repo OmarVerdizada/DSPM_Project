@@ -112,10 +112,12 @@ def backup_metrics() -> dict:
     from backend import backup
 
     age = backup.latest_backup_age_seconds()
+    verified_age = backup.latest_backup_age_seconds(verified=True)
     manifests = backup.list_manifests()
     return {
         "sets_retained": len(manifests),
         "age_seconds": round(age, 1) if age is not None else None,
+        "verified_age_seconds": round(verified_age, 1) if verified_age is not None else None,
         "max_age_hours": float(os.getenv("DSPM_BACKUP_MAX_AGE_HOURS", "26")),
     }
 
@@ -325,10 +327,16 @@ def _warnings(metrics: dict) -> list[str]:
         backup_block = metrics["backup"] or {}
         age = backup_block.get("age_seconds")
         max_age = float(backup_block.get("max_age_hours") or 26) * 3600
+        # Judged on the newest VERIFIED set when it is reported: a set that did not verify
+        # restores nothing, however new it is.
+        verified_age = backup_block.get("verified_age_seconds", age)
         if age is None:
             out.append("no backup manifest found")
-        elif age > max_age:
-            out.append(f"newest backup is {age / 3600:.1f}h old")
+        elif verified_age is None:
+            out.append("no verified backup")
+        elif verified_age > max_age:
+            out.append(f"newest {'verified ' if 'verified_age_seconds' in backup_block else ''}backup is "
+                       f"{verified_age / 3600:.1f}h old")
 
     storage = metrics.get("storage") or {}
     free_ratio = storage.get("disk_free_ratio")

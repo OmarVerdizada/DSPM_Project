@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,12 +52,14 @@ def main() -> int:
         print("DSPM_PG_ADMIN_URL is required (a role able to CREATE DATABASE).", file=sys.stderr)
         return 2
 
-    manifests = backup.list_manifests()
-    if not manifests:
-        print("No backup manifests found - run scripts/db_backup.py first.", file=sys.stderr)
+    # The newest PostgreSQL set by when it was taken. The last manifest by NAME was a SQLite
+    # set (sentro_sqlite_... sorts after sentro_2026...) once an install had moved.
+    newest = next((item for item in backup.backup_sets() if item["data"].get("kind") == "logical"), None)
+    if newest is None:
+        print("No PostgreSQL backup manifests found - run scripts/db_backup.py first.", file=sys.stderr)
         return 2
-    manifest_path = manifests[-1]
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_path = newest["manifest"]
+    manifest = newest["data"]
     encrypted = manifest_path.parent / manifest["file"]
 
     import psycopg
@@ -66,9 +69,12 @@ def main() -> int:
     timings: dict[str, float] = {}
     overall_start = time.perf_counter()
 
-    # 1. Decrypt and verify integrity against the manifest hash.
+    # 1. Decrypt and verify integrity against the manifest hash. The plaintext is staged in
+    # a private temporary folder, not beside the backup: a drill stopped there left a whole
+    # pg_dump in the backup directory, where production refuses to start.
     t0 = time.perf_counter()
-    plain = manifest_path.parent / (manifest["file"] + ".drill.tmp")
+    staging = Path(tempfile.mkdtemp(prefix=backup.STAGING_PREFIX))
+    plain = staging / (manifest["file"] + ".drill.tmp")
     try:
         plain_sha = backup.decrypt_file(encrypted, plain)
         timings["decrypt_seconds"] = round(time.perf_counter() - t0, 3)
@@ -123,6 +129,7 @@ def main() -> int:
         timings["artifact_restore_seconds"] = round(time.perf_counter() - t0, 3)
     finally:
         plain.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
         if not args.keep_drill_db:
             try:
                 with psycopg.connect(admin_dsn, autocommit=True, connect_timeout=15) as admin:

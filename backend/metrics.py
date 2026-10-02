@@ -154,11 +154,12 @@ def _backup(out: _Out) -> None:
     out.metric("sentro_backup_sets", "gauge", "Backup sets kept.", len(backup.list_manifests()))
     out.metric("sentro_backup_age_seconds", "gauge", "Age of the newest backup (-1: none yet).",
                -1 if age is None else round(age, 1))
-    # C0.3: the age production readiness is held to - a set counts once it verified.
-    verified = next((item for item in backup.backup_sets() if item["verified"]), None)
+    # C0.3: the age production readiness is held to - a set counts once it verified. The
+    # stale-backup alert reads this one: failed sets kept the newest-set age fresh while
+    # nothing restorable was being made.
+    verified = backup.latest_backup_age_seconds(verified=True)
     out.metric("sentro_backup_verified_age_seconds", "gauge", "Age of the newest verified backup (-1: none yet).",
-               -1 if verified is None else
-               round(max(0.0, (datetime.now(timezone.utc) - verified["created_at"]).total_seconds()), 1))
+               -1 if verified is None else round(verified, 1))
     attempt = json.loads(store.get_app_setting("backup.last_attempt") or "{}")
     if attempt:
         out.metric("sentro_backup_last_attempt_success", "gauge", "Whether the last backup attempt succeeded.",

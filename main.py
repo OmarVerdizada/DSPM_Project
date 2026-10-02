@@ -319,9 +319,13 @@ def backup_command(args: argparse.Namespace) -> int:
             document.update({"verified": report["ok"], "problems": report["problems"]})
             _record_backup_attempt(report["ok"], "" if report["ok"] else backup.BackupVerifyError.__name__,
                                    "done" if report["ok"] else "verify")
+            if not report["ok"]:
+                backup.keep_one_failed_set(manifest)
         else:
             _record_backup_attempt(True, "")
-        if args.keep:
+        # Retention runs only after a backup that did not fail: a failed verify is no
+        # reason to remove anything that still restores.
+        if args.keep and document.get("verified", True):
             document["pruned"] = backup.prune_backups(keep=args.keep)
         emit(document, f"backup {manifest}" + ("" if not args.verify else
                                                 (" - verified" if document["verified"] else
@@ -336,9 +340,13 @@ def backup_command(args: argparse.Namespace) -> int:
             print("Restoring replaces the database (the current one is kept beside it). Add --yes to do it.")
             return 2
         result = backup.restore_backup(Path(args.manifest))
+        # PostgreSQL: the row counts read after the restore against the ones the backup
+        # recorded. A difference was returned and never shown, and the command said success.
+        differing = result.get("tables_differing") or []
         emit(result, f"restored {result['restored']} at schema revision {result['schema_revision']}; "
-                     f"the previous database is {result['previous_database']}")
-        return 0
+                     f"the previous database is {result['previous_database']}"
+                     + (f"; ROW COUNTS DIFFER from the backup's in: {', '.join(differing)}" if differing else ""))
+        return 1 if differing else 0
     rows = []
     for path in backup.list_manifests():
         manifest = json.loads(path.read_text(encoding="utf-8"))

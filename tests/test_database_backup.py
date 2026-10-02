@@ -63,8 +63,10 @@ class BackupCryptoTests(unittest.TestCase):
             created = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
             payload = self.dir / f"{name}.dump.enc"
             payload.write_bytes(b"x")
+            # Verified: --keep is retention, which keeps the newest N VERIFIED sets.
             (self.dir / f"{name}{backup.MANIFEST_SUFFIX}").write_text(json.dumps({
                 "created_at": created.isoformat(), "file": payload.name, "table_counts": {},
+                "verified_at": created.isoformat(),
             }))
 
         manifest("sentro_a", 300)

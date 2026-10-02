@@ -8,13 +8,14 @@ read `/metrics`. The metrics count the installation as a whole - no workspace, p
 value or secret is in them.
 
 **Alerts.** `sentro-alerts.yml` pages on the conditions an operator acts on: the backend
-down or not ready, the scan queue stuck or backed up, a backup that failed or is older
-than 26 hours, the SIEM or an alert channel refusing deliveries, the licence, and a
+down or not ready, the scan queue stuck or backed up, a backup that failed, or a newest
+VERIFIED backup older than 26 hours (a set that failed its verification restores nothing,
+so it does not keep the alert quiet), the SIEM or an alert channel refusing deliveries, the licence, and a
 collector that cannot read. The queue, backup and SIEM conditions also raise alerts inside
 Sentro itself (the `default` workspace's alerts, delivered to its webhook and e-mail), so an
-install without Prometheus is still told. The backup conditions read what
-`python main.py backup create` recorded - schedule it (Task Scheduler, daily) and the
-alerts tell you when it stops working.
+install without Prometheus is still told. The backup conditions read what the backend's
+own backup schedule and `python main.py backup create` recorded, and the alerts tell you
+when it stops working.
 
 **Logs.** With `DSPM_LOG_FORMAT = "json"` each log line is one JSON object, redacted before
 it is written; `fluent-bit.conf` tails and forwards them over TLS. Audit events go to the

@@ -10,6 +10,7 @@ database password on its command line; a newer schema turns data routes into 503
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -169,8 +170,7 @@ class TheDumpPasswordTest(unittest.TestCase):
             raise RuntimeError("stop after the call")
 
         with tempfile.TemporaryDirectory() as out, \
-                mock.patch.object(backup, "capture_table_counts", return_value={}), \
-                mock.patch.object(backup, "_pg_schema_revision", return_value=26), \
+                mock.patch.object(backup, "_exported_snapshot", return_value=contextlib.nullcontext(("s-1", {}, 26))), \
                 mock.patch.object(backup.subprocess, "run", side_effect=fake_run):
             with self.assertRaises(RuntimeError):
                 backup.create_logical_backup("postgresql://sentro_app:S3cret-pw@db01:5432/sentro", Path(out))
@@ -220,8 +220,7 @@ class APostgresBackupUnderRowSecurityTest(unittest.TestCase):
             calls.append((list(command), kwargs.get("env") or {}))
             raise RuntimeError("stop after the call")
 
-        with mock.patch.object(backup, "capture_table_counts", return_value={}), \
-                mock.patch.object(backup, "_pg_schema_revision", return_value=30), \
+        with mock.patch.object(backup, "_exported_snapshot", return_value=contextlib.nullcontext(("s-1", {}, 30))), \
                 mock.patch.object(backup, "verify_backup", return_value={"ok": True, "problems": []}), \
                 mock.patch.object(backup, "create_logical_backup", wraps=backup.create_logical_backup), \
                 mock.patch.object(backup, "decrypt_file", return_value="digest"), \

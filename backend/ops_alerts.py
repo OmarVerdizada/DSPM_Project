@@ -66,12 +66,14 @@ def conditions() -> dict[str, dict]:
                                              f"({attempt.get('error') or 'see the backup log'}). Run python main.py "
                                              "backup create --verify and read what it says."}
     max_age = _float("DSPM_BACKUP_MAX_AGE_HOURS", 26) * 3600
-    age = backup.latest_backup_age_seconds()
+    # The newest VERIFIED set, as readiness measures it: a set that failed its verification
+    # restores nothing, and hourly retries of one kept the newest-set age fresh.
+    age = backup.latest_backup_age_seconds(verified=True)
     production = os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}
     if max_age and ((age is not None and age > max_age) or (age is None and production)):
         found["backup_stale"] = {"severity": "HIGH", "title": "No recent backup",
-                                 "message": ("There is no backup yet." if age is None else
-                                             f"The newest backup is {int(age // 3600)} hours old.")
+                                 "message": ("There is no verified backup yet." if age is None else
+                                             f"The newest verified backup is {int(age // 3600)} hours old.")
                                  + " Backups are what an upgrade and a recovery restore from."}
     outbox = store.audit_outbox_status()
     if outbox.get("failing") and float(outbox.get("oldest_seconds") or 0) > 900:
