@@ -764,8 +764,16 @@ async def unexpected_exception_handler(request: Request, exc: Exception) -> JSON
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_: Request, __: RequestValidationError) -> JSONResponse:
-    return JSONResponse(status_code=400, content={"detail": "Invalid request. Check required fields and formats."})
+async def validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+    # Which field, and what kind of problem - never the value sent or the validator's own
+    # words (a validator may quote the input). Without it a refused request said only
+    # "check required fields", and an API client had nothing to fix.
+    fields = []
+    for error in exc.errors()[:10]:
+        where = ".".join(str(part)[:60] for part in error.get("loc", ()) if isinstance(part, (str, int)))
+        fields.append({"field": where[:200], "problem": str(error.get("type", "invalid"))[:40]})
+    return JSONResponse(status_code=400, content={"detail": "Invalid request. Check required fields and formats.",
+                                                  "fields": fields})
 
 
 class SavedCredentialMissing(LookupError):

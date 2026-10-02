@@ -598,5 +598,28 @@ class AMissingSavedCredentialIsA404EverywhereTest(unittest.TestCase):
         self.assertEqual(refused.detail["code"], "scan_capacity")
 
 
+class ARefusedRequestSaysWhichFieldTest(unittest.TestCase):
+    """Every validation failure answered only "check required fields and formats"."""
+
+    def test_the_field_and_the_problem_are_named_and_the_value_is_not(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from backend.app import app
+        from backend.security import create_token
+
+        client = TestClient(app)
+        headers = {"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"}
+        response = client.post("/api/scan", headers=headers,
+                               json={"local_path": "x", "max_depth": 99,
+                                     "compliance_frameworks": ["secret-framework-value-xyz"]})
+        self.assertEqual(response.status_code, 400)
+        body = response.json()
+        self.assertEqual(body["detail"], "Invalid request. Check required fields and formats.")
+        named = {item["field"] for item in body["fields"]}
+        self.assertIn("body.max_depth", named)
+        self.assertIn("body.compliance_frameworks", named)
+        self.assertNotIn("secret-framework-value-xyz", response.text)
+
+
 if __name__ == "__main__":
     unittest.main()
