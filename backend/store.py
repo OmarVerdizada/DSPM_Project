@@ -7631,9 +7631,9 @@ def list_inventory(tenant_id: str, *, risk: str = "", source: str = "", framewor
     # switch supports backfill/shadow operation before cutover.
     if filt["q"]:
         try:
-            from backend.search import SearchUnavailable, external_search_requested, search_inventory
+            from backend.search import SearchUnavailable, can_express, external_search_requested, search_inventory
 
-            if external_search_requested():
+            if external_search_requested() and can_express(filt):
                 col, _, _ = INVENTORY_SORTS[sort]
                 return search_inventory(tenant_id, filt, col, direction, cursor, limit)
         except SearchUnavailable as exc:

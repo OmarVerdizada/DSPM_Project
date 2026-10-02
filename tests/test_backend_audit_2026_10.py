@@ -389,5 +389,34 @@ class EverySortWalksEveryFindingOnceTest(unittest.TestCase):
                     self.assertEqual(len(set(seen)), len(types), seen)
 
 
+class TheSearchEngineAnswersOnlyWhatItCanFilterTest(unittest.TestCase):
+    """The engine's filter read the old single-value fields, which the multi-select
+    inventory filters leave empty: a text search with two risks, an extension, a source
+    or a finding type ticked came back unfiltered from the engine."""
+
+    def test_list_filters_reach_the_engine(self) -> None:
+        from backend import search, store
+
+        filt = store._inventory_filters("HIGH,CRITICAL", "", "", "payroll", ".xlsx,.csv")
+        expression = search.build_filter("t1", filt)
+        self.assertIn('risk_level = "HIGH" OR risk_level = "CRITICAL"', expression)
+        self.assertIn('extension = ".xlsx" OR extension = ".csv"', expression)
+        self.assertTrue(search.can_express(filt))
+
+    def test_what_the_engine_cannot_express_stays_on_the_database(self) -> None:
+        from backend import search, store
+
+        for filt in (store._inventory_filters("", "smb", "", "payroll", ""),
+                     store._inventory_filters("", "", "", "payroll", "", finding_type="email"),
+                     store._inventory_filters("PROTECTED", "", "", "payroll", "")):
+            self.assertFalse(search.can_express(filt), filt)
+
+        tenant = f"audit-search-{uuid4().hex[:8]}"
+        store.create_tenant(tenant, "Search")
+        with patch.object(search, "external_search_requested", return_value=True),                 patch.object(search, "search_inventory", side_effect=AssertionError("asked the engine")):
+            page = store.list_inventory(tenant, q="payroll", finding_type="email")
+        self.assertIn("items", page)
+
+
 if __name__ == "__main__":
     unittest.main()

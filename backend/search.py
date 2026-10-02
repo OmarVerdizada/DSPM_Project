@@ -152,22 +152,39 @@ def _filter_value(value) -> str:
     return json.dumps(str(value or ""), ensure_ascii=False)
 
 
+def can_express(filt: dict) -> bool:
+    """Whether the engine can answer these filters exactly as the database does.
+
+    The inventory filters became multi-select: a source also matches a scan's name, a
+    finding type stands for every stored spelling of itself, and "Protected",
+    "Classified" and "Clear" are pseudo-values that join their facet's OR group. The
+    engine was handed the old single-value fields - empty for all of these - so a text
+    search with them ticked came back unfiltered, its items and total disagreeing with
+    the filters. Those searches stay on the database, which answers them correctly."""
+    return not (filt.get("sources") or filt.get("source") or filt.get("finding_types") or filt.get("finding_type")
+                or filt.get("protected_risk") or filt.get("protected_type") or filt.get("classified_type")
+                or filt.get("clear_type"))
+
+
 def build_filter(tenant_id: str, filt: dict) -> str:
-    """Build a tenant-mandatory Meilisearch filter expression."""
+    """Build a tenant-mandatory Meilisearch filter expression (see `can_express`)."""
     clauses = [
         f"tenant_id = {_filter_value(tenant_id)}",
         f"index_version = {_filter_value(INDEX_VERSION)}",
     ]
-    if filt.get("risk"):
-        clauses.append(f"risk_level = {_filter_value(filt['risk'])}")
+    risks = [value for value in filt.get("risks") or ([filt["risk"]] if filt.get("risk") else []) if value]
+    if risks:
+        clauses.append("(" + " OR ".join(f"risk_level = {_filter_value(value)}" for value in risks) + ")")
     if filt.get("source_group"):
         clauses.append(
             "(" + " OR ".join(f"source = {_filter_value(source)}" for source in filt["source_group"]) + ")"
         )
     elif filt.get("source"):
         clauses.append(f"source = {_filter_value(filt['source'])}")
-    if filt.get("extension"):
-        clauses.append(f"extension = {_filter_value(filt['extension'])}")
+    extensions = [value for value in filt.get("extensions") or ([filt["extension"]] if filt.get("extension") else [])
+                  if value]
+    if extensions:
+        clauses.append("(" + " OR ".join(f"extension = {_filter_value(value)}" for value in extensions) + ")")
     if filt.get("protected") is not None:
         clauses.append(f"is_protected = {_filter_value(bool(filt['protected']))}")
     if filt.get("finding_type"):
