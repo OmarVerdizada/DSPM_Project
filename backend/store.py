@@ -9385,18 +9385,50 @@ def get_scan_source(tenant_id: str, scan_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+class EdmCapacityExceeded(ValueError):
+    """A reference set that would take its workspace past the configured number of values."""
+
+    # Its message names the limit and the setting, written for the administrator.
+    client_safe = True
+
+
+# D2: the advisory-lock namespace (the first of the two keys) that serializes reference-set
+# uploads per workspace on PostgreSQL. The two-key space never meets the migration lock's.
+_EDM_LOCK_NAMESPACE = 0x45444D31  # "EDM1"
+
+
+def _edm_tenant_lock_key(tenant_id: str) -> int:
+    return int.from_bytes(hashlib.sha256(str(tenant_id).encode("utf-8")).digest()[:4], "big", signed=True)
+
+
 def create_edm_set(tenant_id: str, set_id: str, name: str, entity_type: str, fingerprints, key_digest: str,
-                   created_by: str) -> int:
+                   created_by: str, *, max_rows: int) -> int:
     """D2: store a reference set - its name and its values' fingerprints - in one
-    transaction. Returns how many distinct fingerprints it holds."""
+    transaction, refused with EdmCapacityExceeded when the workspace would then hold more
+    than `max_rows` values. Returns how many distinct fingerprints it holds.
+
+    The count and the insert are one transaction, serialized per workspace (M4 exit
+    review): the API counted first, outside any lock, so two uploads at once each saw room
+    for themselves and both went in. On SQLite the first statement writes, so the
+    transaction holds the database's write lock before it counts, as the audit chain's
+    does; PostgreSQL takes a transaction-scoped advisory lock keyed by the workspace."""
     rows = sorted(set(fingerprints))
     with _lock:
         with _connect() as conn:
+            if db.is_postgres():
+                conn.execute("SELECT pg_advisory_xact_lock(CAST(? AS integer), CAST(? AS integer))",
+                             (_EDM_LOCK_NAMESPACE, _edm_tenant_lock_key(tenant_id)))
             conn.execute(
                 "INSERT INTO edm_sets (tenant_id, set_id, name, entity_type, row_count, key_digest, created_by, "
                 "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (tenant_id, set_id, name, entity_type, len(rows), key_digest, created_by,
                  datetime.now(timezone.utc).isoformat()))
+            held = conn.execute("SELECT COALESCE(SUM(row_count), 0) AS n FROM edm_sets WHERE tenant_id = ?",
+                                (tenant_id,)).fetchone()
+            if int(held["n"] or 0) > int(max_rows):
+                # Raised inside the transaction, so the set row above is rolled back with it.
+                raise EdmCapacityExceeded(f"A workspace's reference sets may hold {int(max_rows):,} values "
+                                          "(DSPM_EDM_MAX_ROWS); remove a set first.")
             _executemany(conn, "INSERT INTO edm_fingerprints (tenant_id, set_id, fingerprint) VALUES (?, ?, ?)",
                          ((tenant_id, set_id, fingerprint) for fingerprint in rows))
     return len(rows)
@@ -9416,13 +9448,6 @@ def delete_edm_set(tenant_id: str, set_id: str) -> bool:
             conn.execute("DELETE FROM edm_fingerprints WHERE tenant_id = ? AND set_id = ?", (tenant_id, set_id))
             return conn.execute("DELETE FROM edm_sets WHERE tenant_id = ? AND set_id = ?",
                                 (tenant_id, set_id)).rowcount > 0
-
-
-def count_edm_rows(tenant_id: str) -> int:
-    with _connect() as conn:
-        row = conn.execute("SELECT COALESCE(SUM(row_count), 0) AS n FROM edm_sets WHERE tenant_id = ?",
-                           (tenant_id,)).fetchone()
-    return int(row["n"] or 0)
 
 
 def exact_match_index_for_scan(tenant_id: str, key_digest: str) -> dict:

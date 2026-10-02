@@ -122,6 +122,28 @@ class TheMetricsTest(D11Case):
         methods = {re.search(r'method="([^"]*)"', labels).group(1) for labels, _ in samples["sentro_http_requests_total"]}
         self.assertLessEqual(methods, {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
 
+    def test_an_invented_method_or_status_makes_no_new_series(self) -> None:
+        """M4 exit review: every request is counted before it is authenticated and the server
+        accepts any token as a method, so a client inventing methods made a new series with
+        each one, without limit. Anything not known is OTHER; a status outside 100-599 is 0."""
+        with mock.patch.dict(metrics._requests, clear=True):
+            for index in range(40):
+                metrics.record_request(f"AAAAAAAAA{index}", 405, 0.01)
+                metrics.record_request("get", 1000 + index, 0.01)
+            metrics.record_request("BREW", -7, 0.01)
+            metrics.record_request("DELETE", 204, 0.01)
+            self.assertEqual(metrics._requests, {("OTHER", "405"): 40, ("GET", "0"): 40, ("OTHER", "0"): 1,
+                                                 ("DELETE", "204"): 1})
+            # The same through the server's own middleware.
+            before = dict(metrics._requests)
+            self.client.request("AAAAAAAAA1", "/api/health")
+            counted = {key for key, value in metrics._requests.items() if value != before.get(key)}
+            self.assertEqual({method for method, _code in counted}, {"OTHER"}, metrics._requests)
+            exposed = parse(metrics.render(ready=True, build={}))["sentro_http_requests_total"]
+        methods = {re.search(r'method="([^"]*)"', labels).group(1) for labels, _ in exposed}
+        self.assertEqual(methods, {"OTHER", "GET", "DELETE"})
+        self.assertNotIn("AAAAAAAAA", str(exposed))
+
     def test_a_queued_scan_and_a_failing_siem_show(self) -> None:
         old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         with store._connect() as conn:

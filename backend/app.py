@@ -4084,13 +4084,15 @@ def create_exact_match_set(payload: ExactMatchSetRequest,
     payload.values.clear()
     if not fingerprints:
         raise HTTPException(status_code=400, detail="The set holds no usable values.")
-    if store_module.count_edm_rows(principal.tenant_id) + len(fingerprints) > _edm_max_rows():
-        raise HTTPException(status_code=400, detail=f"A workspace's reference sets may hold {_edm_max_rows():,} values "
-                            "(DSPM_EDM_MAX_ROWS); remove a set first.")
     set_id = secrets.token_hex(8)
     name = " ".join(payload.name.split())[:80]
-    rows = store_module.create_edm_set(principal.tenant_id, set_id, name, entity_type, fingerprints,
-                                       exact_match.key_digest(), principal.subject)
+    try:
+        # The limit is checked by the store, in the transaction that inserts the set: a
+        # count taken here, before it, let two uploads at once both fit (M4 exit review).
+        rows = store_module.create_edm_set(principal.tenant_id, set_id, name, entity_type, fingerprints,
+                                           exact_match.key_digest(), principal.subject, max_rows=_edm_max_rows())
+    except store_module.EdmCapacityExceeded as exc:
+        raise HTTPException(status_code=400, detail=client_message(exc, "The reference set was refused.")) from exc
     audit(principal.tenant_id, principal.subject, "exact_match.set_created",
           {"set_id": set_id, "name": name, "entity_type": entity_type, "values": rows})
     return {"set_id": set_id, "name": name, "entity_type": entity_type, "values": rows}

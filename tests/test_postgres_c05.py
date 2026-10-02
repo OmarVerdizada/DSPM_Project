@@ -146,7 +146,8 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
         store.save_directory_settings(tenant, False, {"host": "dc.example.test"}, "", "tester")
         store.begin_mfa_enrollment(tenant, f"{tenant}-user", "pending-ciphertext", 2_000_000_000)
         store.record_scan_source(tenant, f"{tenant}-scan", "smb", "fs1", "typed")
-        store.create_edm_set(tenant, f"{tenant}-edm", "seed", "EMAIL_ADDRESS", ["f" * 64], "kd", "tester")
+        store.create_edm_set(tenant, f"{tenant}-edm", "seed", "EMAIL_ADDRESS", ["f" * 64], "kd", "tester",
+                             max_rows=10)
 
     def _tenant_tables(self) -> list[str]:
         with db.platform_scope("migration"), store._connect() as conn:

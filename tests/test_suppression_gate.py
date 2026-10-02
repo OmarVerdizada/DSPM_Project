@@ -53,7 +53,7 @@ class TheSuppressionGateTest(unittest.TestCase):
         store.delete_tenant_with_data(self.tenant)
         self.temp.cleanup()
 
-    def _scan(self, scan_id: str) -> dict:
+    def _scan(self, scan_id: str, *, incremental: bool = False) -> dict:
         """One scan, configured the way the backend configures one - rules and all."""
         engine = DSPMDiscoveryEngine(
             ScanConfig(
@@ -64,7 +64,7 @@ class TheSuppressionGateTest(unittest.TestCase):
                 walk_local_path=True,
                 persistent_cache_enabled=True,
                 cache_dir=str(self.cache),
-                incremental_enabled=False,
+                incremental_enabled=incremental,
                 max_workers=1,
                 suppression_rules=store.suppression_rules_for_scan(self.tenant),
             )
@@ -117,6 +117,28 @@ class TheSuppressionGateTest(unittest.TestCase):
         third = self._scan("gate-3")
         self.assertIn("credit_card", self._reported_types(third),
                       "withdrawing the rule must bring the finding back - it was hidden, not deleted")
+
+    def test_withdrawing_a_rule_brings_the_finding_back_after_a_replay(self) -> None:
+        """M4 exit review: a replay wrote the findings the rule had let through back into
+        the findings cache, under the key a re-read looks up. Withdrawing the rule stopped
+        the replay, the file was read again, and the cache answered without the card -
+        until the file itself changed. The test above scans with reuse off."""
+        rule = store.create_suppression_rule(self.tenant, finding_type="credit_card", reason="synthetic test data",
+                                             created_by="ana")
+        first = self._scan("replay-1", incremental=True)
+        self.assertNotIn("credit_card", self._reported_types(first))
+        self.assertEqual(first["scan_diagnostics"]["suppression"]["suppressed_findings"], 1,
+                         "the fixture found nothing to suppress")
+
+        second = self._scan("replay-2", incremental=True)
+        self.assertTrue(second["files"] and all(file_obj.get("incremental_reused") for file_obj in second["files"]),
+                        "the unchanged file was not replayed")
+        self.assertNotIn("credit_card", self._reported_types(second))
+
+        store.delete_suppression_rule(self.tenant, rule["rule_id"])
+        third = self._scan("replay-3", incremental=True)
+        self.assertIn("credit_card", self._reported_types(third),
+                      "the replay cached what the rule let through, so the withdrawn rule went on hiding the card")
 
 
 if __name__ == "__main__":

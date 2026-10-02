@@ -131,11 +131,13 @@ class _Services:
 
 
 class _Relay:
-    """An SMTP relay offering STARTTLS with the private CA's certificate."""
+    """An SMTP relay offering STARTTLS with the private CA's certificate. An address in
+    `refused` is answered 550 at RCPT, as a relay answers a mailbox that is gone."""
 
     def __init__(self, certfile: Path, keyfile: Path) -> None:
         self.messages: list[dict] = []
         self.logins: list[str] = []
+        self.refused: set[str] = set()
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile, keyfile)
         relay = self
@@ -176,8 +178,12 @@ class _Relay:
                         mail = {"from": line, "rcpt": [], "tls": tls}
                         send("250 OK")
                     elif verb == "RCPT":
-                        mail["rcpt"].append(line)
-                        send("250 OK")
+                        address = line.partition("<")[2].partition(">")[0].lower()
+                        if address in relay.refused:
+                            send("550 5.1.1 No such user here")
+                        else:
+                            mail["rcpt"].append(line)
+                            send("250 OK")
                     elif verb == "DATA":
                         send("354 End with <CRLF>.<CRLF>")
                         lines = []
@@ -243,6 +249,7 @@ class D3Case(unittest.TestCase):
         self.services.incidents.clear()
         self.relay.messages.clear()
         self.relay.logins.clear()
+        self.relay.refused.clear()
         self.client = TestClient(app)
 
     def as_(self, user: str = "d3-admin", role: str = "admin", tenant: str = "t-d3", *, mfa: bool = True) -> dict:
@@ -445,6 +452,222 @@ class TheMailRelayTest(D3Case):
         for text in texts:
             for secret in ("relay-pass-1", "relay-pass-2"):
                 self.assertNotIn(secret, text)
+
+    def mail_view(self) -> dict:
+        return next(item for item in self.client.get("/api/integrations", headers=self.as_()).json()["integrations"]
+                    if item["channel"] == "email")
+
+    def test_one_refused_recipient_does_not_resend_the_alert_to_the_rest(self) -> None:
+        """M4 exit review: a relay that refused one address while it took the others failed
+        the delivery, and every retry mailed the others again - every few minutes, for good,
+        because one mailbox was gone. They were sent it: it is delivered, once, and the
+        channel names the address to fix."""
+        self.relay.refused.add("gone@example.com")
+        recipients = ["soc@example.com", "gone@example.com", "ciso@example.com"]
+        self.assertEqual(self.relay_config(recipients=recipients).status_code, 200)
+        alert = self.raise_alert()
+        passes = [alert_delivery.drain(now=time.time() + later) for later in (0, 600, 3600, 86400)]
+        self.assertEqual([(item["delivered"], item["retry"]) for item in passes], [(1, 0), (0, 0), (0, 0), (0, 0)])
+        [message] = self.relay.messages
+        accepted = " ".join(message["rcpt"])
+        self.assertIn("soc@example.com", accepted)
+        self.assertIn("ciso@example.com", accepted)
+        self.assertNotIn("gone@example.com", accepted)
+        [delivery] = self.client.get("/api/alerts", headers=self.as_()).json()["alerts"][0]["deliveries"]
+        self.assertEqual((delivery["status"], delivery["attempts"]), ("delivered", 1))
+        self.assertIn("gone@example.com", self.mail_view()["status"]["last_error"], "the address to fix is shown")
+        [delivered] = [json.loads(row["detail_json"]) for row in self.audit_rows() if row["action"] == "alert.delivered"]
+        self.assertEqual((delivered["alert_id"], delivered["refused_recipients"]), (alert["alert_id"], ["gone@example.com"]))
+
+    def test_every_recipient_refused_is_still_a_failure(self) -> None:
+        self.relay.refused.update({"soc@example.com", "gone@example.com"})
+        self.assertEqual(self.relay_config(recipients=["soc@example.com", "gone@example.com"]).status_code, 200)
+        self.raise_alert()
+        self.assertEqual(alert_delivery.drain()["retry"], 1)
+        self.assertEqual(self.relay.messages, [])
+        [delivery] = self.client.get("/api/alerts", headers=self.as_()).json()["alerts"][0]["deliveries"]
+        self.assertEqual(delivery["status"], "pending", "retried, not given up and not called delivered")
+        self.assertIn("refused every recipient", self.mail_view()["status"]["last_error"])
+        self.assertNotIn("alert.delivered", self.actions())
+
+    def test_a_test_message_with_a_refused_recipient_is_not_a_pass(self) -> None:
+        self.relay.refused.add("gone@example.com")
+        self.relay_config(recipients=["soc@example.com", "gone@example.com"])
+        result = self.client.post("/api/integrations/email/test", headers=self.as_()).json()["test"]
+        self.assertFalse(result["ok"])
+        self.assertIn("gone@example.com", result["message"])
+        self.assertEqual(len(self.relay.messages), 1, "the others were sent the test")
+
+    def test_the_relay_names_the_recipients_it_refused(self) -> None:
+        self.relay.refused.add("gone@example.com")
+        common = {"host": "localhost", "port": self.relay.port, "security": "starttls", "sender": "sentro@example.com",
+                  "subject": "s", "text": "t", "ca_pem": self.ca.read_text()}
+        self.assertEqual(outbound.send_mail(recipients=["soc@example.com"], **common), [])
+        self.assertEqual(outbound.send_mail(recipients=["soc@example.com", "gone@example.com"], **common),
+                         ["gone@example.com"])
+        with self.assertRaisesRegex(outbound.OutboundRefused, "refused every recipient"):
+            outbound.send_mail(recipients=["gone@example.com"], **common)
+        self.assertEqual(len(self.relay.messages), 2)
+
+
+class ASavedSecretStaysWithItsDestinationTest(D3Case):
+    """M4 exit review: a save that pointed a channel somewhere else - another host or port,
+    another URL, another CA trusted for it - with the secret left out sent the saved
+    password or token there. An administrator who never saw it could collect it on a host
+    of their own."""
+
+    REFUSED = "enter the password or token again"
+
+    def mail(self, **extra):
+        return self.configure("email", {"host": "localhost", "port": self.relay.port, "security": "starttls",
+                                        "sender": "sentro@example.com", "recipients": ["soc@example.com"],
+                                        "username": "relay-user", "enabled": True, **extra})
+
+    def assert_refused_and_unchanged(self, channel: str, change: dict) -> None:
+        before = store.get_alert_channel("t-d3", channel)
+        refused = self.configure(channel, change)
+        self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertIn(self.REFUSED, refused.json()["detail"])
+        after = store.get_alert_channel("t-d3", channel)
+        self.assertEqual((after["config"], after["secret_ref"]), (before["config"], before["secret_ref"]),
+                         "a refused save changed the channel")
+
+    def test_a_mail_relay_moved_without_its_password_is_refused(self) -> None:
+        self.assertEqual(self.mail(password="relay-pass-1").status_code, 200)
+        other_ca, _cert, _key = _private_ca(self.tmp)
+        for change in ({"host": "127.0.0.1"}, {"port": self.relay.port + 1}, {"remove_ca": True},
+                       {"ca_pem": other_ca.read_text()}):
+            with self.subTest(change=sorted(change)):
+                self.assert_refused_and_unchanged("email", change)
+        self.assertEqual(integrations.load("t-d3", "email")[1], "relay-pass-1")
+
+    def test_entering_the_password_with_the_new_relay_saves_both(self) -> None:
+        self.mail(password="relay-pass-1")
+        first = store.get_alert_channel("t-d3", "email")["secret_ref"]
+        moved = self.configure("email", {"host": "127.0.0.1", "password": "relay-pass-2"})
+        self.assertEqual(moved.status_code, 200, moved.text)
+        self.assertEqual(store.get_alert_channel("t-d3", "email")["config"]["host"], "127.0.0.1")
+        self.assertEqual(integrations.load("t-d3", "email")[1], "relay-pass-2")
+        self.assertIsNone(store.read_secret_record("t-d3", first), "the secret for the old relay is gone")
+
+    def test_changing_what_is_not_a_destination_keeps_the_secret(self) -> None:
+        self.mail(password="relay-pass-1")
+        ref = store.get_alert_channel("t-d3", "email")["secret_ref"]
+        for change in ({"recipients": ["soc@example.com", "ciso@example.com"]}, {"min_severity": "MEDIUM"},
+                       {"sender": "alerts@example.com"}):
+            with self.subTest(change=sorted(change)):
+                self.assertEqual(self.configure("email", change).status_code, 200)
+                self.assertEqual(store.get_alert_channel("t-d3", "email")["secret_ref"], ref)
+        self.assertEqual(integrations.load("t-d3", "email")[1], "relay-pass-1")
+
+    def test_a_relay_with_no_saved_password_may_move(self) -> None:
+        self.assertEqual(self.mail().status_code, 200)
+        self.assertEqual(self.configure("email", {"host": "127.0.0.1"}).status_code, 200)
+
+    def test_a_ticket_system_moved_without_its_token_is_refused(self) -> None:
+        self.assertEqual(self.configure("jira", {"base_url": self.services.url(""), "project_key": "SEC",
+                                                 "username": "bot@example.com", "token": "jira-token-1"}).status_code, 200)
+        self.assert_refused_and_unchanged("jira", {"base_url": "https://jira.example.test"})
+        self.assert_refused_and_unchanged("jira", {"remove_ca": True})
+        ref = store.get_alert_channel("t-d3", "jira")["secret_ref"]
+        self.assertEqual(self.configure("jira", {"project_key": "OPS"}).status_code, 200, "not a destination")
+        self.assertEqual(store.get_alert_channel("t-d3", "jira")["secret_ref"], ref)
+        self.assertEqual(self.configure("jira", {"base_url": "https://jira.example.test", "token": "jira-token-2"})
+                         .status_code, 200)
+        self.assertEqual(integrations.load("t-d3", "jira")[1], "jira-token-2")
+
+        self.assertEqual(self.configure("servicenow", {"instance_url": self.services.url(""), "username": "sn.bot",
+                                                       "password": "sn-pass-1"}).status_code, 200)
+        self.assert_refused_and_unchanged("servicenow", {"instance_url": "https://sn.example.test"})
+        self.assertEqual(self.configure("servicenow", {"assignment_group": "SOC"}).status_code, 200)
+        self.assertEqual(integrations.load("t-d3", "servicenow")[1], "sn-pass-1")
+
+
+class TheDeliveryLeaseTest(D3Case):
+    """M4 exit review: a pass of slow sends can outlast the lease its deliveries were claimed
+    under. Another backend then claims them and sends them too, and whichever finished last
+    wrote its outcome over the other's. The lease is renewed before each send, a worker that
+    lost it does not send, and only the lease's holder writes an outcome."""
+
+    def claim(self, owner: str, now: float, limit: int = 10) -> list[dict]:
+        return store.claim_alert_deliveries(limit=limit, now=now, lease_seconds=alert_delivery.LEASE_SECONDS,
+                                            owner=owner)
+
+    def delivery(self, delivery_id: int) -> dict:
+        with store._connect() as conn:
+            return dict(conn.execute("SELECT status, attempts, lease_owner, lease_until FROM alert_deliveries "
+                                     "WHERE id = ?", (delivery_id,)).fetchone())
+
+    def hooks(self) -> list[dict]:
+        return [item for item in self.services.requests if item["path"] == "/hook"]
+
+    def test_a_renewed_lease_is_not_claimed_by_another_worker(self) -> None:
+        self.webhook()
+        self.raise_alert()
+        start = time.time()
+        [row] = self.claim("worker-a", start)
+        self.assertTrue(store.renew_alert_delivery_lease("t-d3", row["id"], owner="worker-a", until=start + 600))
+        self.assertEqual(self.claim("worker-b", start + alert_delivery.LEASE_SECONDS + 1), [],
+                         "the renewed lease was claimed as if it had run out")
+        self.assertFalse(store.renew_alert_delivery_lease("t-d3", row["id"], owner="worker-b", until=start + 900),
+                         "a worker renewed a lease it does not hold")
+        self.assertEqual(self.delivery(row["id"])["lease_owner"], "worker-a")
+        self.assertEqual([item["id"] for item in self.claim("worker-b", start + 601)], [row["id"]])
+
+    def test_a_worker_that_lost_its_lease_does_not_send(self) -> None:
+        self.webhook()
+        self.raise_alert()
+        start = time.time()
+        [stale] = self.claim("worker-a", start)
+        [taken] = self.claim("worker-b", start + alert_delivery.LEASE_SECONDS + 1)
+        with mock.patch.object(alert_delivery, "_owner", return_value="worker-a"):
+            self.assertEqual(alert_delivery.deliver(stale), "skipped")
+        self.assertEqual(self.hooks(), [], "sent by a worker that no longer held the delivery")
+        self.assertEqual((self.delivery(taken["id"])["status"], self.delivery(taken["id"])["lease_owner"]),
+                         ("pending", "worker-b"))
+        with mock.patch.object(alert_delivery, "_owner", return_value="worker-b"):
+            self.assertEqual(alert_delivery.deliver(taken), "delivered")
+        self.assertEqual(len(self.hooks()), 1)
+        self.assertEqual(self.delivery(taken["id"])["status"], "delivered")
+
+    def test_an_outcome_from_a_worker_whose_lease_was_taken_over_is_not_written(self) -> None:
+        self.webhook()
+        self.raise_alert()
+        start = time.time()
+        [row] = self.claim("worker-a", start)
+        taken: list[dict] = []
+        real_send = alert_delivery.send_webhook
+
+        def slow_send(*args, **kwargs):
+            # The send outlasts the lease, and another worker claims the delivery meanwhile.
+            taken.extend(self.claim("worker-b", time.time() + alert_delivery.LEASE_SECONDS + 1))
+            return real_send(*args, **kwargs)
+
+        with mock.patch.object(alert_delivery, "_owner", return_value="worker-a"), \
+                mock.patch.object(alert_delivery, "send_webhook", side_effect=slow_send):
+            alert_delivery.deliver(row)
+        self.assertEqual([item["id"] for item in taken], [row["id"]])
+        held = self.delivery(row["id"])
+        self.assertEqual((held["status"], held["lease_owner"]), ("pending", "worker-b"),
+                         "the worker that lost the lease wrote its outcome over the new holder's")
+        self.assertFalse(store.finish_alert_delivery("t-d3", row["id"], status="pending", attempts=1, error="late",
+                                                     next_attempt_at=start + 3600, owner="worker-a"))
+        self.assertEqual(self.delivery(row["id"])["lease_owner"], "worker-b")
+        self.assertTrue(store.finish_alert_delivery("t-d3", row["id"], status="delivered", attempts=1,
+                                                    owner="worker-b"))
+        self.assertEqual(self.delivery(row["id"])["status"], "delivered")
+
+    def test_claims_take_turns_between_workspaces(self) -> None:
+        for tenant in ("t-d3", "t-other"):
+            store.save_alert_channel(tenant, "webhook", enabled=True, config={"url": self.services.url("/hook"),
+                                     "min_severity": "LOW"}, secret_ref="", actor="tester")
+        store.save_alerts("t-d3", "scan-a", [{"severity": "CRITICAL", "title": f"a{index}"} for index in range(5)])
+        store.save_alerts("t-other", "scan-b", [{"severity": "CRITICAL", "title": "b0"}])
+        claimed = self.claim("worker-a", time.time(), limit=2)
+        self.assertEqual(sorted(row["tenant_id"] for row in claimed), ["t-d3", "t-other"],
+                         "one workspace's backlog held another's alert behind it")
+        rest = self.claim("worker-a", time.time(), limit=10)
+        self.assertEqual([row["tenant_id"] for row in rest], ["t-d3"] * 4)
 
 
 class OnOffAndRemoveTest(D3Case):

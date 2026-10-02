@@ -183,15 +183,18 @@ class ThePriorAnalysisIsTakenNotCopiedTest(_ReScanTest):
 
 class TheRehydrateKeepsNoCopyTest(_ReScanTest):
 
-    def test_a_durable_rescan_rewrites_the_cache_to_disk_and_keeps_none_in_memory(self) -> None:
+    def test_a_durable_rescan_rewrites_the_l1_index_and_keeps_nothing_in_memory(self) -> None:
         self._full_then_saved()
         self._clear_l1()
         engine, report, _records = self._scan()
         self.assertEqual(report["scan_diagnostics"]["incremental"]["durable_baseline_hits"], FILES)
         self.assertEqual(engine._finding_cache, {},
                          "reused findings were kept in memory for the rest of the scan")
-        self.assertGreaterEqual(len(list(self.cache.glob("*.json"))), FILES,
-                                "the rehydrate no longer wrote the findings cache")
+        # The replayed findings have been through the reference sets and suppression
+        # rules, which the findings cache key does not carry - so they are not written
+        # there (M4 exit review). The reuse metadata is.
+        self.assertEqual(list(self.cache.glob("*.json")), [],
+                         "the rehydrate wrote replayed findings into the findings cache")
         # What the rehydrate wrote is what answers the next scan.
         _engine, third, _records = self._scan()
         self.assertEqual(third["scan_diagnostics"]["incremental"]["sidecar_hits"], FILES)

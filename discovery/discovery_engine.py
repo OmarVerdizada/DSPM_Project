@@ -1645,6 +1645,8 @@ class DSPMDiscoveryEngine:
 
         # Rehydrate the L1 cache after a failover/cache eviction, so subsequent
         # unchanged scans avoid even the database lookup.
+        if not self.config.persistent_cache_enabled:
+            return public_record
         framework_ids = {
             str(item).lower() for item in self.config.compliance_frameworks
         } if self.config.compliance_enabled else set()
@@ -1664,13 +1666,24 @@ class DSPMDiscoveryEngine:
         cache_record = dict(public_record)
         cache_record["content"] = ""
         cache_record["reused_preview"] = public_record.get("preview")
-        # Written to disk for the next scan, not remembered for this one: nothing
-        # later in this scan asks for this file's findings again, and keeping them
-        # cost 18.3 KB per reused file. The findings are serialised on the spot and
-        # never mutated, so they are passed as they are rather than copied first.
-        self._store_cached_findings(
-            cache_key, public_record.get("findings") or [], cache_record, remember=False,
-        )
+        # Only the reuse metadata is written back, never these findings into the
+        # findings cache. That cache holds what the detectors found, before the
+        # workspace's reference sets and suppression rules were applied - neither is in
+        # its key, because a re-read applies both to whatever it finds there. These
+        # findings have been through both. Written back under that key (M4 exit
+        # review), a set added or deleted or a rule withdrawn stopped the replay, the
+        # file was read again and the cache answered with the old policy's findings: a
+        # new set confirmed nothing, a deleted one went on confirming, a withdrawn rule
+        # went on hiding - until the file itself changed.
+        #
+        # The metadata is paired with the entry the analysing scan left, while it is
+        # there. When it is gone (an evicted cache, another worker) it is written
+        # unpaired, which is safe only because it then carries the whole result: the
+        # next scan replays it and never looks for findings that are not cached.
+        paired = self._finding_digest_exists(_cache_key_digest(cache_key))
+        replayable = isinstance(cache_record.get("findings"), list) and isinstance(cache_record.get("risk"), dict)
+        if paired or replayable:
+            self._write_meta_sidecar(cache_record, cache_key if paired else None)
         return public_record
 
     def _record_triage(self, decision: dict) -> None:
@@ -1835,12 +1848,11 @@ class DSPMDiscoveryEngine:
         except (OSError, json.JSONDecodeError, ValueError):
             return None
 
-    def _store_cached_findings(
-        self, cache_key: tuple, findings: list[dict], record: dict, *, remember: bool = True,
-    ) -> None:
-        if remember:
-            with self._cache_lock:
-                self._finding_cache[cache_key] = copy.deepcopy(findings)
+    def _store_cached_findings(self, cache_key: tuple, findings: list[dict], record: dict) -> None:
+        """What the detectors found, before any reference set or suppression rule was
+        applied - the key carries neither, so the caller applies both after reading."""
+        with self._cache_lock:
+            self._finding_cache[cache_key] = copy.deepcopy(findings)
         if not self.config.persistent_cache_enabled:
             return
         path = self._cache_path(cache_key)

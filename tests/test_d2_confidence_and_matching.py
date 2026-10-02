@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -159,11 +160,11 @@ class ExactMatchCase(unittest.TestCase):
         return self.client.post("/api/exact-match/sets", headers=self.as_(user, tenant),
                                 json={"name": name, "entity_type": entity_type, "values": list(values)})
 
-    def scan(self) -> dict:
+    def scan(self, *, incremental: bool = False) -> dict:
         with mock.patch("backend.app.partitioned_scans_enabled", return_value=False):
             response = self.client.post("/api/scan", headers=self.as_("edm-admin", "t-edm"), json={
                 "local_path": self.relative.as_posix(), "async_scan": False, "save_report": True,
-                "compact_result": False, "incremental_enabled": False, "compliance_enabled": True,
+                "compact_result": False, "incremental_enabled": incremental, "compliance_enabled": True,
                 "compliance_frameworks": ["gdpr"]})
         self.assertEqual(response.status_code, 200, response.text[:400])
         return response.json()
@@ -228,6 +229,52 @@ class TheReferenceSetTest(ExactMatchCase):
         index = store.exact_match_index_for_scan("t-edm", exact_match.key_digest())
         after = DSPMDiscoveryEngine(ScanConfig(tenant_id="t-edm", local_path=".", exact_match=index)).version_signature()
         self.assertNotEqual(before, after)
+
+
+class AnUnchangedFileFollowsTheSetsTest(ExactMatchCase):
+    """M4 exit review: a replayed file wrote its findings back into the findings cache
+    after the sets had been applied to them - fingerprints removed, CONFIRMED kept - under
+    the key a re-read looks up, and that key carries no set digest. Once a set changed the
+    replay stopped, the file was read again and the cache answered with those findings: a
+    new set confirmed nothing and a deleted one went on confirming, until the file itself
+    changed. The tests above scan with reuse off, which is why none of them saw it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # A cache of this test's own, so what is replayed is what these scans wrote.
+        patcher = mock.patch.dict(os.environ, {"DSPM_SCAN_CACHE_DIR": str(self.tmp / "scan-cache")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def file_of(self, report: dict) -> dict:
+        files = [item for item in report.get("files") or [] if str(item.get("path") or "").endswith("customers.txt")]
+        self.assertEqual(len(files), 1, "the scan reported the fixture file")
+        return files[0]
+
+    def replayed(self) -> dict:
+        report = self.scan(incremental=True)
+        self.assertTrue(self.file_of(report).get("incremental_reused"), "the unchanged file was not replayed")
+        return report
+
+    def test_a_set_added_after_a_replay_confirms_the_unchanged_file(self) -> None:
+        self.assertFalse(self.file_of(self.scan(incremental=True)).get("incremental_reused"), "read the first time")
+        self.assertNotEqual(self.gdpr_finding(self.replayed(), "gdpr_email_address")["confidence_tier"], "CONFIRMED")
+        self.assertEqual(self.upload(["ana.mammadova@example.com"]).status_code, 200)
+        email = self.gdpr_finding(self.scan(incremental=True), "gdpr_email_address")
+        self.assertEqual(email["confidence_tier"], "CONFIRMED",
+                         "the replay cached findings without their fingerprints, so the new set matched nothing")
+        self.assertEqual(email["exact_match"], {"sets": ["Customers"], "matched_values": 1})
+
+    def test_a_set_deleted_after_a_replay_confirms_no_longer(self) -> None:
+        set_id = self.upload(["ana.mammadova@example.com"]).json()["set_id"]
+        self.assertEqual(self.gdpr_finding(self.scan(incremental=True), "gdpr_email_address")["confidence_tier"],
+                         "CONFIRMED")
+        self.assertEqual(self.gdpr_finding(self.replayed(), "gdpr_email_address")["confidence_tier"], "CONFIRMED")
+        self.assertEqual(self.client.delete(f"/api/exact-match/sets/{set_id}",
+                                            headers=self.as_("edm-admin", "t-edm")).status_code, 200)
+        email = self.gdpr_finding(self.scan(incremental=True), "gdpr_email_address")
+        self.assertNotEqual(email["confidence_tier"], "CONFIRMED", "the replay cached the confirmation itself")
+        self.assertNotIn("exact_match", email, "a deleted set is still named")
 
 
 class TheScanKeysWithItsWorkspaceTest(ExactMatchCase):
@@ -320,6 +367,43 @@ class NothingOfTheValuesIsKeptTest(ExactMatchCase):
             self.assertEqual(self.upload(["a@example.com", "b@example.com"]).status_code, 200)
             self.assertEqual(self.upload(["c@example.com"], name="More").status_code, 400)
         self.assertEqual(len(store.list_edm_sets("t-edm")), 1)
+
+    def test_two_uploads_at_once_do_not_both_fit(self) -> None:
+        """M4 exit review: the API counted the workspace's values, then went on to insert
+        the set - the count outside any lock and any transaction. An upload still on its way
+        to the store let another one in, and both fitted."""
+        first_paused, second_done = threading.Event(), threading.Event()
+        original = exact_match.key_digest
+
+        def pause_the_first() -> str:
+            # Called on the way to the store's insert; the first upload waits there until
+            # the second has been answered.
+            if not first_paused.is_set():
+                first_paused.set()
+                second_done.wait(10)
+            return original()
+
+        statuses: dict[str, int] = {}
+
+        def upload(label: str, client: TestClient) -> None:
+            values = [f"{label.lower()}-{index}@example.com" for index in range(2)]
+            statuses[label] = client.post("/api/exact-match/sets", headers=self.as_("edm-admin", "t-edm"), json={
+                "name": label, "entity_type": "EMAIL_ADDRESS", "values": values}).status_code
+
+        with mock.patch.dict(os.environ, {"DSPM_EDM_MAX_ROWS": "3"}), \
+                mock.patch.object(exact_match, "key_digest", side_effect=pause_the_first):
+            first = threading.Thread(target=upload, args=("First", TestClient(app)))
+            first.start()
+            self.assertTrue(first_paused.wait(10), "the first upload never reached the store")
+            upload("Second", self.client)
+            second_done.set()
+            first.join(30)
+        self.assertEqual(sorted(statuses.values()), [200, 400], statuses)
+        self.assertEqual(sum(item["row_count"] for item in store.list_edm_sets("t-edm")), 2,
+                         "the workspace holds more values than configured")
+        with store._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) AS n FROM edm_fingerprints WHERE tenant_id = 't-edm'")
+                             .fetchone()["n"], 2, "the refused set left values behind")
 
     def test_erasing_the_workspace_erases_its_sets(self) -> None:
         self.upload(["ana.mammadova@example.com"])
