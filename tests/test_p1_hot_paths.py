@@ -24,6 +24,7 @@ from classification.compliance import (
     nist_catalog,
     validators,
 )
+from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -201,7 +202,8 @@ class TheScanCacheDirectoryIsResolvedOnceTest(unittest.TestCase):
             with mock.patch.object(Path, "resolve", counter):
                 paths = [engine._cache_path(("file", n)) for n in range(100)]
             self.assertEqual(counter.calls, 0)
-            self.assertEqual(first.parent, Path(os.path.join(temp_dir, "cache")).resolve())
+            # The workspace's own directory of the cache (C0.2).
+            self.assertEqual(first.parent, scan_cache.tenant_cache_dir(os.path.join(temp_dir, "cache"), "default"))
             self.assertTrue(all(path.parent == first.parent for path in paths))
             self.assertEqual(len(set(paths)), 100)
 

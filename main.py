@@ -33,7 +33,21 @@ logger = get_logger(__name__)
 MINIMUM_PYTHON = (3, 12)
 
 
+PLAINTEXT_OUTPUT_REFUSED = (
+    "main.py scan writes the whole report - every file's path, findings and preview - to --output as "
+    "plaintext JSON, and this install does not allow plaintext report exports. Set "
+    "DSPM_PLAINTEXT_REPORT_EXPORT=1 to allow them (refused in production), or run the scan from the "
+    "console, which keeps the report in the encrypted artifact store."
+)
+
+
 def run_scan(args: argparse.Namespace) -> None:
+    # C0.2: the CLI's report file is the same plaintext copy the console stopped writing
+    # by default, so it obeys the same policy - and is refused before the scan, not after.
+    from backend.config import plaintext_export_allowed
+
+    if not plaintext_export_allowed():
+        raise SystemExit(PLAINTEXT_OUTPUT_REFUSED)
     allowed_extensions = [
         item.strip()
         for item in (args.extensions or "").split(",")
@@ -242,6 +256,15 @@ def config_check(args: argparse.Namespace) -> int:
 
     raw = args.config or os.environ.get(config.CONFIG_ENV) or ""
     effective = config.resolve(os.environ, Path(raw) if raw else None)
+    if effective.production:
+        # C0.2: the backend refuses to start beside a plaintext dump; saying so here
+        # stops an upgrade before anything is stopped. Only the server refuses - a
+        # backup must still be possible, since taking one comes before the cleanup.
+        from backend.backup import plaintext_dump_problem
+
+        problem = plaintext_dump_problem(Path(effective.get("DSPM_BACKUP_DIR") or "data/backups").resolve())
+        if problem:
+            effective.errors.append(f"the backend will not start: {problem}")
     print(f"configuration: {raw or '(environment only)'}")
     print(f"mode:          {'production' if effective.production else 'local / evaluation'}")
     rows = effective.describe(show_defaults=args.all)

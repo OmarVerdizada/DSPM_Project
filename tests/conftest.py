@@ -44,6 +44,8 @@ _SESSION_ROOT: pathlib.Path | None = None
 # The scan cache this session made (none when DSPM_SCAN_CACHE_DIR was given), removed at
 # the end too. Found 2026-09-29: every run left one behind - hundreds, some over 100 MB.
 _SCAN_CACHE_ROOT: pathlib.Path | None = None
+# The report and backup directories this session made, removed at the end too.
+_DIRECTORIES_ROOT: pathlib.Path | None = None
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -62,10 +64,17 @@ def pytest_configure(config: pytest.Config) -> None:
     env inherited would wipe it. Require an explicit DSPM_PG_TEST_RESET=1 opt-in
     to run the destructive suite against Postgres; otherwise abort before any
     test (or fixture) runs. SQLite is always fine (its isolation is a temp file)."""
-    global _SCAN_CACHE_ROOT
+    global _SCAN_CACHE_ROOT, _DIRECTORIES_ROOT
     if not os.getenv("DSPM_SCAN_CACHE_DIR"):
         _SCAN_CACHE_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-scan-cache-")).resolve()
         os.environ["DSPM_SCAN_CACHE_DIR"] = str(_SCAN_CACHE_ROOT)
+    # C0.2: housekeeping now ages plaintext report files out by default, and production
+    # startup reads the backup directory. A test that starts the app must do both to a
+    # directory of its own, never to the checkout's data/reports and data/backups.
+    if not os.getenv("DSPM_REPORT_DIR") or not os.getenv("DSPM_BACKUP_DIR"):
+        _DIRECTORIES_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="dspm-test-dirs-")).resolve()
+        os.environ.setdefault("DSPM_REPORT_DIR", str(_DIRECTORIES_ROOT / "reports"))
+        os.environ.setdefault("DSPM_BACKUP_DIR", str(_DIRECTORIES_ROOT / "backups"))
     # C8 raised the production work factor to 600,000 PBKDF2 rounds (~0.34 s a hash on
     # this host). The suite hashes hundreds of fixture passwords, and none of those
     # tests is about the work factor, so it runs at the clamp floor - faster than the
@@ -148,6 +157,8 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
     if _SCAN_CACHE_ROOT is not None and not os.getenv("DSPM_TEST_KEEP_DB"):
         shutil.rmtree(_SCAN_CACHE_ROOT, ignore_errors=True)
+    if _DIRECTORIES_ROOT is not None and not os.getenv("DSPM_TEST_KEEP_DB"):
+        shutil.rmtree(_DIRECTORIES_ROOT, ignore_errors=True)
     if _SESSION_ROOT is None or os.getenv("DSPM_TEST_KEEP_DB"):
         return
     with suppress(Exception):

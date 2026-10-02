@@ -156,10 +156,11 @@ The generated files intentionally contain secret-like patterns for classifier te
 ## CLI Scan
 
 ```powershell
+$env:DSPM_PLAINTEXT_REPORT_EXPORT = "1"   # the report file is a plaintext export
 python main.py scan --local-path enterprise_test_data --output report.json
 ```
 
-The CLI writes a full JSON report with summary, file findings, permissions, risk reasons, DLP recommendations, and remediation actions.
+The CLI writes a full JSON report with summary, file findings, permissions, risk reasons, DLP recommendations, and remediation actions. That file is a plaintext copy of every path and finding, so it follows the same export policy as the console's report files (C0.2): it is refused - before anything is scanned - unless `DSPM_PLAINTEXT_REPORT_EXPORT=1`, and always in production. Scans started from the console keep their reports in the encrypted artifact store.
 
 ## File Server Scans
 
@@ -408,6 +409,8 @@ Useful environment variables:
 - `DSPM_ENV`: `local` (default) or `production`. Production enables fail-closed startup checks, disables the OpenAPI docs routes, blocks `--reload`, and scans nothing on the network until a workspace lists its scan targets (Security operations → Scan targets: networks and host names; anything else is refused before the scan connects and recorded in the audit trail — `DSPM_ALLOW_PRIVATE_TARGETS` is no longer read). It also serves only on loopback behind an HTTPS reverse proxy on the same host, and refuses to start with an unsafe network boundary: an empty or wildcard `DSPM_TRUSTED_HOSTS`, a wildcard, local or `http://` entry in `DSPM_CORS_ORIGINS`, a `0.0.0.0/0` `DSPM_TRUSTED_PROXIES`, or no trusted proxy for the loopback listener. See [deploy/reverse-proxy](deploy/reverse-proxy/README.md) for the Caddy and nginx configurations.
 - `DSPM_API_KEYS`: API-key hash mapping in `tenant_id:hash` format.
 - `DSPM_ALERT_WEBHOOK_URL`: optional alert webhook destination, POSTed on CRITICAL findings.
+- `DSPM_SCAN_CACHE_DIR` / `DSPM_SCAN_CACHE_ENCRYPT`: the incremental scan cache (default `data/scan_cache`) keeps each workspace's entries in its own subdirectory, sealed with the artifact key (C0.2); tenant erasure removes it. Measured cost on 3,000 small files: +9.5% on a cold scan, about 0.45 ms per file on an unchanged rescan (+13-24% there, on a noisy host), +1.9% on disk - and the sealed cache is 14% smaller than the plaintext one it replaces. `DSPM_SCAN_CACHE_ENCRYPT=0` is for an evaluation install only and is refused in production. Every place scan data rests, and the procedure for removing old plaintext copies, is in [Sensitive data at rest](docs/DEPLOYMENT_WINDOWS.md#sensitive-data-at-rest).
+- `DSPM_RETAIN_REPORT_FILE_DAYS`: plaintext report files in `DSPM_REPORT_DIR` are deleted this many days after they were written - 90 by default, `0` keeps them; a workspace under legal hold keeps its files. Production also refuses to start while the backup directory holds an unencrypted database dump (`main.py config check` names it).
 
 See [`.env.example`](.env.example) for the complete, code-verified list of all supported environment variables with defaults and production guidance. Note that the application does not auto-load `.env` files; export the values into the process environment.
 

@@ -279,6 +279,75 @@ escrowed keys in place, copy a set from the off-host location, and run `backup v
 <manifest>` and `backup restore <manifest> --yes`; reconcile the row counts the restore
 reports and check that a stored report opens.
 
+## Sensitive data at rest
+
+What a scan learns - paths, owners, ACLs, previews, findings - is kept in these places.
+Found values are stored masked everywhere but the moment-long temporary extraction files;
+paths and owners are not masked anywhere.
+
+| Surface | Where | At rest | How long |
+|---|---|---|---|
+| Database | `<DataRoot>\db` (SQLite) or PostgreSQL | not encrypted by Sentro: use BitLocker or the database server's own encryption | until erased (workspace erasure, retention for event rows) |
+| Report bodies | `<DataRoot>\artifacts\<workspace>` | gzip + Fernet, `artifact_key` | removed with the workspace; unreferenced ones with `DSPM_RETENTION_PRUNE_ARTIFACTS=1` |
+| Backups | `<DataRoot>\backups` | Fernet, `backup_key` | `backup create --keep N`; **production will not start beside an unencrypted dump here** |
+| Scan cache | `<DataRoot>\cache\tenants\<workspace>` | sealed with `artifact_key` (`DSPM_SCAN_CACHE_ENCRYPT`, on) | removed with the workspace; rebuilt by the next scan if deleted |
+| Plaintext report files | `<DataRoot>\reports\*.json` | **plaintext** - not written unless `DSPM_PLAINTEXT_REPORT_EXPORT=1` (refused in production) | deleted after `DSPM_RETAIN_REPORT_FILE_DAYS` (90; a held workspace's are kept) |
+| `main.py scan --output` | wherever it is pointed | **plaintext** - refused unless `DSPM_PLAINTEXT_REPORT_EXPORT=1`, always in production | the operator's |
+| Rendered reports (PDF, HTML) | `<InstallRoot>\current\app\data\reports_artifacts\<workspace>` | **plaintext**; values masked, paths reduced to file names | **kept** - not aged out, not removed by workspace erasure (see below) |
+| Temporary extraction | the service account's `%TEMP%` | **plaintext** for the moment a document or image from SMB, SharePoint or SFTP is converted to text; zero-filled, then deleted (a process killed mid-file can leave one). Archive members are read in memory | seconds |
+| Logs | `<DataRoot>\logs` | plaintext; secrets, tokens and passwords redacted; paths and host names can appear | `DSPM_LOG_MAX_MB` x `DSPM_LOG_BACKUPS` |
+
+**The scan cache (C0.2).** Each entry - a findings entry per file (`<digest>.enc`) and a row
+per file in `meta_index.sqlite` - is zlib-compressed and sealed with Fernet under the
+artifact key, behind a format marker (`SSC1`); reads are bounded before anything is
+decrypted, writes go to a private name and are renamed into place, and an entry that does
+not open (another key, altered, the other format) is a miss and is replaced. Each
+workspace has its own directory, so erasing a workspace removes its cache. The plaintext
+cache an older release left in the cache root is deleted, by exact name, on the first
+scan after the upgrade; that scan reads files again or replays them from the database
+baseline, and later scans reuse as before. Changing the artifact key, or
+`DSPM_SCAN_CACHE_ENCRYPT`, empties the cache the same way. Measured on 3,000 small files
+(`python scripts/scan_cache_cost.py`): a cold scan, which analyses and
+writes every entry, took 32.9 s sealed against 30.1 s in clear (+9.5%); an unchanged rescan,
+which opens every entry and seals it again, 11.6 s against 9.3 s (+24%, on a host where two
+runs of the same build differed by 21%), of which the sealing itself is about 1.3 s - 0.45 ms
+per file. Sealing and opening an 11.4 KB entry costs 159 and 171 us against 60 and 30 us for
+compression alone. On disk sealing adds 1.9% (26.1 MB against 25.6 MB), and the sealed cache
+is 14% smaller than the plaintext one it replaces (30.5 MB), because findings entries are
+compressed now too.
+
+### Removing plaintext copies (retention procedure)
+
+Plaintext copies made before C0.2 - a `pg_dump` left unencrypted in the backup directory,
+report files in `<DataRoot>\reports`, rendered reports - are somebody's data, so Sentro does
+not delete them itself, with one exception (report files older than the retention window).
+An operator removes them, in this order, once a good encrypted backup exists:
+
+1. **See what there is.** `main.py config check` names every unencrypted dump in the backup
+   directory (`REFUSED: the backend will not start: ...`); `Get-ChildItem <DataRoot>\reports`
+   and `<InstallRoot>\current\app\data\reports_artifacts` show the rest.
+2. **Take an encrypted backup and prove it.** `main.py backup create --verify` - it is not
+   refused beside the dump, because it comes first.
+3. **Restore drill.** Restore that backup where it cannot harm the install: a scratch install
+   with a copy of the secrets folder and its own `DSPM_DB_PATH` (SQLite), or a disposable
+   PostgreSQL database. `main.py backup verify <manifest>`, then `main.py backup restore
+   <manifest> --yes`, and check the workspaces and scans are there.
+4. **Delete the plaintext copies.** The dumps `config check` named, the report files no
+   external reader still needs, and rendered reports older than your policy. Deleting does
+   not overwrite: on a disk without BitLocker the blocks stay readable until reused.
+5. **Check again and start.** `main.py config check` reports the configuration valid; start
+   the services. Record the deletion (what, when, who, which backup was drilled) in the
+   change log.
+
+`tests/test_c02_data_lifecycle.py::TheCleanupProcedureTest` runs steps 1-5 against a
+throwaway install, including a restore after the cleanup.
+
+Rendered reports (the PDF and HTML a user downloads) are the remaining plaintext surface
+with no lifecycle: they are written under the release's own `data` folder, which cannot be
+moved by configuration, so neither retention nor workspace erasure reaches them yet.
+Remove them by hand in step 4 (a new release starts with none; an old release's go when it
+is removed from `releases\`).
+
 ## Upgrade
 
 Start an upgrade from the **install**, naming the new package's folder:

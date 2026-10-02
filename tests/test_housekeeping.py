@@ -6,9 +6,9 @@ do it once between them - and the policy has one definition, shared with the too
 
 What it may remove is deliberately narrow. Event rows past their window and finished job
 records go; scan reports, findings and assets never do; a tenant under legal hold keeps
-everything; and the two things that would delete somebody's data - artifact objects and
-the plaintext report files Phase A stopped writing - happen only when an install asks
-for them by name.
+everything; artifact objects are collected only when an install asks for it by name; and
+the plaintext report files Phase A stopped writing - clear-text copies of reports the
+encrypted artifact tier keeps - are aged out after 90 days unless the install says 0 (C0.2).
 """
 
 from __future__ import annotations
@@ -152,7 +152,8 @@ class TheHousekeepingPassTest(_HousekeepingTest):
         self.assertEqual((classes["artifacts"]["removed_rows"], classes["artifacts"]["skipped"]), (3, False))
         prune.assert_called_once()
 
-    def test_plaintext_report_files_are_kept_unless_a_number_of_days_says_otherwise(self) -> None:
+    def test_plaintext_report_files_are_kept_only_when_zero_days_says_so(self) -> None:
+        """C0.2 made the window finite by default (90 days); 0 still keeps every file."""
         reports = self.base / "reports"
         reports.mkdir()
         old = reports / "1_20260101000000.json"
@@ -162,11 +163,13 @@ class TheHousekeepingPassTest(_HousekeepingTest):
             stamp = (self.now - timedelta(days=age_days)).timestamp()
             os.utime(path, (stamp, stamp))
 
-        kept = housekeeping.run_retention(now=self.now, report_dir=reports)
+        with mock.patch.dict(os.environ, {"DSPM_RETAIN_REPORT_FILE_DAYS": "0"}):
+            kept = housekeeping.run_retention(now=self.now, report_dir=reports)
         self.assertNotIn("report_files", [row["data_class"] for row in kept["data_classes"]])
-        self.assertTrue(old.exists(), "a report file was deleted with no retention set")
+        self.assertTrue(old.exists(), "a report file was deleted with retention set to keep them")
 
-        with mock.patch.dict(os.environ, {"DSPM_RETAIN_REPORT_FILE_DAYS": "90"}):
+        with mock.patch.dict(os.environ, {"DSPM_RETAIN_REPORT_FILE_DAYS": ""}):
+            os.environ.pop("DSPM_RETAIN_REPORT_FILE_DAYS")
             summary = housekeeping.run_retention(now=self.now, report_dir=reports)
         classes = {row["data_class"]: row for row in summary["data_classes"]}
         self.assertEqual(classes["report_files"]["removed_rows"], 1)

@@ -402,16 +402,28 @@ async def app_lifespan(_: FastAPI):
             "DSPM_PLAINTEXT_REPORT_EXPORT=1 is refused in production: it writes every "
             "scanned file, previews included, to DSPM_REPORT_DIR as plaintext."
         )
+    # C0.2: nor does it serve beside a plaintext copy of its database. A pg_dump left
+    # unencrypted in the backup directory outlived every encrypted backup taken after
+    # it; refusing to start is what makes somebody look. Not suppressed, like the vault
+    # key check above: the refusal is the point.
+    if ENVIRONMENT in {"prod", "production"}:
+        from backend.backup import backup_dir, plaintext_dump_problem
+
+        problem = plaintext_dump_problem(backup_dir())
+        if problem:
+            raise RuntimeError(problem)
     with suppress(Exception):
-        from backend.housekeeping import plaintext_report_files
+        from backend.housekeeping import plaintext_report_files, report_file_days
         from scripts.logger import get_logger
 
         existing = plaintext_report_files(REPORT_DIR)
         if existing:
+            days = report_file_days()
             get_logger("backend.app").warning(
-                "%s plaintext scan report file(s) in %s. They are not written by default any more; "
-                "set DSPM_RETAIN_REPORT_FILE_DAYS to have housekeeping age them out.",
+                "%s plaintext scan report file(s) in %s. They are not written by default any more; %s",
                 len(existing), REPORT_DIR,
+                f"housekeeping removes each {days} days after it was written (DSPM_RETAIN_REPORT_FILE_DAYS)."
+                if days else "DSPM_RETAIN_REPORT_FILE_DAYS=0 keeps them; set a number of days to age them out.",
             )
     # ARCH-003: at server startup, mark jobs orphaned by a prior process as
     # failed and prune old terminal records. Done here (not at import) so tools

@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 
 from backend import store
 from collectors import file_scanner
+from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from discovery.incremental import apply_reuse_snapshot, incremental_scope_key
 from discovery.parity import accuracy_projection
@@ -193,8 +194,8 @@ class TheRehydrateKeepsNoCopyTest(_ReScanTest):
         # The replayed findings have been through the reference sets and suppression
         # rules, which the findings cache key does not carry - so they are not written
         # there (M4 exit review). The reuse metadata is.
-        self.assertEqual(list(self.cache.glob("*.json")), [],
-                         "the rehydrate wrote replayed findings into the findings cache")
+        self.assertEqual(list(scan_cache.tenant_cache_dir(self.cache, self.tenant).glob(f"*{scan_cache.FINDINGS_SUFFIX}")),
+                         [], "the rehydrate wrote replayed findings into the findings cache")
         # What the rehydrate wrote is what answers the next scan.
         _engine, third, _records = self._scan()
         self.assertEqual(third["scan_diagnostics"]["incremental"]["sidecar_hits"], FILES)

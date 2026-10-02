@@ -52,7 +52,10 @@ class _Case(unittest.TestCase):
         return "\n".join(lines)
 
     def production_file(self, extra: str = "") -> Path:
-        return self.write("[settings]\nDSPM_ENV = \"production\"\n" + self.secret_files() + "\n" + extra)
+        # A backup directory of its own: `config check` refuses production beside a
+        # plaintext dump there (C0.2), and the checkout's data/backups may hold one.
+        backups = f"DSPM_BACKUP_DIR = '{self.tmp / 'backups'}'\n"
+        return self.write("[settings]\nDSPM_ENV = \"production\"\n" + self.secret_files() + "\n" + backups + extra)
 
 
 class PrecedenceTest(_Case):

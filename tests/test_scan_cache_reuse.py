@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from collectors import file_scanner
+from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from backend import jobs
 
@@ -102,11 +103,12 @@ class ScanCacheReuseTests(unittest.TestCase):
 
     def test_missing_findings_cache_triggers_safe_reread(self) -> None:
         self._run()
-        # Remove findings cache files but keep the .meta.json reuse sidecars, so
-        # the reuse path hits and must fall back to a re-read for correctness.
-        for cache_file in self.cache.glob("*.json"):
-            if not cache_file.name.endswith(".meta.json"):
-                cache_file.unlink()
+        # Remove the findings entries but keep the reuse index, so the reuse path
+        # hits and must fall back to a re-read for correctness.
+        entries = list(scan_cache.tenant_cache_dir(self.cache, "reuse-tenant").glob(f"*{scan_cache.FINDINGS_SUFFIX}"))
+        self.assertTrue(entries, "the cold scan wrote no findings entries, so this proves nothing")
+        for cache_file in entries:
+            cache_file.unlink()
         d = self._run()
         self.assertTrue(any(f.get("findings") for f in d["files"]))
 

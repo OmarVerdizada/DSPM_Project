@@ -14,9 +14,12 @@ What it removes is deliberately narrow:
 - **unreferenced artifact objects**, only when ``DSPM_RETENTION_PRUNE_ARTIFACTS=1``. It is
   off by default: collecting objects is not retention, and an install should say yes to it
   deliberately;
-- **plaintext report files**, only when ``DSPM_RETAIN_REPORT_FILE_DAYS`` is set above zero.
-  Phase A stopped writing them by default; the ones already on disk are somebody's data,
-  and deleting them is an instruction, not a default.
+- **plaintext report files** older than ``DSPM_RETAIN_REPORT_FILE_DAYS`` (90 by default;
+  ``0`` keeps them), except a held tenant's. Phase A stopped writing them by default, and
+  each is a clear-text copy of a report the encrypted artifact tier still holds, so
+  removing it loses no report. Until C0.2 the default was to keep them for ever, which
+  made the plaintext copy the longest-lived one; 90 days gives an external reader that
+  still collects them (``DSPM_PLAINTEXT_REPORT_EXPORT=1``) a full quarter.
 
 Scan reports, findings and assets are never touched here.
 
@@ -56,12 +59,19 @@ def prune_artifacts_enabled() -> bool:
     return os.getenv("DSPM_RETENTION_PRUNE_ARTIFACTS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+REPORT_FILE_DAYS_DEFAULT = 90
+
+
 def report_file_days() -> int:
-    """After how many days a plaintext report file is deleted; ``0`` (the default) keeps them all."""
+    """After how many days a plaintext report file is deleted; ``0`` keeps them all.
+
+    An unreadable value keeps the default rather than turning retention off: a typo must
+    not quietly bring back keeping plaintext for ever.
+    """
     try:
-        return max(0, int(os.getenv("DSPM_RETAIN_REPORT_FILE_DAYS", "0")))
+        return max(0, int(os.getenv("DSPM_RETAIN_REPORT_FILE_DAYS", "90")))
     except ValueError:
-        return 0
+        return REPORT_FILE_DAYS_DEFAULT
 
 
 def plaintext_report_files(report_dir: Path) -> list[Path]:
@@ -74,8 +84,13 @@ def plaintext_report_files(report_dir: Path) -> list[Path]:
 
 def _prune_report_files(report_dir: Path, *, days: int, now: datetime, apply: bool) -> dict:
     cutoff = (now - timedelta(days=days)).timestamp()
+    # A file is named <tenant>_<scan>.json. A held tenant's are kept; matching by prefix
+    # can only keep more than that (another tenant whose id begins the same way).
+    held = tuple(f"{tenant}_" for tenant in store.tenants_under_legal_hold())
     stale = []
     for path in plaintext_report_files(report_dir):
+        if held and path.name.startswith(held):
+            continue
         try:
             if path.stat().st_mtime < cutoff:
                 stale.append(path)

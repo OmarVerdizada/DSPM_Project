@@ -151,9 +151,13 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_REPORT_ARTIFACTS", "bool"),
     ("DSPM_PLAINTEXT_REPORT_EXPORT", "bool"),
     ("DSPM_SCAN_CACHE_DIR", "path"),
+    # C0.2: the scan cache is sealed with the artifact key; 0 is for an evaluation
+    # install only, and production refuses it.
+    ("DSPM_SCAN_CACHE_ENCRYPT", "bool", {"default": "1"}),
     ("DSPM_RETAIN_ALERT_DAYS", "int", {"minimum": 0}),
     ("DSPM_RETAIN_AUDIT_DAYS", "int", {"minimum": 0}),
-    ("DSPM_RETAIN_REPORT_FILE_DAYS", "int", {"minimum": 0}),
+    # C0.2: plaintext report files are aged out after a quarter; 0 keeps them.
+    ("DSPM_RETAIN_REPORT_FILE_DAYS", "int", {"default": "90", "minimum": 0}),
     ("DSPM_RETENTION_INTERVAL_SECONDS", "int", {"minimum": 0}),
     ("DSPM_RETENTION_PRUNE_ARTIFACTS", "bool"),
     # sessions and sign-in
@@ -451,6 +455,17 @@ def smb_encryption_required() -> bool:
     return truthy(os.getenv("DSPM_SMB_REQUIRE_ENCRYPTION"))
 
 
+def plaintext_export_allowed(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether a scan report may be written to disk as plaintext JSON.
+
+    One policy for every writer of such a copy - the console's report export and
+    `main.py scan --output` (C0.2): only when DSPM_PLAINTEXT_REPORT_EXPORT=1, and never in
+    production, where the switch itself is refused.
+    """
+    env = os.environ if environ is None else environ
+    return truthy(env.get("DSPM_PLAINTEXT_REPORT_EXPORT")) and not is_production_value(env.get("DSPM_ENV"))
+
+
 def resolve(environ: Mapping[str, str], path: Path | None = None) -> Effective:
     """Effective settings from the environment and an optional file. Pure: changes nothing."""
     effective = Effective(path=path)
@@ -524,6 +539,9 @@ def production_problems(effective: Effective) -> list[str]:
     ):
         if truthy(get(name)):
             problems.append(f"{name}=1 is refused in production: {why}.")
+    if not truthy(get("DSPM_SCAN_CACHE_ENCRYPT") or "1"):
+        problems.append("DSPM_SCAN_CACHE_ENCRYPT=0 is refused in production: it writes every scanned file's path, "
+                        "owner and findings to the scan cache in clear.")
     if get("DSPM_DEV_ADMIN_PASSWORD"):
         problems.append("DSPM_DEV_ADMIN_PASSWORD is for local installs; production uses DSPM_ADMIN_PASSWORD(_FILE).")
     for name in sorted(TEST_ONLY):

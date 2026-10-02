@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 
 from collectors import file_scanner
 from discovery import discovery_engine as engine_module
+from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from discovery.parity import accuracy_projection
 
@@ -76,8 +77,17 @@ class _EstateTest(unittest.TestCase):
     def _run(self, **overrides) -> dict:
         return DSPMDiscoveryEngine(self._config(**overrides)).run().to_dict()
 
+    def _tenant_dir(self) -> Path:
+        """The workspace's cache directory, where its index lives since C0.2."""
+        return scan_cache.tenant_cache_dir(self.cache, "l1-index")
+
+    def _prepared_tenant_dir(self) -> Path:
+        """The directory as an engine leaves it before its first entry: made, and marked
+        with the format and key its entries are sealed with."""
+        return scan_cache.prepare_tenant_dir(self.cache, "l1-index", scan_cache.codec_from_environment())
+
     def _index_rows(self) -> dict[str, tuple[int, bytes]]:
-        path = self.cache / engine_module.META_INDEX_FILENAME
+        path = self._tenant_dir() / engine_module.META_INDEX_FILENAME
         conn = sqlite3.connect(str(path))
         try:
             return {digest: (rowid, payload) for rowid, digest, payload in
@@ -97,14 +107,16 @@ class TheIndexIsASQLiteFileTest(_EstateTest):
 
     def test_a_scan_writes_one_row_per_file_and_no_json_document(self) -> None:
         self._run()
-        self.assertTrue((self.cache / engine_module.META_INDEX_FILENAME).exists())
+        self.assertTrue((self._tenant_dir() / engine_module.META_INDEX_FILENAME).exists())
         self.assertFalse((self.cache / "index.json").exists(), "the whole-document index came back")
+        self.assertFalse((self._tenant_dir() / "index.json").exists(), "the whole-document index came back")
         self.assertEqual(len(self._index_rows()), FILES)
 
     def test_a_stored_entry_is_the_same_payload_the_json_index_held(self) -> None:
         """Only the storage changed: every entry still carries its snapshot."""
         self._run()
-        payload = json.loads(zlib.decompress(next(iter(self._index_rows().values()))[1]))
+        sealed = next(iter(self._index_rows().values()))[1]
+        payload = json.loads(scan_cache.codec_from_environment().open(sealed))
         self.assertEqual(payload.get("meta_version"), 2)
         self.assertIn("snapshot", payload)
         self.assertIn("baseline_result", payload["snapshot"],
@@ -155,8 +167,7 @@ class MemoryAndWritesAreBoundedTest(_EstateTest):
         `INSERT OR REPLACE` gives a replaced row a new rowid, so an unrelated
         entry that keeps its rowid and its bytes was provably not rewritten.
         """
-        self.cache.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.cache / engine_module.META_INDEX_FILENAME))
+        conn = sqlite3.connect(str(self._prepared_tenant_dir() / engine_module.META_INDEX_FILENAME))
         conn.execute("CREATE TABLE IF NOT EXISTS entries (digest TEXT PRIMARY KEY, payload BLOB NOT NULL)")
         conn.executemany(
             "INSERT INTO entries (digest, payload) VALUES (?, ?)",
@@ -283,8 +294,7 @@ class ReadsRunInParallelTest(_EstateTest):
 class ABrokenCacheIsNeverAFailedScanTest(_EstateTest):
 
     def test_a_corrupt_index_file_is_rebuilt(self) -> None:
-        self.cache.mkdir(parents=True, exist_ok=True)
-        (self.cache / engine_module.META_INDEX_FILENAME).write_bytes(b"this is not a database" * 50)
+        (self._prepared_tenant_dir() / engine_module.META_INDEX_FILENAME).write_bytes(b"this is not a database" * 50)
         report = self._run()
         self.assertEqual(len(report["files"]), FILES)
         self.assertEqual(len(self._index_rows()), FILES)
@@ -306,7 +316,7 @@ class AStoppedCacheIsNeverSilentTest(_EstateTest):
     """
 
     def _index_path(self) -> Path:
-        return self.cache / engine_module.META_INDEX_FILENAME
+        return self._tenant_dir() / engine_module.META_INDEX_FILENAME
 
     def _marker(self) -> Path:
         return Path(f"{self._index_path()}{engine_module.META_INDEX_REBUILD_MARKER_SUFFIX}")

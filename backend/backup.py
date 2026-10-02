@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -338,6 +339,106 @@ def create_logical_backup(dsn: str, out_dir: Path | None = None) -> Path:
         # The unencrypted dump never stays on disk.
         plain.unlink(missing_ok=True)
     return manifest_path
+
+
+# ---------------------------------------------------------------------------
+# C0.2: a plaintext dump in the backup directory. Every backup this module writes is
+# chunked Fernet beside a manifest, but the directory has held other things: a pg_dump
+# that failed its returncode check before the finally above existed, a SQLite snapshot a
+# killed process left, and whatever an operator copied there by hand. Any of them is the
+# whole database - or the estate's findings - readable by anyone with the folder, and
+# kept for as long as nobody looks. Production does not start beside one.
+# ---------------------------------------------------------------------------
+
+_SNIFF_BYTES = 64 * 1024
+_MAX_FILES_EXAMINED = 10_000
+# A token's version byte (0x80) and a timestamp's leading zero bytes, base64-encoded.
+_FERNET_TOKEN_PREFIX = b"gAAAAA"
+_DUMP_SUFFIXES = (".dump", ".sql", ".sqlite", ".sqlite3", ".backup", ".bak")
+_SQL_STATEMENT = re.compile(rb"\b(?:CREATE TABLE|INSERT INTO|COPY [\w.\"]+ \()", re.IGNORECASE)
+_SQL_OPENING = (b"--", b"/*", b"PRAGMA", b"BEGIN", b"SET ", b"CREATE ")
+_REPORT_KEYS = (b'"files"', b'"findings"', b'"scan_id"')
+
+
+def _chunked_fernet(head: bytes) -> bool:
+    """The framing ``encrypt_stream`` writes: a 4-byte length, then a Fernet token."""
+    if len(head) < 4 + len(_FERNET_TOKEN_PREFIX):
+        return False
+    (length,) = struct.unpack(">I", head[:4])
+    return length > 0 and head[4:4 + len(_FERNET_TOKEN_PREFIX)] == _FERNET_TOKEN_PREFIX
+
+
+def plaintext_dump_kind(path: Path) -> str | None:
+    """What unencrypted copy of the data a file in the backup directory is, or None.
+
+    Decided by content, not by name alone: a manifest and an encrypted payload are what
+    belong there, a file that begins like a database or a dump does not, whatever it is
+    called. A file that cannot be read is not judged.
+    """
+    name = path.name.lower()
+    if name.endswith(MANIFEST_SUFFIX):
+        return None
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(_SNIFF_BYTES)
+    except OSError:
+        return None
+    if _chunked_fernet(head):
+        return None
+    if head.startswith(b"PGDMP"):
+        return "a pg_dump archive"
+    if head.startswith(b"SQLite format 3\x00"):
+        return "a SQLite database"
+    if len(head) >= 262 and head[257:262] == b"ustar":
+        # capture_artifacts' own staging tar holds objects that are each encrypted.
+        return None if name.endswith(".artifacts.tar") else "a tar archive"
+    if head.startswith(b"\x1f\x8b") and name.endswith(tuple(f"{suffix}.gz" for suffix in (*_DUMP_SUFFIXES, ".tar", ".db"))):
+        return "a compressed dump"
+    stripped = head.lstrip()
+    if stripped.startswith(_SQL_OPENING) and _SQL_STATEMENT.search(head):
+        return "a plain SQL dump"
+    if name.endswith(".json") and stripped.startswith(b"{") and any(key in head for key in _REPORT_KEYS):
+        return "a plaintext scan report"
+    if name.endswith(_DUMP_SUFFIXES):
+        return "a file named as a dump that is not encrypted"
+    return None
+
+
+def plaintext_dumps(directory: Path | None = None) -> list[tuple[Path, str]]:
+    """The unencrypted copies of the data under the backup directory, with what each is."""
+    directory = Path(directory) if directory is not None else backup_dir()
+    found: list[tuple[Path, str]] = []
+    examined = 0
+    if not directory.is_dir():
+        return found
+    for folder, _subfolders, files in os.walk(directory):
+        for filename in sorted(files):
+            examined += 1
+            if examined > _MAX_FILES_EXAMINED:
+                return found
+            path = Path(folder) / filename
+            kind = plaintext_dump_kind(path)
+            if kind:
+                found.append((path, kind))
+    return found
+
+
+def plaintext_dump_problem(directory: Path | None = None) -> str | None:
+    """Why production refuses to start beside the backup directory, or None."""
+    directory = Path(directory) if directory is not None else backup_dir()
+    found = plaintext_dumps(directory)
+    if not found:
+        return None
+    named = "; ".join(f"{path.relative_to(directory)} ({kind})" for path, kind in found[:10])
+    if len(found) > 10:
+        named += f"; and {len(found) - 10} more"
+    return (
+        f"The backup directory {directory} holds {len(found)} unencrypted file(s) that can contain the "
+        f"database or the estate's findings: {named}. Production does not run beside a plaintext copy of "
+        "its data. Take an encrypted backup and prove it restores (main.py backup create --verify, then a "
+        "restore drill), then delete these files - the procedure is 'Sensitive data at rest' in "
+        "docs/DEPLOYMENT_WINDOWS.md."
+    )
 
 
 def list_manifests(directory: Path | None = None) -> list[Path]:

@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from collectors.smb_scanner import SMBScanner
+from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from backend import jobs
 
@@ -172,9 +173,10 @@ class SmbScanCacheProgressTests(unittest.TestCase):
         # Remove the findings cache but keep the reuse sidecars: the probe must
         # miss (fail-closed) so SMB files are fully re-read, never silently
         # emitted with empty findings.
-        for cache_file in self.cache.glob("*.json"):
-            if not cache_file.name.endswith(".meta.json"):
-                cache_file.unlink()
+        entries = list(scan_cache.tenant_cache_dir(self.cache, "smb-tenant").glob(f"*{scan_cache.FINDINGS_SUFFIX}"))
+        self.assertTrue(entries, "the first scan wrote no findings entries, so this proves nothing")
+        for cache_file in entries:
+            cache_file.unlink()
         retrieve_before = self.fake.retrieve_calls
         d = self._run()
         self.assertGreater(self.fake.retrieve_calls, retrieve_before)

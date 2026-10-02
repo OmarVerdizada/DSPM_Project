@@ -9166,6 +9166,24 @@ def _erase_tenant_artifacts(tenant_id: str) -> int:
         raise
 
 
+def _erase_tenant_scan_cache(tenant_id: str) -> int:
+    """Remove a tenant's scan cache - sealed findings and reuse entries. Raises rather
+    than swallowing, for the reason above (C0.2).
+
+    The cache holds what a report body holds about each file: its path, owner, ACL,
+    preview and findings. Before C0.2 every tenant's entries shared one directory under
+    names nothing could map back to a tenant, so an erasure could not reach them; they
+    now live in the tenant's own subdirectory, and it goes with the tenant.
+    """
+    try:
+        from discovery import scan_cache
+
+        return scan_cache.erase_tenant(tenant_id)
+    except Exception as exc:
+        logger.error("Scan cache erasure failed for tenant %s: %s", tenant_id, type(exc).__name__)
+        raise
+
+
 def delete_tenant_with_data(tenant_id: str) -> dict:
     # A legal hold outranks erasure: the whole point is that a scheduled or
     # requested deletion must not proceed while data is under preservation.
@@ -9184,6 +9202,7 @@ def delete_tenant_with_data(tenant_id: str) -> dict:
             # live in the artifact tier, deleting the rows alone would leave the
             # customer's report contents on disk (Phase 5, DB-07).
             usage["artifacts_removed"] = _erase_tenant_artifacts(tenant_id)
+            usage["scan_cache_files_removed"] = _erase_tenant_scan_cache(tenant_id)
             # Reconciliation state covers the shared optional search projection,
             # not one tenant. Invalidate it after any erasure so the next pass
             # detects and removes documents that no longer exist in the DB.
@@ -9233,6 +9252,8 @@ def reset_default_tenant_data() -> dict:
             # findings, paths, owners - readable on disk, which is the same
             # remanence bug the tenant-erasure path had before Phase 5b.
             usage["artifacts_removed"] = _erase_tenant_artifacts(tenant_id)
+            # The cache holds the same contents, file by file (C0.2).
+            usage["scan_cache_files_removed"] = _erase_tenant_scan_cache(tenant_id)
             # The built-in admin keeps its second factor, as it keeps its password.
             conn.execute("DELETE FROM user_mfa WHERE tenant_id = ? AND username <> ?", (tenant_id, "admin"))
             conn.execute(

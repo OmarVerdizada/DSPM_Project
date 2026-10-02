@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from collectors.binary_extractor import extract_binary_text
 from collectors.file_scanner import scan_directory
+from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
 
@@ -172,7 +173,7 @@ class PlatformRegressionTests(unittest.TestCase):
             self.assertEqual(first["incremental_scan_reason"], "cache_miss_new_or_changed_file")
             self.assertEqual(second["incremental_scan_reason"], "cache_hit_unchanged_file")
             self.assertTrue(second["detector_metrics"]["cache_hit"])
-            self.assertTrue(list(cache_dir.glob("*.json")))
+            self.assertTrue(list(scan_cache.tenant_cache_dir(cache_dir, config.tenant_id).glob(f"*{scan_cache.FINDINGS_SUFFIX}")))
 
     def test_run_uses_worker_pool_when_configured(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:

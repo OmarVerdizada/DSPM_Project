@@ -27,7 +27,7 @@ from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FR
 from classification.regex_classifier import RULES
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
-from discovery import triage
+from discovery import scan_cache, triage
 from discovery.detector_pool import build_pool
 from discovery.detector_stage import DETECTOR_STAGE_VERSION, run_detector_stage, timed_detector
 from discovery.parallelism import ParallelismPlan, resolve_parallelism
@@ -100,8 +100,9 @@ class ScanConfig:
     # Overridable so a test run - or an operator with a separate cache disk -
     # does not read and write the live install's findings cache. The suite
     # sets it to a temp directory; without that, a test's result depended on
-    # what an earlier real scan happened to leave behind.
-    cache_dir: str = field(default_factory=lambda: os.getenv("DSPM_SCAN_CACHE_DIR", "data/scan_cache"))
+    # what an earlier real scan happened to leave behind. Each workspace's entries are
+    # sealed and kept in their own subdirectory (C0.2, discovery/scan_cache.py).
+    cache_dir: str = field(default_factory=scan_cache.default_cache_dir)
     incremental_enabled: bool = True
     incremental_scope: str = ""
     baseline_probe: Callable[[str, int, str, str], dict | None] | None = None
@@ -241,12 +242,8 @@ META_INDEX_BUSY_TIMEOUT_SECONDS = 5.0
 # Left beside an index found damaged after it opened, so the next engine to open
 # it throws it away and starts again instead of reading from it.
 META_INDEX_REBUILD_MARKER_SUFFIX = ".rebuild"
-# Every scan compresses every entry it writes, so the compressor is on the hot
-# path. Measured on 2,000 real entries (25.5 KB raw): level 6 is 274 us at 6.1x,
-# level 1 is 82 us at 4.4x - 3.3x less CPU for 1.7 KB more per entry.
-META_INDEX_COMPRESSION_LEVEL = 1
-# How the whole-document index began, so it can be recognised and removed.
-_LEGACY_META_INDEX_HEADER = '{"index_version": 1'
+# Every scan compresses - and since C0.2 seals - every entry it writes, so both are on
+# the hot path; scan_cache.COMPRESSION_LEVEL records the measurement behind level 1.
 
 
 def _sqlite_failure(exc: BaseException | None) -> str:
@@ -314,7 +311,13 @@ class DSPMDiscoveryEngine:
         self._meta_index_health_lock = threading.Lock()
         self._meta_index_health = {"state": "ok", "write_failures": 0, "dropped_entries": 0, "read_errors": 0}
         self._finding_digests: set | None = None
+        # This workspace's cache directory and the codec its entries are sealed with,
+        # resolved together and once (C0.2). Unavailable - no key, no directory - means
+        # this engine scans without a cache rather than writing one in clear.
         self._cache_root_path: Path | None = None
+        self._cache_codec: scan_cache.CacheCodec | None = None
+        self._cache_unavailable = False
+        self._cache_root_lock = threading.Lock()
         self._incremental_counts = {
             "probes": 0,
             "unchanged": 0,
@@ -720,19 +723,31 @@ class DSPMDiscoveryEngine:
         return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
     def _cache_root(self) -> Path | None:
-        """Resolved cache directory, resolved once (it was re-resolving per file)."""
-        if self._cache_root_path is None:
-            if not self.config.cache_dir:
-                return None
-            try:
-                self._cache_root_path = Path(self.config.cache_dir).expanduser().resolve()
-            except OSError:
-                return None
-        return self._cache_root_path
+        """This workspace's cache directory, resolved and prepared once per engine.
 
-    def _meta_path(self, digest: str) -> Path:
-        root = self._cache_root()
-        return (root or Path(self.config.cache_dir)) / f"{digest}.meta.json"
+        Resolved once because it was re-resolving per file. Preparing it removes the
+        plaintext layout an older build left in the cache root and empties a directory
+        sealed under another key (C0.2). Every entry is read and written through the
+        codec resolved here, so there is no path that touches the cache without it.
+        """
+        root = self._cache_root_path
+        if root is not None or self._cache_unavailable:
+            return root
+        with self._cache_root_lock:
+            if self._cache_root_path is None and not self._cache_unavailable:
+                if not self.config.cache_dir or not self.config.persistent_cache_enabled:
+                    self._cache_unavailable = True
+                    return None
+                try:
+                    codec = scan_cache.codec_from_environment()
+                    prepared = scan_cache.prepare_tenant_dir(self.config.cache_dir, self.config.tenant_id, codec)
+                except (OSError, scan_cache.CacheKeyUnavailable) as exc:
+                    logger.warning("Scanning without the scan cache: %s", type(exc).__name__)
+                    self._cache_unavailable = True
+                    return None
+                self._cache_codec = codec
+                self._cache_root_path = prepared
+        return self._cache_root_path
 
     def _meta_index_connection(self) -> sqlite3.Connection | None:
         """The L1 reuse index, opened once per engine. Caller holds the lock.
@@ -809,26 +824,9 @@ class DSPMDiscoveryEngine:
                 self._meta_index_unavailable = True
                 self._set_meta_index_state("unavailable")
                 return None
-        self._retire_legacy_meta_index(root)
+        # The whole-document index this replaced, and the plaintext index that replaced
+        # it, are removed from the cache root when the directory is prepared (C0.2).
         return self._meta_index_db
-
-    @staticmethod
-    def _retire_legacy_meta_index(root: Path) -> None:
-        """Remove the whole-document index this replaces - but only if it is one.
-
-        Nothing reads it any more, it can run to gigabytes, and leaving it would
-        quietly keep the disk this change exists to give back. A file is only
-        removed if it begins exactly the way that index began.
-        """
-        legacy = root / "index.json"
-        try:
-            with open(legacy, "rb") as handle:
-                head = handle.read(len(_LEGACY_META_INDEX_HEADER)).decode("utf-8", "replace")
-        except OSError:
-            return
-        if head == _LEGACY_META_INDEX_HEADER:
-            with suppress(OSError):
-                legacy.unlink()
 
     def _meta_index_reader(self) -> sqlite3.Connection | None:
         """This thread's read connection, opened on first use.
@@ -875,20 +873,29 @@ class DSPMDiscoveryEngine:
         """One entry, read on demand - never the whole index, and once the index is
         open, never under the lock."""
         reader = self._meta_index_reader()
-        if reader is None:
+        if reader is None or self._cache_codec is None:
             return None
         try:
-            row = reader.execute("SELECT payload FROM entries WHERE digest = ?", (digest,)).fetchone()
+            # Bounded before it is read: SQLite knows a blob's length without loading it.
+            row = reader.execute(
+                "SELECT payload FROM entries WHERE digest = ? AND length(payload) <= ?",
+                (digest, scan_cache.MAX_SEALED_BYTES),
+            ).fetchone()
         except sqlite3.Error as exc:
             self._note_meta_index_failure(exc, reading=True)
             return None
         if row is None:
             return None
         try:
-            data = json.loads(zlib.decompress(row[0]).decode("utf-8"))
+            # None: sealed under another key, altered, or in the other format - a miss,
+            # and the row is replaced when the file is analysed again.
+            plain = self._cache_codec.open(row[0])
+            if plain is None:
+                return None
+            data = json.loads(plain.decode("utf-8"))
         except (zlib.error, UnicodeDecodeError, ValueError):
-            # Every entry is written compressed JSON; one that does not decode was
-            # damaged on disk (zlib checks its own checksum).
+            # An entry that opened and still does not decode was damaged on disk
+            # (zlib checks its own checksum).
             self._note_meta_index_failure(None, reading=True, kind="corrupt")
             return None
         return data if isinstance(data, dict) else None
@@ -991,12 +998,13 @@ class DSPMDiscoveryEngine:
                 if self._finding_digests is None:
                     names: set[str] = set()
                     root = self._cache_root()
+                    suffix = scan_cache.FINDINGS_SUFFIX
                     if root is not None:
                         try:
                             names = {
-                                entry.name[:-5]
+                                entry.name[:-len(suffix)]
                                 for entry in os.scandir(root)
-                                if entry.name.endswith(".json") and not entry.name.endswith(".meta.json")
+                                if entry.name.endswith(suffix)
                             }
                         except OSError:
                             names = set()
@@ -1072,10 +1080,13 @@ class DSPMDiscoveryEngine:
         if self.config.persistent_cache_enabled and self.config.cache_dir and not archive_bundle_required:
             try:
                 digest = self._meta_digest(path, size, mtime)
-                data = self._meta_index_get(digest)
-                if data is None:
-                    # Legacy per-file sidecar (cache written by an older build).
-                    data = json.loads(self._meta_path(digest).read_text(encoding="utf-8"))
+                # The per-file plaintext sidecars an older build wrote are no longer
+                # read: C0.2 removes them, and only sealed entries answer a probe.
+                data = self._meta_index_get(digest) or {}
+                if data and not _entry_describes(data, path, size, mtime):
+                    # The digest names this file; an entry that describes another one
+                    # was moved there, and is not trusted to answer for it.
+                    data = {}
                 finding_digest = str(data.get("finding_cache_digest") or "")
                 if finding_digest and not self._finding_digest_exists(finding_digest):
                     data = {}
@@ -1085,7 +1096,7 @@ class DSPMDiscoveryEngine:
                         self._incremental_counts["unchanged"] += 1
                         self._incremental_counts["sidecar_hits"] += 1
                     return snapshot
-            except (OSError, json.JSONDecodeError, ValueError):
+            except (OSError, ValueError, TypeError):
                 pass
 
         if self.config.baseline_probe is None or not self.config.incremental_scope:
@@ -1249,16 +1260,18 @@ class DSPMDiscoveryEngine:
             "snapshot": snapshot,
         }
         digest = self._meta_digest(identity, size, mtime)
-        # Serialise and compress here, in the analysis thread, so the lock guards a
-        # dict insert and nothing more - and so what waits for the next batch is
-        # the few kilobytes it will be stored as, not the object it was built from.
+        if self._cache_root() is None or self._cache_codec is None:
+            return
+        # Serialise, compress and seal here, in the analysis thread, so the lock guards
+        # a dict insert and nothing more - and so what waits for the next batch is the
+        # few kilobytes it will be stored as, never the plaintext it was built from.
         try:
-            packed = zlib.compress(
+            packed = self._cache_codec.seal(
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-                META_INDEX_COMPRESSION_LEVEL,
             )
         except (TypeError, ValueError):
-            # Not serialisable means not reusable: a miss next scan, not a crash now.
+            # Not serialisable (or past the bound a reader accepts) means not reusable:
+            # a miss next scan, not a crash now.
             return
         batch = None
         with self._meta_index_lock:
@@ -1835,18 +1848,28 @@ class DSPMDiscoveryEngine:
         if not self.config.persistent_cache_enabled:
             return None
         path = self._cache_path(cache_key)
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("cache_key") != _cache_key_digest(cache_key):
-                return None
-            findings = data.get("findings")
-            if not isinstance(findings, list):
-                return None
-            with self._cache_lock:
-                self._finding_cache[cache_key] = copy.deepcopy(findings)
-            return copy.deepcopy(findings)
-        except (OSError, json.JSONDecodeError, ValueError):
+        if path is None or self._cache_codec is None:
             return None
+        stored = scan_cache.read_entry(path)
+        if stored is None:
+            return None
+        try:
+            plain = self._cache_codec.open(stored)
+            data = json.loads(plain.decode("utf-8")) if plain is not None else None
+        except (zlib.error, UnicodeDecodeError, ValueError):
+            data = None
+        # An entry that does not open, or that names another key than the one it is
+        # filed under, is removed rather than left to be tried again: it is a miss
+        # either way, and what replaces it is written sealed.
+        if not isinstance(data, dict) or data.get("cache_key") != _cache_key_digest(cache_key):
+            scan_cache.discard(path)
+            return None
+        findings = data.get("findings")
+        if not isinstance(findings, list):
+            return None
+        with self._cache_lock:
+            self._finding_cache[cache_key] = copy.deepcopy(findings)
+        return copy.deepcopy(findings)
 
     def _store_cached_findings(self, cache_key: tuple, findings: list[dict], record: dict) -> None:
         """What the detectors found, before any reference set or suppression rule was
@@ -1856,6 +1879,8 @@ class DSPMDiscoveryEngine:
         if not self.config.persistent_cache_enabled:
             return
         path = self._cache_path(cache_key)
+        if path is None or self._cache_codec is None:
+            return
         payload = {
             "cache_key": _cache_key_digest(cache_key),
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1884,10 +1909,13 @@ class DSPMDiscoveryEngine:
             "findings": findings,
         }
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
+            sealed = self._cache_codec.seal(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        except scan_cache.EntryTooLarge:
+            return  # a file whose findings no reader would accept is analysed again
+        try:
+            # Sealed before it touches the disk, written under a private name and
+            # renamed into place: no plaintext and no partial entry is ever visible.
+            scan_cache.write_entry(path, sealed)
         except OSError:
             return
         # Also persist the metadata-first reuse sidecar so an unchanged file can
@@ -1895,11 +1923,14 @@ class DSPMDiscoveryEngine:
         # which findings-cache entry it pairs with so reuse is fail-closed.
         self._write_meta_sidecar(record, cache_key)
 
-    def _cache_path(self, cache_key: tuple) -> Path:
+    def _cache_path(self, cache_key: tuple) -> Path | None:
         # P1: _cache_root resolves the directory once; this re-resolved it for every
-        # file, ~10% of the main process on Windows in the quality audit.
-        root = self._cache_root() or Path(self.config.cache_dir).expanduser().resolve()
-        return root / f"{_cache_key_digest(cache_key)}.json"
+        # file, ~10% of the main process on Windows in the quality audit. None when
+        # this engine has no usable cache: nothing is read or written then.
+        root = self._cache_root()
+        if root is None:
+            return None
+        return root / f"{_cache_key_digest(cache_key)}{scan_cache.FINDINGS_SUFFIX}"
 
     @staticmethod
     def _build_summary(files: list[dict]) -> ScanSummary:
@@ -2067,6 +2098,20 @@ def _detector_version(framework_ids: set[str]) -> str:
 def _cache_key_digest(cache_key: tuple) -> str:
     raw = json.dumps(cache_key, sort_keys=True, default=str, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _entry_describes(entry: dict, identity: str, size: int, mtime: str) -> bool:
+    """Whether a reuse entry is about the file it was looked up for.
+
+    Its digest was made from these three, so an entry written for this file always
+    agrees. Encryption says an entry is authentic, not that it sits under its own name;
+    this says the second.
+    """
+    try:
+        return (str(entry.get("identity")) == str(identity) and int(entry.get("size")) == int(size)
+                and str(entry.get("modified_time")) == str(mtime))
+    except (TypeError, ValueError):
+        return False
 
 
 def _record_cache_key(
