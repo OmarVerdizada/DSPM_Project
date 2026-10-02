@@ -15,8 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
+import socket
+import struct
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -39,13 +43,17 @@ def _pg_dsn() -> str:
 
 
 class FakeCursor:
-    """A DB-API cursor over fixed tables: {(schema, table): (columns, types, rows)}."""
+    """A DB-API cursor over fixed tables: {(schema, table): (columns, types, rows)}. It runs
+    the sample SQL as PostgreSQL would - `left(col::text, n)` cuts a value, a bare column
+    does not - and keeps the longest value it sent and how each result was fetched."""
 
-    def __init__(self, tables: dict, statements: list) -> None:
-        self.tables, self.statements, self._rows = tables, statements, []
+    def __init__(self, tables: dict, statements: list, wire: dict) -> None:
+        self.tables, self.statements, self.wire, self._rows = tables, statements, wire, []
+        self._sample = False
 
     def execute(self, sql: str, params=()) -> None:
         self.statements.append(sql)
+        self._sample = False
         if "information_schema.tables" in sql:
             self._rows = sorted(self.tables)
         elif "information_schema.columns" in sql:
@@ -58,15 +66,36 @@ class FakeCursor:
             name = sql.split("FROM ", 1)[1].split(" LIMIT")[0]
             limit = int(sql.rsplit("LIMIT ", 1)[1])
             columns, types, rows = self._table(name)
-            wanted = [part.split('"')[1] for part in sql.split("SELECT ", 1)[1].split(" FROM")[0].split(", ")]
-            self._rows = [tuple(row[columns.index(column)] for column in wanted) for row in rows[:limit]]
+            selected = sql.split("SELECT ", 1)[1].split(" FROM")[0]
+            wanted = [quoted.replace('""', '"') for quoted in re.findall(r'"((?:[^"]|"")*)"', selected)]
+            cut = re.match(r'left\(".*?"::text, (\d+)\)', selected)
+            width = int(cut.group(1)) if cut else None
+
+            def sent(value):
+                if value is None:
+                    return None
+                value = str(value)[:width] if width else value
+                self.wire["longest"] = max(self.wire.get("longest", 0), len(str(value)))
+                return value
+
+            self._rows = [tuple(sent(row[columns.index(column)]) for column in wanted) for row in rows[:limit]]
+            self._sample = True
 
     def _table(self, quoted: str):
         schema, table = (part.strip('"') for part in quoted.split("."))
         return self.tables[(schema, table)]
 
     def fetchall(self):
-        return list(self._rows)
+        if self._sample:
+            self.wire.setdefault("fetches", []).append("fetchall")
+        rows, self._rows = list(self._rows), []
+        return rows
+
+    def fetchmany(self, size=1):
+        if self._sample:
+            self.wire.setdefault("fetches", []).append(size)
+        rows, self._rows = self._rows[:size], self._rows[size:]
+        return rows
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
@@ -74,10 +103,10 @@ class FakeCursor:
 
 class FakeConnection:
     def __init__(self, tables: dict) -> None:
-        self.tables, self.statements = tables, []
+        self.tables, self.statements, self.wire = tables, [], {}
 
     def cursor(self) -> FakeCursor:
-        return FakeCursor(self.tables, self.statements)
+        return FakeCursor(self.tables, self.statements, self.wire)
 
     def close(self) -> None:
         pass
@@ -139,7 +168,47 @@ class TheSamplerTest(unittest.TestCase):
         self.assertEqual(database_scanner.PostgresDialect().quote(evil), '"x""; DROP TABLE t; --"')
         self.assertEqual(database_scanner.MySQLDialect().quote("a`b"), "`a``b`")
         self.assertEqual(database_scanner.SQLServerDialect().quote("a]b"), "[a]]b]")
-        self.assertIn("TOP (5)", database_scanner.SQLServerDialect().sample_sql("dbo", "t", ["c"], 5))
+        self.assertIn("TOP (5)", database_scanner.SQLServerDialect().sample_sql("dbo", "t", ["c"], 5, 256))
+
+    def test_each_engine_cuts_a_value_in_the_sql(self) -> None:
+        # M4 exit review: the cut was made in Python, after the whole cell had crossed the wire.
+        postgres = database_scanner.PostgresDialect().sample_sql("s", 't"x', ['a"b', "c"], 7, 64)
+        self.assertEqual(postgres, 'SELECT left("a""b"::text, 64), left("c"::text, 64) FROM "s"."t""x" LIMIT 7')
+        self.assertEqual(database_scanner.MySQLDialect().sample_sql("s", "t", ["a`b"], 7, 64),
+                         "SELECT LEFT(CAST(`a``b` AS CHAR), 64) FROM `s`.`t` LIMIT 7")
+        self.assertEqual(database_scanner.SQLServerDialect().sample_sql("s", "t", ["a]b"], 7, 64),
+                         "SELECT TOP (7) LEFT(CAST([a]]b] AS NVARCHAR(MAX)), 64) FROM [s].[t]")
+
+    def test_a_large_value_never_crosses_the_wire_whole(self) -> None:
+        # A 5,000-character jsonb cell in 450 rows, sampled at 32 characters a value.
+        tables = {("public", "events"): (["payload"], ["jsonb"], [("{" + "x" * 5000 + "}",) for _ in range(450)])}
+        connection = FakeConnection(tables)
+        records, _ = database_scanner.scan(source(max_value_chars=32), connection=connection)
+        self.assertEqual(records[0]["database"]["sampled_rows"], 450)
+        self.assertLessEqual(connection.wire["longest"], 32, "the database sent the cut value, not the cell")
+        self.assertTrue(all(len(line) <= 32 for line in records[0]["content"].split("\n")))
+        fetches = connection.wire["fetches"]
+        self.assertNotIn("fetchall", fetches, "the sample is fetched in batches")
+        self.assertTrue(all(size <= database_scanner.FETCH_ROWS for size in fetches))
+        self.assertGreater(len(fetches), 1)
+
+    def test_each_tables_columns_are_handed_on_as_the_table_is_read(self) -> None:
+        connection = FakeConnection(seeded_tables())
+        handed = []
+        records, _ = database_scanner.scan(source(), connection=connection,
+                                           record_callback=lambda record: handed.append((record["name"],
+                                                                                         len(connection.statements))))
+        self.assertEqual([name for name, _ in handed], [record["name"] for record in records])
+        orders_sampled = next(index for index, sql in enumerate(connection.statements)
+                              if '"orders" LIMIT' in sql)
+        customers_handed = max(at for name, at in handed if name.startswith("public.customers."))
+        self.assertLessEqual(customers_handed, orders_sampled, "customers analysed before orders is read")
+        # The engine passes its callback down, rather than replaying the list at the end.
+        engine_handed = []
+        engine_connection = FakeConnection(seeded_tables())
+        engine = DatabaseDiscoveryEngine(ScanConfig(tenant_id="default"), source(), connection=engine_connection)
+        engine._collect_records(record_callback=lambda record: engine_handed.append(len(engine_connection.statements)))
+        self.assertLess(engine_handed[0], len(engine_connection.statements))
 
     def test_mysql_and_sql_server_say_their_driver_is_missing(self) -> None:
         for engine in ("mysql", "sqlserver"):
@@ -176,6 +245,96 @@ class TheSamplerTest(unittest.TestCase):
         self.assertEqual((columns["columns_skipped"], columns.get("record_limit_reached")), (2, True))
         stopped = database_scanner.scan(source(), connection=FakeConnection(seeded_tables()), cancel_check=lambda: True)[1]
         self.assertEqual(stopped.get("scan_aborted_reason"), "cancelled")
+
+
+class FakePostgres:
+    """Speaks just enough of the PostgreSQL wire protocol to do what a hostile host would:
+    refuse TLS, then ask for the password in the clear (3) or as MD5 (5). It keeps every
+    byte the client sends. Not a database - nothing here connects to one."""
+
+    def __init__(self, auth_code: int) -> None:
+        self.auth_code, self.received = auth_code, bytearray()
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(4)
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _exactly(self, conn, size: int) -> bytes:
+        data = b""
+        while len(data) < size:
+            chunk = conn.recv(size - len(data))
+            if not chunk:
+                raise ConnectionError("closed")
+            self.received += chunk
+            data += chunk
+        return data
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                conn, _ = self.listener.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(5)
+                try:
+                    while True:
+                        length = struct.unpack("!i", self._exactly(conn, 4))[0]
+                        code = struct.unpack("!i", self._exactly(conn, length - 4)[:4])[0]
+                        if code not in (80877103, 80877104):  # SSLRequest, GSSENCRequest: answered "no"
+                            break
+                        conn.sendall(b"N")
+                    salt = b"salt" if self.auth_code == 5 else b""
+                    conn.sendall(b"R" + struct.pack("!ii", 8 + len(salt), self.auth_code) + salt)
+                    chunk = conn.recv(4096)  # the password message - or nothing, as it should be
+                    self.received += chunk
+                except (OSError, ConnectionError, struct.error):
+                    pass
+
+    def close(self) -> None:
+        self.listener.close()
+
+
+class TheConnectionTest(unittest.TestCase):
+    """The password is offered only through SCRAM-SHA-256 (M4 exit review)."""
+
+    def target(self, **extra) -> database_scanner.DatabaseSource:
+        return source(host="db.corp.test", address="127.0.0.1", password="Svc-Fileserver-Secret-77",
+                      sslmode="prefer", **extra).bounded()
+
+    def test_a_host_that_asks_for_the_password_in_the_clear_never_gets_it(self) -> None:
+        for name, code in (("cleartext", 3), ("md5", 5)):
+            with self.subTest(auth=name):
+                server = FakePostgres(code)
+                self.addCleanup(server.close)
+                with self.assertRaisesRegex(database_scanner.DatabaseScanError, "SCRAM-SHA-256") as refused:
+                    database_scanner.connect(self.target(port=server.port))
+                self.assertIn("password was not sent", str(refused.exception))
+                self.assertNotIn(b"Svc-Fileserver-Secret-77", bytes(server.received))
+                self.assertNotIn(b"md5", bytes(server.received), "no MD5 answer either")
+                self.assertTrue(server.received, "the client did reach the fake host")
+
+    def test_scram_is_required_and_bound_to_tls_when_tls_is(self) -> None:
+        import psycopg
+
+        for sslmode, binding in (("verify-full", "require"), ("verify-ca", "require"), ("require", "require"),
+                                 ("prefer", None), ("disable", None)):
+            with self.subTest(sslmode=sslmode), mock.patch.object(psycopg, "connect") as dialled:
+                database_scanner.connect(source(sslmode=sslmode, address="10.1.2.3").bounded())
+                kwargs = dialled.call_args.kwargs
+                self.assertEqual(kwargs["require_auth"], "scram-sha-256")
+                self.assertEqual(kwargs.get("channel_binding"), binding)
+                self.assertEqual((kwargs["hostaddr"], kwargs["sslmode"]), ("10.1.2.3", sslmode))
+
+    def test_a_libpq_that_cannot_refuse_is_not_used(self) -> None:
+        import psycopg
+
+        with (mock.patch.object(psycopg.pq, "version", return_value=150007),
+              mock.patch.object(psycopg, "connect") as dialled,
+              self.assertRaisesRegex(database_scanner.DatabaseScanError, "older than 16")):
+            database_scanner.connect(self.target(port=5432))
+        dialled.assert_not_called()
 
 
 class TheEngineTest(unittest.TestCase):

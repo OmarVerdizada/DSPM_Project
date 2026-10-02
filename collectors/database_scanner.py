@@ -22,6 +22,20 @@ workspace's scan targets allowed (resolved once and pinned, collectors.net_guard
 verifies TLS as the connection's sslmode says. PostgreSQL is supported; MySQL and SQL
 Server have their SQL here and need their driver (PyMySQL, pyodbc) - neither is installed
 with the product: HELD until a pilot needs one.
+
+The password is only ever offered through SCRAM-SHA-256 (M4 exit review). The host is
+whatever the caller names within the workspace's scan targets, and the credential any
+saved scan credential - the vault has no separate database kind - so a host that asked
+libpq for the password in the clear (`password` authentication) would have been handed,
+say, the file-server service account's password. libpq's `require_auth` refuses every
+other method before the password goes anywhere, and under TLS `channel_binding=require`
+ties the exchange to the server's certificate, so it cannot be relayed either. Saved
+credentials stay one kind (README): give database scans an account of their own.
+
+Bounded on the wire as well as in the record: a value is cut to `max_value_chars` in the
+SQL, so a 5 MB jsonb cell sends its first 256 characters, not 5 MB; rows are fetched in
+batches; and each table's columns are handed to the engine (`record_callback`) as soon as
+the table is read, so analysis starts while the next table is sampled.
 """
 
 from __future__ import annotations
@@ -29,12 +43,17 @@ from __future__ import annotations
 import fnmatch
 import logging
 from dataclasses import dataclass, field
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
 ENGINES = ("postgresql", "mysql", "sqlserver")
 DEFAULT_PORTS = {"postgresql": 5432, "mysql": 3306, "sqlserver": 1433}
 MAX_SAMPLE_ROWS = 10_000
+FETCH_ROWS = 200  # rows a fetch: the sample is read in batches, never all at once
+# libpq 16 added require_auth; an older one cannot refuse a cleartext-password request.
+LIBPQ_REQUIRE_AUTH = 160000
+TLS_SSLMODES = ("require", "verify-ca", "verify-full")
 TEXT_TYPES = {
     "postgresql": {"text", "character varying", "character", "json", "jsonb", "citext", "uuid", "xml", "name"},
     "mysql": {"char", "varchar", "tinytext", "text", "mediumtext", "longtext", "json", "enum", "set"},
@@ -116,7 +135,9 @@ class Dialect:
     def count_sql(self, schema: str, table: str) -> str:
         return f"SELECT COUNT(*) FROM {self.quote(schema)}.{self.quote(table)}"
 
-    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int) -> str:
+    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int, max_chars: int) -> str:
+        """At most `limit` rows of `columns`, each value cut to `max_chars` characters by
+        the database - what crosses the wire is the bounded sample, not the cell."""
         raise NotImplementedError
 
     marker = "%s"
@@ -128,8 +149,8 @@ class PostgresDialect(Dialect):
     def quote(self, name: str) -> str:
         return '"' + str(name).replace('"', '""') + '"'
 
-    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int) -> str:
-        selected = ", ".join(f"{self.quote(column)}::text" for column in columns)
+    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int, max_chars: int) -> str:
+        selected = ", ".join(f"left({self.quote(column)}::text, {int(max_chars)})" for column in columns)
         return f"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}"
 
     def estimate_sql(self) -> str:
@@ -143,8 +164,8 @@ class MySQLDialect(Dialect):
     def quote(self, name: str) -> str:
         return "`" + str(name).replace("`", "``") + "`"
 
-    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int) -> str:
-        selected = ", ".join(f"CAST({self.quote(column)} AS CHAR)" for column in columns)
+    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int, max_chars: int) -> str:
+        selected = ", ".join(f"LEFT(CAST({self.quote(column)} AS CHAR), {int(max_chars)})" for column in columns)
         return f"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}"
 
 
@@ -158,8 +179,8 @@ class SQLServerDialect(Dialect):
     def count_sql(self, schema: str, table: str) -> str:
         return f"SELECT COUNT_BIG(*) FROM {self.quote(schema)}.{self.quote(table)}"
 
-    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int) -> str:
-        selected = ", ".join(f"CAST({self.quote(column)} AS NVARCHAR(MAX))" for column in columns)
+    def sample_sql(self, schema: str, table: str, columns: list[str], limit: int, max_chars: int) -> str:
+        selected = ", ".join(f"LEFT(CAST({self.quote(column)} AS NVARCHAR(MAX)), {int(max_chars)})" for column in columns)
         return f"SELECT TOP ({int(limit)}) {selected} FROM {self.quote(schema)}.{self.quote(table)}"
 
 
@@ -174,13 +195,30 @@ def connect(source: DatabaseSource):
             import psycopg
         except ImportError as exc:  # pragma: no cover - psycopg is in the PostgreSQL extra
             raise DriverMissing("The PostgreSQL driver (psycopg) is not installed.") from exc
+        if psycopg.pq.version() < LIBPQ_REQUIRE_AUTH:
+            raise DatabaseScanError("This install's PostgreSQL client library (libpq) is older than 16 and cannot "
+                                    "refuse a server that asks for the password in the clear, so no database is "
+                                    "scanned with it. Install psycopg[binary] from requirements-postgres.txt.")
+        # Only SCRAM-SHA-256 is offered the password; under TLS the exchange is bound to
+        # the server's certificate. Unknown to psycopg, both go to libpq as they are.
+        auth = {"require_auth": "scram-sha-256"}
+        if source.sslmode in TLS_SSLMODES:
+            auth["channel_binding"] = "require"
         try:
             return psycopg.connect(host=source.host, hostaddr=source.address or None, port=source.port,
                                    dbname=source.database, user=source.username, password=source.password,
                                    sslmode=source.sslmode, connect_timeout=10, autocommit=True,
                                    options=f"-c default_transaction_read_only=on "
-                                           f"-c statement_timeout={source.statement_timeout_ms}")
+                                           f"-c statement_timeout={source.statement_timeout_ms}", **auth)
         except psycopg.Error as exc:
+            # libpq's own wording, read here and never repeated: the message is said in ours.
+            text = str(exc)
+            if "authentication method requirement" in text or "channel binding" in text:
+                bound = " with channel binding" if "channel_binding" in auth else ""
+                raise DatabaseScanError(
+                    f"{source.host}:{source.port} did not authenticate with SCRAM-SHA-256{bound}, the only way "
+                    "this scan offers a password; the password was not sent. Set the account to scram-sha-256 in "
+                    "the server's pg_hba.conf (and password_encryption).") from exc
             raise DatabaseScanError(f"Could not connect to {source.host}:{source.port} ({type(exc).__name__}).") from exc
     driver = {"mysql": "PyMySQL", "sqlserver": "pyodbc"}[source.engine]
     raise DriverMissing(f"Scanning {source.engine} needs its driver ({driver}), which is not installed with this "
@@ -202,8 +240,11 @@ def _row_count(cursor, dialect: Dialect, schema: str, table: str) -> tuple[int, 
         return 0, False
 
 
-def scan(source: DatabaseSource, *, connection=None, cancel_check=None) -> tuple[list[dict], dict]:
-    """(records, diagnostics): one record a sampled text column."""
+def scan(source: DatabaseSource, *, connection=None, cancel_check=None,
+         record_callback: Callable[[dict], None] | None = None) -> tuple[list[dict], dict]:
+    """(records, diagnostics): one record a sampled text column. `record_callback` gets
+    each table's records as soon as the table is read, so the engine analyses one table
+    while the next is sampled instead of after the last."""
     source.bounded()
     dialect = DIALECTS[source.engine]
     conn = connection or connect(source)
@@ -229,11 +270,17 @@ def scan(source: DatabaseSource, *, connection=None, cancel_check=None) -> tuple
                 diagnostics["cancelled"] = True
                 break
             try:
-                records.extend(_scan_table(cursor, dialect, source, schema, table, diagnostics))
-                diagnostics["tables"] += 1
+                table_records = _scan_table(cursor, dialect, source, schema, table, diagnostics)
             except Exception as exc:
                 # The table is named in the report; the error only by its type.
                 diagnostics["errors"].append({"table": f"{schema}.{table}", "error": type(exc).__name__})
+                continue
+            diagnostics["tables"] += 1
+            records.extend(table_records)
+            # Outside the try: the engine refusing a record is not this table failing.
+            if record_callback is not None:
+                for record in table_records:
+                    record_callback(record)
         diagnostics["columns"] = len(records)
         # What was in scope and not read - a table that failed, tables or columns past the
         # limits, a cancelled scan - makes the scan incomplete, in the engine's own markers:
@@ -267,13 +314,25 @@ def _scan_table(cursor, dialect: Dialect, source: DatabaseSource, schema: str, t
     rows, exact = _row_count(cursor, dialect, schema, table)
     if exact and rows == 0:
         return []  # nothing to sample: counted in the diagnostics, not inventoried
-    cursor.execute(dialect.sample_sql(schema, table, [name for name, _ in columns], source.sample_rows))
-    sampled = cursor.fetchall()
+    cursor.execute(dialect.sample_sql(schema, table, [name for name, _ in columns], source.sample_rows,
+                                      source.max_value_chars))
+    # In batches: only the cut values are kept, one list a column, never the rows as well.
+    sampled = 0
+    column_values: list[list[str]] = [[] for _ in columns]
+    while sampled < source.sample_rows:
+        batch = cursor.fetchmany(FETCH_ROWS)
+        if not batch:
+            break
+        sampled += len(batch)
+        for row in batch:
+            for index, values in enumerate(column_values):
+                if row[index] is not None:
+                    # Cut in the SQL already; cut again in case a driver counts differently.
+                    values.append(str(row[index])[:source.max_value_chars])
     records = []
-    for index, (column, kind) in enumerate(columns):
-        values = [str(row[index])[:source.max_value_chars] for row in sampled if row[index] is not None]
+    for (column, kind), values in zip(columns, column_values):
         content = "\n".join(values)
-        complete = exact and len(sampled) >= rows
+        complete = exact and sampled >= rows
         records.append({
             "source": "database", "path": source.location(f"{schema}.{table}", column),
             "name": f"{schema}.{table}.{column}", "extension": ".column", "size": len(content.encode("utf-8")),
@@ -282,7 +341,7 @@ def _scan_table(cursor, dialect: Dialect, source: DatabaseSource, schema: str, t
             "bytes_scanned": len(content.encode("utf-8")), "total_bytes": len(content.encode("utf-8")),
             "database": {"engine": source.engine, "database": source.database, "schema": schema, "table": table,
                          "column": column, "data_type": kind, "table_rows": rows, "table_rows_exact": exact,
-                         "sampled_rows": len(sampled), "non_null_sampled": len(values),
+                         "sampled_rows": sampled, "non_null_sampled": len(values),
                          "sample_limit": source.sample_rows},
         })
     return records

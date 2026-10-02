@@ -30,12 +30,11 @@ class DatabaseDiscoveryEngine(DSPMDiscoveryEngine):
         self._connection = connection
 
     def _collect_records(self, record_callback: Callable[[dict], None] | None = None) -> list[dict]:
+        # The callback goes to the scanner, which hands on each table's columns as the table
+        # is read - not every table's, after the last one.
         records, diagnostics = database_scanner.scan(self.source, connection=self._connection,
-                                                     cancel_check=self._cancelled)
+                                                     cancel_check=self._cancelled, record_callback=record_callback)
         self.last_scan_diagnostics = diagnostics
-        if record_callback is not None:
-            for record in records:
-                record_callback(record)
         return records
 
     def _analyze_record(self, record: dict) -> dict:

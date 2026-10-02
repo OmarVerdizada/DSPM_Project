@@ -536,16 +536,16 @@
     {
       "file": "collectors/database_scanner.py",
       "test_id": "B608",
-      "code": "selected = \", \".join(f\"{self.quote(column)}::text\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
-      "reviewed": "2026-09-29",
-      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+      "code": "selected = \", \".join(f\"left({self.quote(column)}::text, {int(max_chars)})\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
+      "reviewed": "2026-10-01",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters; the value cut (max_value_chars, M4 exit review) is an int too, bounded 16-4096."
     },
     {
       "file": "collectors/database_scanner.py",
       "test_id": "B608",
-      "code": "selected = \", \".join(f\"CAST({self.quote(column)} AS CHAR)\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
-      "reviewed": "2026-09-29",
-      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+      "code": "selected = \", \".join(f\"LEFT(CAST({self.quote(column)} AS CHAR), {int(max_chars)})\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
+      "reviewed": "2026-10-01",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters; the value cut (max_value_chars, M4 exit review) is an int too, bounded 16-4096."
     },
     {
       "file": "collectors/database_scanner.py",
@@ -557,9 +557,9 @@
     {
       "file": "collectors/database_scanner.py",
       "test_id": "B608",
-      "code": "selected = \", \".join(f\"CAST({self.quote(column)} AS NVARCHAR(MAX))\" for column in columns) return f\"SELECT TOP ({int(limit)}) {selected} FROM {self.quote(schema)}.{self.quote(table)}\"",
-      "reviewed": "2026-09-29",
-      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+      "code": "selected = \", \".join(f\"LEFT(CAST({self.quote(column)} AS NVARCHAR(MAX)), {int(max_chars)})\" for column in columns) return f\"SELECT TOP ({int(limit)}) {selected} FROM {self.quote(schema)}.{self.quote(table)}\"",
+      "reviewed": "2026-10-01",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters; the value cut (max_value_chars, M4 exit review) is an int too, bounded 16-4096."
     }
   ]
 }
