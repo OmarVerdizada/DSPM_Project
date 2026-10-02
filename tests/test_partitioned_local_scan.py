@@ -445,7 +445,8 @@ class StoppingTest(_LocalTest):
 
     def test_the_time_budget_covers_the_whole_scan_and_planning_too(self) -> None:
         self._use_database("deadline")
-        with patch.object(discovery_engine, "SCAN_MAX_SECONDS", 1e-9):
+        # The whole partitioned scan's budget is a queued scan's (audit 2026-10, finding 11).
+        with patch.object(partitioned_scan, "queue_wait_seconds", return_value=1e-9):
             with self.assertRaisesRegex(RuntimeError, "time budget"):
                 partitioned_scan.run_partitioned_scan(TENANT, self._config("deadline"), max_files=3)
         with store._connect() as conn:

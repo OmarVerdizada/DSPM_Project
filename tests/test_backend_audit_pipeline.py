@@ -8,17 +8,24 @@ test that walks patches `is_skipped_scan_path`.
 """
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-from backend import store
+from backend import app as app_module, jobs, partition_worker, partitioned_scan, scan_resumer, store
+from backend.work_queue import LedgerQueue
 from collectors import file_scanner
+from discovery import discovery_engine
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
+from tests.test_partitioned_local_scan import TENANT
+from tests.test_queued_scan import REQUEST_PATH, _QueuedTest
 
 
 def _estate(root: Path, files: int, text: str = "nothing to see here\n") -> Path:
@@ -230,6 +237,230 @@ class AFailedAnalysisIsReadAgainTest(_LocalScanTest):
         self.assertIsInstance(reader._reuse_probe(str(self.estate / "plain.txt"), 52, stamp), dict,
                               "the index entry was never written, so the next assertion proves nothing")
         self.assertIsNone(reader._reuse_probe(str(self.estate / "contacts.txt"), 52, stamp))
+
+
+# ---- partitioned and queued scans: 4, 8, 11, 13, 15 ----------------------------------------------
+
+
+class _Partitioned(_QueuedTest):
+    """The partitioned-scan fixtures: a temp estate, a private database per test."""
+
+    def _planned(self, name: str, *, request: dict | None = None, label: str = "estate") -> dict:
+        self._use_database(name)
+        record = partitioned_scan.start_partitioned_scan(
+            TENANT, self._scan_config(name), request=request if request is not None else {"local_path": REQUEST_PATH},
+            scan_label=label, max_files=3)
+        self.assertIsNotNone(record)
+        return record
+
+
+class AQueuedScanNoWorkerCanRebuildRunsHereTest(_Partitioned):
+    """4: with DSPM_SCAN_EXECUTION=queue a scan whose credential is a typed password is
+    recorded as not resumable, workers take only resumable scans, and the resume sweep
+    failed it a lease later "because its credential was a typed password" - it never ran."""
+
+    def test_a_typed_password_scan_runs_in_the_process_that_holds_the_password(self) -> None:
+        self._use_database("typed-password")
+        payload = app_module.ScanRequest(local_path=REQUEST_PATH, server="fs01.corp.local", username="svc",
+                                         password="typed-not-stored", scan_label="estate", async_scan=True)
+        queue = MagicMock(wraps=LedgerQueue())
+        patches = (*self._queued(queue), mock.patch.dict(os.environ, {"DSPM_SCAN_QUEUE_MAX_SECONDS": "20"}))
+        for started in patches:
+            started.start()
+        try:
+            report = app_module._run_partitioned_scan_payload(
+                self._scan_config("typed-password"), payload, self._principal(), self._job())
+        finally:
+            for started in reversed(patches):
+                started.stop()
+        stored = store.read_partitioned_scan(TENANT, report["scan_id"])
+        self.assertFalse(stored["resumable"])
+        self.assertEqual(stored["status"], "done", "nothing ran a scan no worker could rebuild")
+        queue.publish.assert_not_called()
+
+
+class TheResumeSweepLeavesAnotherHostsScanTest(_Partitioned):
+    """8: the sweep never asked `runs_here`: host B resumed host A's local scan of D:\\Shares
+    and walked its own disk into A's estate - or failed it for good."""
+
+    def test_a_local_scan_planned_elsewhere_is_not_resumed_here(self) -> None:
+        record = self._planned("elsewhere")
+        with store._connect() as conn:
+            header = store.json.loads(conn.execute(
+                "SELECT header_json FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?",
+                (TENANT, record["scan_id"])).fetchone()[0])
+            header["host"] = "another-host.corp.local"
+            conn.execute("UPDATE partitioned_scans SET header_json = ? WHERE tenant_id = ? AND scan_id = ?",
+                         (store.json.dumps(header), TENANT, record["scan_id"]))
+        resume = MagicMock()
+        self.assertEqual(scan_resumer.resume_stale_scans(resume, stale_after_seconds=0), [])
+        resume.assert_not_called()
+        self.assertEqual(store.read_partitioned_scan(TENANT, record["scan_id"])["status"], "running")
+
+    def test_this_hosts_scan_is_still_resumed(self) -> None:
+        record = self._planned("here")
+        resume = MagicMock()
+        self.assertEqual(scan_resumer.resume_stale_scans(resume, stale_after_seconds=0), [record["scan_id"]])
+        resume.assert_called_once()
+
+
+class APartitionedScanHasItsOwnBudgetTest(unittest.TestCase):
+    """11: an inline partitioned scan - the path for the largest estates - got the half hour
+    a single scan gets; past it the scan was failed for good with its partitions in the
+    estate and no report."""
+
+    def test_the_whole_scan_gets_a_queued_scans_day_not_the_engines_half_hour(self) -> None:
+        with patch.object(discovery_engine, "SCAN_MAX_SECONDS", 1800), \
+                mock.patch.dict(os.environ, {"DSPM_SCAN_QUEUE_MAX_SECONDS": "86400"}):
+            budget = partitioned_scan._deadline() - time.monotonic()
+        self.assertGreater(budget, 3600)
+
+
+class AFailedPartitionWaitsBeforeItsNextAttemptTest(_Partitioned):
+    """13: a failed partition was queued again at once, so a share unreachable for twenty
+    seconds used up all three attempts in those seconds and failed the scan."""
+
+    def test_the_wait_grows_with_each_failure(self) -> None:
+        record = self._planned("backoff")
+        scan_id = record["scan_id"]
+        unit = store.claim_next_partition(TENANT, scan_id, worker_id="w")
+        store.fail_scan_partition(TENANT, scan_id, unit["partition_id"], "OSError", attempt=unit["attempt"])
+        failed_at = datetime.fromisoformat(store.read_scan_partition(TENANT, scan_id, unit["partition_id"])["finished_at"])
+
+        def requeued(after: float) -> int:
+            return store.requeue_failed_partitions(TENANT, scan_id, max_attempts=3, backoff_seconds=30,
+                                                   now=failed_at + timedelta(seconds=after))
+
+        self.assertEqual(requeued(5), 0, "a failed partition was queued again at once")
+        self.assertEqual(requeued(31), 1)
+        unit = store.claim_next_partition(TENANT, scan_id, worker_id="w")
+        self.assertEqual(unit["attempt"], 2)
+        store.fail_scan_partition(TENANT, scan_id, unit["partition_id"], "OSError", attempt=unit["attempt"])
+        failed_at = datetime.fromisoformat(store.read_scan_partition(TENANT, scan_id, unit["partition_id"])["finished_at"])
+        self.assertEqual(requeued(31), 0, "the second wait did not grow")
+        self.assertEqual(requeued(61), 1)
+
+    def test_an_inline_scan_waits_before_running_a_failed_partition_again(self) -> None:
+        self._use_database("inline-backoff")
+        real_run = partitioned_scan.DSPMDiscoveryEngine.run
+        failed_at: list[float] = []
+        started: list[float] = []
+
+        def the_last_partition_blinks_once(engine):
+            # The last partition, so no other partition's run stands in for the wait.
+            nothing_queued = not any(store.first_queued_partition(TENANT, scan["scan_id"])
+                                     for scan in store.list_unfinished_partitioned_scans())
+            if nothing_queued and not failed_at:
+                failed_at.append(time.monotonic())
+                raise OSError("the share blinked")
+            started.append(time.monotonic())
+            return real_run(engine)
+
+        with patch.object(partitioned_scan, "partition_retry_seconds", return_value=1.0), \
+                patch.object(partitioned_scan.DSPMDiscoveryEngine, "run", the_last_partition_blinks_once):
+            compact = partitioned_scan.run_partitioned_scan(TENANT, self._scan_config("inline-backoff"),
+                                                            request={"local_path": REQUEST_PATH}, max_files=3)
+        self.assertEqual(store.read_partitioned_scan(TENANT, compact["scan_id"])["status"], "done")
+        self.assertTrue(failed_at)
+        self.assertGreaterEqual(started[-1] - failed_at[0], 1.0, "the failed partition ran again at once")
+
+    def test_a_workers_maintenance_queues_it_again_once_the_wait_is_over(self) -> None:
+        record = self._planned("worker-backoff")
+        queue = LedgerQueue()
+        with patch.object(partitioned_scan, "partition_retry_seconds", return_value=0.3), \
+                patch.object(partitioned_scan.DSPMDiscoveryEngine, "run", side_effect=OSError("locked")):
+            first = queue.take("worker-a")
+            self.assertEqual(partition_worker.handle_delivery(queue, first, self._rebuild("worker-backoff"),
+                                                              worker_id="worker-a"), "retry")
+            failed = store.read_scan_partition(TENANT, record["scan_id"], first.partition_id)
+            self.assertEqual(failed["status"], "failed", "the failed partition was queued again at once")
+            time.sleep(0.4)
+            partition_worker._maintain(queue, self._rebuild("worker-backoff"), "worker-a", 300)
+        again = store.read_scan_partition(TENANT, record["scan_id"], first.partition_id)
+        self.assertEqual(again["status"], "queued", "no one queued the partition again after its wait")
+
+
+class ACancelledQueuedScanStopsItsWorkersTest(_Partitioned):
+    """15: workers ran partitions with no stop check and no engine cancel hook, and the
+    write never asked whether the scan was still running: a cancelled queued scan kept
+    writing estate rows for up to half an hour."""
+
+    def test_a_partition_running_when_its_scan_is_cancelled_is_not_written(self) -> None:
+        record = self._planned("cancel-worker")
+        scan_id = record["scan_id"]
+        unit = store.list_scan_partitions(TENANT, scan_id)[0]
+        real_run = partitioned_scan.DSPMDiscoveryEngine.run
+        seen: dict = {}
+
+        def cancelled_while_running(engine):
+            store.mark_partitioned_scan(TENANT, scan_id, "failed", error="Scan cancelled")
+            seen["engine_stops"] = bool(engine.config.cancel_check and engine.config.cancel_check())
+            return real_run(engine)
+
+        with patch.object(partitioned_scan.DSPMDiscoveryEngine, "run", cancelled_while_running):
+            outcome = partitioned_scan.run_queued_partition(record, self._scan_config("cancel-worker"),
+                                                            unit["partition_id"], worker_id="worker-a")
+        self.assertEqual(outcome, "dropped")
+        self.assertTrue(seen["engine_stops"], "the partition's engine was never told the scan was cancelled")
+        self.assertNotEqual(store.read_scan_partition(TENANT, scan_id, unit["partition_id"])["status"], "done")
+        with store._connect() as conn:
+            written = conn.execute("SELECT COUNT(*) FROM assets WHERE tenant_id = ? AND current_scan_id = ?",
+                                   (TENANT, scan_id)).fetchone()[0]
+        self.assertEqual(written, 0, "a cancelled scan's partition wrote estate rows")
+
+    def test_the_write_refuses_a_scan_that_is_no_longer_running(self) -> None:
+        record = self._planned("refuse-write")
+        scan_id = record["scan_id"]
+        unit = store.claim_next_partition(TENANT, scan_id, worker_id="w")
+        store.mark_partitioned_scan(TENANT, scan_id, "failed", error="Scan cancelled")
+        header = {"timestamp": "2026-10-02T00:00:00+00:00", "source": "local", "summary": {}, "scan_diagnostics": {}}
+        record_row = {"source": "local", "path": str(self.estate / "a_root.txt"), "name": "a_root.txt",
+                      "extension": ".txt", "size": 1, "findings": [], "risk": {"score": 0, "level": "NONE"}}
+        with self.assertRaises(store.ScanNotRunning):
+            store.persist_partition(TENANT, scan_id, unit["partition_id"], unit["attempt"], header, [record_row],
+                                    write_estate=True)
+        with store._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM assets WHERE tenant_id = ?", (TENANT,)).fetchone()[0], 0)
+
+
+# ---- 14: a job that is saving is not cancelled -----------------------------------------------------
+
+
+class AJobThatIsSavingIsNotCancelledTest(unittest.TestCase):
+    """14: cancel_job marked the job cancelled - and freed its slot - while its result was
+    being saved; the save still landed, under a job that said it was cancelled."""
+
+    def test_a_cancel_during_the_save_is_refused_and_the_job_completes(self) -> None:
+        saving = threading.Event()
+        release = threading.Event()
+        tenant = f"audit-jobs-{uuid4().hex[:8]}"
+
+        def on_complete(_data: dict) -> None:
+            saving.set()
+            release.wait(10)
+
+        engine = MagicMock()
+        engine.return_value.run.return_value = MagicMock(to_dict=MagicMock(return_value={"files": []}))
+        with patch.object(jobs, "DSPMDiscoveryEngine", engine):
+            job = jobs.create_scan_job(tenant, ScanConfig(tenant_id=tenant), on_complete)
+            self.assertTrue(saving.wait(10), "the job never reached its save")
+            cancelled = jobs.cancel_job(job.id)
+            active = jobs.active_job_count(tenant)
+            release.set()
+            deadline = time.monotonic() + 10
+            while job.status in {"queued", "running"} and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertFalse(cancelled, "a job whose result was being written was called cancelled")
+        self.assertEqual(active, 1, "the slot was freed while the save still ran")
+        self.assertEqual(job.status, "completed")
+
+    def test_a_cancel_before_the_save_still_cancels(self) -> None:
+        job = jobs.ScanJob(id=f"job-{uuid4().hex[:8]}", tenant_id="audit-jobs", status="running")
+        with jobs._lock:
+            jobs._jobs[job.id] = job
+        self.addCleanup(jobs._jobs.pop, job.id, None)
+        self.assertTrue(jobs.cancel_job(job.id))
+        self.assertFalse(jobs.begin_saving(job))
 
 
 if __name__ == "__main__":

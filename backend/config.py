@@ -237,6 +237,7 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_QUEUE_STUCK_MINUTES", "int", {"minimum": 0}),
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),
     ("DSPM_PARTITION_MAX_ATTEMPTS", "int", {"minimum": 1}),
+    ("DSPM_PARTITION_RETRY_SECONDS", "int", {"minimum": 0, "maximum": 900}),
     ("DSPM_PARTITION_MAX_FILES", "int", {"minimum": 1}),
     ("DSPM_PARTITION_WORKERS", "int", {"minimum": 1}),
     ("DSPM_SCAN_HEARTBEAT_SECONDS", "int", {"minimum": 1}),

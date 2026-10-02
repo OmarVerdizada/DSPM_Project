@@ -84,11 +84,16 @@ def _maintain(queue: PartitionQueue, rebuild: Callable[[dict], object], worker_i
     last attempt. Scans with nothing left to run are finalized or failed. The ledger
     queue hands nothing back: what a dead worker held is queued again by the first step.
     """
-    store.requeue_expired_partitions(max_attempts=partitioned_scan.partition_max_attempts())
+    max_attempts = partitioned_scan.partition_max_attempts()
+    store.requeue_expired_partitions(max_attempts=max_attempts)
     for record in store.list_unfinished_partitioned_scans(resumable_only=True):
         if record["status"] != "running" or not partitioned_scan.runs_here(record):
             continue
         try:
+            # A failed partition waits out its back-off before it is queued again, and
+            # nothing else queues it: the worker that saw it fail has moved on.
+            store.requeue_failed_partitions(record["tenant_id"], record["scan_id"], max_attempts=max_attempts,
+                                            backoff_seconds=partitioned_scan.partition_retry_seconds())
             partitioned_scan.settle_if_finished(record, rebuild(record))
         except Exception as exc:
             logger.warning("Scan %s could not be settled: %s", record["scan_id"], type(exc).__name__)

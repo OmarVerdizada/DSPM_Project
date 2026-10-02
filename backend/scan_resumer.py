@@ -67,6 +67,13 @@ def resume_stale_scans(resume: Callable[[dict], object], *, stale_after_seconds:
         tenant_id, scan_id = record["tenant_id"], record["scan_id"]
         if partitioned_scan.is_running_here(tenant_id, scan_id):
             continue
+        if record["resumable"] and not partitioned_scan.runs_here(record):
+            # A local scan names folders on the host that planned it. Resumed here, it
+            # would walk this host's disk into that host's estate - and finalize would
+            # prune the rest - or fail for good on a root it cannot reach. That host's
+            # own sweep continues it. (One that cannot be resumed is only marked failed,
+            # which any host may do.)
+            continue
         job_id = record["job_id"] or str(uuid.uuid4())
         if not store.claim_partitioned_scan_resume(
             tenant_id, scan_id, job_id=job_id, stale_after_seconds=stale, finalizing_stale_after_seconds=finalizing,

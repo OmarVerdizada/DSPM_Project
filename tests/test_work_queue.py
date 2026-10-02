@@ -261,7 +261,8 @@ class WorkersRunAScanTest(_LocalTest):
     def test_a_failed_partition_is_queued_again_until_its_attempts_run_out(self) -> None:
         record = self._start("retry")
         queue = LedgerQueue()
-        with mock.patch.dict(os.environ, {"DSPM_PARTITION_MAX_ATTEMPTS": "2"}), \
+        # Retry counting, not timing: the back-off has its own tests (test_backend_audit_pipeline).
+        with mock.patch.dict(os.environ, {"DSPM_PARTITION_MAX_ATTEMPTS": "2", "DSPM_PARTITION_RETRY_SECONDS": "0"}), \
                 mock.patch.object(partitioned_scan.DSPMDiscoveryEngine, "run", side_effect=OSError("locked")):
             first = queue.take("worker-a")
             self.assertEqual(partition_worker.handle_delivery(queue, first, self._rebuild("retry"), worker_id="worker-a"),

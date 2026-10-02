@@ -5477,21 +5477,44 @@ def requeue_expired_partitions(
     return changed
 
 
+MAX_PARTITION_RETRY_WAIT_SECONDS = 900
+
+
 @_tenant_scoped
-def requeue_failed_partitions(tenant_id: str, scan_id: str, *, max_attempts: int) -> int:
+def requeue_failed_partitions(tenant_id: str, scan_id: str, *, max_attempts: int,
+                              backoff_seconds: float = 0, now: datetime | None = None) -> int:
     """Give failed units of a scan another run, until they have had ``max_attempts``.
 
     A unit fails for reasons that may pass - a share that was briefly unreachable, a
     file locked for a moment. One that has failed ``max_attempts`` times stays failed,
     and the scan cannot be finalized until someone decides what to do with it.
+
+    With ``backoff_seconds`` a unit waits that long after its first failure, twice that
+    after its second, and so on (at most 15 minutes), before it is queued again. Requeued
+    at once, a share unreachable for twenty seconds used up every attempt in those twenty
+    seconds and failed the scan.
     """
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    stamp = datetime.now(timezone.utc).isoformat()
+    requeue = (
+        "UPDATE scan_partitions SET status = 'queued', lease_owner = '', lease_expires_at = '', updated_at = ? "
+        "WHERE tenant_id = ? AND scan_id = ? AND status = 'failed' AND attempt < ?"
+    )
     with _lock:
         with _connect() as conn:
-            return int(conn.execute(
-                "UPDATE scan_partitions SET status = 'queued', lease_owner = '', lease_expires_at = '', updated_at = ? "
-                "WHERE tenant_id = ? AND scan_id = ? AND status = 'failed' AND attempt < ?",
-                (datetime.now(timezone.utc).isoformat(), tenant_id, str(scan_id), int(max_attempts)),
-            ).rowcount or 0)
+            if backoff_seconds <= 0:
+                return int(conn.execute(requeue, (stamp, tenant_id, str(scan_id), int(max_attempts))).rowcount or 0)
+            changed = 0
+            # One statement per attempt number, because the wait grows with it.
+            # `finished_at` is isoformat() text, which compares correctly as a string.
+            for attempt in range(1, int(max_attempts)):
+                wait = min(float(backoff_seconds) * 2 ** (attempt - 1), MAX_PARTITION_RETRY_WAIT_SECONDS)
+                cutoff = (moment - timedelta(seconds=wait)).isoformat()
+                changed += int(conn.execute(
+                    requeue + " AND attempt = ? AND finished_at <= ?",
+                    (stamp, tenant_id, str(scan_id), int(max_attempts), attempt, cutoff),
+                ).rowcount or 0)
+            return changed
 
 
 def _partitioned_scan_row(row) -> dict:
@@ -5709,6 +5732,10 @@ class PartitionNotClaimed(RuntimeError):
     """A partition was persisted by a worker that does not hold it."""
 
 
+class ScanNotRunning(RuntimeError):
+    """A partition was persisted for a scan that is no longer running - cancelled, failed or done."""
+
+
 def iter_json_array(items):
     """``json.dumps(list(items), ensure_ascii=False)``, a piece at a time."""
     yield "["
@@ -5785,6 +5812,16 @@ def persist_partition(
             )
             if int(held.rowcount or 0) != 1:
                 raise not_claimed()
+            scan_row = conn.execute(
+                "SELECT status FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?",
+                (tenant_id, str(scan_id)),
+            ).fetchone()
+            if scan_row is not None and str(scan_row["status"]) not in ("running", "finalizing"):
+                # Cancelling a queued scan marks it failed, and a worker already running one
+                # of its partitions would otherwise go on writing estate rows for a scan that
+                # will never be finalized. (No record at all is a partition written outside
+                # a recorded scan, as the storage tests do.)
+                raise ScanNotRunning(f"scan {scan_id} is {scan_row['status']}; partition {partition_id} not written")
             _touch_scan_record(conn, tenant_id, scan_id, now)
             unit = conn.execute(
                 "SELECT ordinal, status, attempt FROM scan_partitions "

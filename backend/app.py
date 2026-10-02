@@ -5159,7 +5159,13 @@ def _run_partitioned_scan_payload(config: ScanConfig, payload: ScanRequest, prin
     data = None
     if job is not None and queued_execution():
         record = start_partitioned_scan(principal.tenant_id, config, job=job, **started)
-        if record is not None:
+        if record is not None and not record["resumable"]:
+            # Workers only take scans they can rebuild, and a typed password was never
+            # stored: published, nothing would ever run this scan, and the resume sweep
+            # would fail it a lease later for a credential it never needed again. This
+            # process holds the password, so it runs the scan itself.
+            data = continue_partitioned_scan(principal.tenant_id, record["scan_id"], config, job=job)
+        elif record is not None:
             data = _queued_partitioned_scan(record, config, principal, job)
     else:
         data = run_partitioned_scan(principal.tenant_id, config, job=job, **started)

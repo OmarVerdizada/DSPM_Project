@@ -125,6 +125,8 @@ class ScanJob:
     result: dict | None = None
     error: str | None = None
     cancel_requested: bool = False
+    # Set once the scan's result is being written (see `begin_saving`).
+    saving: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -214,11 +216,29 @@ def cancel_job(job_id: str) -> bool:
     job = get_job(job_id)
     if not job or job.status not in {"queued", "running"}:
         return False
-    # Signal the runner to stop at its next checkpoint, then take the terminal
-    # slot atomically. If the worker/heartbeat finalized first (race), _finalize
-    # no-ops and we report that we did not cancel it.
-    job.cancel_requested = True
+    with _lock:
+        if job.saving:
+            # The result is being written and will land: calling the job cancelled now
+            # would be untrue, and would free its slot while the save still runs.
+            return False
+        # Signal the runner to stop at its next checkpoint, then take the terminal
+        # slot atomically. If the worker/heartbeat finalized first (race), _finalize
+        # no-ops and we report that we did not cancel it.
+        job.cancel_requested = True
     return _finalize(job, "cancelled", message="Cancellation requested")
+
+
+def begin_saving(job: ScanJob) -> bool:
+    """Mark that the job is writing its result; returns False if it was cancelled first.
+
+    From here a cancel is refused: the save is one transaction that will land, so the job
+    finishes as what it is, and keeps its slot until its runner returns.
+    """
+    with _lock:
+        if job.cancel_requested:
+            return False
+        job.saving = True
+        return True
 
 
 def _shrink_result(data: dict) -> dict:
@@ -343,9 +363,9 @@ def _run_scan_job(job: ScanJob, config: ScanConfig, on_complete: Callable[[dict]
     with collection_heartbeat(job):
         engine = DSPMDiscoveryEngine(config)
         report = engine.run()
-    if job.cancel_requested:
-        raise RuntimeError("Scan cancelled")
     data = report.to_dict()
+    if not begin_saving(job):
+        raise RuntimeError("Scan cancelled")
     job.progress = max(job.progress, 96)
     job.message = "Saving report"
     on_complete(data)
