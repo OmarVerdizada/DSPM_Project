@@ -376,6 +376,53 @@ class AnEmptySwitchTest(unittest.TestCase):
         self.assertEqual(config.resolve(dict(PRODUCTION), None).errors, [])
 
 
+# ── 3: a SIEM URL with a bad port ────────────────────────────────────────────────────
+class ABadSiemUrlTest(unittest.TestCase):
+    """The first audit write imports DSPM_SIEM_URL as the SIEM configuration. A port out of
+    range or not a number raised ValueError there - in every audit write, so nobody could
+    sign in - and `config check` still called the configuration valid."""
+
+    BAD = ("tls://siem.corp.local:70000", "tcp://siem.corp.local:6514x")
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="sentro-audit-siem-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        original = store.DB_PATH
+        store.DB_PATH = self.tmp / "siem.sqlite"
+        self.addCleanup(setattr, store, "DB_PATH", original)
+        store.init_db()
+        store.create_tenant("t-siem-url", "t")
+
+    def test_audit_writes_go_on_and_nothing_is_forwarded(self) -> None:
+        from backend import siem_settings
+
+        refused = mock.patch.object(siem_settings, "_REFUSED_URLS", set())
+        refused.start()
+        self.addCleanup(refused.stop)
+        for url in self.BAD:
+            with self.subTest(url=url), mock.patch.dict(os.environ, {"DSPM_SIEM_URL": url}), \
+                    self.assertLogs("backend.siem_settings", "WARNING") as logged:
+                store.audit("t-siem-url", "alice", "auth.login", {})
+                store.audit("t-siem-url", "alice", "auth.login", {})
+                self.assertEqual(store.audit_outbox_status()["pending"], 0)
+                self.assertIsNone(siem_settings.target())
+            self.assertEqual(len(logged.records), 1, "once, not at every audit write")
+            self.assertNotIn("siem.corp.local", logged.output[0])
+        self.assertEqual(len([row for row in store.read_audit_log("t-siem-url", 20)]), 4)
+
+    def test_config_check_refuses_it(self) -> None:
+        from backend import config
+
+        for url in self.BAD + ("http://siem.corp.local:514", "tls://:6514", "tcp://siem.corp.local:0"):
+            with self.subTest(url=url):
+                errors = config.resolve({"DSPM_SIEM_URL": url}, None).errors
+                self.assertTrue(any(error.startswith("DSPM_SIEM_URL must be") for error in errors), errors)
+                self.assertNotIn(url, repr(errors))
+        for url in ("tls://siem.corp.local:6514", "udp://10.0.0.5", "tcp://[fd00::5]:1514", ""):
+            with self.subTest(url=url):
+                self.assertEqual(config.resolve({"DSPM_SIEM_URL": url}, None).errors, [])
+
+
 # ── 11: one reading of DSPM_ENV ──────────────────────────────────────────────────────
 class ProductionWithATrailingSpaceTest(unittest.TestCase):
     """config strips DSPM_ENV, so "production " enforced production's rules - while `serve`

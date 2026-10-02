@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -46,6 +47,11 @@ DEFAULT_PORTS = {"tcp": 514, "udp": 514, "tls": 6514}
 CA_MAX_BYTES = 64 * 1024
 # Events that have waited this long are a delivery problem even before a retry has failed.
 QUEUE_STALE_SECONDS = 120
+
+logger = logging.getLogger(__name__)
+# The DSPM_SIEM_URL values already reported as unusable, so each is logged once, not at
+# every audit write.
+_REFUSED_URLS: set[str] = set()
 
 _HOSTNAME = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$")
 
@@ -108,14 +114,25 @@ def _from_environment() -> dict | None:
     url = os.getenv("DSPM_SIEM_URL", "").strip()
     if not url:
         return None
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError:
+        # A port out of range or not a number raised here - inside every audit write, the
+        # first of which imports this - so every audited action failed, sign-in included.
+        # Not imported; `config check` names the setting. Logged once, without the value.
+        if url not in _REFUSED_URLS:
+            _REFUSED_URLS.add(url)
+            logger.warning("DSPM_SIEM_URL is not a valid tls://, tcp:// or udp:// host:port address and was "
+                           "not imported; configure the SIEM under Settings -> Features -> SIEM Integration.")
+        return None
     transport = (parsed.scheme or "").lower()
     if transport not in TRANSPORTS or not parsed.hostname:
         return None
     config = {
         "transport": transport,
         "host": parsed.hostname,
-        "port": parsed.port or DEFAULT_PORTS[transport],
+        "port": port or DEFAULT_PORTS[transport],
         "format": (os.getenv("DSPM_SIEM_FORMAT", "cef").strip().lower() or "cef"),
         "trust": "system",
         "changed_at": _now(),

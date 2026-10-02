@@ -440,6 +440,26 @@ def _check_value(setting: Setting, value: str) -> str | None:
         # The readers lower-case what they read, so the check does too.
         if text.lower() not in setting.choices:
             return f"{setting.name} must be one of {', '.join(c or '(empty)' for c in setting.choices)}, not {text!r}."
+    if text and setting.name == "DSPM_SIEM_URL":
+        return _siem_url_problem(text)
+    return None
+
+
+def _siem_url_problem(text: str) -> str | None:
+    """DSPM_SIEM_URL as backend/siem_settings imports it. A port out of range or not a number
+    made that import raise inside every audit write - sign-in included - while this said the
+    configuration was valid. The value is not quoted back."""
+    from urllib.parse import urlsplit
+
+    problem = ("DSPM_SIEM_URL must be tls://host:port, tcp://host:port or udp://host:port, the port from 1 "
+               "to 65535 (or left out for the transport's own).")
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        return problem
+    if parts.scheme.lower() not in {"tls", "tcp", "udp"} or not parts.hostname or port == 0:
+        return problem
     return None
 
 
