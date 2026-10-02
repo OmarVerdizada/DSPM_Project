@@ -1291,6 +1291,31 @@ def add_source_checkpoints(conn) -> None:
     add_tenant_rls(conn)
 
 
+# Byte counts a 32-bit column cannot hold: a file of 2 GiB or more (a PST, a VHDX, an ISO, a
+# backup) or a report body that large. The baseline declared them INTEGER, which PostgreSQL
+# keeps 32-bit; SQLite's INTEGER is already 64-bit.
+_BYTE_COUNT_COLUMNS = (
+    ("assets", "size"),
+    ("asset_versions", "size"),
+    ("scan_reports", "report_bytes"),
+    ("scan_partitions", "records_bytes"),
+)
+
+
+def widen_byte_counts(conn) -> None:
+    """Revision 0036: byte counts as 64-bit integers on PostgreSQL.
+
+    The normalized write is authoritative, so one file of 2 GiB failed the asset insert
+    with "integer out of range" and the whole scan was not saved. A no-op on SQLite; on
+    PostgreSQL each ALTER rewrites its table once (and is a no-op when the column is
+    BIGINT already, so the revision can be re-run). Rollback: restore the pre-upgrade
+    backup - older code reads BIGINT columns unchanged."""
+    if not db.is_postgres():
+        return
+    for table, column in _BYTE_COUNT_COLUMNS:
+        conn.execute(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT")  # noqa: S608 - fixed names
+
+
 def add_asset_access(conn) -> None:
     """Revision 0031: who can read each file (D7).
 

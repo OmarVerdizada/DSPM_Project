@@ -243,5 +243,44 @@ class AnOlderReportNeverOverwritesANewerFindingTest(unittest.TestCase):
         self.assertEqual(owner, "hr-team")
 
 
+class ByteCountsAre64BitTest(unittest.TestCase):
+    """assets.size, asset_versions.size, scan_reports.report_bytes and
+    scan_partitions.records_bytes were 32-bit on PostgreSQL: one file of 2 GiB failed the
+    authoritative asset insert and the whole scan was not saved."""
+
+    def test_the_revision_widens_every_byte_count_on_postgresql(self) -> None:
+        from backend import db, store
+
+        statements = []
+        conn = MagicMock()
+        conn.execute.side_effect = lambda sql, *args: statements.append(sql)
+        with patch.object(db, "is_postgres", return_value=True):
+            store.widen_byte_counts(conn)
+        for table, column in (("assets", "size"), ("asset_versions", "size"),
+                              ("scan_reports", "report_bytes"), ("scan_partitions", "records_bytes")):
+            self.assertIn(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT", statements)
+
+    def test_sqlite_is_left_alone(self) -> None:
+        from backend import db, store
+
+        conn = MagicMock()
+        with patch.object(db, "is_postgres", return_value=False):
+            store.widen_byte_counts(conn)
+        conn.execute.assert_not_called()
+
+    def test_a_file_over_2_gib_is_stored_with_its_size(self) -> None:
+        from backend import store
+
+        tenant = f"audit-big-{uuid4().hex[:8]}"
+        store.create_tenant(tenant, "Big")
+        big = 5 * 1024 ** 3
+        store.save_scan_history(tenant, {"scan_id": "big-1", "source": "local", "summary": {}, "files": [
+            {"path": "/share/mailbox.pst", "name": "mailbox.pst", "extension": ".pst", "size": big,
+             "modified_at": "2026-09-01T00:00:00+00:00", "risk": {"level": "LOW", "score": 5}, "findings": []}]})
+        with store._connect() as conn:
+            row = conn.execute("SELECT size FROM assets WHERE tenant_id = ?", (tenant,)).fetchone()
+        self.assertEqual(int(row["size"]), big)
+
+
 if __name__ == "__main__":
     unittest.main()
