@@ -14,12 +14,16 @@ escalated around. Each file becomes a record like any other collector's:
   (list, stat, open for reading); symbolic links are not followed, so a link cannot walk
   the scan out of the paths it was given.
 - **Bounded**: depth, a file count and the text limit a file is read to (a longer one is
-  PARTIAL), and the extension policy decides what is opened. Every answer is waited for
+  PARTIAL; a document - Office, OpenDocument, PDF - is read whole up to a larger cap of its
+  own, since its text is parsed from the whole file), and the extension policy decides
+  what is opened. Every answer is waited for
   at most the source's timeout, and the scan's cancel and deadline are asked per file: a
   host that stops answering ends the scan, not complete, instead of holding it.
 - **Who can read it**: the mode bits become access entries the D7 analysis reads - the
   owner, the group and, for world-readable files, Everyone (S-1-1-0) - so a world-readable
-  key or export is flagged like a share Everyone can read.
+  key or export is flagged like a share Everyone can read. The group and Everyone count
+  only when every folder above the file lets them through (x): a 0644 file in a 0700 home
+  folder is not world-readable.
 - **Resume**: a scan interrupted part-way is simply run again; the engine's reuse skips
   every file the last run analysed unchanged (path, size, modification time), so only what
   is left, or what changed, is read.
@@ -39,6 +43,9 @@ import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
+from collectors.file_scanner import MAX_ARCHIVE_TOTAL_BYTES
+from collectors.text_decode import decode_text
 from discovery.incremental import snapshot_is_failed_read
 
 EVERYONE_SID = "S-1-1-0"
@@ -64,6 +71,8 @@ class SftpSource:
     max_depth: int = 8
     max_files: int = 100_000
     max_read_bytes: int = 5 * 1024 * 1024
+    # Office, OpenDocument and PDF files are read whole up to this: see scan().
+    max_document_bytes: int = MAX_ARCHIVE_TOTAL_BYTES
     allowed_extensions: list[str] | None = None
     include_hidden: bool = True
     timeout: float = 15.0
@@ -137,13 +146,31 @@ def connect(source: SftpSource):
         raise
 
 
-def access(attributes) -> dict:
-    """The mode bits as the access entries D7 reads (owner, group, everyone)."""
+def can_enter(folders: tuple[tuple[int, int | None], ...], gid=None) -> bool:
+    """Whether every folder on the way to a file - (mode, gid), from "/" down to its own
+    folder - lets others (``gid`` None) or the members of group ``gid`` pass through it
+    (the x bit). A file's own bits do not open a folder that is closed: a 0644 file in a
+    0700 home folder is read by no one but its owner."""
+    for mode, folder_gid in folders:
+        if mode & 0o001:
+            continue
+        if gid is not None and folder_gid == gid and mode & 0o010:
+            continue
+        return False
+    return True
+
+
+def access(attributes, folders: tuple[tuple[int, int | None], ...] = ()) -> dict:
+    """The mode bits as the access entries D7 reads (owner, group, everyone) - the group and
+    Everyone only when the folders above the file (see ``can_enter``) let them reach it."""
     mode = int(getattr(attributes, "st_mode", 0) or 0)
     uid, gid = getattr(attributes, "st_uid", None), getattr(attributes, "st_gid", None)
+    reaches = {6: True, 3: can_enter(folders, gid), 0: can_enter(folders)}
     entries = []
     for who, sid, shift in ((f"uid:{uid}", f"unix-uid-{uid}", 6), (f"gid:{gid}", f"unix-gid-{gid}", 3),
                             ("Everyone", EVERYONE_SID, 0)):
+        if not reaches[shift]:
+            continue
         bits = (mode >> shift) & 0o7
         rights = [name for name, flag in (("read", _READ), ("write", _WRITE)) if bits & flag]
         if rights:
@@ -204,7 +231,25 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
         diagnostics["scan_aborted_reason"] = "sftp_session_lost"
         diagnostics["scan_errors"].append({"path": path, "error": type(exc).__name__})
 
-    def walk(folder: str, depth: int) -> None:
+    def folders_above(root: str) -> tuple[tuple[int, int | None], ...]:
+        # The root's own folder and those above it, from "/". One that cannot be asked
+        # about is taken to let everyone through: access is reported, not hidden.
+        chain = []
+        parts = [part for part in root.split("/") if part]
+        for index in range(len(parts) + 1):
+            try:
+                attributes = sftp.stat("/" + "/".join(parts[:index]))
+            except lost:
+                # The session stopped answering: the walk finds that out and stops.
+                chain.extend([(0o777, None)] * (len(parts) + 1 - index))
+                break
+            except OSError:
+                chain.append((0o777, None))
+                continue
+            chain.append((int(attributes.st_mode or 0), getattr(attributes, "st_gid", None)))
+        return tuple(chain)
+
+    def walk(folder: str, depth: int, folders: tuple[tuple[int, int | None], ...] = ()) -> None:
         if stopped():
             return
         try:
@@ -236,7 +281,7 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
                 continue
             if stat.S_ISDIR(mode):
                 if depth < source.max_depth:
-                    walk(path, depth + 1)
+                    walk(path, depth + 1, (*folders, (mode, getattr(entry, "st_gid", None))))
                 continue
             if not stat.S_ISREG(mode):
                 continue
@@ -248,7 +293,7 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
             location = f"{prefix}{path}"
             record = {"source": "sftp", "path": location, "name": name, "extension": extension, "size": size,
                       "modified_at": modified, "is_dir": False, "is_hidden": name.startswith("."),
-                      "owner": f"uid:{entry.st_uid}", "acl": access(entry), "content": "", "reuse_key": location}
+                      "owner": f"uid:{entry.st_uid}", "acl": access(entry, folders), "content": "", "reuse_key": location}
             snapshot = reuse_probe(location, size, modified) if reuse_probe else None
             if isinstance(snapshot, dict) and not snapshot_is_failed_read(snapshot):
                 record.update({
@@ -263,9 +308,13 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
                 diagnostics["reused"] += 1
                 records.append(record)
                 continue
+            # A document is read whole, up to its own cap: its text is parsed from the whole
+            # file, and the first 5 MB of a larger .docx/.xlsx/.pptx gave none.
+            limit = (max(source.max_read_bytes, source.max_document_bytes)
+                     if extension in BINARY_TEXT_EXTENSIONS else source.max_read_bytes)
             try:
                 with sftp.open(path, "rb") as handle:
-                    data = handle.read(source.max_read_bytes)
+                    data = handle.read(limit)
             except (*lost, OSError) as exc:
                 reason = (f"not read: the host stopped answering ({type(exc).__name__})" if isinstance(exc, lost)
                           else f"not readable by {source.username} ({type(exc).__name__})")
@@ -278,15 +327,23 @@ def scan(source: SftpSource, *, reuse_probe=None, read_text=None, cancel_check=N
                 continue
             complete = len(data) >= size
             diagnostics["read"] += 1
-            record.update({"content": read_text(data, extension) if read_text else data.decode("utf-8", "replace"),
+            content = read_text(data, extension) if read_text else decode_text(data)
+            record.update({"content": content,
                            "bytes_scanned": len(data), "total_bytes": size,
                            "sha256": hashlib.sha256(data).hexdigest() if complete else "",
                            "scan_completeness": "COMPLETE" if complete else "PARTIAL", "truncated": not complete})
+            if extension in BINARY_TEXT_EXTENSIONS and not content:
+                # No text came out of the document, so none of it was read - and one cut
+                # short (its zip directory, or a PDF's cross-reference table, is at the end)
+                # was not extracted at all, not read in part.
+                record.update({"bytes_scanned": 0, "scan_completeness": "NONE"})
+                if not complete:
+                    record["content_status"] = "not_extracted"
             records.append(record)
 
     try:
         for root in source.paths:
-            walk(root_path(root), 0)
+            walk(root_path(root), 0, folders_above(root_path(root)))
     finally:
         if transport is not None:
             transport.close()

@@ -166,7 +166,9 @@ class P2SmbSinglePassTests(unittest.TestCase):
 
     def test_transport_failure_retries_with_original_preview_and_hash_readers(self) -> None:
         data = b"sensitive@example.com\n" * 100
-        scanner, connection = _scanner(data, "/retry.txt", failures=1)
+        # A failure of this one read - not a ConnectionError, which is a lost session and
+        # is retried on a fresh connection instead (backend audit 2026-10).
+        scanner, connection = _scanner(data, "/retry.txt", failures=1, failure_type=OSError)
 
         acquired = scanner._acquire_file_data("Docs", "/retry.txt", ".txt", len(data))
 

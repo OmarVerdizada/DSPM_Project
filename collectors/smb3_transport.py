@@ -344,9 +344,25 @@ class OperationFailure(Exception):
     """pysmb's OperationFailure, as the collector reads it (its message)."""
 
 
+# Answers that mean the session - or the connection under it - is gone, not that this one
+# object was refused. The collector reconnects and retries for these, as for a socket
+# that closed (smbprotocol's own SMBConnectionClosed reaches it untranslated).
+_SESSION_LOST = frozenset({
+    0xC00000B5,  # STATUS_IO_TIMEOUT
+    0xC00000C9,  # STATUS_NETWORK_NAME_DELETED
+    0xC0000203,  # STATUS_USER_SESSION_DELETED
+    0xC000020C,  # STATUS_CONNECTION_DISCONNECTED
+    0xC000020D,  # STATUS_CONNECTION_RESET
+    0xC000035C,  # STATUS_NETWORK_SESSION_EXPIRED
+})
+
+
 def _translate(exc, share: str, path: str) -> Exception:
-    """The collector tells an access refusal from a dropped connection by the message."""
+    """The collector tells an access refusal from a dropped connection by the message - and
+    a lost session by its type."""
     status = int(getattr(exc, "status", 0) or 0)
     if status == 0xC0000022:  # STATUS_ACCESS_DENIED
         return OperationFailure(f"Access denied: unable to open directory {share}/{path} (0xc0000022)")
+    if status in _SESSION_LOST:
+        return ConnectionResetError(f"SMB session lost on {share}/{path} (0x{status:08x})")
     return OperationFailure(f"SMB operation failed on {share}/{path} (0x{status:08x})")

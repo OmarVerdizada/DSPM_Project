@@ -103,6 +103,37 @@ def _is_stdin_capability_error(exc: BaseException) -> bool:
     return True
 
 
+def _listed(value) -> list:
+    # ConvertTo-Json sends a one-element list as the element itself, and none as null.
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _endpoint_acl(item: dict) -> dict:
+    """A file's ACL as the endpoint sent it, in the shape the D7 analysis reads: the owner,
+    the parallel principal/rights lists reports carry and - when the endpoint sent them -
+    an entry per ACE with its SID, allow or deny, and whether it was inherited. Names and
+    rights alone read every entry as an explicit Allow: "Everyone: Deny Read" was broad
+    read access, and a broad group was recognised only by its English name."""
+    principals, permissions = _listed(item.get("principals")), _listed(item.get("permissions"))
+    types, sids, inherited = _listed(item.get("types")), _listed(item.get("sids")), _listed(item.get("inherited"))
+    acl: dict = {"owner": str(item.get("owner") or ""), "principals": [str(name) for name in principals],
+                 "permissions": [str(rights) for rights in permissions]}
+    if not types:
+        return acl  # an older script's answer: names and rights only
+    acl["types"] = [str(kind).lower() for kind in types]
+    acl["entries"] = [
+        {"principal": str(principal or ""),
+         "sid": str(sids[index] or "") if index < len(sids) else "",
+         "rights": str(permissions[index]) if index < len(permissions) else "",
+         "type": str(types[index]).lower() if index < len(types) else "allow",
+         "inherited": bool(inherited[index]) if index < len(inherited) else False}
+        for index, principal in enumerate(principals)
+    ]
+    return acl
+
+
 def _winrm_response_max_bytes() -> int:
     raw = os.getenv("DSPM_WINRM_RESPONSE_MAX_BYTES", "").strip()
     try:
@@ -1069,11 +1100,7 @@ class WinRMEndpointScanner:
                     "is_hidden": bool(item.get("is_hidden", False)),
                     "is_system": bool(item.get("is_system", False)),
                     "content": "" if archive_metadata else content,
-                    "acl": {
-                        "owner": item.get("owner", ""),
-                        "principals": item.get("principals", []),
-                        "permissions": item.get("permissions", []),
-                    },
+                    "acl": _endpoint_acl(item),
                     "owner": item.get("owner", ""),
                     "scan_mode": item.get("scan_mode") or scan_mode_for_extension(extension),
                     "content_status": item.get("content_status")
@@ -2243,13 +2270,63 @@ def _scan_script(
       return @($roots.ToArray())
     }}
 
+    # A file's bytes as text, in the file's own encoding - the rules of
+    # collectors.text_decode: a byte-order mark (UTF-8, UTF-16 or UTF-32), else UTF-16
+    # when the first 4 KB has a NUL in every other byte, else UTF-8. Read as UTF-8
+    # whatever it was, a UTF-16 file (a regedit export, a PowerShell 5.1 log) came back
+    # with a NUL between every character and was skipped as binary.
+    function ConvertFrom-DspmTextBytes($buffer, $count) {{
+      $start = 0
+      $encoding = New-Object System.Text.UTF8Encoding($false)
+      if ($count -ge 4 -and $buffer[0] -eq 0xFF -and $buffer[1] -eq 0xFE -and $buffer[2] -eq 0 -and $buffer[3] -eq 0) {{
+        $encoding = New-Object System.Text.UTF32Encoding($false, $false); $start = 4
+      }} elseif ($count -ge 4 -and $buffer[0] -eq 0 -and $buffer[1] -eq 0 -and $buffer[2] -eq 0xFE -and $buffer[3] -eq 0xFF) {{
+        $encoding = New-Object System.Text.UTF32Encoding($true, $false); $start = 4
+      }} elseif ($count -ge 3 -and $buffer[0] -eq 0xEF -and $buffer[1] -eq 0xBB -and $buffer[2] -eq 0xBF) {{
+        $start = 3
+      }} elseif ($count -ge 2 -and $buffer[0] -eq 0xFF -and $buffer[1] -eq 0xFE) {{
+        $encoding = New-Object System.Text.UnicodeEncoding($false, $false); $start = 2
+      }} elseif ($count -ge 2 -and $buffer[0] -eq 0xFE -and $buffer[1] -eq 0xFF) {{
+        $encoding = New-Object System.Text.UnicodeEncoding($true, $false); $start = 2
+      }} else {{
+        $sniff = [Math]::Min($count, 4096)
+        $units = [Math]::Floor($sniff / 2)
+        # Counted only when there is a NUL at all: a UTF-8 text has none.
+        if ($units -ge 4 -and [Array]::IndexOf($buffer, [byte]0, 0, $sniff) -ge 0) {{
+          $evenNuls = 0
+          $oddNuls = 0
+          for ($index = 0; $index -lt $units; $index++) {{
+            if ($buffer[2 * $index] -eq 0) {{ $evenNuls++ }}
+            if ($buffer[2 * $index + 1] -eq 0) {{ $oddNuls++ }}
+          }}
+          if ($oddNuls -ge $units * 0.5 -and $evenNuls -le $units * 0.1) {{
+            $encoding = New-Object System.Text.UnicodeEncoding($false, $false)
+          }} elseif ($evenNuls -ge $units * 0.5 -and $oddNuls -le $units * 0.1) {{
+            $encoding = New-Object System.Text.UnicodeEncoding($true, $false)
+          }}
+        }}
+      }}
+      return $encoding.GetString($buffer, $start, $count - $start)
+    }}
+
+    # Up to $limit bytes of a stream, as text. Read until the limit or the end: a zip
+    # entry's stream returns a block at a time, not everything asked for.
+    function Read-DspmStreamText($stream, $limit) {{
+      $buffer = New-Object byte[] ([int]$limit)
+      $read = 0
+      while ($read -lt $buffer.Length) {{
+        $got = $stream.Read($buffer, $read, $buffer.Length - $read)
+        if ($got -le 0) {{ break }}
+        $read += $got
+      }}
+      return (ConvertFrom-DspmTextBytes $buffer $read)
+    }}
+
     function Read-PlainText($path, $maxBytes) {{
       try {{
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try {{
-          $buffer = New-Object byte[] $maxBytes
-          $read = $stream.Read($buffer, 0, $buffer.Length)
-          return [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+          return (Read-DspmStreamText $stream ([Math]::Min([int64]$maxBytes, [int64]$stream.Length)))
         }} finally {{
           $stream.Close()
         }}
@@ -2269,12 +2346,23 @@ def _scan_script(
         $maxRatio = 200
         $archive = [System.IO.Compression.ZipFile]::OpenRead($path)
         try {{
+          # The parts that hold the text, the shared strings first: a worksheet holds only
+          # indices into sharedStrings.xml, and Excel writes the worksheets (and theme and
+          # styles) before it, so a workbook of some 20,000 cells used every character of
+          # the cap before its first text cell. Theme and styles hold no content.
+          $selected = @($archive.Entries | Where-Object {{
+            $_.FullName.StartsWith($prefix) -and $_.FullName.EndsWith(".xml") -and
+            -not ($_.FullName -like "*/theme/*" -or ($prefix -and $_.FullName -eq ($prefix + "styles.xml")))
+          }})
+          $entries = @($selected | Where-Object {{ $_.FullName -eq "xl/sharedStrings.xml" }}) +
+            @($selected | Where-Object {{ $_.FullName -ne "xl/sharedStrings.xml" }})
           $parts = New-Object System.Collections.Generic.List[string]
           $total = 0
-          foreach ($entry in $archive.Entries) {{
-            if (-not ($entry.FullName.StartsWith($prefix) -and $entry.FullName.EndsWith(".xml"))) {{ continue }}
-            if ($entry.Length -gt $maxEntryBytes) {{ continue }}
-            if ($entry.CompressedLength -gt 0 -and ($entry.Length / $entry.CompressedLength) -gt $maxRatio) {{ continue }}
+          $truncated = $false
+          for ($index = 0; $index -lt $entries.Count; $index++) {{
+            $entry = $entries[$index]
+            if ($entry.Length -gt $maxEntryBytes) {{ $truncated = $true; continue }}
+            if ($entry.CompressedLength -gt 0 -and ($entry.Length / $entry.CompressedLength) -gt $maxRatio) {{ $truncated = $true; continue }}
             $reader = New-Object System.IO.StreamReader($entry.Open())
             try {{
               $xml = $reader.ReadToEnd()
@@ -2285,15 +2373,20 @@ def _scan_script(
               $reader.Close()
             }}
             $total += $entry.Length
-            if ($total -ge $maxTotalBytes) {{ break }}
+            if ($total -ge $maxTotalBytes) {{
+              if ($index -lt $entries.Count - 1) {{ $truncated = $true }}
+              break
+            }}
           }}
           $joined = $parts -join "`n"
-          return $joined.Substring(0, [Math]::Min(120000, $joined.Length))
+          if ($joined.Length -gt 120000) {{ $truncated = $true }}
+          # Cut short is said: the record is PARTIAL, not FULL.
+          return [PSCustomObject]@{{ text = $joined.Substring(0, [Math]::Min(120000, $joined.Length)); truncated = $truncated; status = "" }}
         }} finally {{
           $archive.Dispose()
         }}
       }} catch {{
-        return ""
+        return [PSCustomObject]@{{ text = ""; truncated = $false; status = "not_extracted" }}
       }}
     }}
 
@@ -2302,17 +2395,10 @@ def _scan_script(
       if (@(".xlsm", ".xlsx") -contains $extension) {{ return Read-ZipXmlText $path "xl/" }}
       if (@(".pptm", ".pptx") -contains $extension) {{ return Read-ZipXmlText $path "ppt/slides/" }}
       if (@(".odp", ".ods", ".odt", ".otp") -contains $extension) {{ return Read-ZipXmlText $path "" }}
-      if ($extension -eq ".pdf") {{
-        try {{
-          $bytes = [System.IO.File]::ReadAllBytes($path)
-          $limit = [Math]::Min($bytes.Length, $maxBytes * 4)
-          $text = [Text.Encoding]::GetEncoding("iso-8859-1").GetString($bytes, 0, $limit)
-          return (($text | Select-String -Pattern "\\(([^()]*)\\)" -AllMatches).Matches | ForEach-Object {{ $_.Groups[1].Value }}) -join "`n"
-        }} catch {{
-          return ""
-        }}
-      }}
-      return ""
+      # A PDF's page text is compressed; there is no parser on the endpoint. A regex over
+      # the raw bytes found only the uncompressed metadata (Title, Producer) and called
+      # every PDF scanned and FULL. It is said to be not extracted until one runs here.
+      return [PSCustomObject]@{{ text = ""; truncated = $false; status = "not_extracted" }}
     }}
 
     function Read-ZipEntryText($entry, $extension, $maxBytes) {{
@@ -2320,9 +2406,7 @@ def _scan_script(
       try {{
         $stream = $entry.Open()
         try {{
-          $buffer = New-Object byte[] $maxBytes
-          $read = $stream.Read($buffer, 0, $buffer.Length)
-          return [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+          return (Read-DspmStreamText $stream ([Math]::Min([int64]$maxBytes, [int64]$entry.Length)))
         }} finally {{
           $stream.Close()
         }}
@@ -2515,11 +2599,29 @@ def _scan_script(
       $zipProtection = if ($extension -eq ".zip") {{ Test-DspmZipProtection $file.FullName }} else {{ [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }} }}
       $ownerAcl = if ({read_owner_value} -or {read_acl_value}) {{ Get-Acl -LiteralPath $file.FullName -ErrorAction SilentlyContinue }} else {{ $null }}
       $acl = if ({read_acl_value}) {{ $ownerAcl }} else {{ $null }}
+      # Each entry's allow or deny, whether it was inherited, and its SID - not only the
+      # account name and rights: without them a Deny read as an Allow, and a broad group
+      # was known only by its English name ("Everyone", never "Jeder").
+      $rules = if ($acl) {{ @($acl.Access) }} else {{ @() }}
+      $ruleSids = @()
+      if ($acl) {{
+        try {{
+          $ruleSids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {{ $_.IdentityReference.Value }})
+        }} catch {{
+          $ruleSids = @()
+        }}
+      }}
+      if ($ruleSids.Count -ne $rules.Count) {{ $ruleSids = @($rules | ForEach-Object {{ "" }}) }}
       $content = ""
+      $contentStatus = ""
+      $contentTruncated = $false
       if ({read_content_value} -and ($textExtensions -contains $extension)) {{
         $content = Read-PlainText $file.FullName {int(max_read_bytes)}
       }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
-        $content = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
+        $extracted = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
+        $content = [string]$extracted.text
+        $contentStatus = [string]$extracted.status
+        $contentTruncated = [bool]$extracted.truncated
       }}
       $sha256 = ""
       if ({hash_files_value}) {{
@@ -2542,18 +2644,21 @@ def _scan_script(
         attributes = $file.Attributes.ToString()
         sha256 = $sha256
         protected = [bool]$zipProtection.protected
-        content_status = if ($zipProtection.content_status) {{ $zipProtection.content_status }} else {{ "" }}
+        content_status = if ($zipProtection.content_status) {{ $zipProtection.content_status }} elseif ($contentStatus) {{ $contentStatus }} else {{ "" }}
         content_scannable = if ($zipProtection.protected) {{ $false }} else {{ $null }}
         protection_type = if ($zipProtection.protection_type) {{ $zipProtection.protection_type }} else {{ "" }}
         scan_error = if ($zipProtection.scan_error) {{ $zipProtection.scan_error }} else {{ "" }}
         owner = if ($ownerAcl) {{ $ownerAcl.Owner }} else {{ "" }}
-        principals = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }}) }} else {{ @() }}
-        permissions = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }}) }} else {{ @() }}
+        principals = @($rules | ForEach-Object {{ $_.IdentityReference.Value }})
+        permissions = @($rules | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+        types = @($rules | ForEach-Object {{ $_.AccessControlType.ToString() }})
+        inherited = @($rules | ForEach-Object {{ [bool]$_.IsInherited }})
+        sids = $ruleSids
         content = $content
-        scan_completeness = if (($textExtensions -contains $extension) -and $content -and $file.Length -gt {int(max_read_bytes)}) {{ "PARTIAL" }} elseif ($content -or $file.Length -eq 0) {{ "FULL" }} else {{ "NONE" }}
+        scan_completeness = if ((($textExtensions -contains $extension) -and $content -and $file.Length -gt {int(max_read_bytes)}) -or ($content -and $contentTruncated)) {{ "PARTIAL" }} elseif ($content -or $file.Length -eq 0) {{ "FULL" }} else {{ "NONE" }}
         bytes_scanned = if ($content) {{ [Math]::Min([int64]$file.Length, [int64]{int(max_read_bytes)}) }} else {{ 0 }}
         total_bytes = $file.Length
-        truncated = ($content -and ($file.Length -gt {int(max_read_bytes)}))
+        truncated = [bool](($content -and ($file.Length -gt {int(max_read_bytes)})) -or ($content -and $contentTruncated))
       }}
     }}
 

@@ -9,11 +9,13 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import time
 import zipfile
 
-from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text, extract_binary_text_with_status
 from collectors.ocr import extract_text_from_image, is_ocr_scannable
+from collectors.text_decode import TextDecoder
 from collectors import win_security
 from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
 
@@ -426,14 +428,49 @@ def read_text_preview(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_MAX_BYTES) 
     return content
 
 
+# Why the last read on this thread produced no text, kept for the record built from it.
+# The read helper keeps its (text, hash) shape - the evidence reveal, the engine's re-read
+# and the tests that stand in for it all call it so - and the walk builds the record from
+# scan_completeness_for_path right after it, on the same thread.
+_last_read = threading.local()
+
+# What a document extractor's reason for "no text" means on the record.
+_EXTRACTION_OUTCOMES = {
+    "password_protected": {"content_status": "password_protected", "protection_type": "document_password",
+                           "scan_error": "The document is encrypted and needs a password"},
+    "no_text_layer": {"content_status": "no_text_layer"},
+    "not_extracted": {"content_status": "not_extracted"},
+}
+
+
+def _note_read(path: Path, outcome: dict | None = None) -> None:
+    _last_read.outcome = (str(path), dict(outcome or {}))
+
+
+def _take_read_outcome(path: Path) -> dict:
+    noted = getattr(_last_read, "outcome", None)
+    _last_read.outcome = None
+    return noted[1] if noted and noted[0] == str(path) else {}
+
+
+def _unreadable(exc_type: str) -> dict:
+    # The error's type only: its text can carry the path.
+    return {"content_status": "unreadable", "scan_error": f"The file could not be read ({exc_type})"}
+
+
 def read_text_preview_and_sha256(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_MAX_BYTES) -> tuple[str, str]:
     extension = detect_extension(path)
-    if extension in BINARY_TEXT_EXTENSIONS:
-        return extract_binary_text(path), sha256_file(path)
+    if extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension):
+        if extension in BINARY_TEXT_EXTENSIONS:
+            text, reason = extract_binary_text_with_status(path)
+        else:
+            text, reason = extract_text_from_image(path), ""
+        sha256, error = _sha256_and_error(path)
+        # A document that could not be opened is a failed read, not one with no text.
+        _note_read(path, _unreadable(error) if error else _EXTRACTION_OUTCOMES.get(reason))
+        return text, sha256
 
-    if is_ocr_scannable(extension):
-        return extract_text_from_image(path), sha256_file(path)
-
+    _note_read(path)
     if extension not in TEXT_EXTENSIONS:
         return "", sha256_file(path)
 
@@ -441,6 +478,9 @@ def read_text_preview_and_sha256(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_
     try:
         with path.open("rb") as handle:
             remaining = max(0, int(max_bytes or 0))
+            # One decoder across the chunks: it knows the file's encoding (a UTF-16
+            # export is not UTF-8) and carries a character split by a chunk boundary.
+            decoder = TextDecoder()
             chunks: list[str] = []
             while True:
                 chunk = handle.read(TEXT_SCAN_CHUNK_BYTES)
@@ -449,18 +489,29 @@ def read_text_preview_and_sha256(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_
                 digest.update(chunk)
                 if remaining > 0:
                     preview_chunk = chunk[:remaining]
-                    chunks.append(preview_chunk.decode("utf-8", errors="replace"))
+                    chunks.append(decoder.decode(preview_chunk))
                     remaining -= len(preview_chunk)
+            chunks.append(decoder.decode(b"", final=True))
         return "".join(chunks), digest.hexdigest()
-    except OSError:
+    except OSError as exc:
+        # Said on the record: a file that could not be opened (a sharing violation, read
+        # denied) is not an empty file, and is read again next time rather than reused.
+        _note_read(path, _unreadable(type(exc).__name__))
         return "", ""
 
 
 def scan_completeness_for_path(path: Path, content: str, protected: bool = False, max_bytes: int = DEFAULT_TEXT_SCAN_MAX_BYTES) -> dict:
+    """How much of the file the scan read - and, when the read that produced ``content``
+    got no text out of it, why: ``content_status`` (with ``scan_error`` and
+    ``protection_type`` when there is one to say) for the record."""
+    outcome = _take_read_outcome(path)
     try:
         total_bytes = path.stat().st_size
     except OSError:
         total_bytes = 0
+    if outcome and not content:
+        return {"scan_completeness": "NONE", "bytes_scanned": 0, "total_bytes": total_bytes, "truncated": False,
+                **outcome}
     if protected:
         return {"scan_completeness": "NONE", "bytes_scanned": 0, "total_bytes": total_bytes, "truncated": bool(total_bytes)}
     extension = detect_extension(path)
@@ -486,14 +537,19 @@ def content_hash_value(content: str) -> str:
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    return _sha256_and_error(path, chunk_size)[0]
+
+
+def _sha256_and_error(path: Path, chunk_size: int = 1024 * 1024) -> tuple[str, str]:
+    """(digest, "") - or ("", the type of the error) when the file could not be read."""
     digest = hashlib.sha256()
     try:
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(chunk_size), b""):
                 digest.update(chunk)
-        return digest.hexdigest()
-    except OSError:
-        return ""
+        return digest.hexdigest(), ""
+    except OSError as exc:
+        return "", type(exc).__name__
 
 
 def sha256_zip_entry(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, chunk_size: int = 1024 * 1024) -> str:
@@ -851,11 +907,12 @@ def scan_directory(
                 is_hidden=is_hidden,
                 is_system=is_system,
                 content=content,
-                content_status=content_status,
+                # A read that got no text says why (unreadable, no text layer, sealed).
+                content_status=content_status or scan_meta.get("content_status"),
                 content_scannable=content_scannable,
-                scan_error=scan_error,
+                scan_error=scan_error or str(scan_meta.get("scan_error") or ""),
                 protected=protected,
-                protection_type=protection_type,
+                protection_type=protection_type or str(scan_meta.get("protection_type") or ""),
                 owner=owner,
                 acl=acl,
                 created_at=created_at,
@@ -1154,6 +1211,7 @@ def read_zip_entry_preview_and_sha256(archive: zipfile.ZipFile, entry: zipfile.Z
     try:
         with archive.open(entry) as handle:
             remaining = max(0, int(max_bytes or 0))
+            decoder = TextDecoder()  # as read_text_preview_and_sha256: the entry's encoding, across chunks
             chunks: list[str] = []
             while True:
                 chunk = handle.read(TEXT_SCAN_CHUNK_BYTES)
@@ -1162,8 +1220,9 @@ def read_zip_entry_preview_and_sha256(archive: zipfile.ZipFile, entry: zipfile.Z
                 digest.update(chunk)
                 if remaining > 0:
                     preview_chunk = chunk[:remaining]
-                    chunks.append(preview_chunk.decode("utf-8", errors="replace"))
+                    chunks.append(decoder.decode(preview_chunk))
                     remaining -= len(preview_chunk)
+            chunks.append(decoder.decode(b"", final=True))
         return "".join(chunks), digest.hexdigest()
     except (OSError, RuntimeError, zipfile.BadZipFile):
         return "", ""

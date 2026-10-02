@@ -37,21 +37,29 @@ MAX_DOC_PARTS = 4096                         # cap the number of parts processed
 
 
 def extract_binary_text(path: Path, max_chars: int = 120_000) -> str:
+    return extract_binary_text_with_status(path, max_chars)[0]
+
+
+def extract_binary_text_with_status(path: Path, max_chars: int = 120_000) -> tuple[str, str]:
+    """(text, why there is none). The reason is "" when text came out (or the document
+    holds none), "no_text_layer" for a PDF with no text to extract - a scan, images only -
+    "password_protected" for one that does not open without a password, and
+    "not_extracted" when the document could not be parsed at all."""
     suffix = path.suffix.lower()
     try:
         if suffix in {".docm", ".docx", ".dotm", ".dotx"}:
-            return _extract_docx(path, max_chars)
+            return _extract_docx(path, max_chars), ""
         if suffix in {".xlsm", ".xlsx"}:
-            return _extract_xlsx(path, max_chars)
+            return _extract_xlsx(path, max_chars), ""
         if suffix in {".pptm", ".pptx"}:
-            return _extract_pptx(path, max_chars)
+            return _extract_pptx(path, max_chars), ""
         if suffix in {".odp", ".ods", ".odt", ".otp"}:
-            return _extract_odt(path, max_chars)
+            return _extract_odt(path, max_chars), ""
         if suffix == ".pdf":
-            return _extract_pdf_light(path, max_chars)
+            return _extract_pdf(path, max_chars)
     except Exception:
-        return ""
-    return ""
+        return "", "not_extracted"
+    return "", ""
 
 
 def _parse_xml(data: bytes):
@@ -149,37 +157,42 @@ def _extract_odt(path: Path, max_chars: int) -> str:
         return _join_xml_parts(archive, parts, max_chars)
 
 
-def _extract_pdf_light(path: Path, max_chars: int) -> str:
-    parsed = _extract_pdf_with_pypdf(path, max_chars)
-    if parsed:
-        return parsed[:max_chars]
-    data = path.read_bytes()[: max_chars * 4]
-    chunks = re.findall(rb"\(([^()]*)\)", data)
-    return "\n".join(chunk.decode("latin-1", errors="ignore") for chunk in chunks)[:max_chars]
+def _extract_pdf(path: Path, max_chars: int) -> tuple[str, str]:
+    """The text of a PDF's pages, and why there is none when there is none.
 
-
-def _extract_pdf_with_pypdf(path: Path, max_chars: int) -> str:
+    There used to be a fallback when pypdf found no text: a regex over the raw bytes for
+    every "(...)" literal. What that finds is the uncompressed metadata - Title, Producer -
+    never page text, which is compressed: a blank scan titled "Scanned passport" came out
+    as "pypdf / Scanned passport", scanned and FULL, and an encrypted PDF took the same
+    path and came back "scanned" instead of protected. A PDF without a text layer is now
+    said to be one, and the file is read from its handle - not loaded whole - so its size
+    does not decide the memory a scan takes."""
     try:
-        from pypdf import PdfReader
+        from pypdf import PasswordType, PdfReader
     except ModuleNotFoundError:
-        return ""
+        return "", "not_extracted"
     try:
-        reader = PdfReader(str(path))
-        if reader.is_encrypted:
-            try:
-                reader.decrypt("")
-            except Exception:
-                return ""
-        parts: list[str] = []
-        for page_number, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
-            if text.strip():
-                parts.append(f"[pdf page={page_number}]\n{text}")
-            if len("\n".join(parts)) >= max_chars:
-                break
-        return "\n".join(parts)
+        with path.open("rb") as handle:
+            reader = PdfReader(handle)
+            if reader.is_encrypted:
+                # An empty user password opens a PDF that is only restricted, not sealed.
+                try:
+                    opened = reader.decrypt("") != PasswordType.NOT_DECRYPTED
+                except Exception:
+                    opened = False
+                if not opened:
+                    return "", "password_protected"
+            parts: list[str] = []
+            for page_number, page in enumerate(reader.pages, start=1):
+                text = page.extract_text() or ""
+                if text.strip():
+                    parts.append(f"[pdf page={page_number}]\n{text}")
+                if len("\n".join(parts)) >= max_chars:
+                    break
     except Exception:
-        return ""
+        return "", "not_extracted"
+    text = "\n".join(parts)[:max_chars]
+    return text, "" if text else "no_text_layer"
 
 
 def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:

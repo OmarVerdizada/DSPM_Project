@@ -10,7 +10,9 @@ changed or deleted - from the checkpoint the previous scan kept:
   read on the sites it may scan - nothing wider is needed or asked for;
 - **the bounded record contract**: a file is read up to the scan's text limit with an
   HTTP range request, never more whatever the server sends, and one longer than that is
-  PARTIAL like any other truncated file; only files the extension policy admits are
+  PARTIAL like any other truncated file - a document (Office, OpenDocument, PDF) up to a
+  larger cap of its own, since its text is parsed from the whole file, and one that gives
+  no text is NONE, not PARTIAL; only files the extension policy admits are
   downloaded at all. A file that cannot be read is reported as such, and the rest of the
   scan goes on. One deleted after the change list was read is simply not in the scan;
   one Graph throttles (429) or cannot serve (5xx) is asked for again a few times, as
@@ -46,6 +48,9 @@ from pathlib import PurePosixPath
 from urllib.parse import quote, urlencode, urlsplit
 
 from backend.outbound import OutboundRefused, https_request
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
+from collectors.file_scanner import MAX_ARCHIVE_TOTAL_BYTES
+from collectors.text_decode import decode_text
 from discovery.incremental import snapshot_is_failed_read
 
 GRAPH_SCOPE = "https://graph.microsoft.com/.default"
@@ -85,6 +90,8 @@ class GraphSource:
     authority: str = "https://login.microsoftonline.com"
     graph: str = "https://graph.microsoft.com"
     max_read_bytes: int = 5 * 1024 * 1024
+    # Office, OpenDocument and PDF files are read whole up to this: see scan().
+    max_document_bytes: int = MAX_ARCHIVE_TOTAL_BYTES
     max_files: int = 100_000
     allowed_extensions: list[str] | None = None
     ca_pem: str = ""
@@ -415,7 +422,11 @@ def scan(source: GraphSource, checkpoint: dict | None, *, reuse_probe=None, read
                 url = client.download_url(drive_id, item_id)
                 if not url:
                     raise _Unreadable("no download link")
-                data = client.download(url, source.max_read_bytes)
+                # A document is read whole, up to its own cap: its text is parsed from the
+                # whole file, and the first 5 MB of a larger .docx/.xlsx/.pptx gave none.
+                limit = (max(source.max_read_bytes, source.max_document_bytes)
+                         if extension in BINARY_TEXT_EXTENSIONS else source.max_read_bytes)
+                data = client.download(url, limit)
             except _Gone:
                 diagnostics["gone"] += 1
                 continue
@@ -430,10 +441,18 @@ def scan(source: GraphSource, checkpoint: dict | None, *, reuse_probe=None, read
                 continue
             diagnostics["downloaded"] += 1
             complete = len(data) >= facts["size"]
-            record.update({"content": read_text(data, extension) if read_text else data.decode("utf-8", "replace"),
+            content = read_text(data, extension) if read_text else decode_text(data)
+            record.update({"content": content,
                            "bytes_scanned": len(data), "total_bytes": facts["size"],
                            "sha256": hashlib.sha256(data).hexdigest() if complete else "",
                            "scan_completeness": "COMPLETE" if complete else "PARTIAL", "truncated": not complete})
+            if extension in BINARY_TEXT_EXTENSIONS and not content:
+                # No text came out of the document, so none of it was read - and one cut
+                # short (its zip directory, or a PDF's cross-reference table, is at the end)
+                # was not extracted at all, not read in part.
+                record.update({"bytes_scanned": 0, "scan_completeness": "NONE"})
+                if not complete:
+                    record["content_status"] = "not_extracted"
             records.append(record)
         if diagnostics.get("scan_aborted_reason"):
             # The libraries not reached keep their checkpoint, so the next scan resumes them.

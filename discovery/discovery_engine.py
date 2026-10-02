@@ -48,7 +48,10 @@ PCI_DETECTOR_VERSION = "pci-detector-v3"  # A2: one PAN validator, issuer-gated
 # Bumped v2 -> v3 for SC-1: previews and the classification cache are now
 # produced by the universal evidence sanitizer, so every pre-existing findings
 # cache entry and preview sidecar must be regenerated rather than reused.
-PARSER_VERSION = "content-parser-v4"  # A1: credential material (.pem/.key/...) is read as text
+# v5 (2026-10): UTF-16/32 text is decoded as text; a failed read, a PDF without a text layer and
+# a zip beyond the capture are said as such; SharePoint/SFTP documents are read whole. Results
+# read under v4 are not replayed.
+PARSER_VERSION = "content-parser-v5"
 
 
 def product_private_paths() -> list[Path]:
