@@ -311,6 +311,7 @@ NOT_SETTINGS = {
     "DSPM_PG_": "a prefix matched when listing PostgreSQL settings",
     "DSPM_WINRM_": "a prefix matched when listing WinRM settings",
     "DSPM_MIGRATIONS_CLI": "set by the migrations command itself to keep the store import inert",
+    "DSPM_D1_SHARE": "read only by the live SMB 3 encryption test (tests/test_d1_smb3_encryption.py)",
     "DSPM_ACTIVATION_PW": "a variable of the remote PowerShell activation script, not of Sentro",
     "DSPM_SMB_ACL_PW": "a variable of a remote PowerShell script, not of Sentro",
     "DSPM_TASK_ARG": "a variable of the remote scheduled-task script, not of Sentro",
