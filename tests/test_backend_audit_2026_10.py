@@ -282,5 +282,56 @@ class ByteCountsAre64BitTest(unittest.TestCase):
         self.assertEqual(int(row["size"]), big)
 
 
+class TwoAnalystsAtOnceBothKeepTheirChangeTest(unittest.TestCase):
+    """A lifecycle action reads the whole report, changes one finding and saves it back.
+    Two at once on findings of the same scan: both read the old report, the second save
+    put the first one's finding back - both answered OK and were audited, one was lost."""
+
+    def test_concurrent_actions_on_one_scan_both_land(self) -> None:
+        import threading
+        import time
+
+        from backend import store
+
+        tenant = f"audit-race-{uuid4().hex[:8]}"
+        store.create_tenant(tenant, "Race")
+        store.save_scan_history(tenant, {"scan_id": "r1", "source": "local", "summary": {},
+                                         "files": [_file("/share/a.txt", "email"), _file("/share/b.txt", "phone")]})
+        with store._connect() as conn:
+            ids = {row["file_path"]: row["id"] for row in conn.execute(
+                "SELECT id, file_path FROM findings WHERE tenant_id = ?", (tenant,)).fetchall()}
+
+        real_find = store._find_finding_row
+
+        def slow_find(*args, **kwargs):
+            row = real_find(*args, **kwargs)
+            time.sleep(0.4)  # both read before either saves, unless the edits are ordered
+            return row
+
+        errors = []
+
+        def act(finding_id: str, action: str, payload: dict) -> None:
+            try:
+                store.update_finding_lifecycle(tenant, finding_id, action, payload, "analyst")
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        with patch.object(store, "_find_finding_row", slow_find):
+            threads = [threading.Thread(target=act, args=(ids["/share/a.txt"], "resolve", {"comment": "a"})),
+                       threading.Thread(target=act, args=(ids["/share/b.txt"], "false-positive", {"comment": "b"}))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(errors, [])
+        with store._connect() as conn:
+            status = {row["file_path"]: row["status"] for row in conn.execute(
+                "SELECT file_path, status FROM findings WHERE tenant_id = ?", (tenant,)).fetchall()}
+        self.assertEqual(status, {"/share/a.txt": "RESOLVED", "/share/b.txt": "FALSE_POSITIVE"})
+        report = store.read_scan_report(tenant, "r1")
+        in_report = {file["path"]: file["findings"][0]["status"] for file in report["files"]}
+        self.assertEqual(in_report, status, "the saved report lost one of the two changes")
+
+
 if __name__ == "__main__":
     unittest.main()

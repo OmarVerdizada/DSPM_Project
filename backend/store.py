@@ -6458,7 +6458,37 @@ def read_latest_scan_report_by_label(tenant_id: str, scan_label: str) -> dict | 
     return _report_body(tenant_id, row) if row else None
 
 
+_REPORT_EDIT_LOCK = threading.Lock()
+_REPORT_EDIT_NAMESPACE = 0x52504544  # "RPED"
+
+
+@contextlib.contextmanager
+def _report_edit(tenant_id: str):
+    """One read-modify-save of a workspace's reports at a time.
+
+    A lifecycle action reads a whole report, changes one finding and saves the report
+    back. Two analysts acting at once on findings of the same scan both read the old
+    report, and the second save wrote the first one's finding back as it was: both
+    were told it worked, both were audited, one change was gone. In one process a lock
+    orders them (saves are serialized by `_lock` already, so little is lost); across
+    backends on PostgreSQL a transaction-scoped advisory lock per workspace does, held on
+    one connection for the length of the edit."""
+    with _REPORT_EDIT_LOCK:
+        if not db.is_postgres():
+            yield
+            return
+        with _connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(CAST(? AS integer), CAST(? AS integer))",
+                         (_REPORT_EDIT_NAMESPACE, _edm_tenant_lock_key(tenant_id)))
+            yield
+
+
 def update_finding_workflow(tenant_id: str, scan_id: str, selector: dict, update: dict, actor: str) -> dict | None:
+    with _report_edit(tenant_id):
+        return _update_finding_workflow(tenant_id, scan_id, selector, update, actor)
+
+
+def _update_finding_workflow(tenant_id: str, scan_id: str, selector: dict, update: dict, actor: str) -> dict | None:
     allowed_statuses = {
         "unreviewed",
         "confirmed",
@@ -8673,6 +8703,11 @@ def get_finding_occurrences(tenant_id: str, finding_id: str) -> list[dict] | Non
 
 
 def update_finding_lifecycle(tenant_id: str, finding_id: str, action: str, payload: dict, actor: str) -> dict | None:
+    with _report_edit(tenant_id):
+        return _update_finding_lifecycle(tenant_id, finding_id, action, payload, actor)
+
+
+def _update_finding_lifecycle(tenant_id: str, finding_id: str, action: str, payload: dict, actor: str) -> dict | None:
     with _connect() as conn:
         operational = conn.execute(
             "SELECT is_current FROM findings WHERE tenant_id = ? AND id = ?",
