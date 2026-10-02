@@ -199,6 +199,7 @@ from collectors.winrm_endpoint_scanner import (
 )
 from collectors.winrm_endpoint_scanner import _winrm_ssl_required as winrm_ssl_required
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig, product_private_paths
+from discovery.suppression import MAX_SUPPRESSION_RULES
 from discovery.incremental import (
     apply_reuse_snapshot,
     incremental_scope_key,
@@ -4704,6 +4705,27 @@ def suppression_rule_delete(
 
 
 def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLifecyclePayload, principal: Principal) -> dict:
+    rule_fields = None
+    stored: dict = {}
+    if payload.suppress_future and action in {"false-positive", "suppress"}:
+        # A file-scoped rule repeats this one decision about this one file; a folder,
+        # type or value rule silences findings across the workspace, which is the rules
+        # permission's to grant (POST /api/suppression-rules needs it) - triage alone
+        # used to create them.
+        scope = str(payload.suppression_scope or "file").strip().lower()
+        if scope != "file" and not has_permission(principal, "rules.manage"):
+            raise HTTPException(status_code=403, detail="A folder, type or value suppression rule needs the "
+                                "rules permission; dismiss with a file-scoped rule instead.")
+        # Everything the rule needs is checked before the finding changes: a refusal
+        # after the write left the finding dismissed while answering 400.
+        stored = get_finding(principal.tenant_id, finding_id) or {}
+        if not stored:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        reason = payload.reason or payload.comment or f"Dismissed as a false positive by {principal.subject}"
+        rule_fields = _suppression_rule_from_finding(stored, payload.suppression_scope, reason)
+        if len(list_suppression_rules(principal.tenant_id)) >= MAX_SUPPRESSION_RULES:
+            raise HTTPException(status_code=400, detail=f"A workspace may hold at most {MAX_SUPPRESSION_RULES} "
+                                "suppression rules; remove one first.")
     try:
         finding = update_finding_lifecycle(principal.tenant_id, finding_id, action, payload.model_dump(), principal.subject)
     except ValueError as exc:
@@ -4711,12 +4733,9 @@ def _finding_lifecycle_action(finding_id: str, action: str, payload: FindingLife
     if finding is None:
         raise HTTPException(status_code=404, detail="Finding not found")
     response = {"finding": finding}
-    if payload.suppress_future and action in {"false-positive", "suppress"}:
+    if rule_fields is not None:
         # The dismissal changed this row; the rule is what stops the next scan
         # creating the same finding for somebody to dismiss again (B6).
-        stored = get_finding(principal.tenant_id, finding_id) or finding
-        reason = payload.reason or payload.comment or f"Dismissed as a false positive by {principal.subject}"
-        rule_fields = _suppression_rule_from_finding(stored, payload.suppression_scope, reason)
         try:
             rule = create_suppression_rule(
                 principal.tenant_id,

@@ -479,5 +479,70 @@ class StartersRacingOnOneSqliteFileTest(unittest.TestCase):
                 self.assertEqual(count, distinct)
 
 
+class TriageAloneCannotSilenceTheWorkspaceTest(unittest.TestCase):
+    """findings.triage created folder, type and value suppression rules - workspace-wide
+    silence the rules route refuses without rules.manage; and the rule's inputs were
+    checked only after the finding had been dismissed, so a refusal answered 400 for a
+    change that had already been saved."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from fastapi.testclient import TestClient
+
+        from backend import store
+        from backend.app import app
+        from backend.security import create_token, hash_password
+
+        cls.store = store
+        cls.client = TestClient(app)
+        cls.role = f"triage_{uuid4().hex[:6]}"
+        store.save_custom_role("default", cls.role, "Triage only", "", ["inventory.view", "findings.triage"], "test")
+        cls.user = f"triage-{uuid4().hex[:6]}"
+        store.create_user(cls.user, hash_password("x9!Triage-Kestrel-1"), cls.role, "default")
+        cls.headers = {"Authorization": f"Bearer {create_token(cls.user, cls.role, 'default')}"}
+        cls.finding = {"id": "fnd-a", "finding_id": "fnd-a", "type": "credit_card", "scan_id": "s-1",
+                       "file": {"path": "C:/Data/Reports/customers.csv", "source": "local"},
+                       "secure_value_fingerprints": ["fp-1", "fp-2"]}
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.store.delete_user(cls.user)
+        cls.store.delete_custom_role("default", cls.role)
+
+    def _dismiss(self, body: dict, headers: dict | None = None):
+        from backend import app as app_module
+
+        with patch.object(app_module, "update_finding_lifecycle",
+                          return_value=dict(self.finding, status="FALSE_POSITIVE")) as update,                 patch.object(app_module, "get_finding", return_value=self.finding):
+            response = self.client.post("/api/findings/fnd-a/false-positive", json=body,
+                                        headers=headers or self.headers)
+        if response.status_code == 200 and response.json().get("suppression_rule"):
+            self.store.delete_suppression_rule("default", response.json()["suppression_rule"]["rule_id"])
+        return response, update
+
+    def test_a_workspace_wide_rule_needs_the_rules_permission(self) -> None:
+        for scope in ("folder", "type", "value"):
+            with self.subTest(scope=scope):
+                response, update = self._dismiss({"suppress_future": True, "suppression_scope": scope,
+                                                  "comment": "test data"})
+                self.assertEqual(response.status_code, 403, response.text)
+                update.assert_not_called()
+
+    def test_a_file_rule_is_still_the_analysts_to_make(self) -> None:
+        response, update = self._dismiss({"suppress_future": True, "comment": "test data"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["suppression_rule"]["path_pattern"], "C:/Data/Reports/customers.csv")
+        update.assert_called_once()
+
+    def test_a_refused_rule_changes_nothing(self) -> None:
+        from backend.security import create_token
+
+        admin = {"Authorization": f"Bearer {create_token('admin', 'admin', 'default')}"}
+        response, update = self._dismiss({"suppress_future": True, "suppression_scope": "value", "comment": "no"},
+                                         admin)
+        self.assertEqual(response.status_code, 400, response.text)
+        update.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
