@@ -443,5 +443,41 @@ class StartupHygieneRunsInEachWorkspaceTest(unittest.TestCase):
         self.assertIn("'platform-admin'", store.tenant_policy_predicate("scan_object_baselines"))
 
 
+class StartersRacingOnOneSqliteFileTest(unittest.TestCase):
+    """The server and a worker starting together with revisions pending both applied
+    them: the loser's insert into schema_migrations failed its primary key and its import
+    of backend.store failed with it (2 of 9 starters, three rounds of three)."""
+
+    def test_three_fresh_starters_all_come_up(self) -> None:
+        import os
+        import sqlite3
+        import subprocess
+        import sys
+
+        root = Path(__file__).resolve().parents[1]
+        for _ in range(2):
+            with tempfile.TemporaryDirectory() as temp:
+                env = dict(os.environ, DSPM_DB_PATH=str(Path(temp) / "race.sqlite"),
+                           DSPM_ARTIFACT_DIR=str(Path(temp) / "artifacts"),
+                           DSPM_LOCAL_ARTIFACT_KEY_PATH=str(Path(temp) / "artifact_key"),
+                           DSPM_SCAN_CACHE_DIR=str(Path(temp) / "cache"),
+                           DSPM_ADMIN_PASSWORD="race-test-only-pass-1", PYTHONPATH=str(root))
+                env.pop("DSPM_DB_URL", None)
+                starters = [subprocess.Popen([sys.executable, "-c", "import backend.store"], cwd=root, env=env,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for _ in range(3)]
+                results = [(starter.wait(timeout=300), starter.stderr.read().decode(errors="replace")[-300:])
+                           for starter in starters]
+                for starter in starters:
+                    starter.stderr.close()
+                self.assertEqual([code for code, _ in results], [0, 0, 0], [err for _, err in results])
+                conn = sqlite3.connect(env["DSPM_DB_PATH"])
+                try:
+                    count, distinct = conn.execute(
+                        "SELECT COUNT(*), COUNT(DISTINCT revision) FROM schema_migrations").fetchone()
+                finally:
+                    conn.close()
+                self.assertEqual(count, distinct)
+
+
 if __name__ == "__main__":
     unittest.main()

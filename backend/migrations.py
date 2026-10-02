@@ -27,11 +27,14 @@ contract in a later release).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
 import os
 import sys
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 # One stable, project-specific advisory lock key (PostgreSQL only).
 _ADVISORY_LOCK_KEY = 0x53454E54  # "SENT"
@@ -204,13 +207,58 @@ def status() -> dict:
     }
 
 
+SQLITE_LOCK_WAIT_SECONDS = 120.0
+
+
+@contextlib.contextmanager
+def _sqlite_upgrade_lock(database: Path):
+    """One upgrader per SQLite file across processes - PostgreSQL's advisory lock, here.
+
+    `store._lock` orders threads only. The server and `python main.py worker` starting
+    together with a revision pending both read the old revision and both applied it; the
+    second insert into schema_migrations failed its primary key (or waited out "database
+    is locked"), and that process's import of backend.store failed with it. The revision
+    is read again once the lock is held, so the second starter finds nothing to do."""
+    path = Path(str(database) + ".upgrade.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + SQLITE_LOCK_WAIT_SECONDS
+    with open(path, "a+b") as handle:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Another process has been upgrading this database for two minutes; "
+                                       "wait for it to finish and start again.") from None
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                with contextlib.suppress(OSError):
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def upgrade() -> int:
     """Apply pending revisions in order. Returns the resulting revision."""
     from backend import store, db
 
     # C10: revisions span tenants (backfills, re-sealing, policy rebuilds), so the
     # runner names its purpose; an unscoped transaction would see no tenant rows.
-    with store._lock, db.platform_scope("migration"):
+    process_lock = contextlib.nullcontext() if db.is_postgres() else _sqlite_upgrade_lock(store.DB_PATH)
+    with store._lock, process_lock, db.platform_scope("migration"):
         with store._connect() as conn:
             if db.is_postgres():
                 # Serialize concurrent starters/deployers cluster-wide - for exactly the
