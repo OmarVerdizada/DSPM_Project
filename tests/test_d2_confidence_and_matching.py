@@ -153,8 +153,8 @@ class ExactMatchCase(unittest.TestCase):
             "Customer contact sheet\nEmail: ana.mammadova@example.com\nEmail: stranger@example.org\n"
             "Phone: +994 50 123 45 67\n", encoding="utf-8")
 
-    def as_(self, user: str, tenant: str, *, mfa: bool = True) -> dict:
-        return {"Authorization": f"Bearer {security.create_token(user, 'admin', tenant, mfa_verified=mfa)}"}
+    def as_(self, user: str, tenant: str) -> dict:
+        return {"Authorization": f"Bearer {security.create_token(user, 'admin', tenant)}"}
 
     def upload(self, values, entity_type="EMAIL_ADDRESS", tenant="t-edm", user="edm-admin", name="Customers"):
         return self.client.post("/api/exact-match/sets", headers=self.as_(user, tenant),
@@ -356,10 +356,7 @@ class NothingOfTheValuesIsKeptTest(ExactMatchCase):
         self.assertNotEqual(self.gdpr_finding(self.scan(), "gdpr_email_address")["confidence_tier"], "CONFIRMED")
         self.assertEqual(self.client.get("/api/exact-match/sets", headers=self.as_("edm-admin", "t-edm")).json()["sets"], [])
 
-    def test_uploading_needs_a_verified_session_and_a_known_type(self) -> None:
-        response = self.client.post("/api/exact-match/sets", headers=self.as_("edm-admin", "t-edm", mfa=False),
-                                    json={"name": "x", "entity_type": "EMAIL_ADDRESS", "values": ["a@example.com"]})
-        self.assertEqual(response.status_code, 403)
+    def test_uploading_needs_a_known_type(self) -> None:
         self.assertEqual(self.upload(["x"], entity_type="SHOE_SIZE").status_code, 400)
 
     def test_a_workspace_holds_no_more_values_than_configured(self) -> None:

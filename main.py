@@ -226,29 +226,6 @@ def audit_forward(args: argparse.Namespace) -> None:
     raise SystemExit(1 if total["failed"] else 0)
 
 
-def mfa_reset(args: argparse.Namespace) -> int:
-    """Remove an account's second factor from the host (C2 break-glass).
-
-    For the built-in administrator, whose factor the console will not reset, and for any
-    account whose administrators are locked out themselves. Whoever can run this already
-    holds the host, the database and the vault key. The account's sessions end, it sets up
-    a new factor at its next sign-in, and the reset is in the audit trail as done "by host".
-    """
-    from backend.store import audit, delete_user_mfa, get_user, revoke_sessions_for_user
-
-    user = get_user(args.username.strip().lower())
-    if user is None:
-        print(f"No account {args.username!r}.")
-        return 1
-    removed = delete_user_mfa(user["tenant_id"], user["username"])
-    ended = revoke_sessions_for_user(user["username"])
-    audit(user["tenant_id"], "host", "auth.mfa_reset",
-          {"username": user["username"], "by": "host", "had_factor": removed, "sessions_ended": ended})
-    print(f"{user['username']}: second factor {'removed' if removed else 'was not set up'}; "
-          f"{ended} session(s) ended. It is set up again at the next sign-in.")
-    return 0
-
-
 def config_check(args: argparse.Namespace) -> int:
     """Validate the configuration and show the effective settings - each with where it came
     from, a secret only as "(set)" - and every warning and refusal. Exit 1 when refused."""
@@ -500,12 +477,6 @@ def build_parser() -> argparse.ArgumentParser:
     forward_parser = audit_commands.add_parser(
         "forward", help="Send the audit events waiting for the SIEM (DSPM_SIEM_URL) now, once.")
     forward_parser.set_defaults(func=audit_forward)
-
-    mfa_parser = subparsers.add_parser("mfa", help="Second-factor tools for the host operator.")
-    mfa_commands = mfa_parser.add_subparsers(dest="mfa_command", required=True)
-    reset_parser = mfa_commands.add_parser("reset", help="Remove an account's second factor and end its sessions.")
-    reset_parser.add_argument("username", help="The account key (the built-in administrator is 'admin').")
-    reset_parser.set_defaults(func=mfa_reset)
 
     config_parser = subparsers.add_parser("config", help="The configuration file and settings (C11).")
     config_commands = config_parser.add_subparsers(dest="config_command", required=True)

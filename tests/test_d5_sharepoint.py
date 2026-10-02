@@ -250,7 +250,7 @@ class D5Case(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.client = TestClient(app)
-        self.headers = {"Authorization": f"Bearer {security.create_token('d5-admin', 'admin', 't-d5', mfa_verified=True)}"}
+        self.headers = {"Authorization": f"Bearer {security.create_token('d5-admin', 'admin', 't-d5')}"}
         credential = self.client.post("/api/credentials", headers=self.headers,
                                       json={"username": "11111111-app", "password": SECRET, "domain": "contoso-tenant"})
         self.assertEqual(credential.status_code, 200, credential.text)

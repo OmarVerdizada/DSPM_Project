@@ -665,7 +665,7 @@ def install(package: Path, layout: Layout, *, port: int, mode: str, db_url_file:
         f"{' with warnings: ' + '; '.join(ready['warnings']) if ready.get('warnings') else ''}.")
     if "admin_password" in created:
         say(f"The first administrator password is in {layout.secrets / 'admin_password'} (Administrators "
-            f"only). Sign in as admin, set up two-step sign-in, and change the password.")
+            f"only). Sign in as admin and change the password.")
     return read_state(layout)
 
 

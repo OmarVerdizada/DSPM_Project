@@ -252,8 +252,8 @@ class D3Case(unittest.TestCase):
         self.relay.refused.clear()
         self.client = TestClient(app)
 
-    def as_(self, user: str = "d3-admin", role: str = "admin", tenant: str = "t-d3", *, mfa: bool = True) -> dict:
-        return {"Authorization": f"Bearer {security.create_token(user, role, tenant, mfa_verified=mfa)}"}
+    def as_(self, user: str = "d3-admin", role: str = "admin", tenant: str = "t-d3") -> dict:
+        return {"Authorization": f"Bearer {security.create_token(user, role, tenant)}"}
 
     def configure(self, channel: str, body: dict, *, headers: dict | None = None):
         return self.client.put(f"/api/integrations/{channel}", headers=headers or self.as_(),
@@ -711,11 +711,10 @@ class OnOffAndRemoveTest(D3Case):
 
 class ThePermissionsTest(D3Case):
 
-    def test_only_a_verified_administrator_configures_and_only_triage_tickets(self) -> None:
+    def test_only_an_administrator_configures_and_only_triage_tickets(self) -> None:
         body = {"url": self.services.url("/hook")}
         self.assertEqual(self.configure("webhook", body, headers=self.as_("d3-viewer", "viewer")).status_code, 403)
         self.assertEqual(self.configure("webhook", body, headers=self.as_("d3-analyst", "analyst")).status_code, 403)
-        self.assertEqual(self.configure("webhook", body, headers=self.as_(mfa=False)).status_code, 403)
         self.assertEqual(self.client.get("/api/integrations", headers=self.as_("d3-viewer", "viewer")).status_code, 403)
         self.assertEqual(self.client.post("/api/findings/x/ticket", headers=self.as_("d3-viewer", "viewer"),
                                           json={}).status_code, 403)

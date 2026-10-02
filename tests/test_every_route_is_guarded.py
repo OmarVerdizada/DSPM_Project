@@ -29,13 +29,6 @@ PUBLIC_PATHS = {
     # the endpoint useless. Every failure clears the cookie and answers 401 with the
     # same body, so it tells a caller nothing it did not already hold.
     "/api/auth/refresh",
-    # C2: the second step of sign-in. Its credential is the five-minute challenge token
-    # the password step returned (signed, bound to one account and one purpose, spent
-    # on success); every route answers 401 without a valid one, and wrong codes are
-    # throttled per account.
-    "/api/auth/mfa/verify",
-    "/api/auth/mfa/enroll/start",
-    "/api/auth/mfa/enroll/confirm",
     # Liveness and readiness: called by whatever restarts the service.
     "/api/health",
     "/api/ready",
@@ -100,8 +93,7 @@ class EveryRouteIsGuardedTest(unittest.TestCase):
         )
         self.assertEqual(
             public_api,
-            ["/api/auth/login", "/api/auth/mfa/enroll/confirm", "/api/auth/mfa/enroll/start",
-             "/api/auth/mfa/verify", "/api/auth/refresh", "/api/auth/register",
+            ["/api/auth/login", "/api/auth/refresh", "/api/auth/register",
              "/api/health", "/api/ready"],
             "an /api route became public without being named here",
         )

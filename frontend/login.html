@@ -126,53 +126,6 @@
         </div>
       </form>
 
-      <!-- C2: the second factor, after the password -->
-      <form id="mfa-form" class="mfa-step is-hidden" autocomplete="off">
-        <h2 class="mfa-title">Enter your authenticator code</h2>
-        <p class="form-desc" id="mfa-hint">Open your authenticator app and enter the six-digit code for Sentro.</p>
-        <div class="field">
-          <div class="fw">
-            <label class="sr-only" for="mfa-code" id="mfa-code-label">Authenticator code</label>
-            <input class="finput mfa-code" id="mfa-code" name="code" inputmode="numeric" autocomplete="one-time-code"
-                   pattern="[0-9 ]{6,7}" maxlength="7" placeholder="123 456" required/>
-          </div>
-        </div>
-        <button class="btn-sign" type="submit" id="mfa-submit">Verify</button>
-        <button class="link-btn" type="button" id="mfa-use-recovery">Use a recovery code instead</button>
-        <p id="mfa-status" class="status-msg" role="status" aria-live="polite"></p>
-      </form>
-
-      <section id="mfa-enroll" class="mfa-step is-hidden" aria-labelledby="mfa-enroll-title">
-        <h2 class="mfa-title" id="mfa-enroll-title">Set up a second factor</h2>
-        <p class="form-desc">Your role administers this workspace, so it signs in with an authenticator app as well as a password.</p>
-        <ol class="mfa-steps">
-          <li>In your authenticator app (Microsoft Authenticator, Google Authenticator, FreeOTP or similar), add an account with this key. It is shown only now.
-            <code class="mfa-secret" id="mfa-secret" aria-live="polite"></code>
-            <button class="link-btn" type="button" id="mfa-copy-secret">Copy key</button>
-          </li>
-          <li>Enter the six-digit code the app shows.</li>
-        </ol>
-        <form id="mfa-enroll-form" autocomplete="off">
-          <div class="field">
-            <div class="fw">
-              <label class="sr-only" for="mfa-enroll-code">Code from the authenticator</label>
-              <input class="finput mfa-code" id="mfa-enroll-code" inputmode="numeric" autocomplete="one-time-code"
-                     pattern="[0-9 ]{6,7}" maxlength="7" placeholder="123 456" required/>
-            </div>
-          </div>
-          <button class="btn-sign" type="submit">Turn on and continue</button>
-          <p id="mfa-enroll-status" class="status-msg" role="status" aria-live="polite"></p>
-        </form>
-      </section>
-
-      <section id="mfa-recovery" class="mfa-step is-hidden" aria-labelledby="mfa-recovery-title">
-        <h2 class="mfa-title" id="mfa-recovery-title">Save your recovery codes</h2>
-        <p class="form-desc">Each code signs you in once if you lose your authenticator. They are shown only now; Sentro keeps only a fingerprint of each.</p>
-        <ul class="mfa-codes" id="mfa-codes"></ul>
-        <button class="link-btn" type="button" id="mfa-copy-codes">Copy all codes</button>
-        <label class="mfa-ack"><input type="checkbox" id="mfa-saved"/> I have saved these codes somewhere safe</label>
-        <button class="btn-sign" type="button" id="mfa-continue" disabled>Continue to Sentro</button>
-      </section>
     </div>
   </main>
 

@@ -53,34 +53,16 @@ class _Case(unittest.TestCase):
             ("t-one", self.vault.store("t-one", "svc-files", "Files-pass-772", "CORP")): "Files-pass-772",
             ("t-two", self.vault.store("t-two", "svc-other", "Other-pass-773", "OTHER")): "Other-pass-773",
         }
-        self.mfa_seed = "JBSWY3DPEHPK3PXP"
-        self.mfa_sealed = vault.encrypt_text(self.mfa_seed)
 
     def assert_everything_opens(self) -> None:
         for (tenant, ref), password in self.saved.items():
             self.assertEqual(self.vault.resolve(tenant, ref)["password"], password)
-        self.assertEqual(vault.decrypt_text(self.mfa_sealed_now()), self.mfa_seed)
-
-    def mfa_sealed_now(self) -> str:
-        # the seed the rotation re-sealed, as the table holds it
-        return self._mfa_row or self.mfa_sealed
-
-    _mfa_row: str | None = None
 
     def kids_in_use(self) -> set[str]:
         return {vault_keys.split(value)[0] for value in store.vault_sealed_values()}
 
 
 class TheRotationDrillTest(_Case):
-
-    def setUp(self) -> None:
-        super().setUp()
-        # an MFA seed in the table too, so rotation must re-seal both kinds of value
-        store.create_user("drill-user", security.hash_password("Drill-user-pass-9"), "analyst", "t-one")
-        store.begin_mfa_enrollment("t-one", "drill-user", self.mfa_sealed, 2_000_000_000)
-
-    def mfa_sealed_now(self) -> str:
-        return store.get_user_mfa("drill-user")["pending_ciphertext"]
 
     def test_the_drill(self) -> None:
         first_kid = vault_keys.key_id(self.first_key)
@@ -90,7 +72,7 @@ class TheRotationDrillTest(_Case):
         report = vault.rotate(actor="drill")
         second_kid = report["to"]
         self.assertNotEqual(second_kid, first_kid)
-        self.assertEqual(report["resealed"], 4)
+        self.assertEqual(report["resealed"], 3)
         self.assertEqual(self.kids_in_use(), {second_kid})
         self.assert_everything_opens()
         self.assertEqual(vault.status()["rotation"]["state"], "idle")
@@ -306,7 +288,7 @@ class TheCredentialRoutesTest(_Case):
         super().setUp()
         self.client = TestClient(app)
         store.create_user("cm", security.hash_password("Cred-manager-pass-9"), "admin", "t-one")
-        self.admin = {"Authorization": f"Bearer {security.create_token('cm', 'admin', 't-one', mfa_verified=True)}"}
+        self.admin = {"Authorization": f"Bearer {security.create_token('cm', 'admin', 't-one')}"}
 
     def test_the_list_shows_metadata_and_never_a_secret(self) -> None:
         listing = self.client.get("/api/credentials", headers=self.admin)
@@ -351,13 +333,11 @@ class TheCredentialRoutesTest(_Case):
         self.assertEqual(self.client.delete(f"/api/credentials/{ref}", headers=self.admin).status_code, 400)
         self.assertEqual(self.vault.resolve("t-one", ref, kind="directory")["password"], "Bind-pass-778")
 
-    def test_only_a_verified_credential_manager_sees_or_changes_them(self) -> None:
+    def test_only_a_credential_manager_sees_or_changes_them(self) -> None:
         # the role is read from the account, not the token: a viewer needs its own account
         store.create_user("cm-viewer", security.hash_password("Cred-viewer-pass-9"), "viewer", "t-one")
-        viewer = {"Authorization": f"Bearer {security.create_token('cm-viewer', 'viewer', 't-one', mfa_verified=True)}"}
-        unverified = {"Authorization": f"Bearer {security.create_token('cm', 'admin', 't-one', mfa_verified=False)}"}
-        for headers in (viewer, unverified):
-            self.assertEqual(self.client.get("/api/credentials", headers=headers).status_code, 403)
+        viewer = {"Authorization": f"Bearer {security.create_token('cm-viewer', 'viewer', 't-one')}"}
+        self.assertEqual(self.client.get("/api/credentials", headers=viewer).status_code, 403)
         _tenant, ref = next(iter(self.saved))
         foreign = next(ref for (tenant, ref) in self.saved if tenant == "t-two")
         self.assertEqual(self.client.delete(f"/api/credentials/{foreign}", headers=self.admin).status_code, 404)

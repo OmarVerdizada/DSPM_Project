@@ -416,7 +416,7 @@ def _start_server(env: dict) -> tuple[subprocess.Popen, int, str]:
         time.sleep(1)
     minted = subprocess.run([sys.executable, "-c",
                              "import sys; sys.path.insert(0, sys.argv[1]); from backend.security import create_token; "
-                             "print(create_token('admin', 'admin', 'default', mfa_verified=True))", str(ROOT)],
+                             "print(create_token('admin', 'admin', 'default'))", str(ROOT)],
                             env=env, cwd=ROOT, capture_output=True, text=True, check=True)
     return server, port, minted.stdout.strip().splitlines()[-1]
 

@@ -291,9 +291,9 @@
     {
       "file": "backend/store.py",
       "test_id": "B608",
-      "code": "rows = conn.execute( f\"SELECT * FROM findings WHERE {page_where} ORDER BY {expression} {sort_direction}, id {sort_direction} LIMIT ?\", (*page_params, page_size + 1),",
-      "reviewed": "2026-09-28",
-      "reason": "Interpolates an ORDER BY from a whitelist (REMEDIATION_SORTS / INVENTORY_SORTS) and ASC/DESC only; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+      "code": "rows = conn.execute( f\"SELECT *, {expression} AS sort_value FROM findings WHERE {page_where} \" f\"ORDER BY {expression} {sort_direction}, id {sort_direction} LIMIT ?\", (*page_params, page_size + 1),",
+      "reviewed": "2026-10-02",
+      "reason": "Interpolates an ORDER BY from a whitelist (REMEDIATION_SORTS / INVENTORY_SORTS) and ASC/DESC only; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter. 2026-10-02: the sort expression is also selected AS sort_value so the page cursor carries what rows are ordered by - the same whitelisted expression."
     },
     {
       "file": "backend/store.py",

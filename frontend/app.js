@@ -872,15 +872,6 @@ async function api(path, payload, method = "POST", options = {}) {
     return api(path, payload, method, { ...options, isRetry: true });
   }
 
-  if (response.status === 403 && !options.isMfaRetry) {
-    // C2: credentials and administration need a session that proved the second
-    // factor. Ask for a code once, then send the same request again.
-    const problem = await response.clone().json().catch(() => null);
-    if (problem?.detail?.code === "mfa_required" && await confirmSecondFactor()) {
-      return api(path, payload, method, { ...options, isMfaRetry: true });
-    }
-  }
-
   if (response.status === 503) await noticeSchemaMismatch(response);
 
   if (!response.ok) {
@@ -952,116 +943,6 @@ async function refreshAccessToken() {
     })();
   }
   return refreshInFlight;
-}
-
-// C2: one prompt at a time. Several panels refused together share the one answer.
-let secondFactorInFlight = null;
-
-function confirmSecondFactor() {
-  if (!secondFactorInFlight) {
-    secondFactorInFlight = promptSecondFactor().finally(() => {
-      window.setTimeout(() => { secondFactorInFlight = null; }, 0);
-    });
-  }
-  return secondFactorInFlight;
-}
-
-// Resolves true once this session has proved the second factor, false if the person
-// closed the prompt or has no authenticator yet. The code goes to the server and is
-// never kept.
-async function promptSecondFactor() {
-  const modal = document.querySelector("#mfa-stepup-modal");
-  if (!modal) return false;
-  let state = null;
-  try {
-    const response = await fetch("/api/profile/mfa", { headers: authHeaders() });
-    state = response.ok ? await response.json() : null;
-  } catch {
-    state = null;
-  }
-  const enrolled = Boolean(state?.enabled);
-  const form = modal.querySelector("#mfa-stepup-form");
-  const input = modal.querySelector("#mfa-stepup-code");
-  const label = modal.querySelector("#mfa-stepup-label");
-  const toggle = modal.querySelector("#mfa-stepup-toggle");
-  const error = modal.querySelector("[data-mfa-stepup-error]");
-  const submit = modal.querySelector("#mfa-stepup-submit");
-  modal.querySelector("#mfa-stepup-enter").hidden = !enrolled;
-  modal.querySelector("#mfa-stepup-setup").hidden = enrolled;
-  submit.hidden = !enrolled;
-  error.textContent = "";
-  input.value = "";
-  let recovery = false;
-  const setMode = (useRecovery) => {
-    recovery = useRecovery;
-    label.textContent = recovery ? "Recovery code" : "Authenticator code";
-    input.inputMode = recovery ? "text" : "numeric";
-    input.placeholder = recovery ? "XXXX-XXXX-XXXX-XXXX" : "123 456";
-    input.autocomplete = recovery ? "off" : "one-time-code";
-    toggle.textContent = recovery ? "Use the authenticator app" : "Use a recovery code";
-  };
-  setMode(false);
-
-  const returnFocus = document.activeElement;
-  return new Promise((resolve) => {
-    const cleanup = () => {
-      form.removeEventListener("submit", onSubmit);
-      toggle.removeEventListener("click", onToggle);
-      document.removeEventListener("keydown", onKey);
-      modal.querySelectorAll("[data-close-mfa-stepup]").forEach((button) => button.removeEventListener("click", onCancel));
-    };
-    // The same shape as the asset detail: unhide, mark open; Escape, the backdrop and
-    // the icon close all cancel.
-    const finish = (ok) => {
-      cleanup();
-      input.value = "";
-      modal.classList.remove("open");
-      modal.classList.add("hidden");
-      if (returnFocus?.isConnected) returnFocus.focus();
-      resolve(ok);
-    };
-    const onCancel = () => finish(false);
-    const onKey = (event) => {
-      if (event.key === "Escape") finish(false);
-    };
-    const onToggle = () => {
-      setMode(!recovery);
-      input.value = "";
-      input.focus();
-    };
-    const onSubmit = async (event) => {
-      event.preventDefault();
-      if (!enrolled) return;
-      const value = String(input.value || "");
-      const body = recovery ? { recovery_code: value.trim() } : { code: value.replace(/\s+/g, "") };
-      submit.disabled = true;
-      error.textContent = "";
-      try {
-        const response = await fetch("/api/profile/mfa/verify", {
-          method: "POST", headers: authHeaders(), body: JSON.stringify(body),
-        });
-        if (!response.ok) {
-          input.value = "";
-          error.textContent = await readErrorMessage(response);
-          input.focus();
-          return;
-        }
-        finish(true);
-      } catch {
-        error.textContent = "The server could not be reached. Try again.";
-      } finally {
-        submit.disabled = false;
-      }
-    };
-    form.addEventListener("submit", onSubmit);
-    toggle.addEventListener("click", onToggle);
-    document.addEventListener("keydown", onKey);
-    modal.querySelectorAll("[data-close-mfa-stepup]").forEach((button) => button.addEventListener("click", onCancel));
-    modal.classList.remove("hidden");
-    modal.getBoundingClientRect();
-    modal.classList.add("open");
-    requestAnimationFrame(() => (enrolled ? input : modal.querySelector(".mfa-stepup-link"))?.focus());
-  });
 }
 
 function endSession(title, message) {
@@ -10701,6 +10582,7 @@ const AUDIT_ACTIONS = {
   "auth.logout": "Signed out",
   "auth.refreshed": "Renewed a session",
   "auth.refresh_replayed": "Session token replayed - all of that session's sign-ins ended",
+  // Two-step sign-in was removed (2026-10-02); these name the rows recorded before.
   "auth.mfa_challenged": "Password accepted - asked for the second factor",
   "auth.mfa_verified": "Confirmed the second factor",
   "auth.mfa_failed": "Second factor refused",
@@ -11183,7 +11065,6 @@ function renderUsers(users) {
           </td>
           <td>
             <div class="inline-control">
-              <button type="button" class="secondary-btn" data-reset-mfa="${escapeHtml(user.username)}" title="For someone who lost their authenticator: they set up a new one at their next sign-in">Reset 2-step</button>
               <button type="button" class="danger-btn" data-delete-user="${escapeHtml(user.username)}">Delete</button>
             </div>
           </td>
@@ -11229,15 +11110,6 @@ async function resetUserPassword(username, password) {
   await api(`/api/users/${encodeURIComponent(username)}/reset-password`, { password });
   userManagementStatus.textContent = `Password reset for ${username}.`;
   await Promise.all([loadUsers(), loadAudit()]);
-}
-
-async function resetUserMfa(username) {
-  userManagementStatus.textContent = `Resetting two-step sign-in for ${username}...`;
-  const result = await api(`/api/users/${encodeURIComponent(username)}/mfa/reset`, {});
-  userManagementStatus.textContent = result.reset
-    ? `Two-step sign-in reset for ${username}. ${result.sessions_ended} session(s) ended.`
-    : `${username} had no authenticator set up. ${result.sessions_ended} session(s) ended.`;
-  await loadAudit();
 }
 
 async function deleteUser(username) {
@@ -12578,17 +12450,6 @@ usersBody.addEventListener("click", (event) => {
     if (confirmed) {
       deleteUser(username).catch((error) => {
         userManagementStatus.textContent = `Delete failed: ${error.message}`;
-      });
-    }
-    return;
-  }
-
-  const mfaButton = event.target.closest("[data-reset-mfa]");
-  if (mfaButton) {
-    const username = mfaButton.dataset.resetMfa;
-    if (window.confirm(`Reset two-step sign-in for ${username}? Their sessions end, and they set up a new authenticator at their next sign-in.`)) {
-      resetUserMfa(username).catch((error) => {
-        userManagementStatus.textContent = `Reset failed: ${error.message}`;
       });
     }
     return;

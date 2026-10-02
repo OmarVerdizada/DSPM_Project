@@ -28,12 +28,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-from backend import directory, mfa, store
+from backend import directory, store
 from backend.security import (
     Principal,
     _dummy_password_hash,
     authenticate_user,
-    role_permissions_in,
     sanitize_username,
     verify_password,
 )
@@ -193,65 +192,3 @@ def revalidate_directory_account(user: dict) -> str:
         store.audit(tenant_id, user["username"], "auth.directory_role_changed",
                     {"from": before, "to": outcome.role, "group": outcome.matched_group})
     return "ok"
-
-
-# ---- MFA -----------------------------------------------------------------------
-def mfa_state(user: dict) -> dict:
-    record = store.get_user_mfa(user["username"])
-    required = mfa.requires_sign_in_mfa(role_permissions_in(user["role"], user["tenant_id"]))
-    return {"enabled": bool(record and record["enabled"]), "required_at_sign_in": required,
-            "recovery_codes_left": len(record["recovery_hashes"]) if record and record["enabled"] else 0,
-            "confirmed_at": record.get("confirmed_at") if record else None}
-
-
-def start_enrollment(user: dict) -> dict:
-    """A new secret, shown this once. It replaces nothing until it is confirmed."""
-    from backend.vault import encrypt_text
-
-    secret = mfa.generate_secret()
-    store.begin_mfa_enrollment(user["tenant_id"], user["username"], encrypt_text(secret),
-                               int(time.time()) + mfa.ENROLLMENT_SECONDS)
-    account = f"{user.get('login_name') or user['username']}@{user['tenant_id']}"
-    return {"secret": secret, "otpauth_uri": mfa.provisioning_uri(secret, account),
-            "expires_in": mfa.ENROLLMENT_SECONDS}
-
-
-def confirm_enrollment(user: dict, code: str) -> list[str] | None:
-    """Recovery codes (shown once) when `code` matches the pending secret, else None."""
-    from backend.vault import decrypt_text
-
-    record = store.get_user_mfa(user["username"])
-    if not record or not record.get("pending_ciphertext") or int(record.get("pending_expires_at") or 0) < time.time():
-        return None
-    secret = decrypt_text(record["pending_ciphertext"])
-    step = mfa.matching_step(secret, code)
-    if step is None:
-        return None
-    codes = mfa.generate_recovery_codes()
-    store.confirm_mfa_enrollment(user["tenant_id"], user["username"], record["pending_ciphertext"],
-                                 [mfa.recovery_hash(code) for code in codes], step)
-    return codes
-
-
-def verify_second_factor(user: dict, code: str = "", recovery_code: str = "") -> tuple[bool, str, int | None]:
-    """(ok, method, recovery codes left). A TOTP step is accepted once; a recovery code
-    once."""
-    from backend.vault import decrypt_text
-
-    record = store.get_user_mfa(user["username"])
-    if not record or not record["enabled"]:
-        return False, "", None
-    if recovery_code:
-        left = store.consume_recovery_code(user["username"], mfa.recovery_hash(recovery_code))
-        return left is not None, "recovery_code", left
-    secret = decrypt_text(record["secret_ciphertext"])
-    step = mfa.matching_step(secret, code)
-    if step is None or not store.consume_mfa_step(user["username"], step):
-        return False, "totp", None
-    return True, "totp", None
-
-
-def new_recovery_codes(user: dict) -> list[str]:
-    codes = mfa.generate_recovery_codes()
-    store.replace_recovery_hashes(user["tenant_id"], user["username"], [mfa.recovery_hash(code) for code in codes])
-    return codes

@@ -148,62 +148,6 @@
             <p id="password-status" class="settings-hint" role="status">&nbsp;</p>
           </article>
 
-          <!-- C2: the second factor. The key is shown once while it is set up; recovery
-               codes are shown once when they are made. Neither is stored in the page. -->
-          <article class="settings-card" id="mfa-card">
-            <div class="settings-card-copy">
-              <h2>Two-step sign-in</h2>
-              <p>After your password, sign-in asks for a six-digit code from an authenticator app on your phone. Administrators and anyone who manages scan credentials need it.</p>
-            </div>
-            <div class="settings-kv">
-              <div><span>Status</span><strong id="mfa-state">Checking&hellip;</strong></div>
-              <div><span>Recovery codes left</span><strong id="mfa-codes-left">&ndash;</strong></div>
-              <div><span>This session</span><strong id="mfa-session">&ndash;</strong></div>
-            </div>
-            <div class="settings-form-foot mfa-actions">
-              <span class="siem-actions">
-                <button type="button" class="secondary-btn" id="mfa-new-codes-btn" hidden>New recovery codes</button>
-                <button type="button" class="settings-danger-btn" id="mfa-disable-btn" hidden>Turn off</button>
-              </span>
-              <button type="button" id="mfa-setup-btn">Set up authenticator</button>
-            </div>
-
-            <form id="mfa-stepup-form" class="settings-form-row mfa-panel" hidden>
-              <label class="settings-field">
-                <span id="mfa-stepup-label">Authenticator code</span>
-                <input id="mfa-stepup-code" name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="23" spellcheck="false" placeholder="123 456" />
-              </label>
-              <button type="submit" id="mfa-stepup-btn">Confirm</button>
-              <button type="button" class="link-btn" id="mfa-stepup-recovery">Use a recovery code</button>
-            </form>
-
-            <div id="mfa-setup-panel" class="siem-panel mfa-panel" hidden>
-              <p class="settings-hint mfa-lead">In your authenticator app, add an account and enter this key. It is shown only now.</p>
-              <div class="siem-ca-row">
-                <code id="mfa-setup-secret" class="mfa-key mono"></code>
-                <button type="button" class="secondary-btn" id="mfa-setup-copy">Copy key</button>
-              </div>
-              <form id="mfa-setup-form" class="settings-form-row">
-                <label class="settings-field">
-                  Code from the app
-                  <input id="mfa-setup-code" name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="7" spellcheck="false" placeholder="123 456" />
-                </label>
-                <button type="submit" id="mfa-setup-confirm">Turn on</button>
-                <button type="button" class="secondary-btn" id="mfa-setup-cancel">Cancel</button>
-              </form>
-            </div>
-
-            <div id="mfa-codes-panel" class="siem-panel mfa-panel" hidden>
-              <p class="settings-hint mfa-lead">Save these recovery codes somewhere safe. Each one signs you in once if you lose your phone. They are not shown again.</p>
-              <ol id="mfa-codes-list" class="mfa-code-list mono"></ol>
-              <div class="settings-form-foot">
-                <button type="button" class="secondary-btn" id="mfa-codes-copy">Copy codes</button>
-                <button type="button" id="mfa-codes-done">I saved them</button>
-              </div>
-            </div>
-            <p id="mfa-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
-          </article>
-
           <!-- C2: sign-in with the workspace's directory. The service account's password
                is kept in the vault and never sent back: the field stays empty, and a
                saved password is shown only as configured. -->

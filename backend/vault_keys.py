@@ -1,7 +1,7 @@
 """The vault's keys: versioned, rotated without a moment of unreadable data, escrowed (C12).
 
 Every value the vault seals - a saved scan credential, a directory service account's
-password, an MFA seed - is written as
+password - is written as
 
     vk1.<kid>.<fernet token>
 

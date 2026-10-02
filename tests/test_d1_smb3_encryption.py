@@ -277,7 +277,7 @@ class TheRequestTest(unittest.TestCase):
         from backend import security
         from backend.app import ScanRequest, app
 
-        headers = {"Authorization": f"Bearer {security.create_token('admin', 'admin', 'default', mfa_verified=True)}"}
+        headers = {"Authorization": f"Bearer {security.create_token('admin', 'admin', 'default')}"}
         # A guard: were the refusal missing, nothing may actually connect.
         with mock.patch("discovery.discovery_engine.DSPMDiscoveryEngine.test_connection",
                         side_effect=AssertionError("connected")) as reached:

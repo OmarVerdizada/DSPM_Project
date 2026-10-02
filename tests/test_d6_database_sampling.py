@@ -389,7 +389,7 @@ class TheRouteTest(unittest.TestCase):
         if store.get_user("d6r-admin") is None:
             store.create_user("d6r-admin", security.hash_password(PASSWORD), "admin", "default")
         self.client = TestClient(app)
-        self.headers = {"Authorization": f"Bearer {security.create_token('d6r-admin', 'admin', 'default', mfa_verified=True)}"}
+        self.headers = {"Authorization": f"Bearer {security.create_token('d6r-admin', 'admin', 'default')}"}
         self.body = {"host": "db.corp.test", "database": "crm", "username": "reader", "password": "x", "sslmode": "prefer"}
 
     def post(self):
@@ -436,7 +436,7 @@ class ThePostgreSQLScanTest(unittest.TestCase):
         store.create_user("d6-admin", security.hash_password(PASSWORD), "admin", "default") \
             if store.get_user("d6-admin") is None else None
         self.client = TestClient(app)
-        self.headers = {"Authorization": f"Bearer {security.create_token('d6-admin', 'admin', 'default', mfa_verified=True)}"}
+        self.headers = {"Authorization": f"Bearer {security.create_token('d6-admin', 'admin', 'default')}"}
         from urllib.parse import urlsplit
 
         parts = urlsplit(_pg_dsn())

@@ -27,7 +27,6 @@ from backend.store import (
     forget_session,
     get_active_api_key,
     get_user,
-    is_token_revoked,
     mark_user_login,
     record_session,
     revoke_refresh_family,
@@ -42,8 +41,8 @@ from backend.store import (
     update_user_role,
 )
 from backend.breached_passwords import password_is_breached
-from backend.mfa import GATED_PERMISSIONS, requires_sign_in_mfa
-from backend.permissions import AUTHENTICATED, PERMISSIONS, PLATFORM_ONLY, is_known_role, role_permissions
+from backend.permissions import (AUTHENTICATED, PERMISSIONS, PERSON_ONLY_PERMISSIONS, PLATFORM_ONLY, is_known_role,
+                                 role_permissions)
 from backend.store import issue_refresh_token as store_issue_refresh_token
 
 
@@ -135,9 +134,6 @@ class Principal:
     # credential minted on its behalf - a download token - can be bound to it and die
     # with it. Empty for API keys and system principals, which have no session.
     session_id: str = ""
-    # C2: the session proved a second factor (TOTP or a recovery code) - required to
-    # exercise an MFA-scoped permission (backend.mfa.GATED_PERMISSIONS).
-    mfa_verified: bool = False
 
 
 # C8: the policy a NEW password is held to. Existing passwords keep working at sign-in
@@ -346,8 +342,7 @@ def _refresh_hash(secret: str) -> str:
     return hashlib.sha256(f"refresh.{secret}".encode()).hexdigest()
 
 
-def issue_refresh_token(subject: str, session_jti: str, family_id: str = "", *,
-                        mfa_verified: bool = False) -> tuple[str, str, int]:
+def issue_refresh_token(subject: str, session_jti: str, family_id: str = "") -> tuple[str, str, int]:
     """Mint the next link in a refresh chain. Returns (secret, family_id, expires_at).
 
     The family is the chain: rotation keeps it, and a replay revokes all of it.
@@ -357,8 +352,7 @@ def issue_refresh_token(subject: str, session_jti: str, family_id: str = "", *,
     family = family_id or secrets.token_hex(16)
     now = int(time.time())
     expires_at = now + REFRESH_TTL_SECONDS
-    store_issue_refresh_token(_refresh_hash(secret), family, subject, session_jti, now, expires_at,
-                              mfa_verified=mfa_verified)
+    store_issue_refresh_token(_refresh_hash(secret), family, subject, session_jti, now, expires_at)
     return secret, family, expires_at
 
 
@@ -399,13 +393,6 @@ def rotate_refresh_token(secret: str) -> dict:
                 revoke_refresh_family(str(record.get("family_id") or ""))
             return {"status": "inactive" if verdict in {"inactive", "demoted"} else "directory_unavailable"}
         user = get_user(user["username"]) or user
-    mfa_verified = bool(record.get("mfa_verified"))
-    if not mfa_verified and requires_sign_in_mfa(role_permissions_in(str(user.get("role") or ""),
-                                                                     str(user.get("tenant_id") or "default"))):
-        # A session from before MFA was required, or an account promoted since: it
-        # cannot be renewed into an administrator's session without the second factor.
-        revoke_refresh_family(str(record.get("family_id") or ""))
-        return {"status": "mfa_required"}
     # The role and tenant come from the row on every refresh, exactly as verify_token
     # reads them on every request: a demotion must not wait for the chain to end.
     role = str(user.get("role") or "viewer")
@@ -417,10 +404,9 @@ def rotate_refresh_token(secret: str) -> dict:
         _session_last_seen.pop(previous_jti, None)
         forget_session(previous_jti)
 
-    access = create_token(user["username"], role, tenant_id, mfa_verified=mfa_verified)
-    next_secret, family, expires_at = issue_refresh_token(
-        user["username"], _token_jti(access), str(record.get("family_id") or ""), mfa_verified=mfa_verified
-    )
+    access = create_token(user["username"], role, tenant_id)
+    next_secret, family, expires_at = issue_refresh_token(user["username"], _token_jti(access),
+                                                          str(record.get("family_id") or ""))
     return {
         "status": "ok",
         "access_token": access,
@@ -438,16 +424,15 @@ def _token_jti(token: str) -> str:
         return ""
 
 
-# The only header an access token has. verify_token requires it byte for byte: the MFA
-# challenge ("mfa.<payload>") and the download token ("artifact_dl.<payload>") are
-# signed with the same key over "<prefix>.<payload>", so without this check either one,
-# given its prefix back as a header, verified as a session (M3 exit review).
+# The only header an access token has. verify_token requires it byte for byte: the
+# download token ("artifact_dl.<payload>") is signed with the same key over
+# "<prefix>.<payload>", so without this check it, given its prefix back as a header,
+# verified as a session (M3 exit review).
 _TOKEN_HEADER = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
 
 
-def create_token(subject: str, role: str, tenant_id: str, *, mfa_verified: bool = False) -> str:
-    """An access token and its session row. `mfa_verified` records that the session proved a
-    second factor; every production caller states it (sign-in, MFA completion, refresh)."""
+def create_token(subject: str, role: str, tenant_id: str) -> str:
+    """An access token and its session row."""
     now = int(time.time())
     claims = {
         "sub": subject,
@@ -463,7 +448,7 @@ def create_token(subject: str, role: str, tenant_id: str, *, mfa_verified: bool 
     # a password change can end all of them, and the per-account cap has something to
     # count. The token itself is unchanged - an install upgrading mid-session keeps
     # working, and its sessions become rows the first time they are used.
-    record_session(claims["jti"], subject, now, claims["exp"], mfa_verified=mfa_verified)
+    record_session(claims["jti"], subject, now, claims["exp"])
     return f"{message}.{_sign(message)}"
 
 
@@ -498,8 +483,7 @@ def verify_token(token: str) -> Principal:
         tenant_id = str(user.get("tenant_id") or claims.get("tenant") or "default")
         if not role_exists(role, tenant_id):
             raise ValueError("invalid role")
-        return Principal(subject, role, tenant_id, session_id=jti,
-                         mfa_verified=bool(user.get("session_mfa_verified")))
+        return Principal(subject, role, tenant_id, session_id=jti)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token") from exc
 
@@ -653,7 +637,6 @@ def require_principal(
                 principal.auth_type,
                 principal.home_tenant_id or principal.tenant_id,
                 principal.session_id,
-                principal.mfa_verified,
             )
         return principal
 
@@ -676,51 +659,6 @@ def require_principal(
                 return Principal("api-key", "analyst", tenant_id, "api_key")
 
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-
-
-MFA_CHALLENGE_SECONDS = 300
-
-
-def create_mfa_challenge(subject: str, purpose: str) -> str:
-    """Proof that `subject` passed the first factor, good for five minutes, to be
-    completed with a code (purpose "verify") or by enrolling (purpose "enroll"). It is
-    not a session: it opens nothing but the MFA endpoints, and it is spent on success."""
-    claims = {"sub": subject, "purpose": purpose, "exp": int(time.time()) + MFA_CHALLENGE_SECONDS,
-              "jti": secrets.token_hex(12)}
-    payload = _b64url(json.dumps(claims, separators=(",", ":")).encode())
-    signature = _b64url(hmac.new(SECRET_KEY.encode(), f"mfa.{payload}".encode(), hashlib.sha256).digest())
-    return f"{payload}.{signature}"
-
-
-def read_mfa_challenge(token: str, purposes: tuple[str, ...]) -> dict | None:
-    """The claims of a live challenge for one of `purposes`, or None. Not spent here."""
-    if not token or "." not in token:
-        return None
-    payload, _, signature = token.partition(".")
-    expected = _b64url(hmac.new(SECRET_KEY.encode(), f"mfa.{payload}".encode(), hashlib.sha256).digest())
-    if not hmac.compare_digest(expected, signature):
-        return None
-    try:
-        claims = json.loads(_b64url_decode(payload))
-    except Exception:
-        return None
-    if not isinstance(claims, dict) or claims.get("purpose") not in purposes:
-        return None
-    if int(claims.get("exp", 0)) < int(time.time()) or not claims.get("jti"):
-        return None
-    if is_token_revoked(_spent_challenge_key(claims["jti"])):
-        return None
-    return claims
-
-
-def _spent_challenge_key(jti: str) -> str:
-    # consume_one_time_token files a spent id under "dl:<id>"; the check must read the
-    # same key, or a spent challenge reads as unspent (M3 exit review).
-    return f"dl:mfa:{jti}"
-
-
-def spend_mfa_challenge(claims: dict) -> bool:
-    return consume_one_time_token(f"mfa:{claims.get('jti')}", int(claims.get("exp") or 0))
 
 
 ARTIFACT_DL_TOKEN_TTL_SECONDS = int(os.getenv("DSPM_ARTIFACT_DL_TOKEN_TTL_SECONDS", "300"))
@@ -893,7 +831,7 @@ def has_permission(principal: Principal, permission: str) -> bool:
     return permission in principal_permissions(principal)
 
 
-def require_permission(*permissions: str, mfa: bool | None = None):
+def require_permission(*permissions: str, person_only: bool | None = None):
     """C3: a route names the capability it needs; any one of `permissions` admits.
 
     Replaces `require_role`, whose ranks could not say "may run scans but not read what
@@ -907,10 +845,10 @@ def require_permission(*permissions: str, mfa: bool | None = None):
         raise ValueError(f"require_permission needs known permissions, got {permissions!r}")
     wanted = frozenset(permissions)
 
-    # C2: by default a session must have proved MFA when the permission that admits it is
-    # MFA-scoped. `mfa=True` makes the route itself MFA-scoped whichever permission admits
-    # (storing a vault credential: a scan operator may, but not from an unverified session).
-    gated = wanted & GATED_PERMISSIONS
+    # A route admitted only by a person-only permission refuses an API key; `person_only=True`
+    # makes a route refuse one whichever permission admits (storing a vault credential: a
+    # scan operator may, a machine key may not).
+    gated = wanted & PERSON_ONLY_PERMISSIONS
 
     def dependency(principal: Annotated[Principal, Depends(require_principal)]) -> Principal:
         if AUTHENTICATED in wanted:
@@ -920,18 +858,16 @@ def require_permission(*permissions: str, mfa: bool | None = None):
             needed = " or ".join(sorted(wanted))
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                                 detail=f"Your role does not allow this (it needs {needed})")
-        if (mfa is True or (mfa is None and gated and held <= gated)) and not principal.mfa_verified:
-            # C2: an MFA-scoped permission is exercised only from a session that proved a
-            # second factor. An API key has no second factor, so it never holds one.
+        if (person_only is True or (person_only is None and gated and held <= gated)) \
+                and principal.auth_type == "api_key":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={
-                "code": "mfa_required",
-                "message": "This needs a session verified with your authenticator app.",
-                "hint": "Confirm a code from your authenticator (or set one up in your profile), then try again.",
+                "code": "person_only",
+                "message": "An API key cannot do this; a person signed in to the console can.",
             })
         return principal
 
     dependency.required_permissions = tuple(permissions)
-    dependency.requires_mfa = mfa is True or (mfa is None and bool(gated))
+    dependency.person_only = person_only is True or (person_only is None and bool(gated))
     return dependency
 
 

@@ -140,14 +140,6 @@ def pytest_configure(config: pytest.Config) -> None:
         except Exception:
             pass
         _security.ensure_default_admin()
-    # C2: a session must prove a second factor before it may use an MFA-scoped permission
-    # (tenant.admin, platform.admin, credential.manage). The suite's tests mint sessions
-    # directly with create_token for every role, so here - and only here - a minted token
-    # counts as MFA-verified unless the test says otherwise; production callers always
-    # state it (sign-in, MFA completion, refresh), and tests/test_c2_mfa.py passes
-    # mfa_verified=False to prove the gate.
-    from backend import security as _minting
-    _minting.create_token.__kwdefaults__["mfa_verified"] = True
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:
@@ -175,7 +167,7 @@ _APP_TABLES = (
     "finding_index", "finding_occurrences", "findings", "asset_versions",
     "scan_object_baselines", "assets", "scan_runs", "scan_partitions", "partitioned_scans", "scan_schedules", "suppression_rules", "derived_cache", "scan_jobs", "alert_events", "audit_events",
     "secrets", "scan_reports", "scan_profiles", "registration_invites", "api_keys",
-    "login_failures", "revoked_tokens", "user_sessions", "refresh_tokens", "custom_roles", "scan_targets", "audit_chain_heads", "audit_outbox", "user_mfa", "directory_settings", "scan_sources", "asset_access", "edm_fingerprints", "edm_sets", "alert_deliveries", "alert_channels", "finding_tickets", "source_checkpoints", "users", "tenants",
+    "login_failures", "revoked_tokens", "user_sessions", "refresh_tokens", "custom_roles", "scan_targets", "audit_chain_heads", "audit_outbox", "directory_settings", "scan_sources", "asset_access", "edm_fingerprints", "edm_sets", "alert_deliveries", "alert_channels", "finding_tickets", "source_checkpoints", "users", "tenants",
     # Install-wide settings: the SIEM receiver, feature flags, housekeeping's last run.
     "app_settings",
 )

@@ -83,6 +83,7 @@ def _revisions() -> list[tuple[int, str, object]]:
     (35, "source_checkpoints", store.add_source_checkpoints),
     (36, "widen_byte_counts", store.widen_byte_counts),
     (37, "admit_portfolio_baseline_count", store.admit_portfolio_baseline_count),
+    (38, "remove_two_step_sign_in", store.remove_two_step_sign_in),
     ]
 
 

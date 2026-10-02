@@ -278,7 +278,7 @@ class TheScanTest(D9Case):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.client = TestClient(app)
-        self.headers = {"Authorization": f"Bearer {security.create_token('d9-admin', 'admin', 't-d9', mfa_verified=True)}"}
+        self.headers = {"Authorization": f"Bearer {security.create_token('d9-admin', 'admin', 't-d9')}"}
         credential = self.client.post("/api/credentials", headers=self.headers,
                                       json={"username": "alice", "password": ALICE_PASSWORD, "domain": ""})
         self.assertEqual(credential.status_code, 200, credential.text)

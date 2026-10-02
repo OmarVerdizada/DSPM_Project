@@ -394,8 +394,8 @@ class LicenceCase(KeysCase):
         store.create_user("d10-admin", security.hash_password(PASSWORD), "admin", "t-d10")
         self.client = TestClient(app)
 
-    def as_(self, user: str = "admin", tenant: str = "default", *, mfa: bool = True) -> dict:
-        return {"Authorization": f"Bearer {security.create_token(user, 'admin', tenant, mfa_verified=mfa)}"}
+    def as_(self, user: str = "admin", tenant: str = "default") -> dict:
+        return {"Authorization": f"Bearer {security.create_token(user, 'admin', tenant)}"}
 
     def licence(self, key=None, *, expires: datetime | None = None, not_before: datetime | None = None,
                 customer: str = "Contoso") -> dict:
@@ -444,10 +444,9 @@ class TheLicenceTest(LicenceCase):
         signing.add_to_trust(self.trust_path, raw(package_only), ["package"], "packages only", "now")
         self.assertIn("not to sign a licence", self.put(self.licence(package_only)).json()["detail"])
 
-    def test_only_the_platform_administrator_with_a_second_factor_installs_one(self) -> None:
+    def test_only_the_platform_administrator_installs_one(self) -> None:
         envelope = self.licence()
         self.assertEqual(self.put(envelope, **self.as_("d10-admin", "t-d10")).status_code, 403)
-        self.assertEqual(self.put(envelope, **self.as_(mfa=False)).status_code, 403)
         self.assertEqual(self.client.get("/api/licence", headers=self.as_("d10-admin", "t-d10")).status_code, 403)
 
     def test_an_expired_licence_has_a_grace_period_then_stops_new_scans_only(self) -> None:

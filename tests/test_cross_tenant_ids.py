@@ -73,7 +73,6 @@ ATTEMPTS = [
     ("POST", "/api/users/{username}/delete", None),
     ("POST", "/api/users/{username}/reset-password", {"password": "a-foreign-reset-pass-9"}),
     ("PUT", "/api/users/{username}/role", {"role": "analyst"}),
-    ("POST", "/api/users/{username}/mfa/reset", None),
     ("PUT", "/api/credentials/{secret_ref}", {"username": "u", "password": "a-foreign-pass-9", "domain": "D"}),
     ("DELETE", "/api/credentials/{secret_ref}", None),
     ("POST", "/api/credentials/{secret_ref}/preflight", None),

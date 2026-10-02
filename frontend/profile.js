@@ -104,7 +104,7 @@ async function readError(response) {
   try {
     const data = JSON.parse(message);
     if (typeof data.detail === "string") return { message: data.detail, code: "" };
-    // C2: a refusal can carry a code - "mfa_required" asks for the second factor.
+    // A refusal can carry a code as well as a message.
     if (data.detail && typeof data.detail === "object") {
       return { message: data.detail.message || "Request failed.", code: data.detail.code || "" };
     }
@@ -840,208 +840,6 @@ siemRemoveBtn.addEventListener("click", () => {
     () => "Configuration removed. Forwarding is off.");
 });
 
-/* ── Two-step sign-in (C2) ────────────────────────────────────── */
-// The key is on screen only while it is being set up, and recovery codes only until
-// "I saved them": both live in the DOM for that moment and nowhere else.
-const mfaStateLabel = document.querySelector("#mfa-state");
-const mfaCodesLeft = document.querySelector("#mfa-codes-left");
-const mfaSessionLabel = document.querySelector("#mfa-session");
-const mfaSetupBtn = document.querySelector("#mfa-setup-btn");
-const mfaNewCodesBtn = document.querySelector("#mfa-new-codes-btn");
-const mfaDisableBtn = document.querySelector("#mfa-disable-btn");
-const mfaStepupForm = document.querySelector("#mfa-stepup-form");
-const mfaStepupCode = document.querySelector("#mfa-stepup-code");
-const mfaStepupLabel = document.querySelector("#mfa-stepup-label");
-const mfaStepupRecovery = document.querySelector("#mfa-stepup-recovery");
-const mfaSetupPanel = document.querySelector("#mfa-setup-panel");
-const mfaSetupSecret = document.querySelector("#mfa-setup-secret");
-const mfaSetupForm = document.querySelector("#mfa-setup-form");
-const mfaSetupCode = document.querySelector("#mfa-setup-code");
-const mfaCodesPanel = document.querySelector("#mfa-codes-panel");
-const mfaCodesList = document.querySelector("#mfa-codes-list");
-const mfaStatusLine = document.querySelector("#mfa-status");
-
-let mfaView = null;
-let mfaStepupWithRecovery = false;
-// What to do once the session has proved the factor (the action that asked for it).
-let mfaAfterStepup = null;
-
-function mfaSay(message, isError = false) {
-  mfaStatusLine.classList.toggle("error", Boolean(isError));
-  setStatus(mfaStatusLine, message);
-}
-
-function renderMfa(view) {
-  mfaView = view;
-  const enabled = Boolean(view.enabled);
-  mfaStateLabel.textContent = enabled
-    ? "On"
-    : (view.required_at_sign_in ? "Off - your role requires it at the next sign-in" : "Off");
-  mfaCodesLeft.textContent = enabled ? String(view.recovery_codes_left ?? 0) : "-";
-  mfaSessionLabel.textContent = view.session_verified ? "Confirmed with a code" : (enabled ? "Not confirmed" : "-");
-  mfaSetupBtn.textContent = enabled ? "Replace authenticator" : "Set up authenticator";
-  mfaNewCodesBtn.hidden = !enabled;
-  // A role that requires the factor cannot turn it off; an administrator resets it.
-  mfaDisableBtn.hidden = !enabled || Boolean(view.required_at_sign_in);
-}
-
-async function loadMfa() {
-  try {
-    renderMfa(await api("/api/profile/mfa"));
-  } catch (error) {
-    mfaStateLabel.textContent = "Unavailable";
-    mfaSay(`Could not load two-step sign-in: ${error.message}`, true);
-  }
-}
-
-// Replacing the factor, new codes and turning it off all need this session to have
-// proved the current factor. The server says so; the page asks for a code and carries on.
-async function withStepup(run) {
-  try {
-    return await run();
-  } catch (error) {
-    if (error.code !== "mfa_required") throw error;
-    mfaAfterStepup = run;
-    mfaStepupForm.hidden = false;
-    mfaStepupCode.value = "";
-    mfaStepupCode.focus();
-    mfaSay("Enter a code from your authenticator to continue.");
-    return null;
-  }
-}
-
-mfaStepupRecovery.addEventListener("click", () => {
-  mfaStepupWithRecovery = !mfaStepupWithRecovery;
-  mfaStepupLabel.textContent = mfaStepupWithRecovery ? "Recovery code" : "Authenticator code";
-  mfaStepupCode.inputMode = mfaStepupWithRecovery ? "text" : "numeric";
-  mfaStepupCode.placeholder = mfaStepupWithRecovery ? "XXXX-XXXX-XXXX-XXXX" : "123 456";
-  mfaStepupRecovery.textContent = mfaStepupWithRecovery ? "Use the authenticator app" : "Use a recovery code";
-  mfaStepupCode.value = "";
-  mfaStepupCode.focus();
-});
-
-mfaStepupForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const value = String(mfaStepupCode.value || "");
-  const body = mfaStepupWithRecovery ? { recovery_code: value.trim() } : { code: value.replace(/\s+/g, "") };
-  mfaSay("Checking...");
-  try {
-    await api("/api/profile/mfa/verify", body, "POST");
-  } catch (error) {
-    mfaStepupCode.value = "";
-    mfaSay(error.message, true);
-    return;
-  }
-  mfaStepupForm.hidden = true;
-  mfaStepupCode.value = "";
-  const next = mfaAfterStepup;
-  mfaAfterStepup = null;
-  mfaSay("Confirmed for this session.");
-  await loadMfa();
-  if (next) {
-    try {
-      await next();
-    } catch (error) {
-      mfaSay(error.message, true);
-    }
-  }
-});
-
-async function startMfaSetup() {
-  const data = await api("/api/profile/mfa/enroll/start", {}, "POST");
-  mfaSetupSecret.textContent = String(data.secret || "").replace(/(.{4})/g, "$1 ").trim();
-  mfaSetupPanel.hidden = false;
-  mfaCodesPanel.hidden = true;
-  mfaSetupCode.value = "";
-  mfaSetupCode.focus();
-  mfaSay("Add the key to your authenticator app, then enter the code it shows.");
-  return data;
-}
-
-function closeMfaSetup() {
-  mfaSetupSecret.textContent = "";
-  mfaSetupPanel.hidden = true;
-}
-
-function showRecoveryCodes(codes) {
-  mfaCodesList.replaceChildren(...codes.map((code) => {
-    const item = document.createElement("li");
-    item.textContent = code;
-    return item;
-  }));
-  mfaCodesPanel.hidden = false;
-}
-
-mfaSetupBtn.addEventListener("click", () => {
-  withStepup(startMfaSetup).catch((error) => mfaSay(error.message, true));
-});
-
-document.querySelector("#mfa-setup-copy").addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(mfaSetupSecret.textContent.replace(/\s+/g, ""));
-    mfaSay("Key copied.");
-  } catch {
-    mfaSay("Copy is not available here; type the key into the app.");
-  }
-});
-
-document.querySelector("#mfa-setup-cancel").addEventListener("click", () => {
-  closeMfaSetup();
-  mfaSay("Setup cancelled. Nothing changed.");
-});
-
-mfaSetupForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  mfaSay("Checking...");
-  try {
-    const data = await api("/api/profile/mfa/enroll/confirm", { code: String(mfaSetupCode.value || "").replace(/\s+/g, "") }, "POST");
-    closeMfaSetup();
-    showRecoveryCodes(Array.isArray(data.recovery_codes) ? data.recovery_codes : []);
-    mfaSay("Two-step sign-in is on. Save your recovery codes.");
-    await loadMfa();
-  } catch (error) {
-    mfaSetupCode.value = "";
-    mfaSay(error.message, true);
-  }
-});
-
-mfaNewCodesBtn.addEventListener("click", () => {
-  if (!window.confirm("Make new recovery codes? The codes you have now stop working.")) return;
-  withStepup(async () => {
-    const data = await api("/api/profile/mfa/recovery-codes", {}, "POST");
-    showRecoveryCodes(Array.isArray(data.recovery_codes) ? data.recovery_codes : []);
-    mfaSay("New recovery codes made. The old ones no longer work.");
-    await loadMfa();
-  }).catch((error) => mfaSay(error.message, true));
-});
-
-mfaDisableBtn.addEventListener("click", () => {
-  if (!window.confirm("Turn off two-step sign-in? Sign-in will ask for your password only.")) return;
-  withStepup(async () => {
-    await api("/api/profile/mfa/disable", {}, "POST");
-    mfaCodesPanel.hidden = true;
-    mfaCodesList.replaceChildren();
-    mfaSay("Two-step sign-in is off.");
-    await loadMfa();
-  }).catch((error) => mfaSay(error.message, true));
-});
-
-document.querySelector("#mfa-codes-copy").addEventListener("click", async () => {
-  const text = [...mfaCodesList.querySelectorAll("li")].map((item) => item.textContent).join("\n");
-  try {
-    await navigator.clipboard.writeText(text);
-    mfaSay("Codes copied.");
-  } catch {
-    mfaSay("Copy is not available here; select the codes and copy them.");
-  }
-});
-
-document.querySelector("#mfa-codes-done").addEventListener("click", () => {
-  mfaCodesList.replaceChildren();
-  mfaCodesPanel.hidden = true;
-  mfaSay(" ");
-});
-
 /* ── Directory sign-in (C2) ───────────────────────────────────── */
 // The service account's password is never sent back. The field starts empty every time:
 // left empty, the saved one is kept; typed, it replaces it; "Remove password" deletes it.
@@ -1226,13 +1024,11 @@ async function loadDirectory() {
     directoryCard.hidden = false;
     renderDirectory(view);
   } catch (error) {
-    if (error.status === 403 && error.code !== "mfa_required") return;
+    if (error.status === 403) return;
     directoryCard.hidden = false;
     directoryState.dataset.state = "unavailable";
     directoryStateText.textContent = "Status unavailable.";
-    directorySay(error.code === "mfa_required"
-      ? "Confirm a code from your authenticator (Two-step sign-in, above) to manage directory sign-in."
-      : `Could not load the directory settings: ${error.message}`, true);
+    directorySay(`Could not load the directory settings: ${error.message}`, true);
   }
 }
 
@@ -1446,9 +1242,7 @@ async function loadCredentials() {
     }
     credentialsBody.replaceChildren(...items.map(credentialRow));
   } catch (error) {
-    credentialsSay(error.code === "mfa_required"
-      ? "Confirm a code from your authenticator (Two-step sign-in, above) to see saved credentials."
-      : `Could not load saved credentials: ${error.message}`, true);
+    credentialsSay(`Could not load saved credentials: ${error.message}`, true);
   }
 }
 
@@ -1683,7 +1477,6 @@ activateSection(location.hash.slice(1) || "profile", false);
 renderSessionExpiry();
 loadProfile();
 loadFeatures();
-loadMfa();
 
 /* ── Alerts & tickets (D3) ────────────────────────────────────── */
 // A workspace's webhook, mail relay, Jira and ServiceNow. The server owns delivery - the
@@ -1854,9 +1647,7 @@ async function integrationAction(block, pending, run, done) {
   try {
     integrationSay(block, done(await run()));
   } catch (error) {
-    integrationSay(block, error.code === "mfa_required"
-      ? "Confirm a code from your authenticator (Two-step sign-in, above) to change integrations."
-      : error.message, true);
+    integrationSay(block, error.message, true);
   } finally {
     buttons.forEach((button) => { button.disabled = false; });
   }
@@ -1876,7 +1667,7 @@ async function loadIntegrations() {
     integrationsCard.hidden = false;
     (data.integrations || []).forEach((view) => renderIntegration(view));
   } catch (error) {
-    if (error.status === 403 && error.code !== "mfa_required") return;
+    if (error.status === 403) return;
     integrationsCard.hidden = false;
     integrationsCard.querySelectorAll(".integration").forEach((block) => {
       integrationPart(block, "state").dataset.state = "unavailable";
@@ -1884,9 +1675,7 @@ async function loadIntegrations() {
     });
     const first = integrationsCard.querySelector(".integration");
     if (first) {
-      integrationSay(first, error.code === "mfa_required"
-        ? "Confirm a code from your authenticator (Two-step sign-in, above) to manage integrations."
-        : `Could not load the integrations: ${error.message}`, true);
+      integrationSay(first, `Could not load the integrations: ${error.message}`, true);
     }
   }
 }
@@ -2078,9 +1867,7 @@ licenceFile?.addEventListener("change", async () => {
     setStatus(licenceStatus, `Installed ${file.name}.`);
   } catch (error) {
     licenceStatus.classList.add("error");
-    setStatus(licenceStatus, error.code === "mfa_required"
-      ? "Confirm a code from your authenticator (Two-step sign-in, above) to install a licence."
-      : `${error.message} The licence already installed stays.`);
+    setStatus(licenceStatus, `${error.message} The licence already installed stays.`);
   }
 });
 

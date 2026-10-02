@@ -32,8 +32,8 @@ REQUIRED_ISOLATED = {
     "audit_outbox", "suppression_rules", "scan_schedules", "partitioned_scans", "secrets", "custom_roles",
     "api_keys", "registration_invites", "derived_cache", "alert_events", "finding_index", "scan_jobs",
     "scan_object_baselines", "scan_partitions", "scan_profiles", "users", "scan_targets",
-    # C2: a workspace's directory sign-in settings, and each account's second factor.
-    "directory_settings", "user_mfa",
+    # C2: a workspace's directory sign-in settings.
+    "directory_settings",
     # C13: how each scan reached its files.
     "scan_sources",
     # D7: who can read each file.
@@ -144,7 +144,6 @@ class EveryTenantTableIsIsolatedTest(unittest.TestCase):
         store.save_source_checkpoint(tenant, f"sharepoint:{tenant}", {"drives": {}})
         store.add_scan_target(tenant, "network", "10.20.0.0/16", "seed", "tester")
         store.save_directory_settings(tenant, False, {"host": "dc.example.test"}, "", "tester")
-        store.begin_mfa_enrollment(tenant, f"{tenant}-user", "pending-ciphertext", 2_000_000_000)
         store.record_scan_source(tenant, f"{tenant}-scan", "smb", "fs1", "typed")
         store.create_edm_set(tenant, f"{tenant}-edm", "seed", "EMAIL_ADDRESS", ["f" * 64], "kd", "tester",
                              max_rows=10)

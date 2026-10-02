@@ -96,16 +96,6 @@ def _open(sealed: str) -> bytes:
     return ring().open(sealed)
 
 
-def encrypt_text(plaintext: str) -> str:
-    """A secret that is not a scan credential (an MFA seed), sealed like one, so the key
-    lifecycle - rotation, rollback, escrow - covers it too."""
-    return _seal(plaintext.encode("utf-8"))
-
-
-def decrypt_text(ciphertext: str) -> str:
-    return _open(ciphertext).decode("utf-8")
-
-
 def validate_vault_key() -> None:
     """Startup format-check (M3): fail CLOSED if the vault key is missing (prod) or
     not a valid Fernet key, so a bad key breaks startup rather than the first

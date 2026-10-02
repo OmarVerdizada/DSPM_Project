@@ -273,7 +273,7 @@ class APostgresBackupUnderRowSecurityTest(unittest.TestCase):
                          "the purpose is named before any table is counted")
 
     def test_every_tenant_table_admits_the_backup(self) -> None:
-        for table in ("assets", "audit_events", "secrets", "scan_sources", "user_mfa"):
+        for table in ("assets", "audit_events", "secrets", "scan_sources"):
             self.assertIn("'backup'", store.tenant_policy_predicate(table), table)
 
 

@@ -62,9 +62,6 @@ from backend.finding_contracts import build_nist_finding_detail, get_finding_dis
 from backend.jobs import cancel_job, cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
 from backend.inventory_export import inventory_export_response_metadata, inventory_export_stream
 from backend.security import (
-    create_mfa_challenge,
-    read_mfa_challenge,
-    spend_mfa_challenge,
     REFRESH_COOKIE,
     REFRESH_TTL_SECONDS,
     TOKEN_TTL_SECONDS,
@@ -88,10 +85,8 @@ from backend.security import _token_jti
 from backend.store import (
     allocate_account_key,
     delete_directory_settings,
-    delete_user_mfa,
     find_user_by_login,
     get_directory_settings,
-    mark_session_mfa,
     save_directory_settings,
     InventoryReadUnavailable,
     audit,
@@ -187,7 +182,7 @@ from collectors.file_scanner import normalize_extension_filter, scan_directory
 from collectors.net_guard import resolve_addresses
 from backend import target_scope
 from backend import directory, identity
-from backend.mfa import GATED_PERMISSIONS
+from backend.permissions import PERSON_ONLY_PERMISSIONS
 from collectors.win_security import security_for_path
 from collectors.winrm_endpoint_scanner import (
     ENDPOINT_PATH_ALIASES,
@@ -354,9 +349,6 @@ REFRESH_THROTTLE = RouteThrottle(
     "refresh", max(1, int(os.getenv("DSPM_REFRESH_MAX_FAILURES", "30"))), 300)
 # Verifying reads a tenant's whole audit trail (1.4 s at 20,000 rows, measured), so it
 # is counted per tenant: every verification, not only failed ones.
-# C2: a six-digit code is a small space; wrong codes are counted per ACCOUNT, wherever
-# they come from, and a correct one clears the count.
-MFA_THROTTLE = RouteThrottle("mfa", max(1, int(os.getenv("DSPM_MFA_MAX_FAILURES", "5"))), 900)
 AUDIT_VERIFY_THROTTLE = RouteThrottle(
     "audit_verify", max(1, int(os.getenv("DSPM_AUDIT_VERIFY_MAX_PER_HOUR", "20"))), 3600)
 
@@ -776,7 +768,7 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError) 
                                                   "fields": fields})
 
 
-class SavedCredentialMissing(LookupError):
+class SavedCredentialMissing(KeyError):
     """A scan, a connection test or an endpoint action named a saved credential that is
     not there (deleted, or another workspace's). The vault's KeyError reached the generic
     handler as a 500 on the test and endpoint routes and as a 400 "check target,
@@ -1954,16 +1946,8 @@ def login(payload: LoginRequest, request: Request) -> Response:
     # (a sprayer who guesses one valid credential must not reset the IP's history).
     _clear_login_failures(login_key)
     principal = result.principal
-    challenge = _mfa_challenge_for(result.user or get_user(principal.subject) or {"username": principal.subject,
-                                                                                  "role": principal.role,
-                                                                                  "tenant_id": principal.tenant_id})
-    if challenge is not None:
-        # C2: the first factor held; no session exists until the second one does.
-        audit(principal.tenant_id, principal.subject, "auth.mfa_challenged",
-              {"source": result.source, "enrollment": bool(challenge.get("mfa_enrollment_required"))})
-        return JSONResponse(challenge)
     audit(principal.tenant_id, principal.subject, "auth.login", {"source": result.source} if result.source != "local" else None)
-    return _issue_session(principal, request, mfa_verified=False)
+    return _issue_session(principal, request)
 
 
 def _refresh_cookie_is_secure(request: Request) -> bool:
@@ -2088,36 +2072,12 @@ def register(payload: RegisterRequest, request: Request) -> dict:
     return {"user": _public_user(get_user(key)), "pending_approval": pending}
 
 
-# ---- C2: MFA -------------------------------------------------------------------
-class MfaChallengeRequest(BaseModel):
-    mfa_token: str = Field(min_length=10, max_length=1000)
-    code: str = Field(default="", max_length=12)
-    recovery_code: str = Field(default="", max_length=40)
-
-
-class MfaCodeRequest(BaseModel):
-    code: str = Field(default="", max_length=12)
-    recovery_code: str = Field(default="", max_length=40)
-
-
-def _mfa_challenge_for(user: dict) -> dict | None:
-    """What sign-in answers instead of a session when the account must prove a second
-    factor: a code (enrolled), or an enrollment first (an administrator without one)."""
-    state = identity.mfa_state(user)
-    if state["enabled"]:
-        return {"mfa_required": True, "mfa_token": create_mfa_challenge(user["username"], "verify"),
-                "methods": ["totp", "recovery_code"]}
-    if state["required_at_sign_in"]:
-        return {"mfa_enrollment_required": True, "mfa_token": create_mfa_challenge(user["username"], "enroll")}
-    return None
-
-
-def _issue_session(principal: Principal, request: Request, *, mfa_verified: bool) -> Response:
-    access = create_token(principal.subject, principal.role, principal.tenant_id, mfa_verified=mfa_verified)
+# ---- Sessions --------------------------------------------------------------------
+def _issue_session(principal: Principal, request: Request) -> Response:
+    access = create_token(principal.subject, principal.role, principal.tenant_id)
     # C1: the access token is short, and the session is carried by a single-use refresh
-    # token in an HttpOnly cookie - out of reach of any script on the page. C2: both carry
-    # whether the session proved a second factor.
-    secret, _family, _expires = issue_refresh_token(principal.subject, _token_jti(access), mfa_verified=mfa_verified)
+    # token in an HttpOnly cookie - out of reach of any script on the page.
+    secret, _family, _expires = issue_refresh_token(principal.subject, _token_jti(access))
     body = {
         "access_token": access,
         "token_type": "bearer",
@@ -2125,177 +2085,8 @@ def _issue_session(principal: Principal, request: Request, *, mfa_verified: bool
         "permissions": sorted(principal_permissions(principal)),
         "tenant_id": principal.tenant_id,
         "expires_in": TOKEN_TTL_SECONDS,
-        "mfa_verified": mfa_verified,
     }
     return _with_refresh_cookie(JSONResponse(body), request, secret)
-
-
-def _challenged_user(token: str, purposes: tuple[str, ...]) -> tuple[dict, dict]:
-    claims = read_mfa_challenge(token, purposes)
-    user = get_user(sanitize_username(str(claims.get("sub") or ""))) if claims else None
-    if claims is None or user is None or not user.get("is_active"):
-        raise HTTPException(status_code=401, detail="This sign-in has expired. Sign in again.")
-    return claims, user
-
-
-def _second_factor_or_refuse(user: dict, code: str, recovery_code: str) -> str:
-    subject = user["username"]
-    if MFA_THROTTLE.exhausted(subject):
-        raise HTTPException(status_code=429, detail="Too many incorrect codes. Try again later.")
-    ok, method, left = identity.verify_second_factor(user, code, recovery_code)
-    if not ok:
-        MFA_THROTTLE.failed(subject)
-        audit(user["tenant_id"], subject, "auth.mfa_failed", {"method": method or "totp"})
-        raise HTTPException(status_code=401, detail="That code is not valid.")
-    MFA_THROTTLE.clear(subject)
-    detail = {"method": method}
-    if method == "recovery_code":
-        detail["recovery_codes_left"] = left
-    audit(user["tenant_id"], subject, "auth.mfa_verified", detail)
-    return method
-
-
-@app.post("/api/auth/mfa/verify")
-def mfa_verify(payload: MfaChallengeRequest, request: Request) -> Response:
-    """Second step of sign-in for an account with MFA: the code, then the session."""
-    claims, user = _challenged_user(payload.mfa_token, ("verify",))
-    method = _second_factor_or_refuse(user, payload.code, payload.recovery_code)
-    if not spend_mfa_challenge(claims):
-        raise HTTPException(status_code=401, detail="This sign-in has expired. Sign in again.")
-    audit(user["tenant_id"], user["username"], "auth.login", {"mfa": method})
-    return _issue_session(Principal(user["username"], user["role"], user["tenant_id"]), request, mfa_verified=True)
-
-
-@app.post("/api/auth/mfa/enroll/start")
-def mfa_enroll_start_at_sign_in(payload: MfaChallengeRequest) -> dict:
-    """An administrator signing in without a second factor sets one up first. The secret
-    is returned this once and is not readable again."""
-    _claims, user = _challenged_user(payload.mfa_token, ("enroll",))
-    audit(user["tenant_id"], user["username"], "auth.mfa_enrollment_started", {"at": "sign-in"})
-    return identity.start_enrollment(user)
-
-
-@app.post("/api/auth/mfa/enroll/confirm")
-def mfa_enroll_confirm_at_sign_in(payload: MfaChallengeRequest, request: Request) -> Response:
-    claims, user = _challenged_user(payload.mfa_token, ("enroll",))
-    if MFA_THROTTLE.exhausted(user["username"]):
-        raise HTTPException(status_code=429, detail="Too many incorrect codes. Try again later.")
-    codes = identity.confirm_enrollment(user, payload.code)
-    if codes is None:
-        MFA_THROTTLE.failed(user["username"])
-        raise HTTPException(status_code=400, detail="That code does not match. Check the authenticator and try again.")
-    if not spend_mfa_challenge(claims):
-        raise HTTPException(status_code=401, detail="This sign-in has expired. Sign in again.")
-    MFA_THROTTLE.clear(user["username"])
-    audit(user["tenant_id"], user["username"], "auth.mfa_enrolled", {"at": "sign-in"})
-    audit(user["tenant_id"], user["username"], "auth.login", {"mfa": "enrolled"})
-    response = _issue_session(Principal(user["username"], user["role"], user["tenant_id"]), request, mfa_verified=True)
-    body = json.loads(response.body)
-    body["recovery_codes"] = codes  # shown once; only their hashes are kept
-    replacement = JSONResponse(body)
-    for header, value in response.headers.items():
-        if header.lower() == "set-cookie":
-            replacement.headers.append("set-cookie", value)
-    return replacement
-
-
-@app.get("/api/profile/mfa")
-def profile_mfa(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
-    user = get_user(principal.subject)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    return {**identity.mfa_state(user), "session_verified": principal.mfa_verified}
-
-
-@app.post("/api/profile/mfa/enroll/start")
-def profile_mfa_enroll_start(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
-    """Set up (or replace) the second factor from a signed-in session. Replacing one needs
-    a session that proved the current one - a stolen session cannot swap the factor."""
-    user = get_user(principal.subject)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    if identity.mfa_state(user)["enabled"] and not principal.mfa_verified:
-        raise HTTPException(status_code=403, detail={"code": "mfa_required",
-                                                     "message": "Confirm your current authenticator code first."})
-    audit(principal.tenant_id, principal.subject, "auth.mfa_enrollment_started", {"at": "profile"})
-    return identity.start_enrollment(user)
-
-
-@app.post("/api/profile/mfa/enroll/confirm")
-def profile_mfa_enroll_confirm(payload: MfaCodeRequest,
-                               principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
-    user = get_user(principal.subject)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    if MFA_THROTTLE.exhausted(principal.subject):
-        raise HTTPException(status_code=429, detail="Too many incorrect codes. Try again later.")
-    codes = identity.confirm_enrollment(user, payload.code)
-    if codes is None:
-        MFA_THROTTLE.failed(principal.subject)
-        raise HTTPException(status_code=400, detail="That code does not match. Check the authenticator and try again.")
-    MFA_THROTTLE.clear(principal.subject)
-    mark_session_mfa(principal.session_id)
-    audit(principal.tenant_id, principal.subject, "auth.mfa_enrolled", {"at": "profile"})
-    return {"enabled": True, "recovery_codes": codes, "session_verified": True}
-
-
-@app.post("/api/profile/mfa/verify")
-def profile_mfa_step_up(payload: MfaCodeRequest, principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
-    """Step up a signed-in session: prove the second factor now, and MFA-scoped actions
-    (credentials, administration) open for the rest of this session."""
-    user = get_user(principal.subject)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    _second_factor_or_refuse(user, payload.code, payload.recovery_code)
-    mark_session_mfa(principal.session_id)
-    return {"session_verified": True}
-
-
-@app.post("/api/profile/mfa/recovery-codes")
-def profile_mfa_recovery_codes(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
-    user = get_user(principal.subject)
-    if user is None or not identity.mfa_state(user)["enabled"]:
-        raise HTTPException(status_code=400, detail="Set up an authenticator first.")
-    if not principal.mfa_verified:
-        raise HTTPException(status_code=403, detail={"code": "mfa_required",
-                                                     "message": "Confirm your authenticator code first."})
-    codes = identity.new_recovery_codes(user)
-    audit(principal.tenant_id, principal.subject, "auth.mfa_recovery_codes_replaced")
-    return {"recovery_codes": codes}
-
-
-@app.post("/api/profile/mfa/disable")
-def profile_mfa_disable(principal: Principal = Depends(require_permission(AUTHENTICATED))) -> dict:
-    user = get_user(principal.subject)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    state = identity.mfa_state(user)
-    if state["required_at_sign_in"]:
-        raise HTTPException(status_code=400, detail="Your role requires a second factor; it cannot be turned off.")
-    if not principal.mfa_verified:
-        raise HTTPException(status_code=403, detail={"code": "mfa_required",
-                                                     "message": "Confirm your authenticator code first."})
-    delete_user_mfa(user["tenant_id"], user["username"])
-    audit(principal.tenant_id, principal.subject, "auth.mfa_disabled", {"by": "self"})
-    return {"enabled": False}
-
-
-@app.post("/api/users/{username}/mfa/reset")
-def admin_reset_user_mfa(username: str, principal: Principal = Depends(require_permission("tenant.admin"))) -> dict:
-    """For a person who lost their authenticator: remove the factor and end their
-    sessions. They set up a new one at their next sign-in. The built-in administrator is
-    reset only from the host (`python main.py mfa reset`)."""
-    target = sanitize_username(username)
-    if target in PROTECTED_USERS:
-        raise HTTPException(status_code=403, detail="The built-in administrator's factor is reset from the host.")
-    user = get_user(target)
-    if user is None or not _can_manage_tenant(principal, user["tenant_id"]):
-        raise HTTPException(status_code=404, detail="User not found")
-    removed = delete_user_mfa(user["tenant_id"], target)
-    ended = revoke_sessions_for_user(target)
-    audit(principal.tenant_id, principal.subject, "auth.mfa_reset",
-          {"username": target, "tenant_id": user["tenant_id"], "had_factor": removed, "sessions_ended": ended})
-    return {"username": target, "reset": removed, "sessions_ended": ended}
 
 
 # ---- C2: directory sign-in settings ---------------------------------------------
@@ -2428,8 +2219,6 @@ def profile(principal: Principal = Depends(require_permission(AUTHENTICATED))) -
         # C3: what this account may do, read fresh - the console gates on this, and a
         # role changed since sign-in shows here on the next page load.
         "permissions": sorted(principal_permissions(principal)),
-        # C2: the second factor - whether it is set up, required, and proved this session.
-        "mfa": {**identity.mfa_state(user), "session_verified": principal.mfa_verified},
     }
 
 
@@ -3055,10 +2844,10 @@ def create_api_key(payload: ApiKeyRequest, principal: Principal = Depends(requir
     if not _delegable(role, principal.tenant_id):
         # Machine keys never carry admin - create admins via /api/users.
         raise HTTPException(status_code=400, detail="An API key's role must exist in this tenant and not administer it")
-    if role_permissions_in(role, principal.tenant_id) & GATED_PERMISSIONS:
-        # C2: an API key cannot answer an MFA challenge, so it may not hold what one guards.
-        raise HTTPException(status_code=400, detail="An API key's role may not manage credentials or administer; "
-                                                    "those need a person with a second factor")
+    if role_permissions_in(role, principal.tenant_id) & PERSON_ONLY_PERMISSIONS:
+        # A leaked machine key must not administer, handle stored credentials or reveal values.
+        raise HTTPException(status_code=400, detail="An API key's role may not administer, manage credentials "
+                                                    "or reveal values; those are for a person")
     raw, key_hash = generate_api_key()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=payload.ttl_days)).isoformat()
     key_id = create_api_key_record(principal.tenant_id, key_hash, payload.label, role, principal.subject, expires_at)
@@ -3100,7 +2889,7 @@ def _credential_privilege(tenant_id: str, secret_ref: str, username: str, domain
 
 @app.post("/api/credentials")
 def store_credentials(payload: CredentialRequest,
-                      principal: Principal = Depends(require_permission("scan.run", "credential.manage", mfa=True))) -> dict:
+                      principal: Principal = Depends(require_permission("scan.run", "credential.manage", person_only=True))) -> dict:
     username = payload.username.strip()
     domain = payload.domain.strip() or "WORKGROUP"
     secret_ref = vault.store(principal.tenant_id, username, payload.password, domain)
@@ -4124,7 +3913,7 @@ def _edm_max_rows() -> int:
 
 @app.post("/api/exact-match/sets")
 def create_exact_match_set(payload: ExactMatchSetRequest,
-                           principal: Principal = Depends(require_permission("rules.manage", mfa=True))) -> dict:
+                           principal: Principal = Depends(require_permission("rules.manage", person_only=True))) -> dict:
     """D2: an approved reference set. Its values are fingerprinted with the workspace's key
     and dropped: only the fingerprints are kept, never a value, and nothing about the
     values is logged, audited or returned. A GDPR finding whose value is in a set is
@@ -4234,7 +4023,7 @@ def licence_read(principal: Principal = Depends(require_permission("platform.adm
 
 @app.put("/api/licence")
 def licence_install(payload: LicenceRequest,
-                    principal: Principal = Depends(require_permission("platform.admin", mfa=True))) -> dict:
+                    principal: Principal = Depends(require_permission("platform.admin", person_only=True))) -> dict:
     """Install a licence file's content. It must be signed by a key the install trusts for
     licences, and in force; otherwise it is refused and the installed one stays."""
     from backend import licensing
@@ -4328,7 +4117,7 @@ def integrations_read(principal: Principal = Depends(require_permission("tenant.
 
 @app.put("/api/integrations/{channel}")
 def integrations_save(channel: str, payload: IntegrationRequest,
-                      principal: Principal = Depends(require_permission("tenant.admin", mfa=True))) -> dict:
+                      principal: Principal = Depends(require_permission("tenant.admin", person_only=True))) -> dict:
     from backend import integrations
 
     channel = _integration_channel(channel)
@@ -4378,7 +4167,7 @@ def integrations_save(channel: str, payload: IntegrationRequest,
 
 @app.put("/api/integrations/{channel}/enabled")
 def integrations_enable(channel: str, payload: IntegrationEnabledRequest,
-                        principal: Principal = Depends(require_permission("tenant.admin", mfa=True))) -> dict:
+                        principal: Principal = Depends(require_permission("tenant.admin", person_only=True))) -> dict:
     channel = _integration_channel(channel)
     record = store_module.get_alert_channel(principal.tenant_id, channel)
     if record is None:
@@ -4423,7 +4212,7 @@ def integrations_retry(channel: str, principal: Principal = Depends(require_perm
 
 
 @app.delete("/api/integrations/{channel}")
-def integrations_remove(channel: str, principal: Principal = Depends(require_permission("tenant.admin", mfa=True))) -> dict:
+def integrations_remove(channel: str, principal: Principal = Depends(require_permission("tenant.admin", person_only=True))) -> dict:
     """Delete a channel's settings and its secret. What was waiting for it is cancelled."""
     from backend import integrations
 
@@ -4495,7 +4284,7 @@ def tickets_sync(principal: Principal = Depends(require_permission("findings.tri
 
 @app.post("/api/findings/{finding_id}/reveal")
 def reveal_finding_value(finding_id: str, payload: RevealRequest, request: Request,
-                         principal: Principal = Depends(require_permission("evidence.reveal", mfa=True))) -> dict:
+                         principal: Principal = Depends(require_permission("evidence.reveal", person_only=True))) -> dict:
     """One raw value behind a finding, read again from its source now, never stored.
     Every attempt past the permission check is audited - revealed, refused, throttled or
     failed - with where the value would have come from once that is known."""

@@ -75,7 +75,7 @@ class D11Case(unittest.TestCase):
         return self.client.get("/metrics", headers={"Authorization": f"Bearer {token}"} if token else {})
 
     def as_(self, user: str = "admin", tenant: str = "default") -> dict:
-        return {"Authorization": f"Bearer {security.create_token(user, 'admin', tenant, mfa_verified=True)}"}
+        return {"Authorization": f"Bearer {security.create_token(user, 'admin', tenant)}"}
 
 
 class TheMetricsTest(D11Case):

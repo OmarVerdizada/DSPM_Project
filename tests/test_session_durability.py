@@ -345,8 +345,8 @@ class TheUpgradeReachesAnOlderInstallTest(unittest.TestCase):
                 migrations.upgrade()
             finally:
                 store.DB_PATH = original
-        # Revision 26 (C2), re-run with it, adds whether the session proved a second factor.
-        self.assertEqual(columns, {"jti", "username", "issued_at", "expires_at", "last_seen_at", "mfa_verified"})
+        # Revision 26 (C2) added whether the session proved a second factor; revision 38 removed it.
+        self.assertEqual(columns, {"jti", "username", "issued_at", "expires_at", "last_seen_at"})
         self.assertEqual(int(recorded), 1)
         self.assertGreaterEqual(migrations.expected_revision(), 18)
 

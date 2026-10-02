@@ -173,7 +173,6 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_PASSWORD_CHANGE_MAX_FAILURES", "int", {"minimum": 1}),
     ("DSPM_REGISTER_MAX_FAILURES", "int", {"minimum": 1}),
     ("DSPM_REFRESH_MAX_FAILURES", "int", {"minimum": 1}),
-    ("DSPM_MFA_MAX_FAILURES", "int", {"minimum": 1, "maximum": 20}),
     ("DSPM_DIRECTORY_REVALIDATE_SECONDS", "int", {"minimum": 60, "maximum": 3600}),
     ("DSPM_PBKDF2_ROUNDS", "int", {"minimum": 210000, "maximum": 1200000}),
     ("DSPM_PASSWORD_MIN_LENGTH", "int", {"minimum": 8, "maximum": 128}),

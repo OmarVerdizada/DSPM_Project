@@ -116,11 +116,11 @@ class ADirectoryUserSignsInTest(_Case):
         created = self._audit("auth.directory_account_created")
         self.assertEqual(created[-1]["detail"]["group"], ANALYSTS)
 
-    def test_the_admin_group_maps_to_an_administrator_who_then_needs_mfa(self) -> None:
+    def test_the_admin_group_maps_to_an_administrator(self) -> None:
         self._configure()
         response = self._login("alice", "Alice-pass-1")
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["mfa_enrollment_required"])
+        self.assertEqual(response.json()["role"], "admin")
         self.assertEqual(store.find_user_by_login("t-dir", "alice")["role"], "admin")
 
     def test_a_wrong_password_is_refused_and_recorded_with_its_reason(self) -> None:
@@ -201,8 +201,10 @@ class GroupChangesTakeEffectTest(_Case):
         editor = Connection(self.server, user=SERVICE_DN, password=SERVICE_PASSWORD, client_strategy=MOCK_SYNC)
         editor.bind()
         editor.modify(f"cn=bob,ou=users,{BASE}", {"memberOf": [("MODIFY_REPLACE", [ADMINS])]})
-        # promoted to admin by the directory: the unverified session is not renewed as an admin
-        self.assertEqual(self.client.post("/api/auth/refresh").status_code, 401)
+        # promoted to admin by the directory: the renewed session carries the new role
+        renewed = self.client.post("/api/auth/refresh")
+        self.assertEqual(renewed.status_code, 200)
+        self.assertEqual(renewed.json()["role"], "admin")
         self.assertEqual(store.get_user(account["username"])["role"], "admin")
         changed = self._audit("auth.directory_role_changed")[-1]["detail"]
         self.assertEqual({key: changed[key] for key in ("from", "to", "group")},
@@ -293,7 +295,7 @@ class WhenTheDirectoryFailsTest(_Case):
         with mock.patch.object(directory, "_connection", side_effect=OSError("connection refused")):
             response = self._login("local-boss", "Local-boss-pass-9")
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["mfa_enrollment_required"])
+        self.assertTrue(response.json()["access_token"])
 
     def test_a_refresh_during_an_outage_is_refused_not_trusted(self) -> None:
         self._configure()
@@ -438,15 +440,11 @@ class TheSettingsTest(_Case):
         self.assertEqual({key: tested[key] for key in ("ok", "status", "with_user")},
                          {"ok": True, "status": "ok", "with_user": True})
 
-    def test_only_a_verified_administrator_manages_it(self) -> None:
+    def test_only_an_administrator_manages_it(self) -> None:
         viewer_name = "vic"
         store.create_user(viewer_name, security.hash_password("Vic-view-pass-1"), "viewer", "t-dir")
         viewer = {"Authorization": f"Bearer {security.create_token(viewer_name, 'viewer', 't-dir')}"}
         self.assertEqual(self.client.get("/api/settings/directory", headers=viewer).status_code, 403)
-        unverified = {"Authorization": "Bearer " + security.create_token("local-boss", "admin", "t-dir",
-                                                                         mfa_verified=False)}
-        refused = self.client.put("/api/settings/directory", headers=unverified, json={"enabled": False})
-        self.assertEqual(refused.status_code, 403)
 
     def test_removing_the_configuration_deletes_its_secret(self) -> None:
         self._configure()

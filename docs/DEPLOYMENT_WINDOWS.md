@@ -114,9 +114,8 @@ The database URL file is copied into the secrets folder; delete your copy afterw
 URL never appears on a command line, in the configuration file or in a service definition.
 
 First sign-in: the administrator password is in `<DataRoot>\secrets\admin_password`
-(readable by Administrators and the services only). Sign in as `admin`, set up two-step
-sign-in (required for administrators), and change the password; the file then no longer
-opens anything.
+(readable by Administrators and the services only). Sign in as `admin` and change the
+password; the file then no longer opens anything.
 
 ## Configuration
 
@@ -429,7 +428,7 @@ refused if it was altered, is signed by a key the install does not trust for lic
 never replaces the one installed.
 
 Install it in the console (Settings -> Features -> Licence, as the installation's
-administrator with two-step sign-in), or on the server. **The server path is the offline
+administrator), or on the server. **The server path is the offline
 recovery path** - it needs neither the console nor a network, only the file:
 
 ```powershell

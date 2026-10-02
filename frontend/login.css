@@ -302,26 +302,3 @@
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
   clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
-  /* ─── C2: the second factor ─── */
-  .mfa-step { margin-top: .25rem; }
-  .mfa-title { font-size: 1.15rem; font-weight: 700; color: var(--ltxt); margin-bottom: .4rem; }
-  .mfa-code { letter-spacing: .3em; font-variant-numeric: tabular-nums; text-align: center; padding-left: .9rem; }
-  .mfa-steps { margin: 0 0 1rem 1.1rem; color: var(--lsub); font-size: .84rem; line-height: 1.6; }
-  .mfa-steps li { margin-bottom: .6rem; }
-  .mfa-secret {
-    display: block; margin: .5rem 0 .25rem; padding: .6rem .75rem; border-radius: 8px;
-    background: var(--ibg); border: 1px solid var(--ibdr); color: var(--itxt);
-    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: .88rem; letter-spacing: .08em;
-    word-break: break-all; user-select: all;
-  }
-  .mfa-codes {
-    list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .4rem;
-    margin: 0 0 .75rem; padding: .75rem; border-radius: 8px; background: var(--ibg); border: 1px solid var(--ibdr);
-    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: .8rem; color: var(--itxt);
-  }
-  .mfa-ack { display: flex; gap: .5rem; align-items: center; margin-top: .75rem; font-size: .84rem; color: var(--lsub); }
-  .link-btn {
-    background: none; border: none; padding: .5rem 0 0; color: var(--lnk); font: inherit;
-    font-size: .82rem; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
-  }
-  .btn-sign:disabled { opacity: .5; cursor: not-allowed; transform: none; box-shadow: none; }

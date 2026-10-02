@@ -485,14 +485,15 @@ class TriageAloneCannotSilenceTheWorkspaceTest(unittest.TestCase):
     checked only after the finding had been dismissed, so a refusal answered 400 for a
     change that had already been saved."""
 
-    @classmethod
-    def setUpClass(cls) -> None:
+    def setUp(self) -> None:
+        # Per test, not per class: on PostgreSQL the suite empties the tables before each test.
         from fastapi.testclient import TestClient
 
         from backend import store
         from backend.app import app
         from backend.security import create_token, hash_password
 
+        cls = self
         cls.store = store
         cls.client = TestClient(app)
         cls.role = f"triage_{uuid4().hex[:6]}"
@@ -504,10 +505,9 @@ class TriageAloneCannotSilenceTheWorkspaceTest(unittest.TestCase):
                        "file": {"path": "C:/Data/Reports/customers.csv", "source": "local"},
                        "secure_value_fingerprints": ["fp-1", "fp-2"]}
 
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.store.delete_user(cls.user)
-        cls.store.delete_custom_role("default", cls.role)
+    def tearDown(self) -> None:
+        self.store.delete_user(self.user)
+        self.store.delete_custom_role("default", self.role)
 
     def _dismiss(self, body: dict, headers: dict | None = None):
         from backend import app as app_module

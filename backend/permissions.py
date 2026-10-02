@@ -46,6 +46,12 @@ PERMISSIONS: dict[str, str] = {
 # Held by the installation's administrator identity, never by a role.
 PLATFORM_ONLY = frozenset({"platform.admin"})
 
+# What only a person may do - never an API key. A machine key is a long-lived secret kept
+# in a script or a scheduler; one that leaks must not administer a workspace or the
+# installation, read or replace stored credentials, or reveal raw sensitive values. A
+# key's role may not hold these, and a route admitted only by them refuses a key.
+PERSON_ONLY_PERMISSIONS = frozenset({"tenant.admin", "platform.admin", "credential.manage", "evidence.reveal"})
+
 _ALL_ASSIGNABLE = frozenset(PERMISSIONS) - PLATFORM_ONLY
 
 # Built-in roles, least to most. Their names are what users.role, invites and API keys

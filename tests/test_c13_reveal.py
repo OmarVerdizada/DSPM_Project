@@ -74,8 +74,8 @@ class _ScannedCase(unittest.TestCase):
         self.assertTrue(self.finding.get("secure_value_fingerprints"), sorted(self.finding))
         self.fingerprints = list(self.finding["secure_value_fingerprints"])
 
-    def as_(self, user: str, role: str, tenant: str, *, mfa: bool = True) -> dict:
-        return {"Authorization": f"Bearer {security.create_token(user, role, tenant, mfa_verified=mfa)}"}
+    def as_(self, user: str, role: str, tenant: str) -> dict:
+        return {"Authorization": f"Bearer {security.create_token(user, role, tenant)}"}
 
     def reveal(self, fingerprint: str | None = None, reason: str = REASON, user=("rita", "revealer", "t-rev"), **kw):
         return self.client.post(f"/api/findings/{self.finding['finding_id']}/reveal", headers=self.as_(*user, **kw),
@@ -150,10 +150,6 @@ class TheRefusalsTest(_ScannedCase):
 
     def test_evidence_view_alone_is_not_enough(self) -> None:
         self.assertEqual(self.reveal(user=("ana", "analyst", "t-rev")).status_code, 403)
-
-    def test_a_session_without_the_second_factor_is_refused(self) -> None:
-        response = self.reveal(mfa=False)
-        self.assertEqual((response.status_code, response.json()["detail"]["code"]), (403, "mfa_required"))
 
     def test_another_workspace_cannot_reveal_it(self) -> None:
         response = self.reveal(user=("otto", "revealer", "t-other"))
