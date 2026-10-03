@@ -242,6 +242,11 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_PARTITION_LEASE_SECONDS", "int", {"minimum": 5}),
     ("DSPM_PARTITION_MAX_ATTEMPTS", "int", {"minimum": 1}),
     ("DSPM_PARTITION_RETRY_SECONDS", "int", {"minimum": 0, "maximum": 900}),
+    # W1.1: a partitioned scan has no wall clock; each unit has a budget, a stalled scan pauses.
+    ("DSPM_PARTITION_MAX_SECONDS", "int", {"minimum": 0, "maximum": 86400}),
+    ("DSPM_SCAN_STALL_SECONDS", "int", {"minimum": 0}),
+    ("DSPM_SCAN_SLA_SECONDS", "int", {"default": "0", "minimum": 0}),
+    ("DSPM_PARTITION_WORKERS", "int", {"default": "1", "minimum": 1, "maximum": 8}),
     ("DSPM_PARTITION_MAX_FILES", "int", {"minimum": 1}),
     ("DSPM_PARTITION_WORKERS", "int", {"minimum": 1}),
     ("DSPM_SCAN_HEARTBEAT_SECONDS", "int", {"minimum": 1}),

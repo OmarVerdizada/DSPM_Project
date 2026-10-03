@@ -33,6 +33,41 @@ _lock = threading.Lock()
 _sqlite_inventory_fts_enabled = False
 
 
+_ESTATE_WRITE_NAMESPACE = 0x45535457  # "ESTW"
+
+
+@contextlib.contextmanager
+def _estate_write(tenant_id: str):
+    """A connection in the transaction of one estate write - a save, a partition, a
+    finalize - holding the right to write the workspace's estate.
+
+    SQLite has one writer at a time, and the process lock orders writes there as it
+    always has. On PostgreSQL that lock was held for the whole write - seconds for a
+    partition, minutes for a finalize streaming its body - and every other write in the
+    process queued behind it: an analyst's click, a sibling scan's lease renewal (W1.1).
+    There a transaction-scoped advisory lock per workspace serializes estate writes
+    instead: across every process, which the process lock never did, and nothing else."""
+    if db.is_postgres():
+        with _connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(CAST(? AS integer), CAST(? AS integer))",
+                         (_ESTATE_WRITE_NAMESPACE, _tenant_lock_key(tenant_id)))
+            yield conn
+    else:
+        with _lock, _connect() as conn:
+            yield conn
+
+
+def _sqlite_write_lock():
+    """The process lock where SQLite needs it; nothing on PostgreSQL, whose row locks a
+    caller takes for itself."""
+    return contextlib.nullcontext() if db.is_postgres() else _lock
+
+
+def _tenant_lock_key(tenant_id: str) -> int:
+    """A workspace's key in a two-part advisory lock."""
+    return int.from_bytes(hashlib.sha256(str(tenant_id).encode("utf-8")).digest()[:4], "big", signed=True)
+
+
 def db_path() -> Path:
     return DB_PATH
 
@@ -3067,58 +3102,57 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
     scan_id = report.get("scan_id") or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
     report["scan_id"] = scan_id
     created_at = datetime.now(timezone.utc).isoformat()
-    with _lock:
-        with _connect() as conn:
-            # DATA-002: a scan run's creation timestamp is immutable. Finding-
-            # lifecycle updates re-save the same scan_id to refresh the body, but
-            # must NOT reset created_at (that broke history/audit ordering). The
-            # immutable scan-run record itself lives in the normalized scan_runs
-            # table, written authoritatively below (Phase 5): if that write
-            # fails, this whole save fails and nothing is persisted.
-            existing = conn.execute(
-                "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
-                (tenant_id, scan_id),
-            ).fetchone()
-            if existing and existing["created_at"]:
-                created_at = existing["created_at"]
-            # The run's own inventory view (rows_json) is kept only for a run small enough
-            # to be read back whole; above that the scan-name filter answers from the
-            # current estate (W1.4), so the list is not even collected.
-            viewable = _scan_run_viewable(len(report.get("files") or []))
-            inventory_rows: list[dict] | None = [] if viewable else None
-            normalized_written = _dual_write_normalized(conn, tenant_id, report, is_new_scan=existing is None,
-                                                        inventory_rows=inventory_rows)
-            if normalized_written:
-                _write_incremental_baseline(conn, tenant_id, report, is_new_scan=existing is None)
-            else:
-                incremental = (report.get("scan_diagnostics") or {}).get("incremental")
-                if isinstance(incremental, dict) and incremental.get("enabled"):
-                    incremental["baseline_committed"] = False
-                    incremental["baseline_commit_reason"] = "normalized_asset_write_unavailable"
-            report_ref, report_bytes, inline_body = _store_report_body(tenant_id, report)
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO scan_reports
-                    (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
-                     report_json, report_ref, report_bytes, rows_json, compact_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    tenant_id,
-                    scan_id,
-                    report.get("timestamp"),
-                    report.get("source"),
-                    str(report.get("scan_label") or "").strip()[:80],
-                    json.dumps(report.get("summary", {}), ensure_ascii=False),
-                    inline_body,
-                    report_ref,
-                    report_bytes,
-                    _packed_report_rows(tenant_id, report, inventory_rows if normalized_written else None)
-                    if viewable else None,
-                    _packed_compact_report(report),
-                    created_at,
-                ),
-            )
+    with _estate_write(tenant_id) as conn:
+        # DATA-002: a scan run's creation timestamp is immutable. Finding-
+        # lifecycle updates re-save the same scan_id to refresh the body, but
+        # must NOT reset created_at (that broke history/audit ordering). The
+        # immutable scan-run record itself lives in the normalized scan_runs
+        # table, written authoritatively below (Phase 5): if that write
+        # fails, this whole save fails and nothing is persisted.
+        existing = conn.execute(
+            "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+            (tenant_id, scan_id),
+        ).fetchone()
+        if existing and existing["created_at"]:
+            created_at = existing["created_at"]
+        # The run's own inventory view (rows_json) is kept only for a run small enough
+        # to be read back whole; above that the scan-name filter answers from the
+        # current estate (W1.4), so the list is not even collected.
+        viewable = _scan_run_viewable(len(report.get("files") or []))
+        inventory_rows: list[dict] | None = [] if viewable else None
+        normalized_written = _dual_write_normalized(conn, tenant_id, report, is_new_scan=existing is None,
+                                                    inventory_rows=inventory_rows)
+        if normalized_written:
+            _write_incremental_baseline(conn, tenant_id, report, is_new_scan=existing is None)
+        else:
+            incremental = (report.get("scan_diagnostics") or {}).get("incremental")
+            if isinstance(incremental, dict) and incremental.get("enabled"):
+                incremental["baseline_committed"] = False
+                incremental["baseline_commit_reason"] = "normalized_asset_write_unavailable"
+        report_ref, report_bytes, inline_body = _store_report_body(tenant_id, report)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO scan_reports
+                (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
+                 report_json, report_ref, report_bytes, rows_json, compact_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tenant_id,
+                scan_id,
+                report.get("timestamp"),
+                report.get("source"),
+                str(report.get("scan_label") or "").strip()[:80],
+                json.dumps(report.get("summary", {}), ensure_ascii=False),
+                inline_body,
+                report_ref,
+                report_bytes,
+                _packed_report_rows(tenant_id, report, inventory_rows if normalized_written else None)
+                if viewable else None,
+                _packed_compact_report(report),
+                created_at,
+            ),
+        )
     _invalidate_inventory_query_cache(tenant_id)
     _invalidate_remediation_query_cache(tenant_id)
     # A scan is the only thing that changes the shape of this data, so it is
@@ -5889,76 +5923,75 @@ def persist_partition(
             f"partition {partition_id} of scan {scan_id} is not running under attempt {attempt}"
         )
 
-    with _lock:
-        with _connect() as conn:
-            # The write starts by writing to its own ledger row. On PostgreSQL that locks
-            # the row, so no other process can take the partition back until this commits:
-            # its lease cannot be renewed meanwhile, because renewal waits for the store
-            # lock this holds. It also shows the scan is alive (B2.4 review).
-            held = conn.execute(
-                "UPDATE scan_partitions SET updated_at = ? "
-                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running' AND attempt = ?",
-                (now, tenant_id, str(scan_id), str(partition_id), int(attempt)),
-            )
-            if int(held.rowcount or 0) != 1:
-                raise not_claimed()
-            scan_row = conn.execute(
-                "SELECT status FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?",
-                (tenant_id, str(scan_id)),
-            ).fetchone()
-            if scan_row is not None and str(scan_row["status"]) not in ("running", "finalizing"):
-                # Cancelling a queued scan marks it failed, and a worker already running one
-                # of its partitions would otherwise go on writing estate rows for a scan that
-                # will never be finalized. (No record at all is a partition written outside
-                # a recorded scan, as the storage tests do.)
-                raise ScanNotRunning(f"scan {scan_id} is {scan_row['status']}; partition {partition_id} not written")
-            _touch_scan_record(conn, tenant_id, scan_id, now)
-            unit = conn.execute(
-                "SELECT ordinal, status, attempt FROM scan_partitions "
-                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ?",
-                (tenant_id, str(scan_id), str(partition_id)),
-            ).fetchone()
-            if unit is None or str(unit["status"]) != "running" or int(unit["attempt"] or 0) != int(attempt):
-                raise not_claimed()
-            ordinal = int(unit["ordinal"] or 0)
-            seq_offset = ordinal * PARTITION_SEQ_SPAN
-            if not 0 <= ordinal < MAX_SCAN_PARTITIONS:
-                raise ValueError(f"partition ordinal {ordinal} cannot be ordered in a four-byte seq column")
-            _write_normalized_rows(
-                conn, tenant_id, report, refresh_current=True,
-                partition={"seq_offset": seq_offset, "seq_span": PARTITION_SEQ_SPAN, "write_estate": bool(write_estate)},
-            )
-            _write_incremental_baseline(conn, tenant_id, report, is_new_scan=True, prune=False)
-            # The records are stored after the rows, because writing the rows fills
-            # lifecycle fields into the findings, and finalize has to stream what a
-            # single save would have stored. They are stored before the partition is
-            # marked done, so a completed partition always has its records - and in
-            # the same transaction as the rows, so a partition whose rows landed is
-            # never run again with a different set of files.
-            records_ref, records_bytes, inline = "", 0, None
-            if report_artifacts_enabled():
-                from backend import artifacts
+    with _estate_write(tenant_id) as conn:
+        # The write starts by writing to its own ledger row. On PostgreSQL that locks
+        # the row, so no other process can take the partition back until this commits,
+        # and its lease cannot be renewed meanwhile: renewal waits for the row there,
+        # and for the store lock on SQLite. It also shows the scan is alive (B2.4 review).
+        held = conn.execute(
+            "UPDATE scan_partitions SET updated_at = ? "
+            "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running' AND attempt = ?",
+            (now, tenant_id, str(scan_id), str(partition_id), int(attempt)),
+        )
+        if int(held.rowcount or 0) != 1:
+            raise not_claimed()
+        scan_row = conn.execute(
+            "SELECT status FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?",
+            (tenant_id, str(scan_id)),
+        ).fetchone()
+        if scan_row is not None and str(scan_row["status"]) not in ("running", "finalizing"):
+            # Cancelling a queued scan marks it failed, and a worker already running one
+            # of its partitions would otherwise go on writing estate rows for a scan that
+            # will never be finalized. (No record at all is a partition written outside
+            # a recorded scan, as the storage tests do.)
+            raise ScanNotRunning(f"scan {scan_id} is {scan_row['status']}; partition {partition_id} not written")
+        _touch_scan_record(conn, tenant_id, scan_id, now)
+        unit = conn.execute(
+            "SELECT ordinal, status, attempt FROM scan_partitions "
+            "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ?",
+            (tenant_id, str(scan_id), str(partition_id)),
+        ).fetchone()
+        if unit is None or str(unit["status"]) != "running" or int(unit["attempt"] or 0) != int(attempt):
+            raise not_claimed()
+        ordinal = int(unit["ordinal"] or 0)
+        seq_offset = ordinal * PARTITION_SEQ_SPAN
+        if not 0 <= ordinal < MAX_SCAN_PARTITIONS:
+            raise ValueError(f"partition ordinal {ordinal} cannot be ordered in a four-byte seq column")
+        _write_normalized_rows(
+            conn, tenant_id, report, refresh_current=True,
+            partition={"seq_offset": seq_offset, "seq_span": PARTITION_SEQ_SPAN, "write_estate": bool(write_estate)},
+        )
+        _write_incremental_baseline(conn, tenant_id, report, is_new_scan=True, prune=False)
+        # The records are stored after the rows, because writing the rows fills
+        # lifecycle fields into the findings, and finalize has to stream what a
+        # single save would have stored. They are stored before the partition is
+        # marked done, so a completed partition always has its records - and in
+        # the same transaction as the rows, so a partition whose rows landed is
+        # never run again with a different set of files.
+        records_ref, records_bytes, inline = "", 0, None
+        if report_artifacts_enabled():
+            from backend import artifacts
 
-                ref = artifacts.put_stream(tenant_id, iter_json_array(records))
-                records_ref, records_bytes = ref.content_id, ref.size_bytes
-            else:
-                body = "".join(iter_json_array(records))
-                inline, records_bytes = pack_json_text(body), len(body.encode("utf-8"))
-            finished = conn.execute(
-                "UPDATE scan_partitions SET status = 'done', files = ?, error = '', records_ref = ?, "
-                "lease_owner = '', lease_expires_at = '', "
-                "records_bytes = ?, records_json = ?, summary_json = ?, diagnostics_json = ?, "
-                "finished_at = ?, updated_at = ? "
-                "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running' AND attempt = ?",
-                (
-                    len(records), records_ref, records_bytes, inline,
-                    json.dumps(summary, ensure_ascii=False, separators=(",", ":"), default=str),
-                    json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":"), default=str),
-                    now, now, tenant_id, str(scan_id), str(partition_id), int(attempt),
-                ),
-            )
-            if int(finished.rowcount or 0) != 1:
-                raise not_claimed()
+            ref = artifacts.put_stream(tenant_id, iter_json_array(records))
+            records_ref, records_bytes = ref.content_id, ref.size_bytes
+        else:
+            body = "".join(iter_json_array(records))
+            inline, records_bytes = pack_json_text(body), len(body.encode("utf-8"))
+        finished = conn.execute(
+            "UPDATE scan_partitions SET status = 'done', files = ?, error = '', records_ref = ?, "
+            "lease_owner = '', lease_expires_at = '', "
+            "records_bytes = ?, records_json = ?, summary_json = ?, diagnostics_json = ?, "
+            "finished_at = ?, updated_at = ? "
+            "WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'running' AND attempt = ?",
+            (
+                len(records), records_ref, records_bytes, inline,
+                json.dumps(summary, ensure_ascii=False, separators=(",", ":"), default=str),
+                json.dumps(diagnostics, ensure_ascii=False, separators=(",", ":"), default=str),
+                now, now, tenant_id, str(scan_id), str(partition_id), int(attempt),
+            ),
+        )
+        if int(finished.rowcount or 0) != 1:
+            raise not_claimed()
     _invalidate_inventory_query_cache(tenant_id)
     _invalidate_remediation_query_cache(tenant_id)
     # The search projection is best effort and runs after the authoritative
@@ -6179,95 +6212,94 @@ def finalize_partitioned_scan(
     scan_id = str(scan_id)
     report["scan_id"] = scan_id
     created_at = datetime.now(timezone.utc).isoformat()
-    with _lock:
-        with _connect() as conn:
-            # Two finalizes of one scan wait for each other here: the update takes the
-            # scan record's row lock on PostgreSQL and makes this a write transaction on
-            # SQLite, so the one that waited sees what the first committed (B2.4).
-            conn.execute(
-                "UPDATE partitioned_scans SET updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
-                (created_at, tenant_id, scan_id),
-            )
-            states = {
-                str(row["status"]): int(row["n"] or 0)
-                for row in conn.execute(
-                    "SELECT status, COUNT(*) AS n FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? GROUP BY status",
-                    (tenant_id, scan_id),
-                ).fetchall()
-            }
-            if not states or set(states) != {"done"}:
-                raise PartitionsNotFinished(f"scan {scan_id} cannot be finalized: partitions {states or 'none'}")
-            existing = conn.execute(
-                "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id),
-            ).fetchone()
-            held = conn.execute(
-                "SELECT COUNT(*) AS n FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? "
-                "AND (records_ref <> '' OR records_json IS NOT NULL)",
+    with _estate_write(tenant_id) as conn:
+        # Two finalizes of one scan wait for each other here: the update takes the
+        # scan record's row lock on PostgreSQL and makes this a write transaction on
+        # SQLite, so the one that waited sees what the first committed (B2.4).
+        conn.execute(
+            "UPDATE partitioned_scans SET updated_at = ? WHERE tenant_id = ? AND scan_id = ?",
+            (created_at, tenant_id, scan_id),
+        )
+        states = {
+            str(row["status"]): int(row["n"] or 0)
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS n FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? GROUP BY status",
                 (tenant_id, scan_id),
-            ).fetchone()
-            if existing is not None and not int(held["n"] or 0):
-                # The first finalize released the records its body was built from; this
-                # one would stream an empty body over that report.
-                raise ScanAlreadyFinalized(f"scan {scan_id} is already finalized")
-            if existing and existing["created_at"]:
-                created_at = existing["created_at"]
-            run = scan_run_from_report(tenant_id, report)
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO scan_runs
-                    (tenant_id, id, source, mode, policy_version, started_at, ended_at, status, total_files, summary_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at,
-                 run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
-            )
-            scan_label = str(report.get("scan_label") or "").strip()[:80]
-            diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
-            incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
-            complete_scope = not isinstance(incremental, dict) or bool(incremental.get("complete"))
-            if write_estate and scan_label and complete_scope:
-                _prune_unseen_assets(conn, tenant_id, scan_label, scan_id)
-            if (
-                isinstance(incremental, dict)
-                and incremental.get("baseline_update", incremental.get("enabled"))
-                and incremental.get("baseline_committed")
-                and str(incremental.get("scope_key") or "")
-            ):
-                _prune_incremental_baseline(conn, tenant_id, incremental, str(incremental.get("scope_key")), scan_id)
-            _trim_finding_index(conn, tenant_id)
-            report_ref, report_bytes, inline_body = _store_report_body(tenant_id, report)
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO scan_reports
-                    (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
-                     report_json, report_ref, report_bytes, rows_json, compact_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    tenant_id,
-                    scan_id,
-                    report.get("timestamp"),
-                    report.get("source"),
-                    scan_label,
-                    json.dumps(report.get("summary", {}), ensure_ascii=False),
-                    inline_body,
-                    report_ref,
-                    report_bytes,
-                    None,
-                    pack_json_text(json.dumps(
-                        compact_scan_report_from_counts(report, file_count, sample_count),
-                        ensure_ascii=False, separators=(",", ":"),
-                    )),
-                    created_at,
-                ),
-            )
-            # The body now holds every record, so the partitions' own copies are
-            # unreferenced from here on and retention collects them.
-            conn.execute(
-                "UPDATE scan_partitions SET records_ref = '', records_bytes = 0, records_json = NULL, updated_at = ? "
-                "WHERE tenant_id = ? AND scan_id = ?",
-                (datetime.now(timezone.utc).isoformat(), tenant_id, scan_id),
-            )
+            ).fetchall()
+        }
+        if not states or set(states) != {"done"}:
+            raise PartitionsNotFinished(f"scan {scan_id} cannot be finalized: partitions {states or 'none'}")
+        existing = conn.execute(
+            "SELECT created_at FROM scan_reports WHERE tenant_id = ? AND scan_id = ?", (tenant_id, scan_id),
+        ).fetchone()
+        held = conn.execute(
+            "SELECT COUNT(*) AS n FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? "
+            "AND (records_ref <> '' OR records_json IS NOT NULL)",
+            (tenant_id, scan_id),
+        ).fetchone()
+        if existing is not None and not int(held["n"] or 0):
+            # The first finalize released the records its body was built from; this
+            # one would stream an empty body over that report.
+            raise ScanAlreadyFinalized(f"scan {scan_id} is already finalized")
+        if existing and existing["created_at"]:
+            created_at = existing["created_at"]
+        run = scan_run_from_report(tenant_id, report)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO scan_runs
+                (tenant_id, id, source, mode, policy_version, started_at, ended_at, status, total_files, summary_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (tenant_id, run.id, run.source, run.mode, run.policy_version, run.started_at, run.ended_at,
+             run.status, run.total_files, json.dumps(run.summary, ensure_ascii=False)),
+        )
+        scan_label = str(report.get("scan_label") or "").strip()[:80]
+        diagnostics = report.get("scan_diagnostics") if isinstance(report.get("scan_diagnostics"), dict) else {}
+        incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
+        complete_scope = not isinstance(incremental, dict) or bool(incremental.get("complete"))
+        if write_estate and scan_label and complete_scope:
+            _prune_unseen_assets(conn, tenant_id, scan_label, scan_id)
+        if (
+            isinstance(incremental, dict)
+            and incremental.get("baseline_update", incremental.get("enabled"))
+            and incremental.get("baseline_committed")
+            and str(incremental.get("scope_key") or "")
+        ):
+            _prune_incremental_baseline(conn, tenant_id, incremental, str(incremental.get("scope_key")), scan_id)
+        _trim_finding_index(conn, tenant_id)
+        report_ref, report_bytes, inline_body = _store_report_body(tenant_id, report)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO scan_reports
+                (tenant_id, scan_id, timestamp, source, scan_label, summary_json,
+                 report_json, report_ref, report_bytes, rows_json, compact_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tenant_id,
+                scan_id,
+                report.get("timestamp"),
+                report.get("source"),
+                scan_label,
+                json.dumps(report.get("summary", {}), ensure_ascii=False),
+                inline_body,
+                report_ref,
+                report_bytes,
+                None,
+                pack_json_text(json.dumps(
+                    compact_scan_report_from_counts(report, file_count, sample_count),
+                    ensure_ascii=False, separators=(",", ":"),
+                )),
+                created_at,
+            ),
+        )
+        # The body now holds every record, so the partitions' own copies are
+        # unreferenced from here on and retention collects them.
+        conn.execute(
+            "UPDATE scan_partitions SET records_ref = '', records_bytes = 0, records_json = NULL, updated_at = ? "
+            "WHERE tenant_id = ? AND scan_id = ?",
+            (datetime.now(timezone.utc).isoformat(), tenant_id, scan_id),
+        )
     _invalidate_inventory_query_cache(tenant_id)
     _invalidate_remediation_query_cache(tenant_id)
     _forget_scan_report_rows(tenant_id)
@@ -9125,7 +9157,7 @@ def _apply_finding_lifecycle(tenant_id: str, finding_id: str, actor: str, audit_
     returns the history event; `stored` is the finding as its newest scan recorded it,
     the source of the detail a pre-W1.4 action left in a report body."""
     for_update = " FOR UPDATE" if db.is_postgres() else ""
-    with _lock:
+    with _sqlite_write_lock():
         with _connect() as conn:
             row = conn.execute(
                 "SELECT scan_id, is_current, status, owner, sla_due, lifecycle_json, display_name, rule, "

@@ -274,6 +274,9 @@ def _safe_job_error(exc: Exception) -> str:
         return "Scan could not save because the local DSPM database is busy. Wait a few seconds and retry."
     if "permission denied" in raw or "winerror 5" in raw:
         return "Scan could not read or save one of the selected paths. Check filesystem permissions and retry."
+    if "scan paused" in raw:
+        # A partitioned scan that stopped making progress (W1.1): left to the resume sweep.
+        return "Scan paused: no part of it finished for a long time. It continues automatically; nothing already scanned is lost."
     if "no space left" in raw or "disk full" in raw:
         return "Scan stopped because the backend storage is full. Free disk space and retry."
     if "no such file" in raw or "cannot find the path" in raw or "winerror 3" in raw:
@@ -310,25 +313,31 @@ def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
 
 
 @contextlib.contextmanager
-def collection_heartbeat(job: ScanJob | None, *, ceiling: int = COLLECT_HEARTBEAT_CEILING) -> Iterator[None]:
+def collection_heartbeat(job: ScanJob | None, *, ceiling: int = COLLECT_HEARTBEAT_CEILING,
+                         max_seconds: int | None = None) -> Iterator[None]:
     """Keep a long blocking collection phase honest.
 
     While the wrapped call runs, nudge ``job.progress`` up to ``ceiling`` (a
     bounded keepalive band, never fake completion) and enforce the wall-clock
     deadline ``SCAN_MAX_SECONDS`` so a hung remote/local collection becomes a
     *failed* job the frontend can display instead of an eternal "running".
+
+    ``max_seconds=0`` keeps the progress and drops the deadline. A partitioned scan
+    passes it (W1.1): each unit's engine carries its own budget, and this deadline -
+    measured per wrapped call - failed the whole scan when one unit ran long.
     """
     if job is None:
         yield
         return
     stop_heartbeat = threading.Event()
     started = time.monotonic()
+    limit = SCAN_MAX_SECONDS if max_seconds is None else int(max_seconds)
 
     def _heartbeat() -> None:
         while not stop_heartbeat.wait(COLLECT_HEARTBEAT_SECONDS):
             if job.cancel_requested or job.status not in {"queued", "running"}:
                 return
-            if SCAN_MAX_SECONDS > 0 and (time.monotonic() - started) > SCAN_MAX_SECONDS:
+            if limit > 0 and (time.monotonic() - started) > limit:
                 job.cancel_requested = True
                 _finalize(
                     job,

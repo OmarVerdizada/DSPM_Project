@@ -30,6 +30,7 @@ import socket
 import threading
 import time
 import uuid
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -261,12 +262,60 @@ def queue_wait_seconds() -> int:
     default rather than ``SCAN_MAX_SECONDS``. When it runs out the job says no worker
     finished the scan, and the scan itself is left exactly as it is: a worker may still
     be running it, and the ledger remains the truth about that. A partitioned scan run in
-    this process gets the same budget (:func:`_deadline`).
+    this process has no such budget: see :func:`partition_max_seconds`.
     """
     try:
         return max(1, min(int(os.getenv("DSPM_SCAN_QUEUE_MAX_SECONDS", "86400")), 30 * 24 * 3600))
     except ValueError:
         return 86_400
+
+
+def partition_max_seconds() -> int:
+    """How long one partition's engine may run (``DSPM_PARTITION_MAX_SECONDS``; 0 = no limit).
+
+    A partitioned scan has no time budget of its own (W1.1): two million files take as long
+    as they take, and a scan cut off at a wall clock was failed for good with its finished
+    partitions in the estate and no report. Each unit has one instead - by default the half
+    hour a whole single scan gets. A unit that runs out of it is tried again, like one that
+    failed; on its last attempt what it read is kept, and the scan says it is incomplete.
+    """
+    default = os.getenv("DSPM_SCAN_MAX_SECONDS") or "1800"
+    try:
+        return max(0, min(int(os.getenv("DSPM_PARTITION_MAX_SECONDS") or default), 86_400))
+    except ValueError:
+        return 1800
+
+
+def scan_stall_seconds() -> int:
+    """How long a scan may go without any partition finishing before its runner pauses it
+    (``DSPM_SCAN_STALL_SECONDS``; 0 = never). Three unit budgets, and at least an hour."""
+    default = max(3 * partition_max_seconds(), 3600)
+    try:
+        return max(0, min(int(os.getenv("DSPM_SCAN_STALL_SECONDS") or default), 30 * 24 * 3600))
+    except ValueError:
+        return default
+
+
+def partition_workers() -> int:
+    """How many units of one scan run at once in this process (``DSPM_PARTITION_WORKERS``).
+
+    One by default. Each unit runs its own engine, and with compliance on each engine starts
+    a detector process pool sized for the whole host, so N units cost N pools of processes
+    and their memory. Raise it for I/O-bound scans - SMB, compliance off - until the pool is
+    shared between units (roadmap E8).
+    """
+    try:
+        return max(1, min(int(os.getenv("DSPM_PARTITION_WORKERS") or "1"), 8))
+    except ValueError:
+        return 1
+
+
+def scan_sla_seconds() -> int:
+    """``DSPM_SCAN_SLA_SECONDS``: past it a running scan is reported late - never stopped (0 = off)."""
+    try:
+        return max(0, min(int(os.getenv("DSPM_SCAN_SLA_SECONDS", "0")), 30 * 24 * 3600))
+    except ValueError:
+        return 0
 
 
 # ---- running one -------------------------------------------------------------------------------------------
@@ -278,6 +327,20 @@ class ScanStopped(RuntimeError):
     The scan is marked failed and never resumed. A scan whose process died has not
     stopped - it stays unfinished, and the resume sweep continues it.
     """
+
+
+class ScanPaused(RuntimeError):
+    """A partitioned scan stopped making progress, and its runner let it go (W1.1).
+
+    Nothing is marked failed: the scan stays unfinished, and once nothing has touched it
+    for a lease the resume sweep continues it under the same job. Only a scan that cannot
+    be resumed - started without a request - is failed instead, since nothing would ever
+    pick it up again.
+    """
+
+
+class PartitionOverBudget(RuntimeError):
+    """A unit's engine ran out of its time budget before it had read everything."""
 
 
 _running_here: set[tuple[str, str]] = set()
@@ -314,24 +377,14 @@ def runs_here(record: dict) -> bool:
     return not host or host.casefold() == _this_host()
 
 
-def _deadline() -> float:
-    """When a whole partitioned scan run in this process is out of time.
+def _stop_check(job) -> Callable[[], str | None]:
+    """Why the scan must stop now: only a cancellation. A partitioned scan has no wall
+    clock of its own (W1.1) - each unit has a budget, and a scan that stops making progress
+    is paused for the resume sweep, never failed (see :func:`_run_partitions`)."""
 
-    Partitioning is for the largest estates, which is exactly what ``SCAN_MAX_SECONDS``
-    - half an hour, sized for one scan held in memory - cannot cover: a scan cut off at
-    thirty minutes was failed for good, with its finished partitions in the estate and
-    no report. So the whole scan gets what a queued one gets, :func:`queue_wait_seconds`
-    (a day), and each partition's engine keeps ``SCAN_MAX_SECONDS``.
-    """
-    return time.monotonic() + queue_wait_seconds()
-
-
-def _stop_check(job, deadline: float | None) -> Callable[[], str | None]:
     def stop_reason() -> str | None:
         if job is not None and job.cancel_requested:
             return "Scan cancelled"
-        if deadline is not None and time.monotonic() > deadline:
-            return "Scan exceeded its time budget"
         return None
 
     return stop_reason
@@ -423,12 +476,14 @@ def _unit_config(config: ScanConfig, spec: dict, scan_root: str) -> ScanConfig:
         local_entry_names=tuple(spec.get("names") or ()),
         scan_root=scan_root,
         progress_callback=None,
+        max_seconds=partition_max_seconds(),
     )
 
 
 def _share_unit_config(config: ScanConfig, spec: dict) -> ScanConfig:
     """One SMB partition's engine: the scan's policy, scope and reuse, over one group of shares."""
-    return replace(config, smb_shares=tuple(spec.get("shares") or ()), progress_callback=None)
+    return replace(config, smb_shares=tuple(spec.get("shares") or ()), progress_callback=None,
+                   max_seconds=partition_max_seconds())
 
 
 def _vanished_partition(timestamp: str, label: str, folder: str) -> tuple[dict, list]:
@@ -485,10 +540,11 @@ def start_partitioned_scan(
     """
     from backend.jobs import collection_heartbeat
 
-    stop_reason = stop_reason or _stop_check(job, _deadline())
+    stop_reason = stop_reason or _stop_check(job)
     budget = max_files or partition_max_files()
     remote = bool(config.server)
-    with collection_heartbeat(job) if job is not None else nullcontext():
+    # Planning walks the whole target: no wall clock, only a cancel (W1.1).
+    with collection_heartbeat(job, max_seconds=0) if job is not None else nullcontext():
         if remote:
             plan = plan_share_partitions(config, stop_check=stop_reason)
         else:
@@ -542,10 +598,11 @@ def continue_partitioned_scan(
     and the lease is renewed while the partition runs, so a live worker never loses
     its partition to a sweep.
 
-    A cancellation, the time budget or a partition out of attempts stops the scan for
-    good: it is marked failed and :class:`ScanStopped` is raised. Any other error marks
-    it failed too, with the error's type. Only a process that dies leaves a scan
-    unfinished, for the resume sweep to find.
+    A cancellation or a partition out of attempts stops the scan for good: it is marked
+    failed and :class:`ScanStopped` is raised. Any other error marks it failed too, with
+    the error's type. A scan that stops making progress is paused - :class:`ScanPaused`
+    is raised and the scan is left unfinished - and so is one whose process dies: the
+    resume sweep continues both.
     """
     record = store.read_partitioned_scan(tenant_id, scan_id)
     if record is None:
@@ -563,10 +620,19 @@ def continue_partitioned_scan(
         _running_here.add(key)
     try:
         scan = _scan_from_record(record, config)
-        stop_reason = stop_reason or _stop_check(job, _deadline())
+        stop_reason = stop_reason or _stop_check(job)
         try:
             _run_partitions(scan, job=job, stop_reason=stop_reason, poll_seconds=poll_seconds)
             return _finalize_when_claimed(scan, job=job, stop_reason=stop_reason, poll_seconds=poll_seconds)
+        except ScanPaused:
+            if not record.get("resumable"):
+                with suppress(Exception):
+                    store.mark_partitioned_scan(
+                        scan.tenant_id, scan.scan_id, "failed",
+                        error="Scan stopped making progress and cannot be resumed: it was started without a "
+                              "request to rebuild it from. Run the scan again.",
+                    )
+            raise
         except Exception as exc:
             with suppress(Exception):
                 store.mark_partitioned_scan(
@@ -586,38 +652,94 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
     total = len(units)
     done = sum(1 for unit in units if unit["status"] == "done")
     max_attempts = partition_max_attempts()
-    # A partition whose holder died is taken back once its lease has run out - or, on
-    # its last attempt, failed.
-    store.requeue_expired_partitions(tenant_id=scan.tenant_id, max_attempts=max_attempts)
-    while True:
-        reason = stop_reason()
-        if reason:
-            raise ScanStopped(reason)
-        store.touch_partitioned_scan(scan.tenant_id, scan.scan_id)
-        unit = store.claim_next_partition(
+    stall = scan_stall_seconds()
+    sla = scan_sla_seconds()
+    started = last_progress = time.monotonic()
+    late = False
+    workers = partition_workers()
+    # One unit at a time runs here, in the job's own thread, as it always has. More than
+    # one run on a pool of their own (W1.1); a stop or a pause claims nothing more.
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="partition") if workers > 1 else None
+    running: dict = {}
+
+    def finished_one() -> None:
+        nonlocal done, last_progress
+        done += 1
+        last_progress = time.monotonic()
+        if job is not None:
+            job.progress = max(job.progress, min(94, 8 + int(86 * done / total)))
+            _share_progress(job)
+
+    def claim():
+        return store.claim_next_partition(
             scan.tenant_id, scan.scan_id, worker_id=scan.worker, lease_seconds=scan.lease_seconds,
         )
-        if unit is not None:
-            if job is not None:
-                job.message = f"Scanning partition {done + 1} of {total}"
-            if _run_unit(scan, unit, job=job, stop_reason=stop_reason):
-                done += 1
+
+    try:
+        # A partition whose holder died is taken back once its lease has run out - or, on
+        # its last attempt, failed.
+        store.requeue_expired_partitions(tenant_id=scan.tenant_id, max_attempts=max_attempts)
+        while True:
+            reason = stop_reason()
+            if reason:
+                raise ScanStopped(reason)
+            now = time.monotonic()
+            if stall and now - last_progress > stall:
+                raise ScanPaused(
+                    f"Scan paused: no partition of scan {scan.scan_id} finished in {int(stall // 60)} minutes; "
+                    "it continues automatically"
+                )
+            if sla and not late and now - started > sla:
+                late = True
+                logger.warning("Partitioned scan %s is past its %s s SLA with %s of %s partitions done; it continues",
+                               scan.scan_id, sla, done, total)
                 if job is not None:
-                    job.progress = max(job.progress, min(94, 8 + int(86 * done / total)))
-                    _share_progress(job)
-            continue
-        if store.requeue_failed_partitions(scan.tenant_id, scan.scan_id, max_attempts=max_attempts,
-                                           backoff_seconds=partition_retry_seconds()):
-            continue
-        units = store.list_scan_partitions(scan.tenant_id, scan.scan_id)
-        if all(unit["status"] == "done" for unit in units):
-            return
-        exhausted = [unit for unit in units if unit["status"] == "failed" and unit["attempt"] >= max_attempts]
-        if exhausted:
-            raise ScanStopped(_exhausted_message(exhausted[0]))
-        # What is left runs under another worker's lease: take back any that ran out, or wait.
-        if not store.requeue_expired_partitions(tenant_id=scan.tenant_id, max_attempts=max_attempts):
-            time.sleep(poll_seconds)
+                    job.message = f"Scanning partition {done + 1} of {total} (past its expected time)"
+            store.touch_partitioned_scan(scan.tenant_id, scan.scan_id)
+            if pool is None:
+                unit = claim()
+                if unit is not None:
+                    if job is not None:
+                        job.message = f"Scanning partition {done + 1} of {total}"
+                    if _run_unit(scan, unit, job=job, stop_reason=stop_reason):
+                        finished_one()
+                    continue
+            else:
+                while len(running) < workers:
+                    unit = claim()
+                    if unit is None:
+                        break
+                    running[pool.submit(_run_unit, scan, unit, job=job, stop_reason=stop_reason)] = unit
+                if running:
+                    if job is not None:
+                        job.message = f"Scanning partitions {done + 1}-{min(total, done + len(running))} of {total}"
+                    complete, _pending = wait(list(running), timeout=poll_seconds, return_when=FIRST_COMPLETED)
+                    for future in complete:
+                        running.pop(future)
+                        if future.result():
+                            finished_one()
+                    continue
+            if store.requeue_failed_partitions(scan.tenant_id, scan.scan_id, max_attempts=max_attempts,
+                                               backoff_seconds=partition_retry_seconds()):
+                continue
+            units = store.list_scan_partitions(scan.tenant_id, scan.scan_id)
+            if all(unit["status"] == "done" for unit in units):
+                return
+            finished = sum(1 for unit in units if unit["status"] == "done")
+            if finished > done:
+                # Another worker finished one: that is progress too.
+                done, last_progress = finished, time.monotonic()
+            exhausted = [unit for unit in units if unit["status"] == "failed" and unit["attempt"] >= max_attempts]
+            if exhausted:
+                raise ScanStopped(_exhausted_message(exhausted[0]))
+            # What is left runs under another worker's lease: take back any that ran out, or wait.
+            if not store.requeue_expired_partitions(tenant_id=scan.tenant_id, max_attempts=max_attempts):
+                time.sleep(poll_seconds)
+    finally:
+        if pool is not None:
+            # Units still running end on their own - a cancel reaches their engines - or
+            # are left to their leases; nothing waits here for one that hangs.
+            pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _exhausted_message(unit: dict) -> str:
@@ -655,8 +777,8 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
 
     Nothing about the partition is kept once it is written but its ledger row. A
     partition that raises is marked failed under its attempt and the scan goes on; it
-    is tried again once nothing else is queued. A stop - cancellation, the time
-    budget - is not the partition's failure and stops the scan. A partition taken back
+    is tried again once nothing else is queued, and so is one that ran out of its own
+    time budget. A cancellation is not the partition's failure and stops the scan. A partition taken back
     while it ran, because its lease ran out, is left to its new holder.
     """
     from backend.jobs import collection_heartbeat
@@ -676,11 +798,19 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
             if engine_config is None:
                 header, records = _vanished_partition(scan.timestamp, scan.label, str(unit["spec"]["local_path"]))
             else:
-                with collection_heartbeat(job) if job is not None else nullcontext():
+                with collection_heartbeat(job, max_seconds=0) if job is not None else nullcontext():
                     report = DSPMDiscoveryEngine(engine_config).run().to_dict()
                 reason = stop_reason()
                 if reason:
                     raise ScanStopped(reason)
+                if (report.get("scan_diagnostics") or {}).get("scan_truncated") \
+                        and int(unit["attempt"]) < partition_max_attempts():
+                    # Out of its own time, not cancelled: tried again like a failure. On
+                    # its last attempt what it read is written, and the engine has already
+                    # marked it incomplete, so the scan prunes nothing it did not see.
+                    raise PartitionOverBudget(
+                        f"partition {unit['partition_id']} ran past its {partition_max_seconds()} s budget"
+                    )
                 records = report.get("files") or []
                 enrichment = ComplianceReportAccumulator(scan.compliance_enabled, list(scan.compliance_frameworks))
                 for record in records:
@@ -967,13 +1097,12 @@ def run_partitioned_scan(
     Returns ``None`` when the target is not worth partitioning (see
     :func:`start_partitioned_scan`); the caller then runs an ordinary scan.
 
-    It is :func:`start_partitioned_scan` then :func:`continue_partitioned_scan` under
-    one time budget, which covers planning too - not each partition separately (B2.2b
-    review) - a queued scan's day, not the half hour a single scan gets (see
-    :func:`_deadline`). ``request`` is the scan request as the API validated it: with it the scan
-    can be continued after a restart, without it it cannot.
+    It is :func:`start_partitioned_scan` then :func:`continue_partitioned_scan`, with no
+    wall clock over either: each unit has its budget, and a scan that stops making progress
+    is paused (W1.1). ``request`` is the scan request as the API validated it: with it the
+    scan can be continued after a restart, without it it cannot.
     """
-    stop_reason = _stop_check(job, _deadline())
+    stop_reason = _stop_check(job)
     record = start_partitioned_scan(
         tenant_id, config,
         request=request,

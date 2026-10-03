@@ -134,6 +134,9 @@ class ScanConfig:
     # D2: the workspace's exact-match reference fingerprints ({"digest", "fingerprints"}),
     # read once when the configuration is built, like the suppression rules.
     exact_match: dict = field(default_factory=dict)
+    # This run's wall-clock budget in seconds; None is DSPM_SCAN_MAX_SECONDS and 0 is none.
+    # A partitioned scan gives each unit its own (W1.1), so the scan has no budget at all.
+    max_seconds: int | None = None
 
 
 @dataclass(slots=True)
@@ -398,7 +401,8 @@ class DSPMDiscoveryEngine:
 
     def run(self) -> ScanReport:
         # M14: arm the wall-clock deadline for this scan (collection + analysis).
-        self._deadline = (time.monotonic() + SCAN_MAX_SECONDS) if SCAN_MAX_SECONDS > 0 else None
+        budget = SCAN_MAX_SECONDS if self.config.max_seconds is None else int(self.config.max_seconds)
+        self._deadline = (time.monotonic() + budget) if budget > 0 else None
         plan = self._parallelism()
         try:
             try:

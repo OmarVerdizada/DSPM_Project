@@ -443,14 +443,14 @@ class StoppingTest(_LocalTest):
         self.assertEqual(summary["done"], 1)
         self.assertEqual(summary["running"], 0, "the scan left a unit claimed")
 
-    def test_the_time_budget_covers_the_whole_scan_and_planning_too(self) -> None:
+    def test_no_wall_clock_ends_the_scan_or_its_planning(self) -> None:
+        # The whole scan had a time budget - a day since audit 2026-10 finding 11 - and past
+        # it the scan was failed for good. Since W1.1 it has none: each unit has a budget, and
+        # a scan that stops making progress is paused (tests/test_w11_partitioned_path.py).
         self._use_database("deadline")
-        # The whole partitioned scan's budget is a queued scan's (audit 2026-10, finding 11).
         with patch.object(partitioned_scan, "queue_wait_seconds", return_value=1e-9):
-            with self.assertRaisesRegex(RuntimeError, "time budget"):
-                partitioned_scan.run_partitioned_scan(TENANT, self._config("deadline"), max_files=3)
-        with store._connect() as conn:
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM scan_partitions WHERE tenant_id = ?", (TENANT,)).fetchone()[0], 0)
+            compact = partitioned_scan.run_partitioned_scan(TENANT, self._config("deadline"), max_files=3)
+        self.assertEqual(store.read_partitioned_scan(TENANT, compact["scan_id"])["status"], "done")
 
     def test_a_scan_root_out_of_reach_fails_its_partitions_instead_of_writing_them_empty(self) -> None:
         # A worker on another host, or a root taken away mid-scan: written as empty

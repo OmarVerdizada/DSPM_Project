@@ -307,13 +307,22 @@ class TheResumeSweepLeavesAnotherHostsScanTest(_Partitioned):
 class APartitionedScanHasItsOwnBudgetTest(unittest.TestCase):
     """11: an inline partitioned scan - the path for the largest estates - got the half hour
     a single scan gets; past it the scan was failed for good with its partitions in the
-    estate and no report."""
+    estate and no report. It then got a day (W1.5); since W1.1 it has no wall clock at all:
+    each unit has a budget, and a scan that stops making progress is paused."""
 
-    def test_the_whole_scan_gets_a_queued_scans_day_not_the_engines_half_hour(self) -> None:
-        with patch.object(discovery_engine, "SCAN_MAX_SECONDS", 1800), \
-                mock.patch.dict(os.environ, {"DSPM_SCAN_QUEUE_MAX_SECONDS": "86400"}):
-            budget = partitioned_scan._deadline() - time.monotonic()
-        self.assertGreater(budget, 3600)
+    def test_the_whole_scan_has_no_wall_clock(self) -> None:
+        job = MagicMock(cancel_requested=False)
+        stop_reason = partitioned_scan._stop_check(job)
+        with patch.object(partitioned_scan.time, "monotonic", return_value=time.monotonic() + 30 * 86400):
+            self.assertIsNone(stop_reason())
+        job.cancel_requested = True
+        self.assertEqual(stop_reason(), "Scan cancelled")
+
+    def test_each_unit_carries_its_own_budget(self) -> None:
+        with mock.patch.dict(os.environ, {"DSPM_PARTITION_MAX_SECONDS": "120"}):
+            config = partitioned_scan._unit_config(
+                discovery_engine.ScanConfig(local_path="."), {"local_path": ".", "max_depth": 1}, ".")
+        self.assertEqual(config.max_seconds, 120)
 
 
 class AFailedPartitionWaitsBeforeItsNextAttemptTest(_Partitioned):
