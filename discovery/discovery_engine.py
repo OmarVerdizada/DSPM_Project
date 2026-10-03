@@ -123,6 +123,8 @@ class ScanConfig:
     # An SMB partition is a group of shares (B2.3): the collector walks only these,
     # in the order the server lists them. None walks every share.
     smb_shares: tuple[str, ...] | None = None
+    # W1.2: one range of one folder of a share (collectors.smb_scanner.SMBConfig.share_range).
+    smb_range: dict | None = None
     # D1: read SMB servers over SMB 3.1.1 with encryption required.
     smb_require_encryption: bool = False
     # What an analyst has told this tenant's scans not to report again (B6). Read
@@ -1381,6 +1383,7 @@ class DSPMDiscoveryEngine:
                     io_workers=self._parallelism().io_workers,
                     allowed_shares=self.config.smb_shares,
                     require_encryption=self.config.smb_require_encryption,
+                    share_range=self.config.smb_range,
                 )
             )
             records = scanner.scan()

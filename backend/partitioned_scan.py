@@ -192,6 +192,18 @@ def partition_max_files() -> int:
         return 2000
 
 
+def partition_max_bytes() -> int:
+    """The most an SMB partition reads, counting each file up to the read cap (W1.2).
+
+    ``DSPM_PARTITION_MAX_BYTES``, half a gibibyte by default. A partition bounded by files
+    alone could hold 2,000 files of 100 MB each; the scan holds what a partition reads.
+    """
+    try:
+        return max(1, min(int(os.getenv("DSPM_PARTITION_MAX_BYTES") or str(512 * 1024 * 1024)), 1 << 40))
+    except ValueError:
+        return 512 * 1024 * 1024
+
+
 def partition_max_attempts() -> int:
     """How many times one partition is tried before its scan fails.
 
@@ -343,6 +355,10 @@ class PartitionOverBudget(RuntimeError):
     """A unit's engine ran out of its time budget before it had read everything."""
 
 
+class PartitionConnectionLost(RuntimeError):
+    """A unit's SMB session kept resetting, so it did not read everything (W1.2)."""
+
+
 _running_here: set[tuple[str, str]] = set()
 _running_here_lock = threading.Lock()
 
@@ -481,7 +497,12 @@ def _unit_config(config: ScanConfig, spec: dict, scan_root: str) -> ScanConfig:
 
 
 def _share_unit_config(config: ScanConfig, spec: dict) -> ScanConfig:
-    """One SMB partition's engine: the scan's policy, scope and reuse, over one group of shares."""
+    """One SMB partition's engine: the scan's policy, scope and reuse, over one group of
+    shares - or, W1.2, over one range of one folder of a share."""
+    if spec.get("kind") == "smb_range":
+        unit = {key: spec.get(key) for key in ("share", "folder", "depth", "name_from", "name_to")}
+        return replace(config, smb_shares=(str(spec["share"]),), smb_range=unit, progress_callback=None,
+                       max_seconds=partition_max_seconds())
     return replace(config, smb_shares=tuple(spec.get("shares") or ()), progress_callback=None,
                    max_seconds=partition_max_seconds())
 
@@ -546,7 +567,8 @@ def start_partitioned_scan(
     # Planning walks the whole target: no wall clock, only a cancel (W1.1).
     with collection_heartbeat(job, max_seconds=0) if job is not None else nullcontext():
         if remote:
-            plan = plan_share_partitions(config, stop_check=stop_reason)
+            plan = plan_share_partitions(config, stop_check=stop_reason, max_files=budget,
+                                         max_bytes=partition_max_bytes())
         else:
             plan = plan_bounded_partitions(config, max_files=budget, stop_check=stop_reason)
     if plan is None or plan["sample_paths"]:
@@ -803,7 +825,18 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
                 reason = stop_reason()
                 if reason:
                     raise ScanStopped(reason)
-                if (report.get("scan_diagnostics") or {}).get("scan_truncated") \
+                diagnostics = report.get("scan_diagnostics") or {}
+                if (diagnostics.get("shares_connection_reset") or diagnostics.get("scan_aborted_reason")) \
+                        and int(unit["attempt"]) < partition_max_attempts():
+                    # A session that kept resetting: what it did not read is not gone, and
+                    # writing the unit done would leave it missing until the next scan (W1.2).
+                    # Tried again with back-off; on the last attempt it is written, and the
+                    # engine has marked the scan incomplete, so nothing under it is pruned.
+                    raise PartitionConnectionLost(
+                        f"partition {unit['partition_id']}: the SMB session kept resetting "
+                        f"({', '.join(map(str, diagnostics.get('shares_connection_reset') or [])) or 'aborted'})"
+                    )
+                if diagnostics.get("scan_truncated") \
                         and int(unit["attempt"]) < partition_max_attempts():
                     # Out of its own time, not cancelled: tried again like a failure. On
                     # its last attempt what it read is written, and the engine has already

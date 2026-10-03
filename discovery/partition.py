@@ -186,20 +186,25 @@ def plan_bounded_partitions(
         budget *= 2
 
 
-def plan_share_partitions(config: ScanConfig, *, stop_check=None) -> dict | None:
-    """Cut an SMB scan into groups of shares that together are exactly one scan (B2.3).
+def plan_share_partitions(
+    config: ScanConfig, *, stop_check=None, max_files: int | None = None, max_bytes: int | None = None,
+    max_units: int | None = None,
+) -> dict | None:
+    """Cut an SMB scan into units that together are exactly one scan (B2.3, W1.2).
 
-    Each unit is a group of shares, walked in the order the server lists them; a group
-    keeps together every pair of shares that can overlap, so the overlapping-share
-    collapse happens inside one partition (see ``SMBScanner.plan_share_groups``). A
-    share is never split: a partitioned SMB scan's memory follows its largest share,
-    or group, and not yet its largest folder.
+    The shares are first grouped, in the order the server lists them, so that every pair
+    that can overlap is in one group and the overlapping-share collapse happens inside one
+    partition (see ``SMBScanner.plan_share_groups``). A group of several shares is one
+    unit. A share alone is cut, with ``max_files`` and ``max_bytes``, into ranges of its
+    folders (see ``SMBScanner.plan_share_ranges``) - so a partitioned SMB scan's memory
+    follows the unit, not its largest share - or kept whole when it fits one unit.
 
-    Returns ``None`` when the scan should run whole: a local target, a server whose
-    shares form a single group, or a plan that cannot be trusted. Otherwise
-    ``{"units", "files", "sample_paths"}``, like :func:`plan_bounded_partitions`.
+    Returns ``None`` when the scan should run whole: a local target, a server that comes
+    to a single unit, or a plan that cannot be trusted. Otherwise ``{"units", "files",
+    "sample_paths"}``, like :func:`plan_bounded_partitions`.
     """
-    from collectors.smb_scanner import SMBConfig, SMBScanner
+    from backend.store import MAX_SCAN_PARTITIONS
+    from collectors.smb_scanner import SMBConfig, SMBScanner, _SmbConnectionLost
 
     if not config.server:
         return None
@@ -209,14 +214,40 @@ def plan_share_partitions(config: ScanConfig, *, stop_check=None) -> dict | None
         username=config.username,
         password=config.password,
         domain=config.domain,
+        max_depth=config.max_depth,
+        include_hidden=config.include_hidden,
+        hidden_filter_enabled=config.hidden_filter_enabled,
         include_admin_shares=config.include_admin_shares,
         allowed_shares=config.smb_shares,
         require_encryption=config.smb_require_encryption,
     ))
     groups = scanner.plan_share_groups(stop_check)
-    if not groups or len(groups) < 2:
+    if not groups:
         return None
-    return {"units": [{"kind": "shares", "shares": group} for group in groups], "files": 0, "sample_paths": []}
+    # A range is walked by the metadata-first collector only; its legacy walker cannot.
+    ranges = bool(max_files) and scanner._should_use_file_pipeline()
+    files_budget = max(1, int(max_files or 1))
+    bytes_budget = max(1, int(max_bytes or 1))
+    limit = max_units or MAX_SCAN_PARTITIONS
+    while True:
+        units: list[dict] = []
+        for group in groups:
+            cut = None
+            if ranges and len(group) == 1:
+                try:
+                    cut = scanner.plan_share_ranges(group[0], max_files=files_budget, max_bytes=bytes_budget,
+                                                    stop_check=stop_check)
+                except _SmbConnectionLost:
+                    return None
+            units.extend(cut if cut is not None else [{"kind": "shares", "shares": group}])
+        if len(units) <= limit:
+            break
+        # More units than one scan can order - reachable only at millions of files.
+        files_budget *= 2
+        bytes_budget *= 2
+    if len(units) < 2:
+        return None
+    return {"units": units, "files": 0, "sample_paths": []}
 
 
 def _archive_weight(path: Path) -> int:

@@ -66,6 +66,16 @@ def _format_smb_timestamp(value) -> str:
         return ""
 
 
+# Windows caps a command line at 32,767 characters; the rest of the PowerShell
+# invocation and a margin leave this much for the ACL batch's encoded command (E6).
+ACL_BATCH_COMMAND_LIMIT = 30_000
+
+
+def _in_range(key: str, low: str, high: str) -> bool:
+    """Whether a case-folded name falls in [low, high); an empty bound is open."""
+    return key >= low and (not high or key < high)
+
+
 class _SmbConnectionLost(Exception):
     """Raised when an SMB operation fails because the CONNECTION died (reset by
     the peer / broken pipe / WinError 10054) rather than a per-object
@@ -288,6 +298,10 @@ class SMBConfig:
     # D1: SMB 3.1.1 with the session encrypted, and required (collectors.smb3_transport).
     # pysmb cannot encrypt; a server or share that requires encryption resets it.
     require_encryption: bool = False
+    # W1.2: one unit of a partitioned scan inside a share - {"share", "folder", "depth",
+    # "name_from", "name_to"}. The folder's entries whose case-folded names fall in
+    # [name_from, name_to) are walked, each subfolder among them whole; "" is unbounded.
+    share_range: dict | None = None
 
 
 
@@ -566,6 +580,8 @@ class SMBScanner:
             # per-file pipeline. Instance-overridden walkers (the compatibility
             # seam used by integrations/tests) retain the proven P-B.2 path.
             budget = host_admission_budget()
+            if self.config.share_range and not self._should_use_file_pipeline():
+                raise RuntimeError("an SMB range unit needs the metadata-first collector (DSPM_SMB_PARALLEL)")
             if self._should_use_file_pipeline():
                 self.close()  # the listing connection is no longer needed
                 records, reset_shares, aborted_reason = self._scan_shares_two_phase(scanned_shares, budget)
@@ -758,7 +774,14 @@ class SMBScanner:
                     detail = "could not establish an SMB enumeration connection"
                 else:
                     try:
-                        plan = self._enumerate_share_plan(share_name, "/", depth=0)
+                        unit = self.config.share_range
+                        if unit and str(unit.get("share") or "").casefold() == share_name.casefold():
+                            plan = self._enumerate_share_plan(
+                                share_name, str(unit.get("folder") or "/"), depth=int(unit.get("depth") or 0),
+                                name_range=(str(unit.get("name_from") or ""), str(unit.get("name_to") or "")),
+                            )
+                        else:
+                            plan = self._enumerate_share_plan(share_name, "/", depth=0)
                     except _SmbConnectionLost as lost:
                         detail = lost.detail
                     else:
@@ -777,6 +800,7 @@ class SMBScanner:
         folder: str,
         depth: int,
         plan: _SMBSharePlan | None = None,
+        name_range: tuple[str, str] | None = None,
     ) -> _SMBSharePlan:
         if plan is None:
             plan = _SMBSharePlan(share_name=share_name, slots=[])
@@ -798,7 +822,13 @@ class SMBScanner:
                     errors.append({"share": share_name, "path": folder, "error": brief})
             return plan
 
-        for entry in entries:
+        # A folder's entries are walked in case-folded name order (W1.2): the order a
+        # partitioned scan cuts its ranges in, so its units in sequence are this walk. A
+        # range is applied before the sort, so a unit of a huge folder sorts only its own.
+        keyed = ((str(entry.filename).casefold(), entry) for entry in entries)
+        if name_range is not None:
+            keyed = ((key, entry) for key, entry in keyed if _in_range(key, *name_range))
+        for _key, entry in sorted(keyed, key=lambda pair: pair[0]):
             if self._cancelled():
                 raise RuntimeError("Scan cancelled")
             if entry.filename in {".", ".."}:
@@ -1529,6 +1559,104 @@ class SMBScanner:
         groups.extend([name] for name in shares[position:])
         return groups
 
+    def plan_share_ranges(
+        self,
+        share_name: str,
+        *,
+        max_files: int,
+        max_bytes: int,
+        stop_check: Callable[[], str | None] | None = None,
+    ) -> list[dict] | None:
+        """Cut one share into units of at most ``max_files`` files and ``max_bytes`` of reads (W1.2).
+
+        A share used to be the smallest unit an SMB scan had, so its memory and its time
+        followed its largest share. This walks the share's folders - names and sizes,
+        nothing read - and cuts it the way :func:`discovery.partition.plan_bounded_partitions`
+        cuts a local tree: a folder that fits stays inside its parent's unit, a larger
+        one is cut into runs of its own entries, and a subfolder too large for one run is
+        cut in place. A unit is a half-open range of case-folded names in one folder,
+        ``[name_from, name_to)``, and the ranges of a folder are contiguous, so every
+        entry it held when planned is in exactly one - and one that appears later is in
+        one too. Bytes are what the scan reads: each file's size, up to the read cap.
+
+        Returns ``None`` when the whole share fits one unit. Raises ``_SmbConnectionLost``
+        when the plan cannot be trusted: the connection dropped while a folder was listed.
+        """
+        if not self.connect():
+            raise _SmbConnectionLost(share_name, "could not establish an SMB planning connection")
+        read_cap = max(1, int(self.config.max_read_bytes or 1))
+        include_hidden_dirs = bool(self.config.include_hidden or self.config.hidden_filter_enabled)
+        files_budget = max(1, int(max_files))
+        bytes_budget = max(1, int(max_bytes))
+
+        def visit(folder: str, depth: int) -> tuple[int, int, list[dict] | None]:
+            if stop_check is not None:
+                reason = stop_check()
+                if reason:
+                    raise RuntimeError(reason)
+            if depth > self.config.max_depth or self._skip_path(folder):
+                return 0, 0, None
+            try:
+                entries = self.connection.listPath(share_name, folder)
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+                # Unreadable: whichever unit holds it lists it and reports the error.
+                return 0, 0, None
+            children: list[tuple[str, int, int, list[dict] | None]] = []
+            files = size = 0
+            for entry in sorted(entries, key=lambda item: str(item.filename).casefold()):
+                if entry.filename in {".", ".."}:
+                    continue
+                remote_path = str(PurePosixPath(folder) / entry.filename)
+                if self._skip_path(remote_path):
+                    continue
+                key = str(entry.filename).casefold()
+                if entry.isDirectory:
+                    if bool(getattr(entry, "isHidden", False)) and not include_hidden_dirs:
+                        continue
+                    child_files, child_bytes, child_units = visit(remote_path, depth + 1)
+                    files += child_files
+                    size += child_bytes
+                    children.append((key, child_files, child_bytes, child_units))
+                    continue
+                weight = min(int(getattr(entry, "file_size", 0) or 0), read_cap)
+                files += 1
+                size += weight
+                children.append((key, 1, weight, None))
+            if files <= files_budget and size <= bytes_budget:
+                return files, size, None
+            units: list[dict] = []
+            low = ""
+            run_files = run_bytes = 0
+
+            def flush(high: str) -> None:
+                nonlocal run_files, run_bytes
+                units.append({"kind": "smb_range", "share": share_name, "folder": folder, "depth": depth,
+                              "name_from": low, "name_to": high})
+                run_files = run_bytes = 0
+
+            for key, child_files, child_bytes, child_units in children:
+                if child_units is not None:
+                    flush(key)
+                    units.extend(child_units)
+                    low = key + "\x00"
+                    continue
+                if (run_files or run_bytes) and (run_files + child_files > files_budget
+                                                  or run_bytes + child_bytes > bytes_budget):
+                    flush(key)
+                    low = key
+                run_files += child_files
+                run_bytes += child_bytes
+            flush("")
+            return files, size, units
+
+        try:
+            _files, _bytes, units = visit("/", 0)
+        finally:
+            self.close()
+        return units
+
     def _dedupe_overlapping_shares(self, records: list[dict]) -> list[dict]:
         """Collapse the SAME physical file surfaced through overlapping SMB shares.
 
@@ -2194,9 +2322,58 @@ class SMBScanner:
         Credentials remain off argv: only the non-secret path/user payload is
         encoded into the command, while the password travels in the child
         environment exactly as in the legacy implementation.
+
+        The payload rides in the command line, which Windows caps at 32,767
+        characters. Encoded twice, 32 paths of 80 characters came to 41,536: the
+        launch failed with an OSError and every path fell back to a PowerShell
+        process of its own (E6). A batch whose command would not fit is halved until
+        each half does; a single path that cannot fit falls back alone.
         """
         if not paths:
             return {}
+        encoded_script = self._acl_batch_command(share_name, paths)
+        if len(encoded_script) > ACL_BATCH_COMMAND_LIMIT:
+            if len(paths) == 1:
+                self._bump_diag("acl_batch_path_too_long")
+                return {}
+            self._bump_diag("acl_batch_splits")
+            middle = len(paths) // 2
+            merged: dict[str, dict] = {}
+            for half in (paths[:middle], paths[middle:]):
+                merged.update(self._acl_batch_for_paths(share_name, half) or {})
+            return merged
+        share_root = self._unc_path(share_name, "")
+        started = time.perf_counter()
+        self._bump_diag("acl_batch_processes")
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-EncodedCommand",
+                    encoded_script,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self._acl_batch_timeout_seconds(len(paths)),
+                env={**os.environ, "DSPM_SMB_ACL_PW": self.config.password or ""},
+            )
+        except (OSError, subprocess.SubprocessError):
+            self._bump_diag("acl_batch_failures")
+            return None
+        finally:
+            self._add_diag_ms(
+                "acl_batch_elapsed_ms",
+                (time.perf_counter() - started) * 1000,
+            )
+        return self._parse_acl_batch(share_root, completed)
+
+    def _acl_batch_command(self, share_name: str, paths: list[str]) -> str:
+        """The ``-EncodedCommand`` argument that reads these paths' ACLs."""
         username, _domain = self._windows_credential()
         share_root = self._unc_path(share_name, "")
         items = [
@@ -2283,35 +2460,9 @@ class SMBScanner:
         [PSCustomObject]@{ results = @($results) } |
           ConvertTo-Json -Depth 5 -Compress
         """.replace("__DSPM_PAYLOAD__", encoded_payload)
-        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        started = time.perf_counter()
-        self._bump_diag("acl_batch_processes")
-        try:
-            completed = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-EncodedCommand",
-                    encoded_script,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self._acl_batch_timeout_seconds(len(paths)),
-                env={**os.environ, "DSPM_SMB_ACL_PW": self.config.password or ""},
-            )
-        except (OSError, subprocess.SubprocessError):
-            self._bump_diag("acl_batch_failures")
-            return None
-        finally:
-            self._add_diag_ms(
-                "acl_batch_elapsed_ms",
-                (time.perf_counter() - started) * 1000,
-            )
+        return base64.b64encode(script.encode("utf-16le")).decode("ascii")
 
+    def _parse_acl_batch(self, share_root: str, completed) -> dict[str, dict] | None:
         if completed.returncode != 0:
             self._bump_diag("acl_batch_failures")
             logger.debug(
