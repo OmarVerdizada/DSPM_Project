@@ -117,7 +117,6 @@ class AKilledScanResumesTest(_LocalTest):
             self.fail("the scan process never reached its third partition:\n"
                       + log_path.read_text(encoding="utf-8", errors="replace")[-4000:])
 
-    @unittest.skipIf(db.is_postgres(), "compares two databases; on PostgreSQL the suite has one")
     def test_a_scan_killed_inside_a_partition_resumes_into_the_uninterrupted_scans_report(self) -> None:
         self._use_database("whole")
         whole_compact = partitioned_scan.run_partitioned_scan(
@@ -127,7 +126,13 @@ class AKilledScanResumesTest(_LocalTest):
         whole = store.read_scan_report(TENANT, whole_compact["scan_id"])
         whole_rows = self._rows()
 
-        self._use_database("killed")
+        if db.is_postgres():
+            # One database (G0, W1.1): the uninterrupted scan's estate is taken down first,
+            # and the killed scan, a separate process, writes to the same database.
+            store.delete_tenant_with_data(TENANT)
+            store.create_tenant(TENANT, TENANT)
+        else:
+            self._use_database("killed")
         self._kill_in_the_third_partition()
         (killed,) = store.list_unfinished_partitioned_scans()
         scan_id = killed["scan_id"]

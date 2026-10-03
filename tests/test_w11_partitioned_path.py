@@ -272,3 +272,16 @@ class UnitsRunTogetherWhenAskedTest(_LocalTest):
         with store._connect() as conn:
             return [dict(row) for row in conn.execute(
                 "SELECT status FROM scan_partitions WHERE tenant_id = ?", (TENANT,)).fetchall()]
+
+
+class PartitionedIsTheDefaultPathTest(unittest.TestCase):
+    """G0 passed on PostgreSQL (W1.1): partitioned scanning is on unless turned off."""
+
+    def test_on_unless_turned_off(self) -> None:
+        for value, expected in ((None, True), ("", True), ("1", True), ("0", False), ("false", False)):
+            with self.subTest(value=value):
+                env = {} if value is None else {"DSPM_PARTITIONED_SCANS": value}
+                with mock.patch.dict(os.environ, env, clear=False):
+                    if value is None:
+                        os.environ.pop("DSPM_PARTITIONED_SCANS", None)
+                    self.assertEqual(partitioned_scan.partitioned_scans_enabled(), expected)

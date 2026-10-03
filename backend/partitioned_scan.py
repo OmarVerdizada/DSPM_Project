@@ -174,14 +174,16 @@ def finalize_scan(
 
 
 def partitioned_scans_enabled() -> bool:
-    """Whether local and SMB scans run partitioned. Off by default.
+    """Whether local and SMB scans run partitioned. On by default since W1.1 (2026-10).
 
-    An interrupted partitioned scan is now continued rather than left half-written
-    (B2.4). The default stays off until the B2 gates are measured at the scale they
-    are about (plan §8): this is the path a pilot's largest scans take, and it should
-    be turned on by that evidence, not by being finished.
+    The single path holds the whole estate in memory and had a wall clock; this one holds
+    a unit at a time, has none, and continues after a restart (B2.4). It was turned on by
+    the G0 gate on PostgreSQL - every Wave 1 regression test, kill/resume parity and the
+    scale gate's envelopes - not by being finished. A target that fits one unit still
+    runs as an ordinary scan. ``DSPM_PARTITIONED_SCANS=0`` turns it off.
     """
-    return os.getenv("DSPM_PARTITIONED_SCANS", "0").strip().lower() in {"1", "true", "yes", "on"}
+    raw = (os.getenv("DSPM_PARTITIONED_SCANS") or "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def partition_max_files() -> int:
