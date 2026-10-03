@@ -84,6 +84,8 @@ def _revisions() -> list[tuple[int, str, object]]:
     (36, "widen_byte_counts", store.widen_byte_counts),
     (37, "admit_portfolio_baseline_count", store.admit_portfolio_baseline_count),
     (38, "remove_two_step_sign_in", store.remove_two_step_sign_in),
+    (39, "asset_prune_index", store.add_asset_prune_index),
+    (40, "finding_lifecycle_detail", store.add_finding_lifecycle_detail),
     ]
 
 
@@ -269,6 +271,13 @@ def upgrade() -> int:
                 # which replaced the real error; and the lock stayed held by the pooled
                 # connection, so the next upgrade from any other connection waited on it
                 # forever. A transaction lock ends with the commit or the rollback.
+                #
+                # W1.4: application sessions open with statement, lock and idle timeouts.
+                # The runner is the one place a statement may rightly run long - an index
+                # built over every asset, a backfill - and a second starter should wait for
+                # the first rather than fail, so it lifts them for its own transaction.
+                for parameter in ("statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"):
+                    conn.execute(f"SET LOCAL {parameter} = 0")
                 conn.execute("SELECT pg_advisory_xact_lock(?)", (_ADVISORY_LOCK_KEY,))
             _ensure_table(conn)
             applied = current_revision(conn)

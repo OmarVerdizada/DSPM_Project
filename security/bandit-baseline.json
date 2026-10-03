@@ -60,13 +60,6 @@
     {
       "file": "backend/store.py",
       "test_id": "B608",
-      "code": "conn.execute( f\"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({stale_sql})\", (tenant_id, *stale_params),",
-      "reviewed": "2026-09-28",
-      "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals. Every value is a bound parameter."
-    },
-    {
-      "file": "backend/store.py",
-      "test_id": "B608",
       "code": "conn.execute( f\"DELETE FROM finding_occurrences WHERE tenant_id = ? AND scan_id = ? AND finding_id IN ({placeholders})\", (tenant_id, scan_id, *id_chunk),",
       "reviewed": "2026-09-28",
       "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals. Every value is a bound parameter."
@@ -75,13 +68,6 @@
       "file": "backend/store.py",
       "test_id": "B608",
       "code": "conn.execute( f\"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
-      "reviewed": "2026-09-28",
-      "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals. Every value is a bound parameter."
-    },
-    {
-      "file": "backend/store.py",
-      "test_id": "B608",
-      "code": "conn.execute( f\"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({stale_sql})\", (tenant_id, *stale_params),",
       "reviewed": "2026-09-28",
       "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals. Every value is a bound parameter."
     },
@@ -473,13 +459,6 @@
     {
       "file": "backend/store.py",
       "test_id": "B608",
-      "code": "conn.execute( f\"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({stale_sql})\", (tenant_id, *stale_params),",
-      "reviewed": "2026-09-28",
-      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
-    },
-    {
-      "file": "backend/store.py",
-      "test_id": "B608",
       "code": "conn.execute(f\"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM assets WHERE id = ?{scope_sql}\", args)",
       "reviewed": "2026-09-28",
       "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
@@ -560,6 +539,48 @@
       "code": "selected = \", \".join(f\"LEFT(CAST({self.quote(column)} AS NVARCHAR(MAX)), {int(max_chars)})\" for column in columns) return f\"SELECT TOP ({int(limit)}) {selected} FROM {self.quote(schema)}.{self.quote(table)}\"",
       "reviewed": "2026-10-01",
       "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters; the value cut (max_value_chars, M4 exit review) is an int too, bounded 16-4096."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id read from the assets table; the ids are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id; the ids are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id; the ids are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( \"DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ? \" f\"AND id IN ({placeholders})\", (tenant_id, scan_label, scan_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id; the ids and scope are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "sql = ( \"SELECT current_scan_id, id FROM assets WHERE tenant_id = ? AND scan_label = ? \" f\"AND current_scan_id {side} ?\" )",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: `side` is one of the two literals '<' and '>' from a fixed tuple; every value is bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( \"SELECT scan_id, is_current, status, owner, sla_due, lifecycle_json, display_name, rule, \" \"file_path, file_name, affected_asset, data_type, exposure, frameworks_json \" f\"FROM findings WHERE tenant_id = ? AND id = ?{for_update}\", (tenant_id, finding_id),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 lifecycle: the only interpolation is the literal ' FOR UPDATE' (PostgreSQL) or ''; every value is bound."
     }
   ]
 }

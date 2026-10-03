@@ -1286,6 +1286,41 @@ _BYTE_COUNT_COLUMNS = (
 )
 
 
+def add_asset_prune_index(conn) -> None:
+    """Revision 0039: the index a complete named scan reads its unseen assets through.
+
+    The prune after such a scan reads `current_scan_id` below and above the scan's own
+    id within `(tenant_id, scan_label)`; with this index those are two range reads that
+    return only the stale rows, whatever the statistics say. Building it locks writes to
+    `assets` for the length of the build (once, at upgrade). Re-runnable. Rollback:
+    restore the pre-upgrade backup, or drop the index - older code does not read it."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_assets_tenant_scan_label_current_id "
+        "ON assets (tenant_id, scan_label, current_scan_id, id)"
+    )
+
+
+def add_finding_lifecycle_detail(conn) -> None:
+    """Revision 0040: what an analyst said and decided about a finding, on its row.
+
+    A lifecycle action changed one finding by re-saving the whole report that held it -
+    every asset, finding and index row and the encrypted body, for one click. Status,
+    owner and due date were already columns; the rest (comments, history, risk
+    acceptance, suppression, resolution, validation) lived only in that body, so the
+    body had to be re-written. `lifecycle_json` holds the rest; readers lay it over the
+    saved report, so an action writes the row, its index row and the audit trail and
+    nothing else. Empty for a finding nobody has acted on - the partial index holds only
+    the ones somebody has. Re-runnable; adding a column with a constant default is a
+    catalogue change, not a rewrite. Rollback: restore the pre-upgrade backup (older
+    code ignores the column, and would not show detail recorded after the upgrade)."""
+    if "lifecycle_json" not in db.table_columns(conn, "findings"):
+        conn.execute("ALTER TABLE findings ADD COLUMN lifecycle_json TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_findings_tenant_lifecycle "
+        "ON findings (tenant_id, id) WHERE lifecycle_json <> ''"
+    )
+
+
 def remove_two_step_sign_in(conn) -> None:
     """Revision 0038: two-step sign-in is gone - the product owner's decision (2026-10-02):
     Sentro runs fully offline and signs people in with a password or the directory.
@@ -2576,6 +2611,8 @@ def apply_baseline_schema(conn) -> None:
     _alert_event_columns(conn)  # D3 (revision 0033)
     for statement in _ALERT_DELIVERY_DDL:
         conn.executescript(statement)
+    add_asset_prune_index(conn)  # W1.4 (revision 0039)
+    add_finding_lifecycle_detail(conn)  # W1.4 (revision 0040)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -3697,7 +3734,7 @@ _FINDING_UPSERT_SQL = (
     "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text, "
     "severity_rank = excluded.severity_rank "
     # A row belongs to the newest scan that saw the finding. Re-saving an older report - any
-    # lifecycle action on a finding only that scan holds re-saves the whole report - wrote
+    # lifecycle action on a finding only that scan holds re-saved the whole report, before W1.4 - wrote
     # its stale status, owner, severity and last_seen over every finding it shares with a
     # newer scan: a resolved finding came back OPEN.
     "WHERE excluded.is_current = 1 OR findings.scan_id = excluded.scan_id"
@@ -3769,10 +3806,11 @@ def _operational_finding_params(
         # file, and a due date pushed far enough forward that nothing could ever
         # be overdue.
         #
-        # A lifecycle change does not come through here. `update_finding_lifecycle`
-        # re-saves the same scan_id, which makes `refresh_current` False, which
-        # makes `is_current` False - and the analyst's values below win. That is
-        # what this branch being conditional has always been for.
+        # A lifecycle change does not come through here: since W1.4 it writes the
+        # row directly (`_apply_finding_lifecycle`). The one re-save left - a
+        # finding with no row, such as the demo dataset's - re-saves the same
+        # scan_id, which makes `refresh_current` False, which makes `is_current`
+        # False, and the report's values below win.
         status = str(existing["status"] or status)
         owner = str(existing["owner"] or owner)
         # The one thing a scan may still say about a deadline: a finding that got
@@ -3792,9 +3830,8 @@ def _operational_finding_params(
     last_seen = str(finding.get("last_seen") or "")
     file_name = str(file_obj.get("name") or path.replace("\\", "/").rsplit("/", 1)[-1])
     exposure = str(finding.get("exposure") or finding.get("exposure_state") or "")
-    search_text = " ".join(
-        (finding_id, display_name, rule, path, file_name, affected_asset, owner, data_type, exposure, " ".join(frameworks))
-    ).lower()
+    search_text = _finding_search_text(finding_id, display_name, rule, path, file_name, affected_asset, owner,
+                                       data_type, exposure, frameworks)
     return (
         tenant_id, finding_id, asset_id, rule, severity,
         str(finding.get("category") or finding.get("finding_category") or ""), frameworks[0], status,
@@ -3804,6 +3841,15 @@ def _operational_finding_params(
         int(finding.get("confidence") or 0), json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")),
         search_text, severity_rank(severity),
     )
+
+
+def _finding_search_text(finding_id: str, display_name: str, rule: str, path: str, file_name: str,
+                         affected_asset: str, owner: str, data_type: str, exposure: str, frameworks) -> str:
+    """What the remediation queue's search box matches a finding row against. The owner
+    is in it, so an assignment rewrites it."""
+    return " ".join(
+        (finding_id, display_name, rule, path, file_name, affected_asset, owner, data_type, exposure, " ".join(frameworks))
+    ).lower()
 
 
 def _upsert_operational_finding(
@@ -4060,25 +4106,64 @@ def _prune_unseen_assets(conn, tenant_id: str, scan_label: str, scan_id: str) ->
     is done, could not reproduce it. Run afterwards, the same condition matches
     exactly the assets this scan did not see, for a single scan and a partitioned
     one alike.
+
+    **The stale ids are read first, then removed by id** (W1.4, 2026-10-02). This
+    was four statements with ``asset_id IN (SELECT id FROM assets ...)``. A first
+    save writes every row in the transaction that prunes, before PostgreSQL has
+    statistics for any of them; it estimated one row per side, chose a nested
+    loop, and a 20,000-file first save was still pruning after 634 s (measured).
+    Read through revision 0039's index and removed in id chunks, the plan does not
+    depend on what the statistics say.
     """
-    stale_sql = "SELECT id FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?"
-    stale_params = (tenant_id, scan_label, scan_id)
-    conn.execute(
-        f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
-        (tenant_id, *stale_params),
-    )
-    conn.execute(
-        f"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
-        (tenant_id, *stale_params),
-    )
-    conn.execute(
-        f"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({stale_sql})",
-        (tenant_id, *stale_params),
-    )
-    conn.execute(
-        "DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ?",
-        stale_params,
-    )
+    for id_chunk in _stale_asset_chunks(conn, tenant_id, scan_label, scan_id):
+        placeholders = ",".join("?" for _ in id_chunk)
+        conn.execute(
+            f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})",
+            (tenant_id, *id_chunk),
+        )
+        conn.execute(
+            f"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({placeholders})",
+            (tenant_id, *id_chunk),
+        )
+        conn.execute(
+            f"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})",
+            (tenant_id, *id_chunk),
+        )
+        conn.execute(
+            "DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ? "
+            f"AND id IN ({placeholders})",
+            (tenant_id, scan_label, scan_id, *id_chunk),
+        )
+
+
+def _stale_asset_chunks(conn, tenant_id: str, scan_label: str, scan_id: str):
+    """The ids of a named scope's assets that `scan_id` did not see, a chunk at a time.
+
+    ``current_scan_id <> ?`` is not a range an index can seek, so each side of it is
+    read as its own range of ``(tenant_id, scan_label, current_scan_id, id)``: a
+    re-scan that saw every file reads nothing. Each chunk starts after the last row
+    of the one before - the caller deletes as it goes, and PostgreSQL keeps those
+    deleted rows in the index until the transaction ends."""
+    for side in ("<", ">"):
+        after: tuple | None = None
+        while True:
+            sql = (
+                "SELECT current_scan_id, id FROM assets WHERE tenant_id = ? AND scan_label = ? "
+                f"AND current_scan_id {side} ?"
+            )
+            params: list = [tenant_id, scan_label, scan_id]
+            if after is not None:
+                sql += " AND (current_scan_id, id) > (?, ?)"
+                params.extend(after)
+            sql += " ORDER BY current_scan_id, id LIMIT ?"
+            params.append(_ID_CHUNK)
+            rows = conn.execute(sql, params).fetchall()  # noqa: S608 - side is one of two literals
+            if not rows:
+                break
+            yield [str(row[1]) for row in rows]
+            if len(rows) < _ID_CHUNK:
+                break
+            after = (rows[-1][0], rows[-1][1])
 
 
 SEVERITY_RANKS = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -6262,7 +6347,7 @@ def read_scan_report(tenant_id: str, scan_id: str | None = None) -> dict | None:
         params = (tenant_id,)
     with _connect() as conn:
         row = conn.execute(query, params).fetchone()
-    return _report_body(tenant_id, row) if row else None
+    return _overlay_report_lifecycle(tenant_id, _report_body(tenant_id, row)) if row else None
 
 
 _scan_report_rows_cache: dict[tuple[str, str], list[dict]] = {}
@@ -6524,7 +6609,7 @@ def read_latest_scan_report_by_label(tenant_id: str, scan_label: str) -> dict | 
                 "ORDER BY created_at DESC, scan_id DESC LIMIT 1",
                 (tenant_id, label.lower()),
             ).fetchone()
-    return _report_body(tenant_id, row) if row else None
+    return _overlay_report_lifecycle(tenant_id, _report_body(tenant_id, row)) if row else None
 
 
 _REPORT_EDIT_LOCK = threading.Lock()
@@ -6593,48 +6678,69 @@ def _update_finding_workflow(tenant_id: str, scan_id: str, selector: dict, updat
     if target_finding is None:
         return None
 
-    now = datetime.now(timezone.utc).isoformat()
     status = str(update.get("review_status") or update.get("status") or "").strip().lower()
-    if status:
-        if status not in allowed_statuses:
-            raise ValueError("Unsupported finding workflow status")
-        target_finding["review_status"] = status
-    if "exception_status" in update:
-        target_finding["exception_status"] = str(update.get("exception_status") or "").strip() or target_finding.get("exception_status", "not_required")
-    if "exception_reason" in update:
-        target_finding["exception_reason"] = str(update.get("exception_reason") or "").strip()
-    if "owner" in update:
-        target_finding["owner"] = str(update.get("owner") or "").strip()
-    if "due_date" in update:
-        target_finding["due_date"] = str(update.get("due_date") or "").strip()
-    if "sla" in update:
-        target_finding["sla"] = str(update.get("sla") or "").strip()
-    if status == "suppressed":
-        target_finding["display_state"] = "suppressed"
-    elif status == "reopened":
-        target_finding["display_state"] = "primary"
-    event = {
-        "timestamp": now,
-        "actor": actor,
-        "action": str(update.get("action") or status or "update"),
-        "status": target_finding.get("review_status", "unreviewed"),
-        "comment": str(update.get("comment") or "").strip(),
-    }
-    target_finding.setdefault("status_history", []).append(event)
+    if status and status not in allowed_statuses:
+        raise ValueError("Unsupported finding workflow status")
+    path = target_file.get("path") if target_file else file_path
+
+    def change(finding: dict, now: str) -> dict:
+        _apply_workflow_update(finding, update, status, target_finding, target_file)
+        return {
+            "timestamp": now,
+            "actor": actor,
+            "action": str(update.get("action") or status or "update"),
+            "status": finding.get("review_status") or target_finding.get("review_status") or "unreviewed",
+            "comment": str(update.get("comment") or "").strip(),
+        }
+
+    def audit_detail(_owning_scan: str, finding: dict) -> dict:
+        return {"scan_id": scan_id, "path": path, "type": target_finding.get("type"),
+                "status": finding.get("review_status") or target_finding.get("review_status")}
+
+    finding_id = str(target_finding.get("finding_id") or "")
+    operational = None
+    if finding_id:
+        with _connect() as conn:
+            operational = conn.execute(
+                "SELECT is_current FROM findings WHERE tenant_id = ? AND id = ?", (tenant_id, finding_id),
+            ).fetchone()
+    if operational is not None and int(operational["is_current"] or 0):
+        stored = _finding_response({"scan_id": scan_id, "report": report, "file": target_file or {},
+                                    "finding": target_finding})
+        return _apply_finding_lifecycle(tenant_id, finding_id, actor, "finding.workflow_updated", change,
+                                        stored, audit_detail)
+
+    # No current row - the demo dataset, a report older than the normalized estate, or a
+    # finding a newer scan no longer sees: the change is recorded in this report alone.
+    now = datetime.now(timezone.utc).isoformat()
+    target_finding.setdefault("status_history", []).append(change(target_finding, now))
     target_finding["updated_at"] = now
     save_scan_history(tenant_id, report)
-    audit(
-        tenant_id,
-        actor,
-        "finding.workflow_updated",
-        {
-            "scan_id": scan_id,
-            "path": target_file.get("path") if target_file else file_path,
-            "type": target_finding.get("type"),
-            "status": target_finding.get("review_status"),
-        },
-    )
+    audit(tenant_id, actor, "finding.workflow_updated", audit_detail(scan_id, target_finding))
     return target_finding
+
+
+def _apply_workflow_update(finding: dict, update: dict, status: str, base: dict, file_obj: dict | None) -> None:
+    """What the workflow endpoint's update does to a finding's analyst state, in place.
+    `base` is the finding as its report holds it, for the values an update falls back on."""
+    if status:
+        finding["review_status"] = status
+    if "exception_status" in update:
+        finding["exception_status"] = str(update.get("exception_status") or "").strip() or base.get("exception_status", "not_required")
+    if "exception_reason" in update:
+        finding["exception_reason"] = str(update.get("exception_reason") or "").strip()
+    if "owner" in update:
+        # An empty owner hands the finding back to whoever owns its data, as a re-save did.
+        finding["owner"] = (str(update.get("owner") or "").strip() or str(base.get("assignee") or "")
+                            or str(base.get("data_owner") or "") or str((file_obj or {}).get("owner") or ""))
+    if "due_date" in update:
+        finding["due_date"] = str(update.get("due_date") or "").strip()
+    if "sla" in update:
+        finding["sla"] = str(update.get("sla") or "").strip()
+    if status == "suppressed":
+        finding["display_state"] = "suppressed"
+    elif status == "reopened":
+        finding["display_state"] = "primary"
 
 
 FINDING_LIFECYCLE_STATUSES = {
@@ -8739,7 +8845,8 @@ def _find_finding_response_normalized(tenant_id: str, finding_id: str) -> dict |
     return json.loads(body) if body else None
 
 
-def get_finding(tenant_id: str, finding_id: str) -> dict | None:
+def _stored_finding_response(tenant_id: str, finding_id: str) -> dict | None:
+    """The finding as the newest saved scan that holds it recorded it."""
     try:
         response = _find_finding_response_normalized(tenant_id, finding_id)
         if response is not None:
@@ -8750,18 +8857,25 @@ def get_finding(tenant_id: str, finding_id: str) -> dict | None:
     return _finding_response(row) if row else None
 
 
-def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
-    try:
-        response = _find_finding_response_normalized(tenant_id, finding_id)
-        if response is not None:
-            return response.get("status_history") or response.get("history") or []
-    except Exception as exc:  # pragma: no cover - defensive legacy fallback
-        logger.warning("Indexed get_finding_history failed, falling back to blob: %s", exc)
-    row = _find_finding_row(tenant_id, finding_id)
-    if not row:
+def get_finding(tenant_id: str, finding_id: str) -> dict | None:
+    response = _stored_finding_response(tenant_id, finding_id)
+    if response is None:
         return None
-    finding = row["finding"]
-    return finding.get("status_history") or finding.get("history") or []
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT status, owner, sla_due, lifecycle_json FROM findings WHERE tenant_id = ? AND id = ?",
+            (tenant_id, finding_id),
+        ).fetchone()
+    if row is not None and row["lifecycle_json"]:
+        _overlay_lifecycle(response, row)
+    return response
+
+
+def get_finding_history(tenant_id: str, finding_id: str) -> list[dict] | None:
+    response = get_finding(tenant_id, finding_id)
+    if response is None:
+        return None
+    return response.get("status_history") or response.get("history") or []
 
 
 def get_finding_occurrences(tenant_id: str, finding_id: str) -> list[dict] | None:
@@ -8788,8 +8902,39 @@ def _update_finding_lifecycle(tenant_id: str, finding_id: str, action: str, payl
             "SELECT is_current FROM findings WHERE tenant_id = ? AND id = ?",
             (tenant_id, finding_id),
         ).fetchone()
-    if operational is not None and not int(operational["is_current"] or 0):
+    if operational is None:
+        # No row: the demo dataset's findings, or a report saved before the estate
+        # was normalized. Their only home is the report, so it is re-saved.
+        return _update_finding_lifecycle_in_report(tenant_id, finding_id, action, payload, actor)
+    if not int(operational["is_current"] or 0):
         raise ValueError("Historical findings are read-only; remediate a current detection")
+    stored = _stored_finding_response(tenant_id, finding_id)
+    if stored is None:
+        return None
+    status = _status_for_action(action, payload)
+    _validate_lifecycle_payload(status, payload)
+
+    def change(finding: dict, now: str) -> dict:
+        previous_status = _finding_status(finding)
+        _apply_lifecycle_action(finding, action, payload, actor, now, status)
+        return {
+            "timestamp": now,
+            "actor": actor,
+            "action": action,
+            "previous_status": previous_status,
+            "status": _finding_status(finding),
+            "comment": str(payload.get("comment") or "").strip(),
+        }
+
+    return _apply_finding_lifecycle(
+        tenant_id, finding_id, actor, f"finding.{action}", change, stored,
+        lambda scan_id, finding: {"finding_id": finding_id, "scan_id": scan_id, "status": _finding_status(finding)},
+    )
+
+
+def _update_finding_lifecycle_in_report(tenant_id: str, finding_id: str, action: str, payload: dict, actor: str) -> dict | None:
+    """The lifecycle action for a finding that has no row: change it in its report and
+    save the report again (the only path before W1.4)."""
     row = _find_finding_row(tenant_id, finding_id)
     if not row:
         return None
@@ -8800,6 +8945,24 @@ def _update_finding_lifecycle(tenant_id: str, finding_id: str, action: str, payl
 
     now = datetime.now(timezone.utc).isoformat()
     previous_status = _finding_status(finding)
+    _apply_lifecycle_action(finding, action, payload, actor, now, status)
+    event = {
+        "timestamp": now,
+        "actor": actor,
+        "action": action,
+        "previous_status": previous_status,
+        "status": _finding_status(finding),
+        "comment": str(payload.get("comment") or "").strip(),
+    }
+    finding.setdefault("status_history", []).append(event)
+    finding["updated_at"] = now
+    save_scan_history(tenant_id, report)
+    audit(tenant_id, actor, f"finding.{action}", {"finding_id": finding_id, "scan_id": row["scan_id"], "status": _finding_status(finding)})
+    return _finding_response(row)
+
+
+def _apply_lifecycle_action(finding: dict, action: str, payload: dict, actor: str, now: str, status: str) -> None:
+    """What one lifecycle action does to a finding's analyst state, in place."""
     if status:
         finding["status"] = status
         finding["review_status"] = status.lower()
@@ -8841,19 +9004,147 @@ def _update_finding_lifecycle(tenant_id: str, finding_id: str, action: str, payl
     if payload.get("comment") and action != "comment":
         finding.setdefault("comments", []).append(_comment_payload(payload, actor, now))
 
-    event = {
-        "timestamp": now,
-        "actor": actor,
-        "action": action,
-        "previous_status": previous_status,
-        "status": _finding_status(finding),
-        "comment": str(payload.get("comment") or "").strip(),
-    }
-    finding.setdefault("status_history", []).append(event)
-    finding["updated_at"] = now
-    save_scan_history(tenant_id, report)
-    audit(tenant_id, actor, f"finding.{action}", {"finding_id": finding_id, "scan_id": row["scan_id"], "status": _finding_status(finding)})
-    return _finding_response(row)
+
+# A finding's analyst state is its row's status, owner and due date (columns) and the
+# rest of what was said and decided about it (`lifecycle_json`, revision 0040). Readers lay
+# both over what the saved report says, so an action never re-saves a report.
+_LIFECYCLE_COLUMNS = ("status", "owner", "sla_due")
+# The detail an action before W1.4 left in the report body, kept the first time such a
+# finding is acted on again. Not the keys a detector also writes (review_status,
+# display_state, exception_*): until an analyst sets one, it is the scan's reading.
+_LIFECYCLE_CARRIED_KEYS = (
+    "comments", "status_history", "risk_acceptance", "suppression", "resolution", "resolved_at",
+    "validated_at", "validator", "assignee",
+)
+
+
+def _lifecycle_detail(raw) -> dict:
+    try:
+        detail = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return detail if isinstance(detail, dict) else {}
+
+
+def _overlay_lifecycle(finding: dict, row) -> dict:
+    """`finding` with its analyst state laid over it: the detail, then the row's status,
+    owner and due date, which are authoritative."""
+    finding.update(_lifecycle_detail(row["lifecycle_json"]))
+    for column in _LIFECYCLE_COLUMNS:
+        if row[column]:
+            finding[column] = row[column]
+    return finding
+
+
+def _overlay_report_lifecycle(tenant_id: str, report: dict | None) -> dict | None:
+    """A saved report with what analysts have done to its findings since laid over it.
+
+    A report is the scan's snapshot. Since W1.4 an action does not re-save it, so every
+    reader of a report body sees triage through this: one read of the findings somebody
+    has acted on (a partial index holds only those), whatever the size of the report."""
+    if not isinstance(report, dict) or not report.get("files"):
+        return report
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id, status, owner, sla_due, lifecycle_json FROM findings "
+            "WHERE tenant_id = ? AND lifecycle_json <> ''",
+            (tenant_id,),
+        ).fetchall()
+    if not rows:
+        return report
+    acted = {str(row["id"]): dict(row) for row in rows}
+    for file_obj in report.get("files") or []:
+        for finding in file_obj.get("findings") or []:
+            row = acted.get(str(finding.get("finding_id") or ""))
+            if row is not None:
+                _overlay_lifecycle(finding, row)
+    return report
+
+
+def _apply_finding_lifecycle(tenant_id: str, finding_id: str, actor: str, audit_action: str, change,
+                             stored: dict, audit_detail) -> dict | None:
+    """Change one finding's analyst state where it lives - its row, the index row of the
+    scan that owns it, and the audit trail - in one transaction, and nothing else.
+
+    It used to change the finding in its report and save the report again: every asset,
+    finding and index row of the scan and the encrypted body, for one click, and the
+    audit row in a transaction of its own. `change(finding, now)` mutates the state and
+    returns the history event; `stored` is the finding as its newest scan recorded it,
+    the source of the detail a pre-W1.4 action left in a report body."""
+    for_update = " FOR UPDATE" if db.is_postgres() else ""
+    with _lock:
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT scan_id, is_current, status, owner, sla_due, lifecycle_json, display_name, rule, "
+                "file_path, file_name, affected_asset, data_type, exposure, frameworks_json "
+                f"FROM findings WHERE tenant_id = ? AND id = ?{for_update}",
+                (tenant_id, finding_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if not int(row["is_current"] or 0):
+                raise ValueError("Historical findings are read-only; remediate a current detection")
+            if row["lifecycle_json"]:
+                detail = _lifecycle_detail(row["lifecycle_json"])
+            else:
+                detail = json.loads(json.dumps({key: stored[key] for key in _LIFECYCLE_CARRIED_KEYS if key in stored}))
+            finding = {**detail, **{column: str(row[column] or "") for column in _LIFECYCLE_COLUMNS}}
+            now = datetime.now(timezone.utc).isoformat()
+            finding.setdefault("status_history", []).append(change(finding, now))
+            finding["updated_at"] = now
+            status = _finding_status(finding)
+            owner = str(finding.get("owner") or "")
+            sla_due = str(finding.get("sla_due") or "")
+            lifecycle = {key: value for key, value in finding.items() if key not in _LIFECYCLE_COLUMNS}
+            lifecycle_json = json.dumps(lifecycle, ensure_ascii=False, separators=(",", ":"))
+            try:
+                frameworks = [str(item) for item in json.loads(row["frameworks_json"] or "[]")]
+            except (TypeError, ValueError):
+                frameworks = []
+            search_text = _finding_search_text(
+                finding_id, str(row["display_name"] or ""), str(row["rule"] or ""), str(row["file_path"] or ""),
+                str(row["file_name"] or ""), str(row["affected_asset"] or ""), owner, str(row["data_type"] or ""),
+                str(row["exposure"] or ""), frameworks)
+            conn.execute(
+                "UPDATE findings SET status = ?, owner = ?, sla_due = ?, search_text = ?, lifecycle_json = ? "
+                "WHERE tenant_id = ? AND id = ?",
+                (status, owner, sla_due, search_text, lifecycle_json, tenant_id, finding_id),
+            )
+            state = {**lifecycle, "status": status, "owner": owner, "sla_due": sla_due}
+            _restate_finding_index(conn, tenant_id, str(row["scan_id"] or ""), finding_id, state)
+            detail_json = json.dumps(
+                {**audit_detail(str(row["scan_id"] or ""), finding),
+                 **{key: value for key, value in _request_origin.get().items() if value}},
+                ensure_ascii=False,
+            )
+            _append_audit(conn, tenant_id, now, actor, audit_action, detail_json)
+    _invalidate_inventory_query_cache(tenant_id)
+    _invalidate_remediation_query_cache(tenant_id)
+    response = dict(stored)
+    response.update({key: value for key, value in state.items() if value or key not in _LIFECYCLE_COLUMNS})
+    response["status"] = status
+    return response
+
+
+def _restate_finding_index(conn, tenant_id: str, scan_id: str, finding_id: str, state: dict) -> None:
+    """Lay the finding's new state over its index row in the scan that owns it - the row
+    get_finding answers from - rather than re-writing that scan's whole index. A row
+    past the retention window keeps its empty body; only its status moves."""
+    rows = conn.execute(
+        "SELECT seq, response_json FROM finding_index WHERE tenant_id = ? AND finding_id = ? AND scan_id = ?",
+        (tenant_id, finding_id, scan_id),
+    ).fetchall()
+    for row in rows:
+        body = unpack_json_text(row["response_json"]) if row["response_json"] else ""
+        packed = row["response_json"]
+        if body:
+            response = json.loads(body)
+            response.update({key: value for key, value in state.items() if value or key not in _LIFECYCLE_COLUMNS})
+            packed = pack_json_text(json.dumps(response, ensure_ascii=False))
+        conn.execute(
+            "UPDATE finding_index SET status = ?, response_json = ? WHERE tenant_id = ? AND scan_id = ? AND seq = ?",
+            (state["status"], packed, tenant_id, scan_id, row["seq"]),
+        )
 
 
 def _iter_report_findings(report: dict):

@@ -112,6 +112,10 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_DB_POOL_MAX", "int", {"minimum": 1}),
     ("DSPM_DB_POOL_MAX_IDLE", "int", {"minimum": 0}),
     ("DSPM_DB_POOL_CHECK", "bool"),
+    # W1.4: bounds on every PostgreSQL application session, in seconds (0 turns one off).
+    ("DSPM_PG_STATEMENT_TIMEOUT_SECONDS", "int", {"default": "900", "minimum": 0, "maximum": 86400}),
+    ("DSPM_PG_LOCK_TIMEOUT_SECONDS", "int", {"default": "900", "minimum": 0, "maximum": 86400}),
+    ("DSPM_PG_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS", "int", {"default": "1800", "minimum": 0, "maximum": 86400}),
     ("DSPM_DB_ACTIVITY_MONITORING", "bool"),
     ("DSPM_DB_ACTIVITY_MONITORING_REQUIRED", "bool"),
     ("DSPM_SLOW_QUERY_MEAN_MS", "float", {"minimum": 0}),

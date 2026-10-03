@@ -46,7 +46,7 @@ import os
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
@@ -391,6 +391,32 @@ class _PgConn:
         self._raw.close()
 
 
+# W1.4: every application session is bounded. Without these a statement whose plan went
+# wrong ran for as long as it liked - a 20,000-file first save was still pruning after
+# 634 s, holding its locks - and a transaction a crashed caller left open held its locks
+# until the connection was closed. The defaults are generous: they bound the hung, not the
+# slow. 0 turns one off; the migration runner turns all three off for its own transaction.
+_SESSION_TIMEOUTS = (
+    ("statement_timeout", "DSPM_PG_STATEMENT_TIMEOUT_SECONDS", 900),
+    ("lock_timeout", "DSPM_PG_LOCK_TIMEOUT_SECONDS", 900),
+    ("idle_in_transaction_session_timeout", "DSPM_PG_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS", 1800),
+)
+
+
+def session_options() -> str:
+    """The libpq ``options`` every application connection opens with: any the DSN
+    already carries, then the timeouts (a later ``-c`` wins, so these hold)."""
+    own = ""
+    if psycopg is not None:
+        with suppress(Exception):
+            own = str(psycopg.conninfo.conninfo_to_dict(db_url()).get("options") or "")
+    timeouts = " ".join(
+        f"-c {parameter}={_env_number(name, default, 0, 86_400, int) * 1000}"
+        for parameter, name, default in _SESSION_TIMEOUTS
+    )
+    return f"{own} {timeouts}".strip()
+
+
 def _pg_connect() -> _PgConn:
     if psycopg is None:  # pragma: no cover - exercised only in a misconfigured env
         raise RuntimeError(
@@ -403,6 +429,7 @@ def _pg_connect() -> _PgConn:
         autocommit=False,
         row_factory=_pg_row_factory,
         connect_timeout=timeout,
+        options=session_options(),
     )
     return _PgConn(raw)
 
@@ -450,7 +477,7 @@ def _get_pool():
             timeout=_env_number("DSPM_DB_CONNECT_TIMEOUT", 10.0, 0.2, 120.0, float),
             max_idle=_env_number("DSPM_DB_POOL_MAX_IDLE", 300.0, 1.0, 86_400.0, float),
             check=check,
-            kwargs={"row_factory": _pg_row_factory},
+            kwargs={"row_factory": _pg_row_factory, "options": session_options()},
             open=True,
             name="sentro-dspm",
         )
