@@ -250,6 +250,7 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_SCAN_RESUME_INTERVAL_SECONDS", "int", {"minimum": 0}),
     ("DSPM_SCAN_SCHEDULER_INTERVAL_SECONDS", "int", {"minimum": 0}),
     ("DSPM_SCAN_REPORT_ROWS_CACHE", "int", {"minimum": 0}),
+    ("DSPM_SCAN_RUN_VIEW_MAX_FILES", "int", {"default": "20000", "minimum": 1, "maximum": 10000000}),
     ("DSPM_ANALYSIS_WORKERS", "int", {"minimum": 1}),
     ("DSPM_IO_WORKERS", "int", {"minimum": 1}),
     ("DSPM_DETECTOR_PROCESSES", "int", {"minimum": 0}),

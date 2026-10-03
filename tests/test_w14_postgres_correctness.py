@@ -366,3 +366,46 @@ class EveryPostgresSessionIsBoundedTest(unittest.TestCase):
         with store._connect() as conn:
             self.assertEqual(conn.execute("SHOW statement_timeout").fetchone()[0], "15min",
                              "the lift outlived the upgrade transaction")
+
+
+class ALargeRunIsNeverReadWholeForItsNameTest(unittest.TestCase):
+    """Selecting a configured scan by name showed its newest saved run, from a projection
+    of the whole run: kept in scan_reports.rows_json, or rebuilt from the report body,
+    and held in memory per selected scan. At a million files that is gigabytes for one
+    click, and a column past PostgreSQL's 1 GB field limit. Above the cap the name selects
+    the current estate's files under it; at or below it nothing changes."""
+
+    def setUp(self) -> None:
+        self.tenant = f"w14-view-{uuid4().hex[:8]}"
+        store.create_tenant(self.tenant, "View")
+        self.paths = [f"//fs01/finance/f{i}.txt" for i in range(3)]
+        store._forget_scan_report_rows(self.tenant)
+        self.addCleanup(store._forget_scan_report_rows, self.tenant)
+
+    def _rows_json(self, scan_id: str):
+        with store._connect() as conn:
+            return conn.execute("SELECT rows_json FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+                                (self.tenant, scan_id)).fetchone()["rows_json"]
+
+    def test_a_run_above_the_cap_is_served_from_the_current_estate(self) -> None:
+        with patch.dict(os.environ, {"DSPM_SCAN_RUN_VIEW_MAX_FILES": "2"}):
+            store.save_scan_history(self.tenant, _report("scan-a", self.paths))
+            self.assertIsNone(self._rows_json("scan-a"), "a run past the cap stored its whole projection")
+            refused = AssertionError("the whole run was projected for one click")
+            with patch.object(store, "_scan_report_inventory_rows", side_effect=refused), \
+                    patch.object(store, "_stored_report_rows", side_effect=refused):
+                self.assertIsNone(store.scan_report_inventory_rows_by_label(self.tenant, LABEL))
+                page = store.list_inventory(self.tenant, source=LABEL)
+                facets = store.inventory_facets(self.tenant, source=LABEL)
+        self.assertNotEqual(page["source"], "scan-report")
+        self.assertEqual(sorted(item["path"] for item in page["items"]), sorted(self.paths))
+        self.assertEqual(facets["total"], 3)
+
+    def test_a_run_within_the_cap_is_still_its_own_view(self) -> None:
+        with patch.dict(os.environ, {"DSPM_SCAN_RUN_VIEW_MAX_FILES": "3"}):
+            store.save_scan_history(self.tenant, _report("scan-a", self.paths))
+            self.assertIsNotNone(self._rows_json("scan-a"))
+            page = store.list_inventory(self.tenant, source=LABEL)
+        self.assertEqual(page["source"], "scan-report")
+        self.assertEqual(page["scan_id"], "scan-a")
+        self.assertEqual(page["total"], 3)

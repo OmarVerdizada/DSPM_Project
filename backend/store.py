@@ -3081,7 +3081,11 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
             ).fetchone()
             if existing and existing["created_at"]:
                 created_at = existing["created_at"]
-            inventory_rows: list[dict] = []
+            # The run's own inventory view (rows_json) is kept only for a run small enough
+            # to be read back whole; above that the scan-name filter answers from the
+            # current estate (W1.4), so the list is not even collected.
+            viewable = _scan_run_viewable(len(report.get("files") or []))
+            inventory_rows: list[dict] | None = [] if viewable else None
             normalized_written = _dual_write_normalized(conn, tenant_id, report, is_new_scan=existing is None,
                                                         inventory_rows=inventory_rows)
             if normalized_written:
@@ -3109,7 +3113,8 @@ def save_scan_history(tenant_id: str, report: dict) -> str:
                     inline_body,
                     report_ref,
                     report_bytes,
-                    _packed_report_rows(tenant_id, report, inventory_rows if normalized_written else None),
+                    _packed_report_rows(tenant_id, report, inventory_rows if normalized_written else None)
+                    if viewable else None,
                     _packed_compact_report(report),
                     created_at,
                 ),
@@ -6558,6 +6563,49 @@ def latest_scan_id_by_label(tenant_id: str, scan_label: str) -> str:
     return str(row["scan_id"]) if row else ""
 
 
+def scan_run_view_max_files() -> int:
+    """The largest run the scan-name filter shows as that run (``DSPM_SCAN_RUN_VIEW_MAX_FILES``).
+
+    A configured scan's name selects its newest saved run, not the assets whose newest
+    observation carries the name - a later scan of the same files would otherwise take
+    them out of it. That view is the run's own projection, read whole: kept in
+    ``rows_json`` or rebuilt from the report body, and held in memory per selected scan.
+    At a million files that is gigabytes for one click and a column past PostgreSQL's
+    1 GB field limit (W1.4). Above this size the name selects the current estate's
+    files under it instead, through the indexed inventory path. Measured: reading a run
+    and projecting it peaks at 5.4-6.5 KiB a file without compliance sections.
+    """
+    try:
+        return max(1, min(int(os.getenv("DSPM_SCAN_RUN_VIEW_MAX_FILES", "20000")), 10_000_000))
+    except ValueError:
+        return 20_000
+
+
+def _scan_run_viewable(file_count: int) -> bool:
+    return int(file_count or 0) <= scan_run_view_max_files()
+
+
+def _scan_run_file_count(tenant_id: str, scan_id: str) -> int:
+    """How many files a saved run holds, from its summary or its stored compact form -
+    never its body."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT summary_json, compact_json FROM scan_reports WHERE tenant_id = ? AND scan_id = ?",
+            (tenant_id, scan_id),
+        ).fetchone()
+    if row is None:
+        return 0
+    for raw, key in ((row["summary_json"], "total_files"), (row["compact_json"], "file_count")):
+        try:
+            value = json.loads(unpack_json_text(raw) or "{}") if raw else {}
+            count = int(value.get(key) or 0) if isinstance(value, dict) else 0
+        except (TypeError, ValueError):
+            count = 0
+        if count:
+            return count
+    return 0
+
+
 @_tenant_scoped
 def scan_report_inventory_rows_by_label(tenant_id: str, scan_label: str) -> tuple[str, list[dict]] | None:
     """(scan_id, projected rows) for a configured scan name, or None.
@@ -6567,6 +6615,11 @@ def scan_report_inventory_rows_by_label(tenant_id: str, scan_label: str) -> tupl
     """
     scan_id = latest_scan_id_by_label(tenant_id, scan_label)
     if not scan_id:
+        return None
+    if not _scan_run_viewable(_scan_run_file_count(tenant_id, scan_id)):
+        # Projecting this run means reading its whole report into memory on a click;
+        # the caller answers from the current estate under the same name instead.
+        logger.info("Scan %s is too large for its own inventory view; serving the current estate", scan_id)
         return None
 
     def build() -> list[dict]:
