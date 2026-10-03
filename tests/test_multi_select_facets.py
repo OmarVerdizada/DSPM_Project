@@ -177,11 +177,15 @@ class QueueSortTests(unittest.TestCase):
     def test_the_cursor_knows_the_column_behind_each_key(self) -> None:
         """`asset` and `finding_name` are the client's names for columns the
         table calls something else; a cursor built on the client's name would
-        page from a column that does not exist."""
+        page from a column that does not exist. Since the cursor fix (b05e5a6)
+        it is built from the value the rows are ordered by - the sort expression,
+        selected as `sort_value` - so no name has to be mapped to a column."""
         spec = STORE[STORE.index("REMEDIATION_SORTS: dict"):]
         spec = spec[:spec.index(chr(10) + "}")]
-        self.assertIn('"finding_name": "display_name", "asset": "affected_asset"', STORE)
         self.assertIn('"asset": ("COALESCE(affected_asset', spec)
+        self.assertIn('"finding_name": ("COALESCE(display_name', spec)
+        self.assertIn("AS sort_value FROM findings", STORE)
+        self.assertIn('last["sort_value"]', STORE)
 
 
 class FilterSplitterTests(unittest.TestCase):
