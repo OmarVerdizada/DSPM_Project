@@ -3301,8 +3301,16 @@ def generate_demo_data(payload: DemoDataRequest, principal: Principal = Depends(
 
 def _require_scan_licence() -> None:
     """D10: with DSPM_LICENCE_REQUIRED on, a scan needs a valid licence (or one in its
-    grace period). Nothing else is refused: findings, reports and exports stay readable."""
-    from backend import licensing
+    grace period). Nothing else is refused: findings, reports and exports stay readable.
+
+    A scan also needs room to write (backend.disk_guard): below DSPM_MIN_FREE_DISK_MB on a
+    volume it writes to, it is refused with 507 rather than started into a full disk."""
+    from backend import disk_guard, licensing
+
+    full = disk_guard.low_space_reason()
+    if full:
+        raise HTTPException(status_code=507, detail=f"Scan not started: {full}. Free space on that volume "
+                            "(or lower DSPM_MIN_FREE_DISK_MB) and start it again.")
 
     allowed, why = licensing.scans_allowed()
     if not allowed:

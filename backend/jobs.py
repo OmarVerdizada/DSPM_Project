@@ -274,6 +274,10 @@ def _safe_job_error(exc: Exception) -> str:
         return "Scan could not save because the local DSPM database is busy. Wait a few seconds and retry."
     if "permission denied" in raw or "winerror 5" in raw:
         return "Scan could not read or save one of the selected paths. Check filesystem permissions and retry."
+    if "scan paused" in raw and "free disk" in raw:
+        # Below the disk floor (backend.disk_guard): left to the resume sweep, not failed.
+        return ("Scan paused: free disk space is low on a volume the scan writes to. It continues automatically "
+                "once there is room; nothing already scanned is lost.")
     if "scan paused" in raw:
         # A partitioned scan that stopped making progress (W1.1): left to the resume sweep.
         return "Scan paused: no part of it finished for a long time. It continues automatically; nothing already scanned is lost."

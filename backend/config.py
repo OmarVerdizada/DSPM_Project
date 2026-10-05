@@ -112,6 +112,11 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_DB_POOL_MAX", "int", {"minimum": 1}),
     ("DSPM_DB_POOL_MAX_IDLE", "int", {"minimum": 0}),
     ("DSPM_DB_POOL_CHECK", "bool"),
+    # Disk floor and WAL archive health (2026-10): a scan does not write into a full volume.
+    ("DSPM_MIN_FREE_DISK_MB", "int", {"default": "2048", "minimum": 0}),
+    ("DSPM_PG_DATA_DIR", "path"),
+    ("DSPM_WAL_ARCHIVE_DIR", "path"),
+    ("DSPM_WAL_ARCHIVE_WARN_GB", "int", {"default": "20", "minimum": 1}),
     # W1.4: bounds on every PostgreSQL application session, in seconds (0 turns one off).
     ("DSPM_PG_STATEMENT_TIMEOUT_SECONDS", "int", {"default": "900", "minimum": 0, "maximum": 86400}),
     ("DSPM_PG_LOCK_TIMEOUT_SECONDS", "int", {"default": "900", "minimum": 0, "maximum": 86400}),

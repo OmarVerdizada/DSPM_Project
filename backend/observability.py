@@ -149,6 +149,65 @@ def wal_metrics() -> dict:
     }
 
 
+_WAL_SEGMENT_NAME_LENGTH = 24
+
+
+def wal_archive_dir_metrics() -> dict:
+    """The WAL archive directory itself, when it is on this host (``DSPM_WAL_ARCHIVE_DIR``).
+
+    pg_stat_archiver says whether segments are being copied. It does not say whether
+    anything can use them, or whether anything ever removes them. Point-in-time recovery
+    replays archived WAL onto a physical base backup; without one the archive cannot
+    restore anything, and with no retention it only grows. On this project's test cluster
+    it reached 30 GB of 1,884 segments with no base backup at all (2026-10).
+    """
+    raw = os.getenv("DSPM_WAL_ARCHIVE_DIR") or ""
+    if not raw.strip():
+        return {"configured": False}
+    root = Path(raw)
+    if not root.is_dir():
+        return {"configured": True, "exists": False, "path": str(root)}
+    segments = 0
+    total = 0
+    oldest = newest = None
+    base_backups: list[float] = []
+    now = time.time()
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            stat = entry.stat()
+            total += stat.st_size
+            if entry.name.endswith(".backup"):
+                base_backups.append(stat.st_mtime)
+            elif len(entry.name) == _WAL_SEGMENT_NAME_LENGTH:
+                segments += 1
+                oldest = stat.st_mtime if oldest is None else min(oldest, stat.st_mtime)
+                newest = stat.st_mtime if newest is None else max(newest, stat.st_mtime)
+    usage = shutil.disk_usage(root)
+    return {
+        "configured": True,
+        "exists": True,
+        "path": str(root),
+        "segments": segments,
+        "bytes": total,
+        "oldest_segment_age_seconds": round(now - oldest, 1) if oldest is not None else None,
+        "newest_segment_age_seconds": round(now - newest, 1) if newest is not None else None,
+        "base_backups": len(base_backups),
+        "newest_base_backup_age_seconds": round(now - max(base_backups), 1) if base_backups else None,
+        "volume_free_bytes": usage.free,
+        "volume_free_ratio": round(usage.free / usage.total, 4) if usage.total else 0.0,
+    }
+
+
+def wal_archive_warn_bytes() -> int:
+    """``DSPM_WAL_ARCHIVE_WARN_GB``: an archive larger than this is reported (20 GB)."""
+    try:
+        return max(1, int(os.getenv("DSPM_WAL_ARCHIVE_WARN_GB") or "20")) * 1024 ** 3
+    except ValueError:
+        return 20 * 1024 ** 3
+
+
 def replication_metrics() -> dict:
     """Standby lag. Reported as configured=False rather than as zero lag while
     no standby exists, so an absent standby cannot read as a healthy one."""
@@ -302,6 +361,7 @@ def collect() -> dict:
         ("storage", storage_metrics),
         ("backup", backup_metrics),
         ("wal_archive", wal_metrics),
+        ("wal_archive_dir", wal_archive_dir_metrics),
         ("replication", replication_metrics),
         ("activity", activity_metrics),
         ("database_activity_monitoring", database_activity_monitoring),
@@ -366,6 +426,19 @@ def _warnings(metrics: dict) -> list[str]:
     monitored = metrics.get("database_activity_monitoring") or {}
     if os.getenv("DSPM_DB_ACTIVITY_MONITORING_REQUIRED", "0").strip() == "1" and not monitored.get("enabled"):
         out.append("required database activity monitoring is disabled")
+
+    archive = metrics.get("wal_archive_dir") or {}
+    if archive.get("configured") and not archive.get("exists"):
+        out.append(f"WAL archive directory {archive.get('path')} does not exist")
+    elif archive.get("exists"):
+        if int(archive.get("segments") or 0) and not int(archive.get("base_backups") or 0):
+            out.append(f"WAL archive holds {archive['segments']} segment(s) and no base backup: point-in-time "
+                       "recovery cannot start from it - take a base backup, then prune older WAL")
+        if int(archive.get("bytes") or 0) > wal_archive_warn_bytes():
+            out.append(f"WAL archive is {int(archive['bytes']) / 1024 ** 3:.1f} GB - check retention")
+        free_ratio = archive.get("volume_free_ratio")
+        if free_ratio is not None and float(free_ratio) < 0.10:
+            out.append(f"the WAL archive volume is {float(free_ratio) * 100:.1f}% free")
 
     replication = metrics.get("replication") or {}
     if replication.get("applicable") and not replication.get("configured"):

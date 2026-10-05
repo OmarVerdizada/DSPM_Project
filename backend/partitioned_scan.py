@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-from backend import store
+from backend import disk_guard, store
 from backend.compliance_service import ComplianceReportAccumulator
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from discovery.partition import plan_bounded_partitions, plan_share_partitions
@@ -694,6 +694,7 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
     max_attempts = partition_max_attempts()
     stall = scan_stall_seconds()
     sla = scan_sla_seconds()
+    low_disk = disk_guard.ThrottledCheck()
     started = last_progress = time.monotonic()
     late = False
     workers = partition_workers()
@@ -725,6 +726,12 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
             reason = stop_reason()
             if reason:
                 raise ScanStopped(reason)
+            full = low_disk()
+            if full:
+                # A volume this scan writes to is nearly full: writing on would stop PostgreSQL
+                # (it cannot write WAL) and every scan and click with it. Paused, not failed -
+                # the resume sweep continues the scan once there is room again.
+                raise ScanPaused(f"Scan paused: {full}; it continues automatically once there is room")
             now = time.monotonic()
             if stall and now - last_progress > stall:
                 raise ScanPaused(
