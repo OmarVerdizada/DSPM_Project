@@ -186,7 +186,135 @@ class DetectorPool:
         }
 
 
-def build_pool(*, compliance_enabled: bool) -> DetectorPool:
-    """A pool sized for this host, or a disabled one when it cannot pay."""
+# W2 parallelism: a partitioned scan builds an engine - and so a pool - per partition. Each
+# pool spawned its workers, warmed them (about 2.5 s of CPU each) and was shut down when its
+# partition ended, so every partition paid the warm-up again and classified its first files
+# in-process while it ran. Engines now lease one pool the process keeps: it is warmed once,
+# and shut down once nothing has leased it for DSPM_DETECTOR_POOL_IDLE_SECONDS (60).
+# DSPM_DETECTOR_POOL_SHARED=0 gives every engine its own pool again.
+_DEFAULT_IDLE_SECONDS = 60.0
+_shared_lock = threading.Lock()
+_shared_pool: DetectorPool | None = None
+_shared_leases = 0
+_shared_reaper: threading.Timer | None = None
+
+
+def _sharing_enabled() -> bool:
+    return os.getenv("DSPM_DETECTOR_POOL_SHARED", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _idle_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("DSPM_DETECTOR_POOL_IDLE_SECONDS") or _DEFAULT_IDLE_SECONDS))
+    except ValueError:
+        return _DEFAULT_IDLE_SECONDS
+
+
+def _lease_shared(workers: int) -> DetectorPool:
+    """The process's pool, leased; a broken or retired one is replaced."""
+    global _shared_pool, _shared_leases, _shared_reaper
+    stale = None
+    with _shared_lock:
+        if _shared_reaper is not None:
+            _shared_reaper.cancel()
+            _shared_reaper = None
+        if _shared_pool is None or not _shared_pool.enabled:
+            stale, _shared_pool = _shared_pool, DetectorPool(workers)
+        _shared_leases += 1
+        pool = _shared_pool
+    if stale is not None:
+        stale.shutdown()
+    return pool
+
+
+def _release_shared(pool: DetectorPool) -> None:
+    global _shared_leases, _shared_reaper
+    with _shared_lock:
+        _shared_leases = max(0, _shared_leases - 1)
+        if _shared_leases or pool is not _shared_pool:
+            return
+        reaper = threading.Timer(_idle_seconds(), _reap_shared, args=(pool,))
+        reaper.daemon = True
+        _shared_reaper = reaper
+    reaper.start()
+
+
+def _reap_shared(pool: DetectorPool) -> None:
+    """Nothing has leased the pool for the idle time: its workers go."""
+    global _shared_pool
+    with _shared_lock:
+        if _shared_leases or pool is not _shared_pool:
+            return
+        _shared_pool = None
+    pool.shutdown()
+
+
+def shutdown_shared_pool() -> None:
+    """Close the process's pool now (tests, and a process on its way out)."""
+    global _shared_pool, _shared_reaper
+    with _shared_lock:
+        pool, _shared_pool = _shared_pool, None
+        if _shared_reaper is not None:
+            _shared_reaper.cancel()
+            _shared_reaper = None
+    if pool is not None:
+        pool.shutdown()
+
+
+class PoolLease:
+    """One engine's use of the process's pool: the pool's workers, this engine's counts.
+    ``shutdown`` gives the lease back; the pool stays warm for the next engine."""
+
+    def __init__(self, pool: DetectorPool) -> None:
+        self._pool = pool
+        self._lock = threading.Lock()
+        self._released = False
+        self._seen = 0
+        self._in_workers = 0
+        self._in_process = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._pool.enabled
+
+    @property
+    def ready(self) -> bool:
+        return self._pool.ready
+
+    def consider_start(self, files_found: int) -> None:
+        self._pool.consider_start(files_found)
+
+    def start(self) -> None:
+        self._pool.start()
+
+    def run(self, payload: dict) -> dict | None:
+        result = self._pool.run(payload)
+        with self._lock:
+            self._seen += 1
+            if result is None:
+                self._in_process += 1
+            else:
+                self._in_workers += 1
+        return result
+
+    def shutdown(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        _release_shared(self._pool)
+
+    def diagnostics(self) -> dict:
+        with self._lock:
+            mine = {"files_seen": self._seen, "files_in_workers": self._in_workers,
+                    "files_in_process": self._in_process}
+        return {**self._pool.diagnostics(), **mine, "shared": True}
+
+
+def build_pool(*, compliance_enabled: bool) -> DetectorPool | PoolLease:
+    """A pool sized for this host, or a disabled one when it cannot pay - a lease on the
+    process's shared pool unless DSPM_DETECTOR_POOL_SHARED=0."""
     workers = _configured_workers() if compliance_enabled else 0
-    return DetectorPool(workers)
+    if not workers or not _sharing_enabled():
+        return DetectorPool(workers)
+    return PoolLease(_lease_shared(workers))

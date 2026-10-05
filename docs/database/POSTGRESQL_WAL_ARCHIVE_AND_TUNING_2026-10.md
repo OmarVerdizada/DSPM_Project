@@ -272,6 +272,16 @@ findings each, partitioned, same host.
 
 The first save is unchanged: 76 MiB of WAL.
 
+**Revision 0043 (W2.5) then dropped four GIN indexes that no query could
+use.** Measured as the application role under FORCE RLS, with sequential scans
+disabled, no plan touched them. They had been maintained on every asset and
+finding write all the same.
+
+| Same benchmark, after 0043 | WAL | Time |
+|---|---|---|
+| First save | 48.5 MiB (was 76.3) | 6.2 s (was 8.6) |
+| Unchanged rescan | 20.8 MiB (was 30.0) | 3.9 s |
+
 **What remains.** Most of a rescan's WAL is now the per-scan history: one
 `finding_index` row and one `finding_occurrences` row per finding per scan.
 That history is kept by design. Deduplicating its response bodies is the next

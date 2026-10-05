@@ -269,6 +269,9 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_IO_WORKERS", "int", {"minimum": 1}),
     ("DSPM_DETECTOR_PROCESSES", "int", {"minimum": 0}),
     ("DSPM_DETECTOR_POOL_START_AFTER", "int", {"minimum": 0}),
+    # One detector pool per process, leased by every engine (W2 parallelism).
+    ("DSPM_DETECTOR_POOL_SHARED", "bool"),
+    ("DSPM_DETECTOR_POOL_IDLE_SECONDS", "float", {"default": "60", "minimum": 0}),
     ("DSPM_DETECTOR_PREFILTER", "bool"),
     ("DSPM_GDPR_DETECTOR_TIMEOUT_SECONDS", "float", {"minimum": 0}),
     ("DSPM_NIST_DETECTOR_TIMEOUT_SECONDS", "float", {"minimum": 0}),
@@ -323,6 +326,7 @@ SETTINGS: dict[str, Setting] = _settings(
     # caches
     ("DSPM_LIVE_CACHE", "bool"),
     ("DSPM_LIVE_CACHE_SECONDS", "int", {"minimum": 0}),
+    ("DSPM_LIVE_CACHE_PARTITION_SECONDS", "float", {"default": "15", "minimum": 0}),
     ("DSPM_TENANT_EXISTS_CACHE_SECONDS", "int", {"minimum": 0}),
     ("DSPM_READINESS_CACHE_SECONDS", "int", {"minimum": 0}),
     ("DSPM_INVENTORY_COUNT_CACHE_SECONDS", "int", {"minimum": 0}),
