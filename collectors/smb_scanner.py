@@ -30,6 +30,7 @@ from collectors import win_security
 from collectors.smb3_transport import ACL_TRANSPORT, ACL_TRANSPORT_NOTE
 from collectors.ocr import extract_text_from_image, is_ocr_scannable, max_image_bytes
 from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
+from collectors.scan_scope import ScopeTally, rules_for
 from collectors.file_scanner import (
     ARCHIVE_EXTENSIONS,
     CONTENT_EXTENSIONS,
@@ -391,6 +392,9 @@ class SMBConfig:
     # "name_from", "name_to"}. The folder's entries whose case-folded names fall in
     # [name_from, name_to) are walked, each subfolder among them whole; "" is unbounded.
     share_range: dict | None = None
+    # Advanced scan scope (collectors.scan_scope): the scan's canonical rules, share-relative
+    # paths. A share, folder or file out of scope is never listed, opened or read.
+    scope: dict | None = None
 
 
 
@@ -430,6 +434,8 @@ class SMBScanner:
         # and the serial path (single thread) sees exactly one, unchanged.
         self._local = threading.local()
         self.extension_filter = normalize_extension_filter(config.allowed_extensions)
+        self._scope = rules_for(config.scope)
+        self._scope_tally = ScopeTally() if self._scope.active else None
         self.credential_used = ""
         self.server_used = ""
         self._owner_cache: dict[str, str] = {}
@@ -630,6 +636,7 @@ class SMBScanner:
     def scan(self) -> list[dict]:
         self.last_scan_diagnostics = {}
         self._progress_counters = {"visited": 0, "matched": 0, "reused": 0}
+        self._scope_tally = ScopeTally() if self._scope.active else None
         self._consecutive_resets = 0
         self._abort_event.clear()
         self._io_parallel_active = False
@@ -664,6 +671,10 @@ class SMBScanner:
                     continue
                 if not self._share_selected(share_name):
                     # Another partition of the same scan walks it (B2.3): not skipped.
+                    continue
+                if self._scope_skips_folder(share_name, "/"):
+                    # Out of scope - an excluded share, or one no included folder is in:
+                    # not even listed.
                     continue
                 scanned_shares.append(share_name)
 
@@ -731,6 +742,7 @@ class SMBScanner:
                 # did not (collectors.smb3_transport says why). Said with the scan.
                 **({"acl_transport": ACL_TRANSPORT, "acl_transport_note": ACL_TRANSPORT_NOTE}
                    if self.config.require_encryption else {}),
+                **({"scope": self._scope_tally.to_dict(self.config.scope)} if self._scope_tally is not None else {}),
             }
             return records
         finally:
@@ -904,6 +916,8 @@ class SMBScanner:
             raise RuntimeError("Scan cancelled")
         if self.connection is None or depth > self.config.max_depth or self._skip_path(folder):
             return plan
+        if self._scope_skips_folder(share_name, folder):
+            return plan
 
         try:
             entries = self.connection.listPath(share_name, folder)
@@ -939,6 +953,8 @@ class SMBScanner:
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
                     continue
+                if self._scope_skips_folder(share_name, remote_path, entry.filename):
+                    continue
                 self._enumerate_share_plan(share_name, remote_path, depth + 1, plan)
                 continue
 
@@ -946,6 +962,9 @@ class SMBScanner:
             with self._walk_lock:
                 self._progress_counters["visited"] += 1
             self._emit_collection_progress()
+            if self._scope_skips_file(share_name, remote_path, extension, entry):
+                # Decided on the listing: never opened, read, hashed or stored.
+                continue
             include_top = matches_scan_filters(
                 extension,
                 is_hidden,
@@ -1823,11 +1842,19 @@ class SMBScanner:
                 if entry.isDirectory:
                     if bool(getattr(entry, "isHidden", False)) and not include_hidden_dirs:
                         continue
+                    if self._scope.active and self._scope.folder_reason(
+                            self._scope_path(share_name, remote_path), entry.filename):
+                        # The walk skips it, and counts it: it weighs nothing here.
+                        continue
                     child_files, child_bytes, child_units = visit(remote_path, depth + 1)
                     files += child_files
                     size += child_bytes
                     children.append((key, child_files, child_bytes, child_units))
                     continue
+                if self._scope.active and self._scope.file_reason(
+                        self._scope_path(share_name, remote_path), detect_extension(remote_path),
+                        int(getattr(entry, "file_size", 0) or 0), getattr(entry, "last_write_time", None)):
+                    continue  # out of scope: the walk lists it and leaves it, so it weighs nothing
                 weight = min(int(getattr(entry, "file_size", 0) or 0), read_cap)
                 files += 1
                 size += weight
@@ -2038,12 +2065,40 @@ class SMBScanner:
 
         return candidates
 
+    def _scope_path(self, share_name: str, remote_path: str) -> str:
+        """A share-relative path in the scope's form: ``share/folder/file``."""
+        return self._scope.path_of(f"{share_name}/{remote_path}")
+
+    def _scope_skips_folder(self, share_name: str, folder: str, name: str = "") -> bool:
+        """Whether a folder - or a whole share, at ``/`` - is out of scope; counted when it is."""
+        if self._scope_tally is None:
+            return False
+        reason = self._scope.folder_reason(self._scope_path(share_name, folder),
+                                           name or (share_name if folder in ("", "/") else ""))
+        if reason:
+            self._scope_tally.folder(reason)
+        return bool(reason)
+
+    def _scope_skips_file(self, share_name: str, remote_path: str, extension: str, entry) -> bool:
+        """Whether a listed file is out of scope - by its path, extension, size or time, all
+        of which the listing gives; counted when it is."""
+        if self._scope_tally is None:
+            return False
+        reason = self._scope.file_reason(self._scope_path(share_name, remote_path), extension,
+                                         int(getattr(entry, "file_size", 0) or 0),
+                                         getattr(entry, "last_write_time", None))
+        if reason:
+            self._scope_tally.file(reason)
+        return bool(reason)
+
     def _walk_share(self, share_name: str, folder: str, depth: int) -> list[dict]:
         if self._cancelled():
             raise RuntimeError("Scan cancelled")
         if self.connection is None or depth > self.config.max_depth:
             return []
         if self._skip_path(folder):
+            return []
+        if self._scope_skips_folder(share_name, folder):
             return []
 
         records: list[dict] = []
@@ -2083,6 +2138,8 @@ class SMBScanner:
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
                     continue
+                if self._scope_skips_folder(share_name, remote_path, entry.filename):
+                    continue
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
                 continue
 
@@ -2090,6 +2147,8 @@ class SMBScanner:
             with self._walk_lock:
                 self._progress_counters["visited"] += 1
             self._emit_collection_progress()
+            if self._scope_skips_file(share_name, remote_path, extension, entry):
+                continue
             include_top = matches_scan_filters(
                 extension,
                 is_hidden,

@@ -23,6 +23,7 @@ from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
 from collectors.net_guard import resolve_and_pin
 from discovery.parallelism import host_admission_budget, resolve_parallelism
 from collectors import content_policy
+from collectors.scan_scope import ScopeTally
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     DEFAULT_TEXT_SCAN_MAX_BYTES,
@@ -762,6 +763,9 @@ class WinRMEndpointConfig:
     cert_thumbprint: str = ""
     kerberos_mode: str = ""
     insecure_tls: bool = False
+    # Advanced scan scope (collectors.scan_scope), canonical, absolute paths: applied on
+    # the endpoint by the collector script, before a file's work is queued.
+    scope: dict | None = None
 
 
 @dataclass(slots=True)
@@ -1082,6 +1086,7 @@ class WinRMEndpointScanner:
             read_owner=self.config.read_owner,
             parallel_workers=self._winrm_worker_count(),
             page=page,
+            scope=self.config.scope,
         )
         # P-B.2: the WinRM collector runs its whole walk as ONE remote PowerShell
         # session, but that session now parallelizes the expensive per-file work
@@ -1121,6 +1126,7 @@ class WinRMEndpointScanner:
             if isinstance(raw_records.get("records"), dict):
                 raw_records["records"] = [raw_records["records"]]
             self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
+            self._scope_diagnostics()
             self.last_scan_diagnostics["connection_host"] = self.last_connection_host or self._connection_host()
             self.last_scan_diagnostics["connection_candidates"] = self._connection_hosts()
             raw_records = raw_records["records"]
@@ -1184,6 +1190,16 @@ class WinRMEndpointScanner:
         self.last_scan_diagnostics["host_admission"] = admission_stats
         self.last_scan_diagnostics.update(self._session_diagnostics())
         return normalize_records(records)
+
+    def _scope_diagnostics(self) -> None:
+        """The script's per-reason counts as the scan's ``scope`` block (collectors.scan_scope)."""
+        files = self.last_scan_diagnostics.pop("scope_excluded_by", None)
+        folders = self.last_scan_diagnostics.pop("scope_skipped_folders_by", None)
+        if not self.config.scope:
+            return
+        tally = ScopeTally()
+        tally.merge_counts(files if isinstance(files, dict) else {}, folders if isinstance(folders, dict) else {})
+        self.last_scan_diagnostics["scope"] = tally.to_dict(self.config.scope)
 
     def _is_profile_scoped_request(self) -> bool:
         if not self.config.target_username.strip():
@@ -1925,6 +1941,7 @@ def _scan_script(
     read_owner: bool = True,
     parallel_workers: int = 1,
     page: dict | None = None,
+    scope: dict | None = None,
 ) -> str:
     """The collector script. With ``page`` (W1.3) it lists one level of the folders the page
     names - ``{"folders": [{"path", "depth", "after", "root"}], "page_size", "max_folders"}`` -
@@ -1933,6 +1950,9 @@ def _scan_script(
     where the next command takes over. Without it, the whole walk (capped at 5,000 records)."""
     encoded_paths = base64.b64encode(json.dumps(paths).encode("utf-8")).decode("ascii")
     encoded_page = base64.b64encode(json.dumps(page or {}).encode("utf-8")).decode("ascii")
+    # Advanced scan scope (collectors.scan_scope): canonical rules, absolute paths in "/" form.
+    encoded_scope = base64.b64encode(json.dumps(scope or {}).encode("utf-8")).decode("ascii")
+    scope_active_value = "$true" if scope else "$false"
     page_mode_value = "$true" if page else "$false"
     # A page is bounded by page_size; the whole-walk cap is for the walk alone.
     max_records_value = 2147483647 if page else 5000
@@ -1985,6 +2005,22 @@ def _scan_script(
     $binaryExtensions = @({binary_extensions})
     $archiveExtensions = @(".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip")
     $scanArchiveEntries = {inspect_archives_value}
+    $scopeActive = {scope_active_value}
+    $scopeJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_scope}"))
+    $dspmScope = ConvertFrom-Json $scopeJson
+    $scopeExcludeExtensions = @{{}}
+    foreach ($scopeItem in @($dspmScope.exclude_extensions)) {{
+      if ($scopeItem) {{ $scopeExcludeExtensions[([string]$scopeItem).ToLowerInvariant()] = $true }}
+    }}
+    $scopeExcludePaths = @(@($dspmScope.exclude_paths) | Where-Object {{ $_ }} | ForEach-Object {{ ([string]$_).ToLowerInvariant().TrimEnd('/') }})
+    # A folder-name pattern knows * and ? only; -like would read [ and ] as a set.
+    $scopeFolderPatterns = @(@($dspmScope.exclude_folder_patterns) | Where-Object {{ $_ }} | ForEach-Object {{ ([string]$_).ToLowerInvariant().Replace('[', '`[').Replace(']', '`]') }})
+    $scopeMinSize = if ($null -ne $dspmScope.min_size_bytes) {{ [int64]$dspmScope.min_size_bytes }} else {{ [int64]-1 }}
+    $scopeMaxSize = if ($null -ne $dspmScope.max_size_bytes) {{ [int64]$dspmScope.max_size_bytes }} else {{ [int64]-1 }}
+    $scopeModifiedAfter = $null
+    if ($dspmScope.modified_after) {{
+      $scopeModifiedAfter = [datetime]::SpecifyKind([datetime]::ParseExact([string]$dspmScope.modified_after, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture), [DateTimeKind]::Utc)
+    }}
     $maxRecords = {max_records_value}
     $maxArchiveEntriesPerFile = 200
     $maxArchiveEntryBytes = 26214400
@@ -2013,6 +2049,8 @@ def _scan_script(
       extension_filter_enabled = {extension_filter_value}
       hidden_filter_enabled = {hidden_filter_value}
       system_filter_enabled = {system_filter_value}
+      scope_excluded_by = @{{}}
+      scope_skipped_folders_by = @{{}}
     }}
 
     function Get-RelativeDepth($root, $path) {{
@@ -2054,6 +2092,42 @@ def _scan_script(
           $diagnostics.selected_extension_counts[$selectedKey] = 1
         }}
       }}
+    }}
+
+    function Add-DspmScopeCount($table, $reason) {{
+      if ($table.ContainsKey($reason)) {{ $table[$reason] += 1 }} else {{ $table[$reason] = 1 }}
+    }}
+
+    function Test-DspmScopeExcludedPath($normalized) {{
+      foreach ($excluded in $scopeExcludePaths) {{
+        if ($normalized -eq $excluded -or $normalized.StartsWith($excluded + '/')) {{ return $true }}
+      }}
+      return $false
+    }}
+
+    # Advanced scope: why a folder is not listed ("" when it is).
+    function Get-DspmScopeFolderReason($fullName, $name) {{
+      if (-not $scopeActive) {{ return "" }}
+      $normalized = ([string]$fullName).ToLowerInvariant().Replace([string][char]92, '/').TrimEnd('/')
+      if (Test-DspmScopeExcludedPath $normalized) {{ return "excluded_folder" }}
+      $folded = ([string]$name).ToLowerInvariant()
+      foreach ($pattern in $scopeFolderPatterns) {{
+        if ($folded -like $pattern) {{ return "folder_pattern" }}
+      }}
+      return ""
+    }}
+
+    # Advanced scope: why a listed file is left before any work is queued for it - by its
+    # path and extension, then by the size and time the listing already gives.
+    function Get-DspmScopeFileReason($file, $extension) {{
+      if (-not $scopeActive) {{ return "" }}
+      $normalized = ([string]$file.FullName).ToLowerInvariant().Replace([string][char]92, '/')
+      if (Test-DspmScopeExcludedPath $normalized) {{ return "excluded_folder" }}
+      if ($extension -and $scopeExcludeExtensions.ContainsKey(([string]$extension).ToLowerInvariant())) {{ return "extension" }}
+      if ($scopeMinSize -ge 0 -and [int64]$file.Length -lt $scopeMinSize) {{ return "smaller_than_minimum" }}
+      if ($scopeMaxSize -ge 0 -and [int64]$file.Length -gt $scopeMaxSize) {{ return "larger_than_maximum" }}
+      if ($scopeModifiedAfter -and $file.LastWriteTimeUtc -lt $scopeModifiedAfter) {{ return "modified_before_date" }}
+      return ""
     }}
 
     function Test-DspmRecordIncluded($extension, $isHidden, $isSystem) {{
@@ -2697,6 +2771,11 @@ def _scan_script(
     function Add-DspmFileRecord($file, $root) {{
       $diagnostics.visited_files += 1
       $extension = Get-DspmExtension $file
+      $scopeReason = Get-DspmScopeFileReason $file $extension
+      if ($scopeReason) {{
+        Add-DspmScopeCount $diagnostics.scope_excluded_by $scopeReason
+        return
+      }}
       $isHidden = [bool]($file.Attributes -band [IO.FileAttributes]::Hidden)
       $isSystem = [bool]($file.Attributes -band [IO.FileAttributes]::System)
       Add-DspmExtensionStat $extension
@@ -2812,6 +2891,13 @@ def _scan_script(
         $diagnostics.skipped_dirs += 1
         return
       }}
+      if ($depth -eq 0) {{
+        $scopeReason = Get-DspmScopeFolderReason $current (Split-Path -Leaf $current)
+        if ($scopeReason) {{
+          Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
+          return
+        }}
+      }}
       $dspmChildErrors = @()
       $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue -ErrorVariable dspmChildErrors)
       foreach ($dspmError in @($dspmChildErrors)) {{
@@ -2833,6 +2919,11 @@ def _scan_script(
           }}
           if ($dirHidden -and -not ({include_hidden_value} -or {hidden_filter_value})) {{
             $diagnostics.skipped_dirs += 1
+            continue
+          }}
+          $scopeReason = Get-DspmScopeFolderReason $entry.FullName $entry.Name
+          if ($scopeReason) {{
+            Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
             continue
           }}
           Walk-DspmDirectory $root $entry.FullName ($depth + 1)
@@ -2860,6 +2951,13 @@ def _scan_script(
         $diagnostics.skipped_dirs += 1
         return $null
       }}
+      if ($depth -eq 0 -and -not $after) {{
+        $scopeReason = Get-DspmScopeFolderReason $current (Split-Path -Leaf $current)
+        if ($scopeReason) {{
+          Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
+          return $null
+        }}
+      }}
       $dspmChildErrors = @()
       $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue -ErrorVariable dspmChildErrors)
       foreach ($dspmError in @($dspmChildErrors)) {{
@@ -2878,6 +2976,11 @@ def _scan_script(
           $dirReparse = [bool]($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)
           if ($dirReparse -or (Test-DspmSkippedPath $entry.FullName) -or ($dirHidden -and -not ({include_hidden_value} -or {hidden_filter_value}))) {{
             $diagnostics.skipped_dirs += 1
+            continue
+          }}
+          $scopeReason = Get-DspmScopeFolderReason $entry.FullName $entry.Name
+          if ($scopeReason) {{
+            Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
             continue
           }}
           if (($depth + 1) -le {int(max_depth)}) {{

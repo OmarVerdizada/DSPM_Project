@@ -6758,6 +6758,12 @@ def _merge_diagnostic_dicts(parts: list[dict], *, top_level: bool = False) -> di
             merged[key] = _merge_incremental_diagnostics(present)
         elif top_level and key == "suppression" and all(isinstance(value, dict) for value in present):
             merged[key] = _merge_suppression_diagnostics(present)
+        elif top_level and key == "scope" and all(isinstance(value, dict) for value in present):
+            # The scan's rules once - every partition carries the same - and what each
+            # partition left out, added up.
+            from collectors.scan_scope import merge_diagnostics as _merge_scope
+
+            merged[key] = _merge_scope(present)
         elif key == "reuse_index" and all(isinstance(value, dict) for value in present):
             index = _merge_diagnostic_dicts(present)
             index["state"] = next(

@@ -26,7 +26,7 @@ from classification.compliance.keyword_library import custom_keyword_groups_for_
 from classification.compliance.nist_catalog import nist_catalog_status
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
 from classification.regex_classifier import RULES
-from collectors import content_policy
+from collectors import content_policy, scan_scope
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
 from discovery import scan_cache, triage
@@ -142,6 +142,11 @@ class ScanConfig:
     # This run's wall-clock budget in seconds; None is DSPM_SCAN_MAX_SECONDS and 0 is none.
     # A partitioned scan gives each unit its own (W1.1), so the scan has no budget at all.
     max_seconds: int | None = None
+    # Advanced scan scope (collectors.scan_scope), canonical: what the collectors leave
+    # out before reading it. None is no rule - the scan as it always was. Every unit of a
+    # partitioned scan inherits it, and a resumed or scheduled scan rebuilds it from the
+    # stored request.
+    scope: dict | None = None
 
 
 @dataclass(slots=True)
@@ -259,7 +264,8 @@ class ScanReport:
             "timestamp": self.timestamp,
             "source": self.source,
             "mode": str((self.scan_diagnostics.get("incremental") or {}).get("mode") or "full"),
-            "summary": self.summary.to_dict(),
+            # A scoped scan says so in its summary - what the history row reads.
+            "summary": {**self.summary.to_dict(), **scan_scope.summary_fields(self.scan_diagnostics)},
             "files": self.files,
         }
         if self.scan_diagnostics:
@@ -1425,6 +1431,7 @@ class DSPMDiscoveryEngine:
                     allowed_shares=self.config.smb_shares,
                     require_encryption=self.config.smb_require_encryption,
                     share_range=self.config.smb_range,
+                    scope=self.config.scope,
                 )
             )
             records = scanner.scan()
@@ -1454,6 +1461,7 @@ class DSPMDiscoveryEngine:
                 containment_root=self.config.scan_root,
                 resolve_root=not self.config.scan_root,
                 cancel_check=self._cancelled,
+                scope=self.config.scope,
             )
             diagnostics = {
                 "mode": "local",
@@ -1469,6 +1477,7 @@ class DSPMDiscoveryEngine:
                 "unreadable_dirs": list(walk_diagnostics.get("unreadable_dirs") or [])[:20],
                 "archive_errors": list(walk_diagnostics.get("archive_errors") or [])[:20],
                 "archive_timed_out": bool(walk_diagnostics.get("archive_timed_out", False)),
+                **({"scope": walk_diagnostics["scope"]} if walk_diagnostics.get("scope") else {}),
             }
             self.last_scan_diagnostics = diagnostics
             records = self._exclude_cache_records(records)

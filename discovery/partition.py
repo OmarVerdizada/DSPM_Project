@@ -220,6 +220,7 @@ def plan_share_partitions(
         include_admin_shares=config.include_admin_shares,
         allowed_shares=config.smb_shares,
         require_encryption=config.smb_require_encryption,
+        scope=getattr(config, "scope", None),
     ))
     groups = scanner.plan_share_groups(stop_check)
     if not groups:
@@ -264,9 +265,20 @@ def _archive_weight(path: Path) -> int:
 
 
 def _plan_runs(config: ScanConfig, root: Path, excluded: list[Path], budget: int, is_sample, stop_check) -> dict | None:
+    from collectors.scan_scope import rules_for
+
     include_hidden_dirs = bool(config.include_hidden or config.hidden_filter_enabled)
     inspect_archives = bool(config.inspect_archives)
     sample = {"seen": False}
+    scope = rules_for(getattr(config, "scope", None))
+
+    def scope_path(resolved: Path) -> str:
+        if scope.absolute:
+            return scope.path_of(str(resolved))
+        try:
+            return scope.path_of(str(resolved.relative_to(root)))
+        except ValueError:
+            return scope.path_of(resolved.name)
 
     def is_excluded(resolved: Path) -> bool:
         return any(resolved == item or item in resolved.parents for item in excluded)
@@ -303,12 +315,21 @@ def _plan_runs(config: ScanConfig, root: Path, excluded: list[Path], budget: int
                 if is_excluded(resolved_item):
                     children.append((item.name, 0, None))
                     continue
+                if scope.active and scope.folder_reason(scope_path(resolved_item), item.name):
+                    # Out of scope: not listed here either; the walk meets it, skips it
+                    # and counts it, so it stays in a run and weighs nothing.
+                    children.append((item.name, 0, None))
+                    continue
                 child_weight, child_units, child_observed = visit(item, depth + 1)
                 weight += child_weight
                 if child_units is not None or child_observed:
                     children.append((item.name, child_weight, child_units))
                 continue
             if not is_file:
+                continue
+            if scope.active and scope.file_name_reason(scope_path(resolved_item), file_scanner.detect_extension(item)):
+                # Out of scope by its name: the walk lists it and leaves it - no weight.
+                children.append((item.name, 0, None))
                 continue
             entry_weight = _archive_weight(item) if inspect_archives and item.suffix.lower() == ".zip" else 1
             weight += entry_weight

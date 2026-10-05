@@ -756,8 +756,15 @@ def scan_directory(
     resolve_root: bool = True,
     cancel_check: Callable[[], bool] | None = None,
     read_content: bool = True,
+    scope: dict | None = None,
 ) -> list[dict]:
     """Walk a folder - or read one file - into file records.
+
+    ``scope`` is the scan's advanced scope (collectors.scan_scope, canonical form). A
+    folder out of scope is not listed; a file out of scope by its path or extension is
+    left before any stat, and one out of scope by its size or modification time after
+    one stat - never opened, hashed, read for ACLs or recorded. What it left out, and
+    why, is ``diagnostics["scope"]``.
 
     ``read_content=False`` is the inventory level (W2.6): names, sizes, owners and
     access, no byte of content - each file named by its metadata, and said to be not
@@ -789,6 +796,10 @@ def scan_directory(
 
     containment = Path(containment_root).expanduser().resolve() if containment_root is not None else root_path
     extension_filter = normalize_extension_filter(allowed_extensions)
+    from collectors.scan_scope import ScopeTally, rules_for
+
+    scope_rules = rules_for(scope)
+    scope_tally = ScopeTally() if scope_rules.active else None
     excluded_roots: list[Path] = []
     for excluded in excluded_paths or []:
         try:
@@ -825,6 +836,16 @@ def scan_directory(
         except OSError:
             return False
         return any(resolved == excluded or excluded in resolved.parents for excluded in excluded_roots)
+
+    def _scope_path(item: Path) -> str:
+        """An entry's path in the scope's form: relative to the scan's root, or absolute."""
+        resolved = _resolved_entry(item)
+        if scope_rules.absolute:
+            return scope_rules.path_of(str(resolved))
+        try:
+            return scope_rules.path_of(str(resolved.relative_to(containment)))
+        except ValueError:
+            return scope_rules.path_of(item.name)
 
     def _emit_progress(force: bool = False) -> None:
         if progress_callback is None:
@@ -864,6 +885,27 @@ def scan_directory(
         except OSError:
             return
         extension = detect_extension(item)
+        scoped_stat = None
+        if scope_tally is not None:
+            # Advanced scope, before anything is read: the name rules need no stat, the
+            # size and date rules one - which the record then reuses.
+            try:
+                reason = scope_rules.file_name_reason(_scope_path(item), extension)
+            except OSError:
+                return
+            if not reason and scope_rules.needs_metadata:
+                try:
+                    scoped_stat = item.stat()
+                except OSError:
+                    return
+                reason = scope_rules.file_meta_reason(scoped_stat.st_size, scoped_stat.st_mtime)
+            if reason:
+                progress_counters["visited"] += 1
+                _emit_progress()
+                if diagnostics is not None:
+                    diagnostics["visited_files"] = int(diagnostics.get("visited_files") or 0) + 1
+                scope_tally.file(reason)
+                return
         is_hidden = is_hidden_path(item)
         is_system = is_system_path(item)
         attributes = file_attribute_label(item, is_hidden, is_system)
@@ -893,7 +935,7 @@ def scan_directory(
             return
 
         try:
-            stat = item.stat()
+            stat = scoped_stat or item.stat()
         except OSError:
             return
         created_at = datetime.fromtimestamp(stat.st_ctime, timezone.utc).isoformat()
@@ -1291,6 +1333,12 @@ def scan_directory(
                     if diagnostics is not None:
                         diagnostics["skipped_dirs"] = int(diagnostics.get("skipped_dirs") or 0) + 1
                     continue
+                if scope_tally is not None:
+                    reason = scope_rules.folder_reason(_scope_path(item), item.name)
+                    if reason:
+                        # Out of scope: not listed, so nothing under it is counted or read.
+                        scope_tally.folder(reason)
+                        continue
                 walk(item, depth + 1)
                 continue
 
@@ -1304,6 +1352,14 @@ def scan_directory(
     else:
         walk(root_path, 0)
 
+    if diagnostics is not None and scope_tally is not None:
+        block = scope_tally.to_dict(scope if isinstance(scope, dict) else None)
+        if isinstance(diagnostics.get("scope"), dict):
+            # One diagnostics dict over several roots (a local endpoint's folders): added up.
+            from collectors.scan_scope import merge_diagnostics
+
+            block = merge_diagnostics([diagnostics["scope"], block])
+        diagnostics["scope"] = block
     _emit_progress(force=True)
     return [record.to_dict() if isinstance(record, FileRecord) else record for record in records]
 

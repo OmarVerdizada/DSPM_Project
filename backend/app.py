@@ -17,7 +17,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -185,6 +185,7 @@ from classification.compliance.nist_catalog import (
     rollback_nist_catalog,
     validate_nist_catalog,
 )
+from collectors import scan_scope
 from collectors.file_scanner import normalize_extension_filter, scan_directory
 from collectors.net_guard import resolve_addresses
 from backend import target_scope
@@ -844,6 +845,65 @@ async def artifact_corrupted_handler(_: Request, __: ArtifactCorrupted) -> JSONR
     )
 
 
+class ScanScope(BaseModel):
+    """Advanced scan scope (collectors.scan_scope): what a scan leaves out before it reads it.
+
+    Every rule is optional, and an exclusion always wins. On a file server, paths are
+    relative to the scan's target - ``Finance/Archive`` under the local folder, or
+    ``share/folder`` (or ``\\server\share\folder``) over SMB; on an endpoint, absolute.
+    The extension policy (``allowed_extensions``) stays the include side for file types.
+    """
+
+    exclude_extensions: list[str] = Field(default_factory=list, max_length=200,
+                                          description="Never scan files with these extensions")
+    min_size_bytes: int | None = Field(default=None, ge=0, le=scan_scope.MAX_SCOPE_BYTES,
+                                       description="Skip files smaller than this")
+    max_size_bytes: int | None = Field(default=None, ge=1, le=scan_scope.MAX_SCOPE_BYTES,
+                                       description="Skip files larger than this")
+    include_paths: list[str] = Field(default_factory=list, max_length=100,
+                                     description="Walk only these folders (and what is under them)")
+    exclude_paths: list[str] = Field(default_factory=list, max_length=200,
+                                     description="Skip these folders or files and everything under them")
+    exclude_folder_patterns: list[str] = Field(default_factory=list, max_length=100,
+                                               description="Skip any folder whose name matches (* and ?)")
+    modified_after: date | None = Field(default=None, description="Skip files last modified before this date (UTC)")
+
+    @field_validator("exclude_extensions")
+    @classmethod
+    def _clean_extensions(cls, values: list[str]) -> list[str]:
+        return scan_scope.clean_extensions(values)
+
+    @field_validator("exclude_folder_patterns")
+    @classmethod
+    def _clean_patterns(cls, values: list[str]) -> list[str]:
+        return scan_scope.clean_patterns(values)
+
+    @field_validator("include_paths", "exclude_paths")
+    @classmethod
+    def _clean_paths(cls, values: list[str]) -> list[str]:
+        # What holds for any target - no wildcard, no "..", no control character; whether a
+        # path must be relative or absolute is the scan type's, checked by the request.
+        return scan_scope.clean_paths(values, absolute=None)
+
+    @field_validator("modified_after")
+    @classmethod
+    def _not_in_the_future(cls, value: date | None) -> date | None:
+        if value is not None and value > datetime.now(timezone.utc).date():
+            raise ValueError("the modified-after date is in the future: no file would be scanned")
+        return value
+
+    @model_validator(mode="after")
+    def _limits_in_order(self) -> "ScanScope":
+        if self.min_size_bytes is not None and self.max_size_bytes is not None \
+                and self.min_size_bytes > self.max_size_bytes:
+            raise ValueError("the minimum file size is larger than the maximum: no file would be scanned")
+        return self
+
+    def canonical(self, *, absolute: bool) -> dict | None:
+        """The rules a scan's configuration carries, or None when none is set."""
+        return scan_scope.canonical(self.model_dump(mode="json"), absolute=absolute)
+
+
 class ConnectionRequest(BaseModel):
     server: str = Field(default="", description="AD file server hostname or IP", max_length=255)
     username: str = Field(default="", max_length=160)
@@ -865,6 +925,9 @@ class ConnectionRequest(BaseModel):
     # downgraded - naming the shares (they cannot be listed over that transport).
     smb_encryption: bool = False
     smb_shares: list[str] = Field(default_factory=list, max_length=200)
+    # Advanced scan scope: part of the scan's definition, so a resumed, scheduled or
+    # queued run - and every incremental one - applies exactly these rules.
+    scope: ScanScope = Field(default_factory=ScanScope)
 
     @field_validator("smb_shares")
     @classmethod
@@ -893,6 +956,30 @@ class ConnectionRequest(BaseModel):
         # items, strip globs/quotes, drop invalid tokens - never raise. A typo or
         # a "*.pdf" no longer fails the whole scan, and every scan type agrees.
         return sorted(normalize_extension_filter(values))
+
+    @model_validator(mode="after")
+    def _scope_paths_for_target(self) -> "ConnectionRequest":
+        """A file server's scope paths are relative to its target: an SMB scan's are
+        ``share/folder`` - a UNC path naming this server is turned into one - and a local
+        scan's are folders under its local path."""
+        scope = self.scope
+        if not (scope.include_paths or scope.exclude_paths):
+            return self
+        server = "" if _is_local_endpoint_host(self.server) else self.server.strip()
+
+        def tidy(values: list[str]) -> list[str]:
+            cleaned = scan_scope.clean_paths(values, absolute=False)
+            if server:
+                return [scan_scope.unc_to_share_path(value, server) for value in cleaned]
+            for value in cleaned:
+                if value.startswith(("\\\\", "//")):
+                    raise ValueError(f"{value!r}: a local scan's paths are folders under its local path, "
+                                     "not network paths")
+            return cleaned
+
+        self.scope = scope.model_copy(update={"include_paths": tidy(scope.include_paths),
+                                              "exclude_paths": tidy(scope.exclude_paths)})
+        return self
 
 
 class AssetOverride(BaseModel):
@@ -953,6 +1040,8 @@ class EndpointScanRequest(BaseModel):
     compliance_enabled: bool = False
     compliance_frameworks: list[str] = Field(default_factory=list, max_length=12)
     incremental_enabled: bool = True
+    # Advanced scan scope, with absolute paths; the folders to walk are ``paths``.
+    scope: ScanScope = Field(default_factory=ScanScope)
     # C0.1: how this scan reaches the endpoint. The collector has spoken TLS all
     # along; until these existed the API could not ask for it, so every scan and
     # preflight the console started was cleartext HTTP on 5985 - and an install
@@ -990,6 +1079,17 @@ class EndpointScanRequest(BaseModel):
                 f"this path is not: {cleaned}"
             )
         return cleaned
+
+    @model_validator(mode="after")
+    def _scope_paths_on_the_endpoint(self) -> "EndpointScanRequest":
+        """An endpoint's folders are chosen by ``paths``; its scope only leaves things out,
+        by absolute path."""
+        if self.scope.include_paths:
+            raise ValueError("On an endpoint, the folders to scan are its paths; scope can only leave folders out")
+        if self.scope.exclude_paths:
+            self.scope = self.scope.model_copy(
+                update={"exclude_paths": scan_scope.clean_paths(self.scope.exclude_paths, absolute=True)})
+        return self
 
     @model_validator(mode="after")
     def _validate_endpoint_transport(self) -> "EndpointScanRequest":
@@ -5833,7 +5933,8 @@ def _run_endpoint_page(scan, unit: dict, *, job, stop_reason) -> tuple[dict, lis
             if not config.read_content:
                 report.last_scan_diagnostics["incremental"]["content_reads"] = 0
                 report.last_scan_diagnostics["incremental"]["delta_ratio"] = 0.0
-            summary = report._build_summary(analyzed).to_dict()
+            summary = {**report._build_summary(analyzed).to_dict(),
+                       **scan_scope.summary_fields(report.last_scan_diagnostics)}
             diagnostics = dict(report.last_scan_diagnostics or {})
     reason = stop_reason()
     if reason:
@@ -6080,7 +6181,8 @@ def _collect_and_persist_remote_endpoint(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "endpoint-winrm",
         "mode": "incremental" if payload.incremental_enabled else "full",
-        "summary": report._build_summary(analyzed).to_dict(),
+        "summary": {**report._build_summary(analyzed).to_dict(),
+                    **scan_scope.summary_fields(report.last_scan_diagnostics)},
         "files": analyzed,
         "scan_diagnostics": report.last_scan_diagnostics,
         "endpoint": {
@@ -6202,6 +6304,7 @@ def _collect_and_persist_local_endpoint(
                 ),
                 # the install's own data folder, database and key folder are never data here
                 excluded_paths=product_private_paths(),
+                scope=config.scope,
             )
         except (FileNotFoundError, OSError) as exc:
             scan_errors.append(f"{path}: {exc}")
@@ -6243,7 +6346,8 @@ def _collect_and_persist_local_endpoint(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "endpoint-local",
         "mode": "incremental" if payload.incremental_enabled else "full",
-        "summary": report._build_summary(analyzed).to_dict(),
+        "summary": {**report._build_summary(analyzed).to_dict(),
+                    **scan_scope.summary_fields(report.last_scan_diagnostics)},
         "files": analyzed,
         "scan_diagnostics": report.last_scan_diagnostics,
         "endpoint": {
@@ -6482,6 +6586,11 @@ def _file_scan_scope(
             # keeps the scope it always had, so no baseline is orphaned.
             **({"scan_level": payload.scan_level}
                if getattr(payload, "scan_level", "standard") != "standard" else {}),
+            # Advanced scope changes which files the scan can see: a scoped scan keeps its
+            # own baseline, or a narrower run would read as the broader one's deletions.
+            # A scan without one keeps the key it always had.
+            **({"scope": scan_scope.digest(rules)}
+               if (rules := payload.scope.canonical(absolute=False)) else {}),
         },
     )
 
@@ -6504,6 +6613,7 @@ def _endpoint_scan_scope(config: WinRMEndpointConfig) -> str:
             "hidden_filter_enabled": config.hidden_filter_enabled,
             "system_filter_enabled": config.system_filter_enabled,
             "inspect_archives": config.inspect_archives,
+            **({"scope": scan_scope.digest(config.scope)} if config.scope else {}),
         },
     )
 
@@ -6641,6 +6751,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         suppression_rules=suppression_rules_for_scan(tenant_id),
         exact_match=_exact_match_for_scan(tenant_id),
         baseline_probe=_incremental_probe(tenant_id, scope_key, incremental_enabled),
+        scope=payload.scope.canonical(absolute=False),
     )
 
 
@@ -6705,6 +6816,7 @@ def _to_endpoint_config(payload: EndpointScanRequest, tenant_id: str) -> WinRMEn
         cert_thumbprint=payload.cert_thumbprint if payload.cert_trust == "thumbprint" else "",
         insecure_tls=payload.cert_trust == "insecure",
         kerberos_mode=payload.kerberos,
+        scope=payload.scope.canonical(absolute=True),
     )
 
 
