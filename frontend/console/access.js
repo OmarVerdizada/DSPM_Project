@@ -148,7 +148,10 @@ async function loadAccessFiles({ append = false } = {}) {
     const files = data.files || [];
     const rows = files.map((file) => accessFileRow(file, Boolean(accessChosen.kind))).join("");
     if (append) {
-      parts.files.insertAdjacentHTML("beforeend", rows);
+      // The rows are built escaped above; parsed in a detached body and moved in.
+      const holder = document.createElement("tbody");
+      holder.innerHTML = rows;
+      parts.files.append(...holder.children);
     } else {
       parts.files.innerHTML = rows || `<tr><td colspan="4" class="empty">${parts.sensitive?.checked
         ? "None of these files holds findings."
