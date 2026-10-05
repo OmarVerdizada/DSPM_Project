@@ -370,6 +370,7 @@ IS_PRODUCTION = ENVIRONMENT in {"prod", "production"}
 from backend import db as _db
 from backend import store as store_module
 from backend.artifacts import ArtifactCorrupted, ArtifactMissing
+from backend.runtime_identity import APP_VERSION
 
 DATABASE_IDENTITY = _db.enforce_database_authority(IS_PRODUCTION)
 REPORT_DIR = Path(os.getenv("DSPM_REPORT_DIR", BASE_DIR / "data" / "reports")).resolve()
@@ -426,6 +427,17 @@ async def app_lifespan(_: FastAPI):
                 f"housekeeping removes each {days} days after it was written (DSPM_RETAIN_REPORT_FILE_DAYS)."
                 if days else "DSPM_RETAIN_REPORT_FILE_DAYS=0 keeps them; set a number of days to age them out.",
             )
+    # Which build this is, the schema it supports and the database it serves, in the log;
+    # and registered on that database, so another build there can be told apart - and
+    # an import from another checkout does not upgrade the database under this server.
+    with suppress(Exception):
+        from backend import migrations as _migrations
+        from backend import runtime_identity
+
+        with store_module._connect() as _conn:
+            _applied = _migrations.current_revision(_conn)
+        runtime_identity.log_startup(_applied)
+        runtime_identity.register("server")
     # ARCH-003: at server startup, mark jobs orphaned by a prior process as
     # failed and prune old terminal records. Done here (not at import) so tools
     # and tests that import the app do not mutate persisted job state.
@@ -525,6 +537,10 @@ async def app_lifespan(_: FastAPI):
             from backend.search import stop_search_reconciler
 
             stop_search_reconciler()
+        with suppress(Exception):
+            from backend import runtime_identity
+
+            runtime_identity.deregister()
         # Close the DB connection pool cleanly on shutdown (no-op on SQLite), and the
         # held SQLite connection last, after optimize and every thread above.
         with suppress(Exception):
@@ -540,7 +556,7 @@ async def app_lifespan(_: FastAPI):
 app = FastAPI(
     title="DSPM DLP Discovery API",
     description="Discovers sensitive data on AD file servers and produces DLP-ready risk context.",
-    version="1.0.0",
+    version=APP_VERSION,
     docs_url=None if IS_PRODUCTION else "/docs",
     redoc_url=None if IS_PRODUCTION else "/redoc",
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
@@ -1524,6 +1540,33 @@ def database_metrics(principal: Principal = Depends(require_permission("platform
     from backend import observability
 
     return observability.collect()
+
+
+@app.get("/api/admin/runtime")
+def runtime_status(principal: Principal = Depends(require_permission("platform.admin"))) -> dict:
+    """Which build serves this database, and which others do (startup diagnostics).
+
+    This process - version, commit, source tree, the schema revision it supports and the
+    one its source tree on disk supports now - the database's location (never a
+    credential) and revision, and every server or worker registered on it with its
+    build. Two builds on one database, or a process older than its own checkout, show
+    here before they show as a refused sign-in.
+    """
+    from backend import migrations, runtime_identity
+
+    info = migrations.status()
+    with store_module._connect() as conn:
+        newest = conn.execute("SELECT revision, name, applied_at FROM schema_migrations "
+                              "ORDER BY revision DESC LIMIT 1").fetchone()
+    return {
+        "this": {**runtime_identity.identity("server"), "on_disk_revision": runtime_identity.on_disk_revision()},
+        "database": {**runtime_identity.database_location(), "applied_revision": info["applied_revision"],
+                     "expected_revision": info["expected_revision"],
+                     "pending": [item["revision"] for item in info["pending"]],
+                     "checksum_drift": len(info["checksum_drift"]),
+                     "newest_revision": dict(newest) if newest is not None else None},
+        "instances": store_module.runtime_instances(runtime_identity.STALE_SECONDS),
+    }
 
 
 @app.get("/api/admin/db-slow-queries")

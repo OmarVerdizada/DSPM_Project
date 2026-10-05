@@ -170,11 +170,17 @@ def work(args: argparse.Namespace) -> None:
     logger.info("Partition worker %s is taking work from the %s", worker_id, type(queue).__name__)
     # P4: a worker polls the ledger all day; see db.hold_sqlite_open.
     db.hold_sqlite_open(store.DB_PATH)
+    from backend import migrations, runtime_identity
+
+    with store._connect() as conn:
+        runtime_identity.log_startup(migrations.current_revision(conn))
+    runtime_identity.register("worker")
     try:
         run_worker(queue, rebuild_scan_config, worker_id=worker_id)
     except KeyboardInterrupt:
         logger.info("Partition worker %s stopped", worker_id)
     finally:
+        runtime_identity.deregister()
         db.release_sqlite_anchor()
 
 
@@ -268,20 +274,45 @@ def migrate_command(args: argparse.Namespace) -> int:
     """Schema revisions. The database is opened without converging it (what `migrations`
     does on its own), so `status` reads what is there and `upgrade` is the only writer."""
     os.environ["DSPM_MIGRATIONS_CLI"] = "1"
-    from backend import migrations
+    from backend import migrations, runtime_identity, store
+
+    def live_instances() -> list[dict]:
+        try:
+            return store.runtime_instances(runtime_identity.STALE_SECONDS)
+        except Exception:  # noqa: BLE001 - a database older than the registry has none
+            return []
 
     if args.migrate_command == "upgrade":
+        # Deliberate, unlike an import's: it goes ahead, and says which running process
+        # will stop serving data because of it.
+        expected = migrations.expected_revision()
+        for item in live_instances():
+            if int(item.get("schema_supported") or 0) < expected:
+                print(f"warning: a running {runtime_identity.describe_instance(item)} supports only revision "
+                      f"{item.get('schema_supported')}; it stops serving data once this upgrade lands.",
+                      file=sys.stderr)
         migrations.upgrade()
     info = migrations.status()
+    instances = live_instances()
     summary = {"backend": info["backend"], "applied_revision": info["applied_revision"],
                "expected_revision": info["expected_revision"],
-               "pending": [item["revision"] for item in info["pending"]]}
+               "pending": [item["revision"] for item in info["pending"]],
+               "database": runtime_identity.database_location(), "source_tree": runtime_identity.source_tree(),
+               "commit": runtime_identity.git_revision()["commit"],
+               "instances": [{key: item.get(key) for key in ("role", "host", "pid", "schema_supported", "commit",
+                                                             "source_tree", "started_at", "age_seconds")}
+                             for item in instances]}
     if args.json:
         print(json.dumps(summary))
     else:
         print(f"{info['backend']}: schema at revision {info['applied_revision']}, "
               f"this build expects {info['expected_revision']}"
               + (f"; pending {summary['pending']}" if summary["pending"] else ""))
+        print(f"database: {runtime_identity.describe_location(summary['database'])}")
+        print(f"this build: {runtime_identity.source_tree()}"
+              + (f" (commit {summary['commit']})" if summary["commit"] else ""))
+        for item in instances:
+            print("running: " + runtime_identity.describe_instance(item))
     return 0
 
 

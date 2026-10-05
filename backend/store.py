@@ -2796,6 +2796,72 @@ def apply_baseline_schema(conn) -> None:
 
 
 
+def _database_clock(conn) -> datetime:
+    """The database server's clock, in UTC (W2.4 review).
+
+    Heartbeats are written and judged on this one clock. Judged on each backend's own,
+    a host whose clock ran more than the stale interval behind another's would see that
+    host's live jobs as abandoned and take them.
+    """
+    if db.is_postgres():
+        value = conn.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
+    else:
+        value = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now') AS now").fetchone()["now"]
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+# Every server and worker registers itself in app_settings while it runs - its build, the
+# schema revision it supports, its source tree (backend.runtime_identity). Read here, at
+# import, by the upgrade a local install makes of its own database.
+RUNTIME_INSTANCE_PREFIX = "runtime.instance."
+
+
+def _read_runtime_instances(conn) -> tuple[datetime, list[dict]]:
+    """(the database's clock, every registered process with its heartbeat's age)."""
+    now = _database_clock(conn)
+    found: list[dict] = []
+    for row in conn.execute("SELECT key, value FROM app_settings WHERE key LIKE ?",
+                            (RUNTIME_INSTANCE_PREFIX + "%",)).fetchall():
+        try:
+            item = json.loads(row["value"])
+            beat = datetime.fromisoformat(str(item.get("heartbeat_at") or ""))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if beat.tzinfo is None:
+            beat = beat.replace(tzinfo=timezone.utc)
+        item["age_seconds"] = round(max(0.0, (now - beat).total_seconds()), 1)
+        found.append(item)
+    return now, found
+
+
+def _live_older_server(applied: int, expected: int) -> str:
+    """Why this process must not upgrade its database at import: a live server of an older
+    build serves it, and would stop serving data the moment it did (C0.4). "" when
+    nothing stands in the way. This is how a development command run from a checkout
+    upgraded the database a running server used, 2026-10-05."""
+    from backend import runtime_identity
+
+    try:
+        with _connect() as conn:
+            _, instances = _read_runtime_instances(conn)
+    except Exception:  # noqa: BLE001 - no registry (a database older than app_settings): nobody to protect
+        return ""
+    for item in instances:
+        if item["age_seconds"] >= runtime_identity.STALE_SECONDS:
+            continue
+        if int(item.get("schema_supported") or 0) < expected:
+            return (f"Refusing to upgrade {runtime_identity.describe_location()} from schema revision {applied} to "
+                    f"{expected}: a running Sentro {runtime_identity.describe_instance(item)} serves it and supports "
+                    f"only revision {item.get('schema_supported')}. Upgrading would stop it serving data. Stop that "
+                    "process first, point DSPM_DB_PATH or DSPM_DB_URL at a database of this process's own, or "
+                    "upgrade deliberately with `python main.py migrate upgrade`.")
+    return ""
+
+
 def ensure_schema_ready() -> None:
     """Startup schema policy (Phase 2, DB-05).
 
@@ -2812,6 +2878,15 @@ def ensure_schema_ready() -> None:
     if os.getenv("DSPM_ENV", "local").strip().lower() in {"prod", "production"}:
         migrations.verify_or_raise()
     else:
+        # An import upgrades a local install's database - unless a live server of an
+        # older build is serving it.
+        with _connect() as conn:
+            applied = migrations.current_revision(conn)
+        expected = migrations.expected_revision()
+        if 0 < applied < expected:
+            blocker = _live_older_server(applied, expected)
+            if blocker:
+                raise RuntimeError(blocker)
         migrations.upgrade()
 
 
@@ -4825,24 +4900,6 @@ def job_stale_seconds() -> int:
         return max(30, int(os.getenv("DSPM_JOB_STALE_SECONDS") or DEFAULT_JOB_STALE_SECONDS))
     except ValueError:
         return DEFAULT_JOB_STALE_SECONDS
-
-
-def _database_clock(conn) -> datetime:
-    """The database server's clock, in UTC (W2.4 review).
-
-    Heartbeats are written and judged on this one clock. Judged on each backend's own,
-    a host whose clock ran more than the stale interval behind another's would see that
-    host's live jobs as abandoned and take them.
-    """
-    if db.is_postgres():
-        value = conn.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
-    else:
-        value = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now') AS now").fetchone()["now"]
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def job_owner_state(row: dict, *, this_instance: str, this_host: str, now: datetime,
@@ -11687,6 +11744,41 @@ def set_app_setting(key: str, value: str) -> None:
             )
 
 
+def register_runtime_instance(identity: dict) -> None:
+    """Record (or renew) a running process in the registry, on the database's clock, and
+    drop rows nothing has renewed for a day."""
+    instance = str(identity.get("instance_id") or "")
+    if not instance:
+        return
+    with _lock:
+        with _connect() as conn:
+            now = _database_clock(conn)
+            record = {**identity, "heartbeat_at": now.isoformat()}
+            conn.execute(
+                "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (RUNTIME_INSTANCE_PREFIX + instance, json.dumps(record, sort_keys=True, default=str), now.isoformat()),
+            )
+            conn.execute("DELETE FROM app_settings WHERE key LIKE ? AND updated_at < ?",
+                         (RUNTIME_INSTANCE_PREFIX + "%", (now - timedelta(days=1)).isoformat()))
+
+
+def forget_runtime_instance(instance_id: str) -> None:
+    with _lock:
+        with _connect() as conn:
+            conn.execute("DELETE FROM app_settings WHERE key = ?", (RUNTIME_INSTANCE_PREFIX + str(instance_id),))
+
+
+def runtime_instances(max_age_seconds: float | None = None) -> list[dict]:
+    """The registered processes - those renewed within ``max_age_seconds`` when given -
+    each with ``age_seconds``, oldest heartbeat last."""
+    with _connect() as conn:
+        _, instances = _read_runtime_instances(conn)
+    if max_age_seconds is not None:
+        instances = [item for item in instances if item["age_seconds"] < max_age_seconds]
+    return sorted(instances, key=lambda item: item["age_seconds"])
+
+
 def delete_user(username: str) -> dict | None:
     user = get_user(username)
     if user is None:
@@ -12243,6 +12335,9 @@ NO_TENANT_TABLES = {
     "revoke_refresh_family", "revoke_refresh_tokens_for_user", "count_sessions_for_user",
     "forget_session", "record_session", "session_last_seen", "touch_session",
     "revoke_sessions_for_user", "get_app_setting", "set_app_setting", "get_search_reconciliation",
+    "register_runtime_instance", "forget_runtime_instance", "runtime_instances",
+    # schema_migrations and the registry rows in app_settings, before an import upgrades.
+    "ensure_schema_ready", "_live_older_server",
     "save_search_reconciliation", "tenant_isolation_coverage", "tenants_under_legal_hold",
     # Reads the tenant list, then purges each workspace inside that workspace's own scope.
     "_purge_demo_sample_assets_everywhere",

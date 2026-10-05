@@ -61,12 +61,24 @@ def problem() -> str:
     if revision is not None and revision["applied"] > revision["expected"]:
         found = (f"The database schema is at revision {revision['applied']}, newer than this build's "
                  f"{revision['expected']}: another Sentro release has upgraded it. This server stops "
-                 f"serving data until the matching release is running.")
+                 f"serving data until the matching release is running. The server log names this "
+                 f"build, its source and the database.")
+    newly_found = False
     with _lock:
         if found and not STATE["problem"]:
             logger.error(found)
+            newly_found = True
         STATE["problem"] = found
         STATE["revision"] = revision if found else None
+    if newly_found and revision is not None:
+        # The paths, hosts and builds go to the log only: the message above reaches the
+        # sign-in page, which anybody can see.
+        try:
+            from backend import runtime_identity
+
+            logger.error(runtime_identity.mismatch_diagnosis(revision["applied"], revision["expected"]))
+        except Exception:  # noqa: BLE001 - a diagnosis never fails what it diagnoses
+            pass
     return found
 
 

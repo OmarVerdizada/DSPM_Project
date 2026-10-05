@@ -191,6 +191,7 @@ MATRIX: dict[tuple[str, str], str | tuple[str, ...]] = {
     # the installation: every tenant at once
     ("GET", "/api/admin/db-activity"): "platform.admin",
     ("GET", "/api/admin/db-metrics"): "platform.admin",
+    ("GET", "/api/admin/runtime"): "platform.admin",
     ("GET", "/api/admin/db-slow-queries"): "platform.admin",
     ("POST", "/api/nist/catalog/activate"): "platform.admin",
     ("POST", "/api/nist/catalog/import"): "platform.admin",
