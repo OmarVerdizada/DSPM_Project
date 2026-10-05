@@ -284,6 +284,13 @@ def upgrade() -> int:
             for number, name, func in _revisions():
                 if number <= applied:
                     continue
+                if not db.is_postgres() and not conn.in_transaction:
+                    # Python's sqlite3 runs DDL outside any transaction unless one is open,
+                    # so revision 38 dropped the MFA tables for good while a later revision's
+                    # failure rolled back only the history rows - the database then said 37.
+                    # Opened here, a revision and its history row land together, and a run
+                    # of them as one (an executescript revision commits what came before it).
+                    conn.execute("BEGIN IMMEDIATE")
                 func(conn)
                 conn.execute(
                     "INSERT INTO schema_migrations (revision, name, checksum, applied_at) "

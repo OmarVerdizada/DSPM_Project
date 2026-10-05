@@ -1381,13 +1381,20 @@ def widen_byte_counts(conn) -> None:
 
     The normalized write is authoritative, so one file of 2 GiB failed the asset insert
     with "integer out of range" and the whole scan was not saved. A no-op on SQLite; on
-    PostgreSQL each ALTER rewrites its table once (and is a no-op when the column is
-    BIGINT already, so the revision can be re-run). Rollback: restore the pre-upgrade
-    backup - older code reads BIGINT columns unchanged."""
+    PostgreSQL each ALTER rewrites its table once under an exclusive lock - minutes for a
+    table of millions of rows, and the table's size again in free disk while it runs.
+    A column that is BIGINT already is left alone, so a re-run takes no lock at all.
+    Rollback: restore the pre-upgrade backup - older code reads BIGINT columns unchanged."""
     if not db.is_postgres():
         return
     for table, column in _BYTE_COUNT_COLUMNS:
-        conn.execute(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT")  # noqa: S608 - fixed names
+        row = conn.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+            (table, column),
+        ).fetchone()
+        if row is not None and str(row[0]).lower() != "bigint":
+            conn.execute(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT")  # noqa: S608 - fixed names
 
 
 def add_asset_access(conn) -> None:

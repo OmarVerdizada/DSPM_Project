@@ -251,14 +251,23 @@ class ByteCountsAre64BitTest(unittest.TestCase):
     def test_the_revision_widens_every_byte_count_on_postgresql(self) -> None:
         from backend import db, store
 
-        statements = []
-        conn = MagicMock()
-        conn.execute.side_effect = lambda sql, *args: statements.append(sql)
-        with patch.object(db, "is_postgres", return_value=True):
-            store.widen_byte_counts(conn)
-        for table, column in (("assets", "size"), ("asset_versions", "size"),
-                              ("scan_reports", "report_bytes"), ("scan_partitions", "records_bytes")):
-            self.assertIn(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT", statements)
+        for current, expect_alter in (("integer", True), ("bigint", False)):
+            with self.subTest(column_type=current):
+                statements = []
+
+                def execute(sql, *args, current=current, statements=statements):
+                    statements.append(sql)
+                    return MagicMock(fetchone=MagicMock(return_value=(current,)))
+
+                conn = MagicMock()
+                conn.execute.side_effect = execute
+                with patch.object(db, "is_postgres", return_value=True):
+                    store.widen_byte_counts(conn)
+                for table, column in (("assets", "size"), ("asset_versions", "size"),
+                                      ("scan_reports", "report_bytes"), ("scan_partitions", "records_bytes")):
+                    alter = f"ALTER TABLE {table} ALTER COLUMN {column} TYPE BIGINT"
+                    # A column already BIGINT is left alone: a re-run takes no exclusive lock.
+                    self.assertEqual(alter in statements, expect_alter, alter)
 
     def test_sqlite_is_left_alone(self) -> None:
         from backend import db, store
