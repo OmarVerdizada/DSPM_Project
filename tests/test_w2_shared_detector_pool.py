@@ -55,6 +55,28 @@ class EnginesShareOnePoolTest(_Sharing):
         self.assertTrue(closed.called)
         self.assertIsNone(detector_pool._shared_pool)
 
+    def test_a_lease_left_on_a_closed_pool_does_not_hold_the_next_one(self) -> None:
+        leftover = detector_pool.build_pool(compliance_enabled=True)
+        detector_pool.shutdown_shared_pool()  # closed with a lease still out
+        lease = detector_pool.build_pool(compliance_enabled=True)
+        pool = lease._pool
+        self.assertIsNot(pool, leftover._pool)
+        with mock.patch.object(pool, "shutdown") as closed, \
+                mock.patch.dict(os.environ, {"DSPM_DETECTOR_POOL_IDLE_SECONDS": "0.05"}):
+            lease.shutdown()
+            deadline = time.monotonic() + 5
+            while not closed.called and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertTrue(closed.called, "the closed pool's lease was counted against this one")
+        again = detector_pool.build_pool(compliance_enabled=True)
+        with mock.patch.dict(os.environ, {"DSPM_DETECTOR_POOL_IDLE_SECONDS": "0.05"}):
+            leftover.shutdown()  # given back late: not one of the live pool's leases
+            passing = detector_pool.build_pool(compliance_enabled=True)
+            passing.shutdown()  # `again` still holds the pool, so it must not be reaped
+            time.sleep(0.2)
+        self.assertIs(detector_pool._shared_pool, again._pool, "a late lease from a closed pool released the live one")
+        again.shutdown()
+
     def test_a_lease_taken_before_the_idle_time_keeps_it(self) -> None:
         lease = detector_pool.build_pool(compliance_enabled=True)
         pool = lease._pool

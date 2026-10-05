@@ -195,6 +195,10 @@ class DetectorPool:
 _DEFAULT_IDLE_SECONDS = 60.0
 _shared_lock = threading.Lock()
 _shared_pool: DetectorPool | None = None
+# Leases on _shared_pool - that pool's alone. A lease still held on a pool that was
+# replaced or closed is not one of them, and giving it back does not count against the
+# pool that is there now: it used to, and a lease left over from a closed pool kept the
+# next one from ever being reaped.
 _shared_leases = 0
 _shared_reaper: threading.Timer | None = None
 
@@ -220,6 +224,7 @@ def _lease_shared(workers: int) -> DetectorPool:
             _shared_reaper = None
         if _shared_pool is None or not _shared_pool.enabled:
             stale, _shared_pool = _shared_pool, DetectorPool(workers)
+            _shared_leases = 0
         _shared_leases += 1
         pool = _shared_pool
     if stale is not None:
@@ -230,8 +235,10 @@ def _lease_shared(workers: int) -> DetectorPool:
 def _release_shared(pool: DetectorPool) -> None:
     global _shared_leases, _shared_reaper
     with _shared_lock:
+        if pool is not _shared_pool:
+            return
         _shared_leases = max(0, _shared_leases - 1)
-        if _shared_leases or pool is not _shared_pool:
+        if _shared_leases:
             return
         reaper = threading.Timer(_idle_seconds(), _reap_shared, args=(pool,))
         reaper.daemon = True
@@ -251,9 +258,10 @@ def _reap_shared(pool: DetectorPool) -> None:
 
 def shutdown_shared_pool() -> None:
     """Close the process's pool now (tests, and a process on its way out)."""
-    global _shared_pool, _shared_reaper
+    global _shared_pool, _shared_leases, _shared_reaper
     with _shared_lock:
         pool, _shared_pool = _shared_pool, None
+        _shared_leases = 0
         if _shared_reaper is not None:
             _shared_reaper.cancel()
             _shared_reaper = None
