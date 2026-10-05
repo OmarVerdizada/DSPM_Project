@@ -393,6 +393,8 @@
                 </div>
               </section>
 
+<section class="scan-card scope-card" aria-label="Advanced scan scope" data-scan-scope="file-server"></section>
+
 <section class="scan-card" aria-label="Compliance mapping">
                 <div class="scan-card-head">
                   <span class="scan-card-ico" aria-hidden="true">
@@ -455,6 +457,11 @@
                       <button type="button" class="review-row" data-wizard-goto="2">
                         <span class="review-label">File types</span>
                         <span class="review-value" id="scan-summary-policy">Recommended</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Scope</span>
+                        <span class="review-value" id="scan-summary-scope">No scope rules - everything the file types allow</span>
                         <span class="review-edit" aria-hidden="true">Edit</span>
                       </button>
                       <div class="review-row review-row-static">
@@ -1606,6 +1613,8 @@
               <button type="button" id="endpoint-ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
             </div>
 
+<div class="scope-card endpoint-scope-card" data-scan-scope="endpoint"></div>
+
 <div class="compliance-selector endpoint-compliance-selector" data-compliance-scope="endpoint">
               <div class="compliance-selector-head">
                 <label class="checkbox-row option-tile compliance-toggle">
@@ -2027,9 +2036,10 @@
     <script src="/static/console/alerts.js?v=1"></script>
     <script src="/static/console/access.js?v=1"></script>
     <script src="/static/console/exact-match.js?v=1"></script>
-    <script src="/static/app.js?v=256"></script>
+    <script src="/static/console/scan-scope.js?v=1"></script>
+    <script src="/static/app.js?v=257"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
-    <script src="/static/scan-summary.js?v=2"></script>
+    <script src="/static/scan-summary.js?v=3"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
     <script src="/static/sentro-fx.js?v=16" defer></script>
   </body>

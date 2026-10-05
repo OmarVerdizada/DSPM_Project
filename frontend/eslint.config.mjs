@@ -24,6 +24,14 @@ const FROM_FEATURES = {
   // console/exact-match.js
   loadExactMatchSets: "readonly",
   resetExactMatchForm: "readonly",
+  // console/scan-scope.js
+  applyScanScope: "readonly",
+  countScanScopeRules: "readonly",
+  readScanScope: "readonly",
+  scanScopeHistoryNote: "readonly",
+  scanScopeProblem: "readonly",
+  scanScopeReviewText: "readonly",
+  scanScopeSkipsHidden: "readonly",
 };
 const FROM_APP = {
   accessToken: "readonly",
@@ -49,6 +57,11 @@ export default [
   {
     files: ["app.js"],
     languageOptions: { ...base, globals: { ...globals.browser, ...FROM_FEATURES } },
+  },
+  {
+    // The wizard's review mirror reads the scope's one-line summary when it renders.
+    files: ["scan-summary.js"],
+    languageOptions: { ...base, globals: { ...globals.browser, scanScopeReviewText: "readonly" } },
   },
   {
     files: ["console/*.js"],

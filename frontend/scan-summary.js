@@ -53,6 +53,8 @@
     setText("scan-summary-path", server ? "\\\\" + server + "\\" + fieldValue("smb_shares", "*") : fieldValue("local_path", "—"));
     setText("scan-summary-depth", fieldValue("max_depth", "—"));
     setText("scan-summary-policy", policyLabel());
+    // Advanced scan scope (console/scan-scope.js): how many rules, and what they leave out.
+    if (typeof scanScopeReviewText === "function") setText("scan-summary-scope", scanScopeReviewText("file-server"));
     Object.keys(optionInputs).forEach(function (key) {
       var input = document.getElementById(optionInputs[key]);
       var chip = panel.querySelector('[data-summary-option="' + key + '"]');

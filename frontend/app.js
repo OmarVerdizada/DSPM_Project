@@ -1005,10 +1005,12 @@ function readPayload() {
     max_depth: Number(data.get("max_depth") || 4),
     allowed_extensions: selectedFileExtensions,
     extension_filter_enabled: selectedFileExtensions.length > 0,
-    include_hidden: true,
+    include_hidden: !scanScopeSkipsHidden("file-server"),
     include_system: selectedExtensions.includes("__system__"),
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
     system_filter_enabled: selectedExtensions.includes("__system__"),
+    // Advanced scan scope (console/scan-scope.js): applied by the server as it enumerates.
+    scope: readScanScope("file-server"),
     include_admin_shares: Boolean(data.get("include_admin_shares")),
     inspect_archives: Boolean(data.get("inspect_archives")),
     scan_level: String(data.get("scan_level") || "standard"),
@@ -1368,10 +1370,11 @@ function readEndpointPayload() {
     incremental_enabled: document.querySelector("#endpoint-incremental-enabled")?.checked ?? true,
     allowed_extensions: effectiveAllowedExtensions,
     extension_filter_enabled: effectiveAllowedExtensions.length > 0,
-    include_hidden: true,
+    include_hidden: !scanScopeSkipsHidden("endpoint"),
     include_system: selectedExtensions.includes("__system__"),
     hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
     system_filter_enabled: selectedExtensions.includes("__system__"),
+    scope: readScanScope("endpoint"),
     save_report: true,
     ...readEndpointTransport(),
     asset_overrides: assetRules,
@@ -10407,6 +10410,9 @@ function buildHistoryRows(items) {
 // policy working, not a gap.
 function scanCoverageNote(summary = {}) {
   const parts = [];
+  // A scoped scan says so first: what it left out was chosen, not missed.
+  const scoped = scanScopeHistoryNote(summary);
+  if (scoped) parts.push(scoped);
   const partial = Number(summary.content_partial || 0);
   const skipped = Number(summary.content_skipped_policy || 0);
   const failed = Number(summary.content_failed || 0);
@@ -12877,13 +12883,16 @@ function profileChips(profile) {
   const config = profile.config || {};
   const ui = config.ui || {};
   const chips = [];
+  const scopeRules = countScanScopeRules(config.scope || {}, { skipHidden: config.include_hidden === false });
   if (profile.kind === "endpoint") {
     chips.push({ label: ENDPOINT_SCOPE_LABELS[ui.path_scope] || "Scope", on: true });
+    if (scopeRules) chips.push({ label: `Scope rules ${scopeRules}`, on: true });
     chips.push({ label: `Depth ${config.max_depth ?? 6}` });
     if (config.read_acl) chips.push({ label: "ACL", on: true });
     if (config.incremental_enabled) chips.push({ label: "Incremental", on: true });
   } else {
     chips.push({ label: EXT_PRESET_LABELS[ui.ext_preset] || "Custom types", on: true });
+    if (scopeRules) chips.push({ label: `Scope rules ${scopeRules}`, on: true });
     chips.push({ label: `Depth ${config.max_depth ?? 4}` });
     if (config.incremental_enabled) chips.push({ label: "Incremental", on: true });
     if (config.inspect_archives) chips.push({ label: "ZIP" });
@@ -13145,6 +13154,17 @@ function validateWizardStep(kind, step) {
       }
     }
   }
+  if (step === 2) {
+    // Advanced scan scope: the server's own checks, named beside the field.
+    const server = kind === "file-server" ? document.querySelector("#server").value.trim() : "";
+    const scopeProblem = scanScopeProblem(kind, { server });
+    if (scopeProblem) return scopeProblem;
+    const hiddenOnly = readSelectedExtensions(kind === "endpoint" ? endpointAllowedExtensionsList : undefined)
+      .includes("__hidden__");
+    if (hiddenOnly && scanScopeSkipsHidden(kind)) {
+      return { field: `#${kind}-scope-skip_hidden`, message: "The file types ask for hidden files only, and the scope skips them: nothing would be scanned." };
+    }
+  }
   if (step === 2 && kind === "endpoint") {
     try {
       readEndpointPayload();
@@ -13275,6 +13295,8 @@ function applyFileServerProfile(profile) {
   document.querySelector("#smb_shares").value = (config.smb_shares || []).join(", ");
   applyExtensionUiState("file-server", profile ? ui : { ext_preset: "recommended" });
   applyComplianceState("file-server", config.compliance_enabled, config.compliance_frameworks);
+  // A saved scan keeps its scope; one saved before scopes existed has none.
+  applyScanScope("file-server", config.scope, config.include_hidden);
   document.dispatchEvent(new Event("scan-form-updated"));
 }
 
@@ -13307,6 +13329,7 @@ function applyEndpointProfile(profile) {
   syncEndpointTransportFields();
   applyExtensionUiState("endpoint", profile ? ui : { ext_preset: "all" });
   applyComplianceState("endpoint", config.compliance_enabled, config.compliance_frameworks);
+  applyScanScope("endpoint", config.scope, config.include_hidden);
 }
 
 function syncWinrmActivationFields() {
@@ -13438,6 +13461,11 @@ function renderEndpointReview() {
     <button type="button" class="review-row" data-wizard-goto="2">
       <span class="review-label">Scope</span>
       <span class="review-value"><b>${escapeHtml(scopeLabel)}</b><small>depth ${escapeHtml(depth)}</small></span>
+      <span class="review-edit" aria-hidden="true">Edit</span>
+    </button>
+    <button type="button" class="review-row" data-wizard-goto="2">
+      <span class="review-label">Scope rules</span>
+      <span class="review-value">${escapeHtml(scanScopeReviewText("endpoint"))}</span>
       <span class="review-edit" aria-hidden="true">Edit</span>
     </button>
     <div class="review-row review-row-static">
