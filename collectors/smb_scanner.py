@@ -22,7 +22,7 @@ from typing import Callable
 
 from discovery.parallelism import host_admission_budget, resolve_parallelism
 
-from collectors import content_policy
+from collectors import content_policy, pysmb_compat, smb_target
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_bytes_detail
 from collectors.net_guard import TargetNotAllowed, resolve_and_pin
 from collectors.text_decode import decode_text
@@ -47,6 +47,15 @@ from collectors.file_scanner import (
     scan_mode_for_extension,
 )
 from scripts.logger import get_logger
+
+# W2.3: a read-only open lets the file be deleted or renamed meanwhile, as the SMB 3
+# transport already does.
+pysmb_compat.allow_delete_while_reading()
+
+# W2.3: the credential that worked for a server is tried first next time, instead of
+# failing through the others on every session a scan opens.
+_working_credentials: dict[tuple[str, str], str] = {}
+_working_credentials_lock = threading.Lock()
 
 logger = get_logger(__name__)
 
@@ -158,6 +167,32 @@ def _is_access_denied(exc: Exception) -> bool:
 _RANGE_READ_BUFFER = 64 * 1024
 
 
+class _GatedConnection:
+    """A session whose reads are counted against, and held to, its server's gate (W2.3).
+    Everything else is the session's own."""
+
+    def __init__(self, connection, gate) -> None:
+        self._connection = connection
+        self._gate = gate
+
+    def retrieveFileFromOffset(self, share, path, buffer, offset=0, max_length=-1, **kwargs):
+        try:
+            before = buffer.tell()
+        except (AttributeError, OSError, ValueError):
+            before = None
+        result = self._connection.retrieveFileFromOffset(share, path, buffer, offset=offset, max_length=max_length,
+                                                         **kwargs)
+        try:
+            read = buffer.tell() - before if before is not None else 0
+        except (AttributeError, OSError, ValueError):
+            read = 0
+        self._gate.read(max(0, int(read)))
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
 class _ArchiveTooLarge(Exception):
     """Reading an archive through _SmbRangeFile would pass its byte budget."""
 
@@ -229,6 +264,8 @@ class _SMBFileWork:
     inspect_archive_entries: bool
     # The share's id for the file, when the server lists one: part of a meta identity.
     file_id: str = ""
+    # W2.3: reading it would recall it from tiered storage; it is not read.
+    offline: bool = False
 
 
 @dataclass(slots=True)
@@ -481,9 +518,10 @@ class SMBScanner:
                                           domain=domain, shares=list(self.config.allowed_shares or ()))
                     try:
                         if conn.connect(pinned_ip, self.config.port, timeout=self.config.timeout):
-                            self.connection = conn
+                            self.connection = _GatedConnection(conn, self._target_gate())
                             self.credential_used = label
                             self.server_used = server
+                            self._remember_credential(server, label)
                             return True
                         reached_server = True
                     except (EncryptionUnavailable, PermissionError) as exc:
@@ -512,9 +550,10 @@ class SMBScanner:
                 )
                 try:
                     if conn.connect(pinned_ip, self.config.port, timeout=self.config.timeout):
-                        self.connection = conn
+                        self.connection = _GatedConnection(conn, self._target_gate())
                         self.credential_used = label
                         self.server_used = server
+                        self._remember_credential(server, label)
                         return True
                     # TCP + SMB negotiation succeeded but authentication was
                     # rejected (pysmb returns False rather than raising here).
@@ -685,6 +724,8 @@ class SMBScanner:
                 "io_parallel_active": self._io_parallel_active,
                 "io_workers": self._io_worker_count(),
                 "host_admission": budget.stats(),
+                # W2.3: what this server was asked for, by every scan of it in this process.
+                "smb_target": self._target_gate().snapshot(),
                 **({"scan_aborted_reason": aborted_reason} if aborted_reason else {}),
                 # D1: the file bytes came over the encrypted session; the owners and ACLs
                 # did not (collectors.smb3_transport says why). Said with the scan.
@@ -819,7 +860,8 @@ class SMBScanner:
             if self._abort_event.is_set() or self._cancelled():
                 return None, "skipped"
             detail = ""
-            with budget.slot():
+            gate = self._target_gate()
+            with budget.slot(), gate.session():
                 if self._abort_event.is_set() or self._cancelled():
                     return None, "skipped"
                 if not self.connect():
@@ -836,9 +878,11 @@ class SMBScanner:
                             plan = self._enumerate_share_plan(share_name, "/", depth=0)
                     except _SmbConnectionLost as lost:
                         detail = lost.detail
+                        gate.lost()
                     else:
                         with self._reset_lock:
                             self._consecutive_resets = 0
+                        gate.completed()
                         return plan, "done"
                     finally:
                         self.close()
@@ -1004,6 +1048,7 @@ class SMBScanner:
                     include_top=include_top,
                     inspect_archive_entries=inspect_entries,
                     file_id=str(getattr(entry, "file_id", "") or ""),
+                    offline=self._offline(entry),
                 )
             )
         return plan
@@ -1120,7 +1165,8 @@ class SMBScanner:
         if not refs:
             return []
         share_name = refs[0][2].share_name
-        with budget.slot():
+        gate = self._target_gate()
+        with budget.slot(), gate.session():
             if self._cancelled():
                 raise RuntimeError("Scan cancelled")
             self._prefetch_acl_paths(share_name, [ref[2].remote_path for ref in refs])
@@ -1129,12 +1175,15 @@ class SMBScanner:
                 if not self.connect():
                     continue
                 try:
-                    return [
+                    built = [
                         (plan_index, slot_index, self._build_work_records(work))
                         for plan_index, slot_index, work in refs
                     ]
+                    gate.completed()
+                    return built
                 except _SmbConnectionLost as lost:
                     last_detail = lost.detail
+                    gate.lost()
                 finally:
                     self.close()
             raise _SmbConnectionLost(share_name, last_detail)
@@ -1426,16 +1475,20 @@ class SMBScanner:
                 )
             return records
 
-        acquired = self._acquire_file_data(
-            work.share_name,
-            work.remote_path,
-            work.extension,
-            work.file_size,
-            inspect_archive_entries=work.inspect_archive_entries,
-            modified_at=work.modified_at,
-            file_id=work.file_id,
-        )
-        if work.inspect_archive_entries:
+        if work.offline:
+            acquired = self._offline_data(work.share_name, work.remote_path, work.file_size, work.modified_at,
+                                          work.file_id)
+        else:
+            acquired = self._acquire_file_data(
+                work.share_name,
+                work.remote_path,
+                work.extension,
+                work.file_size,
+                inspect_archive_entries=work.inspect_archive_entries,
+                modified_at=work.modified_at,
+                file_id=work.file_id,
+            )
+        if work.inspect_archive_entries and not work.offline:
             records.extend(
                 self._read_zip_entries(
                     work.share_name,
@@ -1455,7 +1508,7 @@ class SMBScanner:
                 size=work.file_size,
                 directory_only=not work.inspect_archive_entries,
             )
-            if work.extension == ".zip"
+            if work.extension == ".zip" and not work.offline
             else {}
         )
         protected_metadata = zip_metadata or archive_metadata
@@ -1565,7 +1618,7 @@ class SMBScanner:
         holding one process-wide admission slot for the scan's duration."""
         records: list[dict] = []
         reset_shares: list[str] = []
-        with budget.slot():
+        with budget.slot(), self._target_gate().session():
             for share_name in shares:
                 if self._cancelled():
                     raise RuntimeError("Scan cancelled")
@@ -1601,7 +1654,7 @@ class SMBScanner:
         def run(share_name: str) -> tuple[str, list[dict], str]:
             if self._abort_event.is_set() or self._cancelled():
                 return share_name, [], "skipped"
-            with budget.slot():
+            with budget.slot(), self._target_gate().session():
                 if self._abort_event.is_set() or self._cancelled():
                     return share_name, [], "skipped"
                 if not self.connect():  # this worker's OWN thread-local connection
@@ -1923,7 +1976,39 @@ class SMBScanner:
 
         return candidates
 
+    def _target_gate(self):
+        """This server's sessions, bandwidth and backoff, shared with every scan of it (W2.3)."""
+        return smb_target.target_gate(self.config.server)
+
+    def _offline(self, entry) -> bool:
+        """Whether reading the entry would recall it from tiered storage - and it is not to be."""
+        return smb_target.needs_recall(getattr(entry, "file_attributes", 0)) and not smb_target.read_offline_files()
+
+    def _offline_data(self, share_name: str, path: str, size: int, modified_at: str, file_id: str) -> _SMBFileData:
+        """An offline file's record data: named by its metadata whatever the hash policy -
+        any byte read would recall it - and said to be not read."""
+        self._target_gate().skipped_offline()
+        self._bump_diag("content_skipped_offline")
+        return _SMBFileData(
+            content="", sha256=content_policy.meta_identity(size, modified_at, file_id),
+            extraction_reason="offline_not_recalled",
+            skip_reason="The file is offline in tiered storage; reading it would recall it, so its content "
+                        "was not read (DSPM_SMB_READ_OFFLINE=1 reads it)")
+
+    def _remember_credential(self, server: str, label: str) -> None:
+        with _working_credentials_lock:
+            _working_credentials[(str(server).lower(), self.config.username.strip().lower())] = label
+
     def _credential_candidates(self) -> list[tuple[str, str, str]]:
+        candidates = self._credential_candidates_in_order()
+        with _working_credentials_lock:
+            remembered = _working_credentials.get(
+                (str(self.config.server).lower(), self.config.username.strip().lower()))
+        if remembered:
+            candidates.sort(key=lambda candidate: candidate[2] != remembered)
+        return candidates
+
+    def _credential_candidates_in_order(self) -> list[tuple[str, str, str]]:
         username = self.config.username.strip()
         domain = (self.config.domain.strip() or "WORKGROUP").strip()
         server_name = self._server_short_name()
@@ -2093,18 +2178,23 @@ class SMBScanner:
                     self._emit_collection_progress()
                     continue
 
+            offline = self._offline(entry)
             inspect_archive_entries = bool(
-                self.config.inspect_archives and self._should_scan_archive_entries(extension)
+                self.config.inspect_archives and self._should_scan_archive_entries(extension) and not offline
             )
-            acquired = self._acquire_file_data(
-                share_name,
-                remote_path,
-                extension,
-                file_size,
-                inspect_archive_entries=inspect_archive_entries,
-                modified_at=modified_at,
-                file_id=str(getattr(entry, "file_id", "") or ""),
-            )
+            if offline:
+                acquired = self._offline_data(share_name, remote_path, file_size, modified_at,
+                                              str(getattr(entry, "file_id", "") or ""))
+            else:
+                acquired = self._acquire_file_data(
+                    share_name,
+                    remote_path,
+                    extension,
+                    file_size,
+                    inspect_archive_entries=inspect_archive_entries,
+                    modified_at=modified_at,
+                    file_id=str(getattr(entry, "file_id", "") or ""),
+                )
             if inspect_archive_entries:
                 records.extend(
                     self._read_zip_entries(
@@ -2125,7 +2215,7 @@ class SMBScanner:
                     size=file_size,
                     directory_only=not inspect_archive_entries,
                 )
-                if extension == ".zip"
+                if extension == ".zip" and not offline
                 else {}
             )
             protected_metadata = zip_metadata or archive_metadata

@@ -278,6 +278,11 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_DOCUMENT_SCAN_MAX_BYTES", "int", {"minimum": 1}),
     ("DSPM_HASH_POLICY", "enum", {"default": "meta", "choices": ("meta", "sampled", "full")}),
     ("DSPM_SMB_CAPTURE_BUDGET_MB", "int", {"minimum": 16}),
+    # W2.3: what an SMB scan may ask of one file server.
+    ("DSPM_SMB_MAX_SESSIONS_PER_TARGET", "int", {"default": "8", "minimum": 1}),
+    ("DSPM_SMB_MAX_MBPS", "float", {"default": "0", "minimum": 0}),
+    ("DSPM_SMB_READ_OFFLINE", "bool"),
+    ("DSPM_SMB_SHARE_DELETE", "bool"),
     ("DSPM_HOST_IO_BUDGET", "int", {"minimum": 1}),
     ("DSPM_PIPELINE_ENABLED", "bool"),
     ("DSPM_PIPELINE_BUFFER", "int", {"minimum": 1}),

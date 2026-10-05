@@ -55,7 +55,7 @@ HASH_POLICIES = ("meta", "sampled", "full")
 # content_status values that mean the read or the extraction failed.
 _FAILED_STATUSES = {"unreadable", "not_extracted", "bad_archive"}
 # ... that the scan chose not to read content it could have read.
-_POLICY_STATUSES = {"over_size_cap", "not_requested", "not_inspected"}
+_POLICY_STATUSES = {"over_size_cap", "not_requested", "not_inspected", "offline_not_recalled"}
 # ... that there is nothing more to read by design: the file is sealed or holds no text.
 _BY_DESIGN_STATUSES = {"protected", "password_protected", "protected_or_uninspectable_archive",
                        "no_text_layer", "metadata_only"}
