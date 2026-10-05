@@ -1713,6 +1713,10 @@ function summarizeEndpointDiagnostics(endpoint = {}) {
     if (Number(incremental.deleted_objects || 0)) parts.push(`Deleted: ${Number(incremental.deleted_objects)}`);
   }
   if (skippedDirs) parts.push(`Skipped dirs: ${skippedDirs}`);
+  const scope = diagnostics.scope || {};
+  if (scope.active) {
+    parts.push(`Left out by scope: ${Number(scope.excluded_files || 0)} files, ${Number(scope.skipped_folders || 0)} folders`);
+  }
   if (filteredWrongProfile) parts.push(`Wrong-profile files ignored: ${filteredWrongProfile}`);
   if (archiveFiles || archiveEntries) parts.push(`Archives: ${archiveFiles}`, `Archive entries: ${archiveEntries}`);
   if (allowed) parts.push(`Allowed: ${allowed}`);
@@ -1747,6 +1751,12 @@ function summarizeFileServerDiagnostics(report = {}) {
   add("ACL reads failed", number(diagnostics.owner_read_failed));
   if (Array.isArray(diagnostics.list_errors) && diagnostics.list_errors.length) {
     add("unreadable paths", diagnostics.list_errors.length, { always: true });
+  }
+  // Advanced scan scope: what was left out by choice - never a failure or a gap.
+  const scope = diagnostics.scope || {};
+  if (scope.active) {
+    add("left out by scope", number(scope.excluded_files), { always: true });
+    add("folders skipped by scope", number(scope.skipped_folders));
   }
   return facts;
 }

@@ -156,6 +156,8 @@ class TheWizardIsWiredTest(unittest.TestCase):
                        'applyScanScope("file-server", config.scope, config.include_hidden)',
                        'applyScanScope("endpoint", config.scope, config.include_hidden)',
                        "scanScopeProblem(kind, { server })", "scanScopeHistoryNote(summary)",
+                       'add("left out by scope", number(scope.excluded_files), { always: true })',
+                       "Left out by scope: ",
                        'include_hidden: !scanScopeSkipsHidden("file-server")'):
             self.assertIn(wiring, app)
         summary = (ROOT / "frontend" / "scan-summary.js").read_text(encoding="utf-8")
