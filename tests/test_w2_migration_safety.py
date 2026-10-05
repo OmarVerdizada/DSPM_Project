@@ -120,6 +120,7 @@ class _Upgrade:
             indexes = _index_names(conn)
             self.assertNotIn("idx_scan_object_baselines_generation", indexes)
             self.assertNotIn("idx_assets_tenant_scan_label_current_id", indexes)
+            self.assertEqual(indexes & set(store.UNUSABLE_SEARCH_INDEXES), set(), "revision 43 left a GIN index")
             self.assertEqual(int(conn.execute("SELECT COUNT(*) FROM findings WHERE lifecycle_json <> ''")
                                  .fetchone()[0]), 0)
         self.assertEqual(self._counts(), before, "the upgrade lost or added rows")

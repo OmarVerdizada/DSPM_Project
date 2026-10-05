@@ -182,28 +182,17 @@ class PostgresBackendTests(unittest.TestCase):
         self.assertEqual(store.count_scan_history(self.tenant), 0)
         self.assertIsNone(store.read_secret(self.tenant, "s"))
 
-    def test_inventory_search_uses_trigram_gin_index(self) -> None:
-        """Track S-D acceptance: provisioned PG has pg_trgm and the inventory
-        substring predicate is eligible for the matching GIN expression index."""
+    def test_inventory_search_is_narrowed_to_the_tenant_by_an_index(self) -> None:
+        """Track S-D built trigram GIN indexes for the inventory search. W2.5 (revision
+        0043) measured that the application role never uses them under FORCE RLS - see
+        below - while every asset and finding write maintained them, so they are gone.
+        What the database guarantees is unchanged: the search is an index range over
+        the tenant, never a scan of every tenant."""
         with store._connect() as conn:
             self.assertTrue(db.postgres_extension_available(conn, "pg_trgm"))
-            self.assertTrue(db.postgres_extension_available(conn, "btree_gin"))
-            row = conn.execute(
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE schemaname = current_schema() AND indexname = ?",
-                ("idx_assets_search_trgm",),
-            ).fetchone()
-            self.assertIsNotNone(row)
-            self.assertIn("gin", str(row[0]).lower())
-            self.assertIn("gin_trgm_ops", str(row[0]).lower())
-            combined = conn.execute(
-                "SELECT indexdef FROM pg_indexes "
-                "WHERE schemaname = current_schema() AND indexname = ?",
-                ("idx_assets_tenant_filter_search_trgm",),
-            ).fetchone()
-            self.assertIsNotNone(combined)
-            self.assertIn("tenant_id", str(combined[0]).lower())
-            self.assertIn("gin_trgm_ops", str(combined[0]).lower())
+            present = {str(row[0]) for row in conn.execute(
+                "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()").fetchall()}
+        self.assertEqual(present & set(store.UNUSABLE_SEARCH_INDEXES), set())
 
         # C10: with RLS forced for the application role, PostgreSQL applies the tenant
         # policy before any predicate that is not leakproof - and LIKE is not - so the

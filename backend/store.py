@@ -1432,6 +1432,38 @@ def add_delta_persistence(conn) -> None:
             )
 
 
+# W2.5: GIN indexes the product's own queries cannot use as the application role.
+UNUSABLE_SEARCH_INDEXES = (
+    "idx_assets_search_trgm",                  # revision 0001 convergence (Track S-D)
+    "idx_assets_tenant_filter_search_trgm",    # revision 0008
+    "idx_findings_tenant_search_trgm",         # revision 0009
+    "idx_findings_frameworks_gin",             # revision 0010
+)
+
+
+def drop_unusable_search_indexes(conn) -> None:
+    """Revision 0043: drop the four GIN indexes no query can use (W2.5).
+
+    Measured on PostgreSQL 18 as the application role (no BYPASSRLS) under FORCE ROW
+    LEVEL SECURITY, with sequential scans disabled so the planner had every reason to
+    take them: the inventory search, the filtered inventory search, the remediation
+    search and the framework filter all ran as a tenant btree range plus a filter, and
+    no plan touched a GIN index. A policy's quals run before any non-leakproof one, and
+    the trigram LIKE and ``jsonb_exists`` are not leakproof; the remediation search also
+    reads ``lower(search_text)``, not the indexed ``lower(COALESCE(search_text, ''))``.
+
+    They were maintained on every asset and finding write all the same. Without them a
+    4,000-file first save wrote 48.5 MiB of WAL instead of 76.3 MiB, and an unchanged
+    rescan 20.8 MiB instead of 30.0 MiB. Search answers are unchanged - they never came
+    from these indexes. For an estate where a tenant-wide LIKE is too slow, the
+    optional search projection (``backend.search``) is the path; making these operators
+    leakproof would need a superuser and widen what a policy lets through, so it is not
+    done. Re-runnable (IF EXISTS). Rollback: re-run revisions 0008-0010 and the baseline,
+    which build them again."""
+    for index in UNUSABLE_SEARCH_INDEXES:
+        conn.execute(f"DROP INDEX IF EXISTS {index}")
+
+
 def remove_two_step_sign_in(conn) -> None:
     """Revision 0038: two-step sign-in is gone - the product owner's decision (2026-10-02):
     Sentro runs fully offline and signs people in with a password or the directory.
@@ -2711,25 +2743,9 @@ def apply_baseline_schema(conn) -> None:
         "ON assets (tenant_id) WHERE detail_json IS NULL OR detail_json = '{}'"
     )
 
-    # Track S-D: PostgreSQL substring search over paths/names/owners is
-    # backed by pg_trgm without changing the S-C API's literal-substring
-    # semantics. The expression is intentionally identical to the WHERE
-    # predicate below. SQLite keeps its compatible LIKE fallback.
-    #
-    # CREATE EXTENSION belongs to scripts/provision_postgres.py because
-    # the runtime role is least-privilege. Existing deployments that have
-    # not rerun provisioning remain correct (sequential LIKE), but warn.
-    if db.is_postgres():
-        if db.postgres_extension_available(conn, "pg_trgm"):
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_assets_search_trgm "
-                "ON assets USING GIN ((lower(COALESCE(search_text, ''))) gin_trgm_ops)"
-            )
-        else:
-            logger.warning(
-                "Track S-D search index unavailable: pg_trgm is not installed; "
-                "rerun scripts/provision_postgres.py as the PostgreSQL admin"
-            )
+    # Track S-D built a pg_trgm index for the inventory search here. Under FORCE RLS the
+    # application role can never use it (revision 0043, W2.5), and it cost every asset
+    # write, so the converged schema has none.
 
     _identity_ddl(conn)  # C2 (revision 0026)
     _vault_ddl(conn)  # C12 (revision 0027)
@@ -2747,6 +2763,7 @@ def apply_baseline_schema(conn) -> None:
     add_finding_lifecycle_detail(conn)  # W1.4 (revision 0040)
     add_job_ownership(conn)  # W2.4 (revision 0041)
     add_delta_persistence(conn)  # W2.1 (revision 0042)
+    drop_unusable_search_indexes(conn)  # W2.5 (revision 0043)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -4077,7 +4094,11 @@ def _upsert_operational_finding(
     )
 
 def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_current: bool = True,
-                          partition: dict | None = None, inventory_rows: list | None = None) -> None:
+                          partition: dict | None = None, inventory_rows: list | None = None,
+                          rewrite_unchanged: bool = False) -> None:
+    """The estate rows of a report. ``rewrite_unchanged`` writes every row whole even where
+    its digest says the content is what is stored - the backfill's job is to repair rows
+    whatever their digests claim (W2.1)."""
     from backend.domain import asset_identity, iter_normalized_chunks, scan_run_from_report
 
     run = scan_run_from_report(tenant_id, report)
@@ -4146,7 +4167,7 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
         # one asset for it, and the identity is recomputed from the record.
         asset_ids_by_path = {asset.path: asset.id for asset in piece.assets}
         changed_assets = _assets_to_write(conn, tenant_id, scan_id, observed_at, piece.assets, records,
-                                          asset_ids_by_path) if estate_rows else []
+                                          asset_ids_by_path, rewrite_unchanged=rewrite_unchanged)             if estate_rows else []
         _executemany(
             conn,
             "INSERT INTO assets "
@@ -4233,7 +4254,7 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
                 )
                 for item_seq, item_asset_id, item_file, item_finding, item_id in pending
             ]
-            if refresh_current:
+            if refresh_current and not rewrite_unchanged:
                 params = _assert_unchanged_findings(conn, tenant_id, scan_id, params, existing)
             _executemany(conn, _FINDING_UPSERT_SQL, params)
         if partition is not None:
@@ -4319,7 +4340,7 @@ def _write_asset_access(conn, tenant_id: str, scan_id: str, records: list, asset
 
 
 def _assets_to_write(conn, tenant_id: str, scan_id: str, observed_at: str, assets, records,
-                     asset_ids_by_path: dict) -> list[tuple]:
+                     asset_ids_by_path: dict, *, rewrite_unchanged: bool = False) -> list[tuple]:
     """W2.1: the batch's assets that must be written whole, with their digests; the rest -
     the same content as stored - are only marked seen by this scan, one statement a chunk.
 
@@ -4339,6 +4360,8 @@ def _assets_to_write(conn, tenant_id: str, scan_id: str, observed_at: str, asset
             asset.finding_types, asset.framework_keys, asset.scan_label, asset.reason_count, asset.dlp_count,
             record_by_id.get(asset.id) or asset.detail_json,
         )))
+    if rewrite_unchanged:
+        return digests
     stored = _stored_values(conn, "assets", "id", "row_digest", tenant_id, [asset.id for asset, _ in digests])
     same = [asset.id for asset, digest in digests if stored.get(asset.id) == digest]
     for id_chunk in _id_chunks(same):
@@ -4611,7 +4634,8 @@ def backfill_normalized_scans(tenant_id: str | None = None) -> dict:
                     report.setdefault("scan_id", key["scan_id"])
                 try:
                     conn.execute("SAVEPOINT dspm_backfill")
-                    _write_normalized_rows(conn, key["tenant_id"], report)
+                    # A repair: every row is written whole, whatever its digest says.
+                    _write_normalized_rows(conn, key["tenant_id"], report, rewrite_unchanged=True)
                     conn.execute("RELEASE SAVEPOINT dspm_backfill")
                     mirrored += 1
                 except Exception as exc:  # pragma: no cover - defensive per-row guard
@@ -6522,7 +6546,7 @@ def persist_partition(
             raise not_claimed()
         if new_units:
             _append_scan_partitions(conn, tenant_id, str(scan_id), new_units, now)
-    _invalidate_inventory_query_cache(tenant_id)
+    _invalidate_after_partition(tenant_id)
     _invalidate_remediation_query_cache(tenant_id)
     # The search projection is best effort and runs after the authoritative
     # transaction, exactly as it does for a single save.
@@ -7704,13 +7728,17 @@ def _posture_inputs(tenant_id: str) -> dict:
 
 
 def remediation_summary(tenant_id: str, scope: str = "current") -> dict:
+    """The remediation queue's counts. W2.5: shared through ``derived_cache`` by every
+    backend and kept until the estate changes - it was a per-process 15-second cache, so
+    each backend paid six aggregate passes over every finding for itself."""
+    from backend import live_cache
+
     normalized_scope = _remediation_scope(scope)
-    cache_key = (str(DB_PATH), tenant_id, normalized_scope, "summary")
-    now_mono = time.monotonic()
-    with _remediation_cache_lock:
-        cached = _remediation_cache.get(cache_key)
-        if cached and now_mono - cached[0] <= 15.0:
-            return dict(cached[1])
+    return live_cache.cached_json(tenant_id, "remediation_summary", {"scope": normalized_scope},
+                                  lambda: _build_remediation_summary(tenant_id, normalized_scope))
+
+
+def _build_remediation_summary(tenant_id: str, normalized_scope: str) -> dict:
     scope_where, scope_params = _remediation_scope_sql(normalized_scope)
     where = " AND ".join(["tenant_id = ?", *scope_where])
     open_values = ",".join(f"'{value}'" for value in REMEDIATION_STATUS_GROUPS["open"])
@@ -7768,19 +7796,19 @@ def remediation_summary(tenant_id: str, scope: str = "current") -> dict:
         },
         "status_groups": {key: list(values) for key, values in REMEDIATION_STATUS_GROUPS.items()},
     }
-    with _remediation_cache_lock:
-        _remediation_cache[cache_key] = (now_mono, dict(summary))
     return summary
 
 
 def _remediation_facets(tenant_id: str, scope: str) -> dict:
+    """The remediation filters' values and counts - shared as the summary is (W2.5)."""
+    from backend import live_cache
+
     normalized_scope = _remediation_scope(scope)
-    cache_key = (str(DB_PATH), tenant_id, normalized_scope, "facets")
-    now_mono = time.monotonic()
-    with _remediation_cache_lock:
-        cached = _remediation_cache.get(cache_key)
-        if cached and now_mono - cached[0] <= 15.0:
-            return dict(cached[1])
+    return live_cache.cached_json(tenant_id, "remediation_facets", {"scope": normalized_scope},
+                                  lambda: _build_remediation_facets(tenant_id, normalized_scope))
+
+
+def _build_remediation_facets(tenant_id: str, normalized_scope: str) -> dict:
     scope_where, scope_params = _remediation_scope_sql(normalized_scope)
     where = " AND ".join(["tenant_id = ?", *scope_where])
     with _connect() as conn:
@@ -7805,8 +7833,6 @@ def _remediation_facets(tenant_id: str, scope: str) -> dict:
             "assets": values("affected_asset"),
             "frameworks": [{"value": str(row["value"]), "count": int(row["n"] or 0)} for row in framework_rows if row["value"]],
         }
-    with _remediation_cache_lock:
-        _remediation_cache[cache_key] = (now_mono, dict(facets))
     return facets
 
 
@@ -7994,7 +8020,30 @@ class InventoryReadUnavailable(RuntimeError):
     """Normalized inventory was selected but could not safely serve the read."""
 
 
-def _invalidate_inventory_query_cache(tenant_id: str | None = None) -> None:
+_partition_generation_moved: dict[str, float] = {}
+
+
+def _partition_generation_seconds() -> float:
+    try:
+        return max(0.0, float(os.getenv("DSPM_LIVE_CACHE_PARTITION_SECONDS", "15")))
+    except ValueError:
+        return 15.0
+
+
+def _invalidate_after_partition(tenant_id: str) -> None:
+    """A partition was written. The per-process caches go at once; the shared generation
+    moves at most every ``DSPM_LIVE_CACHE_PARTITION_SECONDS`` (15) - W2.5. Moved by every
+    partition, it made each console refresh during a scan a miss and an O(estate)
+    aggregate. Finalize, a saved scan and a lifecycle action still move it every time."""
+    now = time.monotonic()
+    with _inventory_query_cache_lock:
+        due = now - _partition_generation_moved.get(tenant_id, float("-inf")) >= _partition_generation_seconds()
+        if due:
+            _partition_generation_moved[tenant_id] = now
+    _invalidate_inventory_query_cache(tenant_id, move_generation=due)
+
+
+def _invalidate_inventory_query_cache(tenant_id: str | None = None, *, move_generation: bool = True) -> None:
     """Invalidate short-lived inventory aggregates after an authoritative write.
 
     Every authoritative estate write already calls this - a saved scan (and the finding
@@ -8002,8 +8051,9 @@ def _invalidate_inventory_query_cache(tenant_id: str | None = None) -> None:
     partitioned scan, a backfill, a tenant's deletion or reset - so the shared cache's
     generation moves here too, and it cannot drift from the per-process caches below.
     """
-    with suppress(Exception):
-        bump_estate_generation(tenant_id)
+    if move_generation:
+        with suppress(Exception):
+            bump_estate_generation(tenant_id)
     _forget_readiness(tenant_id)
     _forget_scan_report_rows(tenant_id)
     with _inventory_query_cache_lock:
@@ -10388,6 +10438,14 @@ def read_audit_log(tenant_id: str, limit: int = 200) -> list[dict]:
 
 
 def data_retention_summary(tenant_id: str) -> dict:
+    """Four COUNT(*)s the dashboard asked on every refresh. W2.5: shared through
+    ``derived_cache``; the audit and alert counts may trail by the cache's TTL."""
+    from backend import live_cache
+
+    return live_cache.cached_json(tenant_id, "retention_summary", None, lambda: _build_retention_summary(tenant_id))
+
+
+def _build_retention_summary(tenant_id: str) -> dict:
     with _connect() as conn:
         report_count = conn.execute(
             "SELECT COUNT(*) FROM scan_reports WHERE tenant_id = ?",
@@ -10578,6 +10636,15 @@ def list_access_principals(tenant_id: str, *, kind: str = "", limit: int = 200) 
     """D7: every principal with access to a file in the current estate, with how many
     files - and how many holding findings - it can read and write. `kind` narrows it to
     broad groups, privileged or service/indexer accounts."""
+    from backend import live_cache
+
+    bounded = max(1, min(int(limit), 1000))
+    # W2.5: an aggregate over every access row of the estate, shared until the estate changes.
+    return live_cache.cached_json(tenant_id, "access_principals", {"kind": kind, "limit": bounded},
+                                  lambda: _build_access_principals(tenant_id, kind, bounded))
+
+
+def _build_access_principals(tenant_id: str, kind: str, limit: int) -> list[dict]:
     kind_sql = {"broad": " AND aa.broad = 1", "privileged": " AND aa.privileged = 1",
                 "service": " AND aa.service = 1"}.get(kind, "")
     with _connect() as conn:
@@ -10590,7 +10657,7 @@ def list_access_principals(tenant_id: str, *, kind: str = "", limit: int = 200) 
             "FROM asset_access aa JOIN assets a ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id "
             f"WHERE aa.tenant_id = ?{kind_sql} GROUP BY aa.principal_key "
             "ORDER BY readable_sensitive DESC, readable DESC, aa.principal_key LIMIT ?",  # noqa: S608 - fixed fragments
-            (tenant_id, max(1, min(int(limit), 1000))),
+            (tenant_id, limit),
         ).fetchall()
     return [{"key": row["principal_key"], "principal": row["principal"], "sid": row["sid"] or "",
              "broad": bool(row["broad"]), "privileged": bool(row["privileged"]), "service": bool(row["service"]),
@@ -10600,9 +10667,14 @@ def list_access_principals(tenant_id: str, *, kind: str = "", limit: int = 200) 
 
 
 def list_access_assets(tenant_id: str, *, principal_key: str = "", kind: str = "", sensitive_only: bool = False,
-                       writable_only: bool = False, limit: int = 100, offset: int = 0) -> list[dict]:
+                       writable_only: bool = False, limit: int = 100, offset: int = 0,
+                       after: tuple | None = None) -> list[dict]:
     """D7: the files a principal can read (or write), or - with `kind` - the files a broad
-    group, privileged or service/indexer account can read; riskiest first."""
+    group, privileged or service/indexer account can read; riskiest first.
+
+    W2.5: ``after`` - the last file's ``(risk_score, path, asset_id)`` - starts the page after
+    it, so the next page costs a page; an ``offset`` reads and discards everything before it
+    and is kept only for older clients."""
     clauses = ["aa.tenant_id = ?"]
     params: list = [tenant_id]
     if principal_key:
@@ -10614,6 +10686,11 @@ def list_access_assets(tenant_id: str, *, principal_key: str = "", kind: str = "
     clauses.append("aa.can_write = 1" if writable_only else "aa.can_read = 1")
     if sensitive_only:
         clauses.append("a.finding_count > 0")
+    if after is not None:
+        score, path, asset_id = float(after[0]), str(after[1]), str(after[2])
+        clauses.append("(a.risk_score < ? OR (a.risk_score = ? AND (a.path > ? OR (a.path = ? AND a.id > ?))))")
+        params.extend([score, score, path, path, asset_id])
+        offset = 0
     with _connect() as conn:
         rows = conn.execute(
             "SELECT a.id AS asset_id, a.path AS path, a.name AS name, a.share AS share, a.source AS source, "
@@ -10622,7 +10699,7 @@ def list_access_assets(tenant_id: str, *, principal_key: str = "", kind: str = "
             "FROM asset_access aa JOIN assets a ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id "
             f"WHERE {' AND '.join(clauses)} "  # noqa: S608 - fixed fragments
             "GROUP BY a.id, a.path, a.name, a.share, a.source, a.risk_level, a.risk_score, a.finding_count "
-            "ORDER BY a.risk_score DESC, a.path LIMIT ? OFFSET ?",
+            "ORDER BY a.risk_score DESC, a.path, a.id LIMIT ? OFFSET ?",
             (*params, max(1, min(int(limit), 500)), max(0, int(offset))),
         ).fetchall()
     return [{"asset_id": row["asset_id"], "path": row["path"], "name": row["name"], "share": row["share"] or "",

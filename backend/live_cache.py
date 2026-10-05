@@ -35,9 +35,24 @@ import threading
 from typing import Any, Callable
 
 DEFAULT_TTL_SECONDS = 30
+# How long a reader waits for another reader of this process that is already building the
+# same answer before it builds its own (W2.5).
+SHARED_BUILD_WAIT_SECONDS = 120
 
-_counters = {"hits": 0, "misses": 0, "errors": 0, "writes": 0}
+_counters = {"hits": 0, "misses": 0, "errors": 0, "writes": 0, "coalesced": 0}
 _counter_lock = threading.Lock()
+
+
+class _Build:
+    """One answer being built in this process, for the readers that asked for it meanwhile."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.encoded: str | None = None
+
+
+_building: dict[tuple, _Build] = {}
+_building_lock = threading.Lock()
 
 
 def enabled() -> bool:
@@ -126,18 +141,41 @@ def cached_json(
             return value
 
     _note("misses")
-    value = builder()
+    # W2.5: one reader of this process builds an answer; the ones that ask for the same
+    # answer at the same generation meanwhile wait for it instead of each running the same
+    # O(estate) aggregate. Across backends the shared row does the same job a moment later.
+    flight = (str(tenant_id), key, generation)
+    with _building_lock:
+        build = _building.get(flight)
+        leader = build is None
+        if leader:
+            build = _building[flight] = _Build()
+    if not leader:
+        if build.done.wait(SHARED_BUILD_WAIT_SECONDS) and build.encoded is not None:
+            _note("coalesced")
+            return json.loads(build.encoded)
+        return builder()
     try:
-        encoded = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
-        store.derived_store(
-            tenant_id, key, generation, encoded,
-            ttl_seconds if ttl_seconds is not None else answer_ttl_seconds(),
-        )
-        _note("writes")
-    except Exception:
-        _note("errors")
-        return value
-    # The reader that computed the answer gets it in the shape every later reader will:
-    # a tuple or a date that JSON turns into a list or a string must not differ between
-    # the first refresh and the second.
-    return json.loads(encoded)
+        value = builder()
+        try:
+            encoded = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            _note("errors")
+            return value
+        build.encoded = encoded
+        try:
+            store.derived_store(
+                tenant_id, key, generation, encoded,
+                ttl_seconds if ttl_seconds is not None else answer_ttl_seconds(),
+            )
+            _note("writes")
+        except Exception:
+            _note("errors")
+        # The reader that computed the answer gets it in the shape every later reader will:
+        # a tuple or a date that JSON turns into a list or a string must not differ between
+        # the first refresh and the second.
+        return json.loads(encoded)
+    finally:
+        build.done.set()
+        with _building_lock:
+            _building.pop(flight, None)

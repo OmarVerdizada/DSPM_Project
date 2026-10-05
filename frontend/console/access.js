@@ -17,6 +17,7 @@ const ACCESS_KIND_LABELS = {
 const ACCESS_FILES_PAGE = 100;
 let accessChosen = null; // {key, kind, label} - whose files the second panel lists
 let accessFilesOffset = 0;
+let accessFilesCursor = "";
 // Every files request is numbered; an answer for an older one (another principal picked,
 // a second "Show more" while the first was on its way) is dropped, not shown.
 let accessFilesRequest = 0;
@@ -126,14 +127,18 @@ async function loadAccessFiles({ append = false } = {}) {
   const parts = accessParts();
   const context = captureTenantContext();
   const request = ++accessFilesRequest;
-  if (!append) accessFilesOffset = 0;
+  if (!append) {
+    accessFilesOffset = 0;
+    accessFilesCursor = "";
+  }
   if (parts.more) parts.more.disabled = true;
   const query = new URLSearchParams({
     sensitive_only: String(Boolean(parts.sensitive?.checked)),
     writable_only: String(Boolean(parts.writable?.checked)),
     limit: String(ACCESS_FILES_PAGE),
-    offset: String(accessFilesOffset),
   });
+  // The next page starts after the last file shown (W2.5), not after N skipped rows.
+  if (append && accessFilesCursor) query.set("cursor", accessFilesCursor);
   if (accessChosen.kind) query.set("kind", accessChosen.kind);
   else query.set("key", accessChosen.key);
   if (parts.filesPanel) parts.filesPanel.hidden = false;
@@ -158,8 +163,9 @@ async function loadAccessFiles({ append = false } = {}) {
         : "No files."}</td></tr>`;
     }
     accessFilesOffset += files.length;
+    accessFilesCursor = data.next_cursor || "";
     if (parts.more) {
-      parts.more.hidden = files.length < ACCESS_FILES_PAGE;
+      parts.more.hidden = !accessFilesCursor;
       parts.more.disabled = false;
     }
     if (parts.filesNote) {
@@ -179,6 +185,7 @@ function resetAccessPage() {
   const parts = accessParts();
   accessChosen = null;
   accessFilesOffset = 0;
+  accessFilesCursor = "";
   accessFilesRequest += 1;
   if (parts.principals) parts.principals.innerHTML = "";
   if (parts.files) parts.files.innerHTML = "";

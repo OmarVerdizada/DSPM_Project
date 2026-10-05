@@ -4004,6 +4004,7 @@ def access_files(key: str = Query(default="", max_length=256), kind: str = Query
                  # Bounded like every sibling list: a 20-digit offset reached SQLite as an
                  # integer it cannot hold and answered 500.
                  limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0, le=1_000_000),
+                 cursor: str = Query(default="", max_length=1024),
                  principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     """D7: the files a principal (its `key` from /api/access/principals) can read - or
     write - or, with `kind`, the files a broad group, privileged or service/indexer
@@ -4012,11 +4013,24 @@ def access_files(key: str = Query(default="", max_length=256), kind: str = Query
         raise HTTPException(status_code=400, detail="kind must be broad, privileged or service")
     if not key and not kind:
         raise HTTPException(status_code=400, detail="Name a principal (key) or a kind (broad, privileged or service).")
+    after = None
+    if cursor:
+        # W2.5: the next page starts after the last file of this one (risk, path, id).
+        try:
+            decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")).decode("utf-8"))
+            after = (float(decoded[0]), str(decoded[1]), str(decoded[2]))
+        except (ValueError, TypeError, IndexError):
+            raise HTTPException(status_code=400, detail="cursor is not one this list issued") from None
     files = store_module.list_access_assets(principal.tenant_id, principal_key=key.strip()[:256], kind=kind,
                                             sensitive_only=sensitive_only, writable_only=writable_only,
-                                            limit=limit, offset=offset)
+                                            limit=limit, offset=offset, after=after)
+    next_cursor = ""
+    if len(files) == limit:
+        last = files[-1]
+        next_cursor = base64.urlsafe_b64encode(json.dumps(
+            [last["risk_score"], last["path"], last["asset_id"]]).encode("utf-8")).decode("ascii")
     return {"files": files, "key": key, "kind": kind, "sensitive_only": sensitive_only,
-            "writable_only": writable_only}
+            "writable_only": writable_only, "next_cursor": next_cursor}
 
 
 class RevealRequest(BaseModel):

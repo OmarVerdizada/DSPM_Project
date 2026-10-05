@@ -88,6 +88,7 @@ def _revisions() -> list[tuple[int, str, object]]:
     (40, "finding_lifecycle_detail", store.add_finding_lifecycle_detail),
     (41, "job_ownership", store.add_job_ownership),
     (42, "delta_persistence", store.add_delta_persistence),
+    (43, "drop_unusable_search_indexes", store.drop_unusable_search_indexes),
     ]
 
 
