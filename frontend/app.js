@@ -13267,6 +13267,9 @@ function applyFileServerProfile(profile) {
   document.querySelector("#async_scan").checked = config.async_scan ?? true;
   document.querySelector("#incremental_enabled").checked = config.incremental_enabled ?? true;
   document.querySelector("#inspect_archives").checked = Boolean(config.inspect_archives);
+  // W2.6: a saved profile keeps its scan level; one saved before levels existed is standard.
+  const scanLevel = document.querySelector("#scan_level");
+  if (scanLevel) scanLevel.value = ["inventory", "standard", "full"].includes(config.scan_level) ? config.scan_level : "standard";
   document.querySelector("#include_admin_shares").checked = Boolean(config.include_admin_shares);
   document.querySelector("#smb_encryption").checked = Boolean(config.smb_encryption);
   document.querySelector("#smb_shares").value = (config.smb_shares || []).join(", ");
