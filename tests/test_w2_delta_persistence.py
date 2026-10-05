@@ -111,6 +111,25 @@ class AnUnchangedRescanWritesOnlyPresenceTest(_Estate):
         detail = store.get_inventory_asset(self.tenant, asset_id)
         self.assertEqual(detail["last_scanned_at"], "2026-10-02T00:00:00+00:00")
 
+    def test_the_file_view_does_not_give_an_old_scans_decisions_as_the_latest(self) -> None:
+        # The row was written by a scan that read the file fresh; the next scan reused it
+        # and wrote only presence. The file view used to say "Fresh analysis" for both.
+        fresh = [{**_file(i), "last_scanned_at": "2026-10-03T00:00:00+00:00", "incremental_reused": False,
+                  "incremental_scan_reason": "new_file", "cache_reused": False} for i in range(self.FILES)]
+        fresh[3]["size"] = 9999  # a material change, so this scan writes the row
+        self._rescan(fresh, scan_id="scan-c", timestamp="2026-10-03T00:00:00+00:00")
+        asset_id = self._rows("SELECT id FROM assets WHERE tenant_id = ? AND name = 'f003.txt'")[0]["id"]
+        own = store.get_inventory_asset(self.tenant, asset_id)
+        self.assertEqual((own["incremental_scan_reason"], own["incremental_reused"]), ("new_file", False),
+                         "the scan that wrote the row is the one it describes")
+        reused = [{**row, "size": 9999} if row["name"] == "f003.txt" else dict(row)
+                  for row in (_file(i, volatile="2026-10-04T00:00:00+00:00") for i in range(self.FILES))]
+        self._rescan(reused, scan_id="scan-d", timestamp="2026-10-04T00:00:00+00:00")
+        later = store.get_inventory_asset(self.tenant, asset_id)
+        self.assertEqual(later["last_scanned_at"], "2026-10-04T00:00:00+00:00")
+        for key in ("incremental_scan_reason", "incremental_reused", "cache_reused"):
+            self.assertNotIn(key, later, f"{key} is the older scan's, shown as the latest's")
+
 
 class WhatChangedIsWrittenTest(_Estate):
 

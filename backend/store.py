@@ -9520,6 +9520,11 @@ def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dic
                 observed = str(row["observed_at"] or "")
                 if isinstance(detail, dict) and observed > str(detail.get("last_scanned_at") or ""):
                     detail["last_scanned_at"] = observed
+                    # What the scan that wrote the row decided for it - reused or read,
+                    # cache hit, timings - is not what the later scans that found it
+                    # unchanged did, and is not shown as theirs.
+                    for key in _VOLATILE_RECORD_KEYS - {"last_scanned_at", "observed_at"}:
+                        detail.pop(key, None)
                 return detail | {column: row[column] for column in _INVENTORY_COLS}
             return None
         except Exception as exc:  # pragma: no cover - operational failure path
