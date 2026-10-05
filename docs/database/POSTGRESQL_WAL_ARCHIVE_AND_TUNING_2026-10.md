@@ -282,6 +282,22 @@ finding write all the same.
 | First save | 48.5 MiB (was 76.3) | 6.2 s (was 8.6) |
 | Unchanged rescan | 20.8 MiB (was 30.0) | 3.9 s |
 
+**End to end, the WAL is several times the benchmark's.** The benchmark saves
+small records with 2 findings each. On 2026-10-05, the product's own
+partitioned scan was run end to end on `sentro_test` with
+`scripts/pg_scan_rehearsal.py`. Its corpus had about 8 findings per file, and
+the WAL included each scan's records and baselines.
+
+| Run | WAL |
+|---|---|
+| 4,000 files, first scan | 421.5 MiB (about 105 KiB/file) |
+| 4,000 files, unchanged rescan | 179.4 MiB (about 45 KiB/file) |
+| 20,000 files, first scan | 1,028 MiB (about 51 KiB/file) |
+
+Size the archive from what the host's own estate writes, measured with that
+script, not from the benchmark. The rehearsal added about 3 GB to this host's
+unpruned archive.
+
 **What remains.** Most of a rescan's WAL is now the per-scan history: one
 `finding_index` row and one `finding_occurrences` row per finding per scan.
 That history is kept by design. Deduplicating its response bodies is the next
