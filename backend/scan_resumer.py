@@ -112,8 +112,9 @@ def recover_jobs() -> int:
         return 0
     from backend import jobs
 
-    recovered = store.recover_interrupted_jobs(resuming=True, this_instance=jobs.INSTANCE_ID, this_host=jobs.HOST)
-    return recovered + store.reconcile_paused_jobs()
+    recovered = store.recover_interrupted_jobs(resuming=True, this_instance=jobs.INSTANCE_ID, this_host=jobs.HOST,
+                                               live_here=jobs.active_job_ids())
+    return recovered + store.reconcile_paused_jobs(jobs.completion_of)
 
 
 def _loop(resume: Callable[[dict], object], interval: int) -> None:

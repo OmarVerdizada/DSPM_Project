@@ -4669,7 +4669,8 @@ def record_job(job: dict) -> None:
     never break the running job, so callers wrap this defensively.
     """
     now = datetime.now(timezone.utc).isoformat()
-    params = (
+    owned = bool(job.get("owner_instance"))
+    params = [
         str(job.get("id")),
         str(job.get("tenant_id")),
         str(job.get("status") or "queued"),
@@ -4679,15 +4680,16 @@ def record_job(job: dict) -> None:
         job.get("finished_at"),
         job.get("error"),
         now,
-        # W2.4: who runs it, and that it was alive now. A row written without an owner
-        # (a tool, a test, an older release) has none, and recovery treats it as orphaned.
+        # W2.4: who runs it, and that it was alive now - on the database's clock, which
+        # every backend judges heartbeats by. A row written without an owner (a tool, a
+        # test, an older release) has none, and recovery treats it as orphaned.
         str(job.get("owner_host") or ""),
         int(job.get("owner_pid") or 0),
         str(job.get("owner_instance") or ""),
-        now if job.get("owner_instance") else "",
+        "",
         # The scan its result is, once known; an empty one keeps what is there.
         str(job.get("result_scan_id") or ""),
-    )
+    ]
     # F6: the terminal state write is a job's last chance to record its outcome;
     # if it is lost the row is stuck "running" until a restart-recovery sweep.
     # SQLite's busy-timeout already absorbs brief contention, but add a small
@@ -4707,6 +4709,7 @@ def record_job(job: dict) -> None:
                     # would have been SQLite-only and invisible in production.
                     # A job taken up again from paused or failed - a resume - is counted;
                     # its cancel request ends with it.
+                    params[12] = _database_clock(conn).isoformat() if owned else ""
                     conn.execute(
                         """
                         INSERT INTO scan_jobs
@@ -4824,18 +4827,40 @@ def job_stale_seconds() -> int:
         return DEFAULT_JOB_STALE_SECONDS
 
 
+def _database_clock(conn) -> datetime:
+    """The database server's clock, in UTC (W2.4 review).
+
+    Heartbeats are written and judged on this one clock. Judged on each backend's own,
+    a host whose clock ran more than the stale interval behind another's would see that
+    host's live jobs as abandoned and take them.
+    """
+    if db.is_postgres():
+        value = conn.execute("SELECT clock_timestamp() AS now").fetchone()["now"]
+    else:
+        value = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f', 'now') AS now").fetchone()["now"]
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def job_owner_state(row: dict, *, this_instance: str, this_host: str, now: datetime,
-                    stale_after_seconds: int, pid_alive=None) -> str:
+                    stale_after_seconds: int, pid_alive=None, live_here=None) -> str:
     """"alive" or "gone" - whether the process a job row names is still running it (W2.4).
 
-    - this process: alive;
+    - this process: alive while it runs the job (``live_here``, the ids it runs; None
+      trusts the row). A row it holds for a job it no longer runs - a terminal write
+      that never landed - is judged by its heartbeat, which stopped with the job;
     - no owner (written before revision 0041, or by a tool): gone;
     - a process on this host: gone when its pid is not running, or its heartbeat is stale
       (the pid may have been reused);
     - a process on another host: gone when its heartbeat is stale.
+
+    ``now`` and the heartbeat are both the database's clock (``_database_clock``).
     """
     instance = str(row.get("owner_instance") or "")
-    if instance and instance == this_instance:
+    if instance and instance == this_instance and (live_here is None or str(row.get("id") or "") in live_here):
         return "alive"
     if not instance:
         return "gone"
@@ -4857,7 +4882,7 @@ def job_owner_state(row: dict, *, this_instance: str, this_host: str, now: datet
 
 
 def recover_interrupted_jobs(*, resuming: bool = True, this_instance: str = "", this_host: str = "",
-                             stale_after_seconds: int | None = None, pid_alive=None) -> int:
+                             stale_after_seconds: int | None = None, pid_alive=None, live_here=None) -> int:
     """Take over the jobs whose owner is gone; returns how many (ARCH-003, W2.4).
 
     Called at startup and by the resume sweep. A job whose owner is alive - a queue
@@ -4870,11 +4895,11 @@ def recover_interrupted_jobs(*, resuming: bool = True, this_instance: str = "", 
     - ``failed`` otherwise, asking for a re-run. With resuming turned off, nothing will
       continue a scan, so its job asks for a re-run too.
     """
-    now_moment = datetime.now(timezone.utc)
-    now = now_moment.isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     stale = job_stale_seconds() if stale_after_seconds is None else max(0, int(stale_after_seconds))
     host = this_host or socket.gethostname()
     with _lock, _connect() as conn:
+        now_moment = _database_clock(conn)
         rows = conn.execute(
             """
             SELECT j.id, j.tenant_id, j.owner_host, j.owner_pid, j.owner_instance, j.heartbeat_at,
@@ -4892,7 +4917,7 @@ def recover_interrupted_jobs(*, resuming: bool = True, this_instance: str = "", 
         for row in rows:
             record = dict(row)
             if job_owner_state(record, this_instance=this_instance, this_host=host, now=now_moment,
-                               stale_after_seconds=stale, pid_alive=pid_alive) == "alive":
+                               stale_after_seconds=stale, pid_alive=pid_alive, live_here=live_here) == "alive":
                 continue
             if record["cancel_requested"]:
                 status, message, error, finished = "cancelled", "Cancelled", CANCELLED_JOB_MESSAGE, now
@@ -4922,9 +4947,9 @@ def heartbeat_jobs(instance: str, job_ids: list[str]) -> int:
     ids = [str(job_id) for job_id in job_ids if job_id]
     if not instance or not ids:
         return 0
-    now = datetime.now(timezone.utc).isoformat()
     renewed = 0
     with _connect() as conn:
+        now = _database_clock(conn).isoformat()
         for start in range(0, len(ids), 200):
             chunk = ids[start:start + 200]
             marks = ", ".join("?" for _ in chunk)
@@ -4982,26 +5007,43 @@ def cancel_paused_job(tenant_id: str, job_id: str) -> bool:
         return done
 
 
-def reconcile_paused_jobs() -> int:
+def reconcile_paused_jobs(completion=None) -> int:
     """A paused job whose partitioned scan ended anyway - finished by queue workers while
     the backend following it was down - takes the scan's outcome (W2.4). Without this it
-    would stay paused, and its console would wait for ever."""
+    would stay paused, and its console would wait for ever.
+
+    ``completion`` maps the finished scan's report to ``(status, message)`` - the jobs
+    module's ``completion_of`` - so a scan that could not see all of its target ends
+    "incomplete", never "completed". Without it, or without the report, it is "completed".
+    """
     now = datetime.now(timezone.utc).isoformat()
     changed = 0
     with _lock, _connect() as conn:
-        changed += int(conn.execute(
+        finished = conn.execute(
             """
-            UPDATE scan_jobs SET status = 'completed', progress = 100, message = 'Completed', error = NULL,
-                finished_at = ?, updated_at = ?,
-                scan_id = (SELECT p.scan_id FROM partitioned_scans p
-                           WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id
-                             AND p.status = 'done' LIMIT 1)
-            WHERE status = 'paused' AND EXISTS (
-                SELECT 1 FROM partitioned_scans p
-                WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id AND p.status = 'done')
-            """,
-            (now, now),
-        ).rowcount or 0)
+            SELECT j.id, j.tenant_id, p.scan_id FROM scan_jobs j
+            JOIN partitioned_scans p ON p.tenant_id = j.tenant_id AND p.job_id = j.id AND p.status = 'done'
+            WHERE j.status = 'paused'
+            """
+        ).fetchall()
+    for row in finished:
+        status, message = "completed", "Completed"
+        if completion is not None:
+            try:
+                report = read_scan_report_compact(str(row["tenant_id"]), str(row["scan_id"]))
+                if report is not None:
+                    status, message = completion(report)
+            except Exception as exc:  # noqa: BLE001 - the job still ends; said, not hidden
+                logger.warning("Paused job %s: its scan's report could not be read (%s); recorded completed",
+                               row["id"], type(exc).__name__)
+        with _lock, _connect() as conn:
+            changed += int(conn.execute(
+                "UPDATE scan_jobs SET status = ?, progress = 100, message = ?, error = NULL, "
+                "finished_at = ?, updated_at = ?, scan_id = ? "
+                "WHERE id = ? AND tenant_id = ? AND status = 'paused'",
+                (status, message, now, now, str(row["scan_id"]), str(row["id"]), str(row["tenant_id"])),
+            ).rowcount or 0)
+    with _lock, _connect() as conn:
         changed += int(conn.execute(
             """
             UPDATE scan_jobs SET status = 'failed', message = 'Failed', finished_at = ?, updated_at = ?,
@@ -5664,9 +5706,19 @@ def claim_due_schedules(*, now: datetime | None = None, limit: int = 10) -> list
 def record_schedule_run(tenant_id: str, schedule_id: str, *, scan_id: str = "", status: str = "",
                         error: str = "", job_id: str | None = None) -> bool:
     """What became of a scheduled run - the job and the scan it started, and how it ended.
-    ``job_id`` None keeps the job recorded; a skipped run keeps the scan too."""
+    ``job_id`` None keeps the job recorded; a skipped run keeps the scan too.
+
+    "started" records only the job: claiming the run already said started, and a run that
+    ended before its start was recorded - it is submitted first - keeps its outcome.
+    """
     with _lock:
         with _connect() as conn:
+            if status == "started":
+                return int(conn.execute(
+                    "UPDATE scan_schedules SET last_job_id = COALESCE(?, last_job_id), updated_at = ? "
+                    "WHERE tenant_id = ? AND schedule_id = ?",
+                    (job_id, datetime.now(timezone.utc).isoformat(), tenant_id, str(schedule_id)),
+                ).rowcount or 0) == 1
             return int(conn.execute(
                 "UPDATE scan_schedules SET last_scan_id = CASE WHEN ? IN ('skipped', 'started') THEN last_scan_id ELSE ? END, "
                 "last_status = ?, last_error = ?, updated_at = ?, "

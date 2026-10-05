@@ -5362,8 +5362,13 @@ def _scheduled_scan_payload(schedule: dict, config: ScanConfig, payload: ScanReq
 
             data = _run_scan_job(job, config, lambda report: _persist_compliance_scan(report, payload, principal))
     except BaseException as exc:
+        from backend.jobs import _is_pause, _resume_follows
+
+        # A run paused to be resumed is not over - the resume sweep continues it under
+        # this job - and is not called failed.
+        status = "paused" if _is_pause(exc) and _resume_follows(exc) else "failed"
         with suppress(Exception):
-            record_schedule_run(tenant_id, schedule_id, status="failed", error=type(exc).__name__)
+            record_schedule_run(tenant_id, schedule_id, status=status, error=type(exc).__name__)
         raise
     from backend.jobs import completion_of
 

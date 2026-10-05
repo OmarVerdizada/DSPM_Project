@@ -352,8 +352,10 @@ class ScanPaused(RuntimeError):
     Nothing is marked failed: the scan stays unfinished, and once nothing has touched it
     for a lease the resume sweep continues it under the same job. Only a scan that cannot
     be resumed - started without a request - is failed instead, since nothing would ever
-    pick it up again.
+    pick it up again; ``resumable`` then says so to the job.
     """
+
+    resumable = True
 
 
 class PartitionOverBudget(RuntimeError):
@@ -664,8 +666,9 @@ def continue_partitioned_scan(
         try:
             _run_partitions(scan, job=job, stop_reason=stop_reason, poll_seconds=poll_seconds)
             return _finalize_when_claimed(scan, job=job, stop_reason=stop_reason, poll_seconds=poll_seconds)
-        except ScanPaused:
+        except ScanPaused as paused:
             if not record.get("resumable"):
+                paused.resumable = False
                 with suppress(Exception):
                     store.mark_partitioned_scan(
                         scan.tenant_id, scan.scan_id, "failed",

@@ -235,6 +235,115 @@ class ASchedulesRunsDoNotOverlapTest(_Database):
         self.assertIn("still going", after["last_error"])
 
 
+class ReviewFindingsTest(_Database):
+    """The W2.4 review: a pause nothing continues, a cancel for a job resumed elsewhere, a
+    terminal write that never landed, a run that ended before its start was recorded, a
+    resumed scan that missed part of its target, and hosts whose clocks disagree."""
+
+    def test_a_pause_nothing_will_continue_fails_instead_of_staying_paused(self) -> None:
+        def pauses(job):
+            raise ScanPaused("Scan paused: no part of it finished for a long time")
+
+        with mock.patch.dict(os.environ, {"DSPM_SCAN_RESUME_INTERVAL_SECONDS": "0"}):
+            job = jobs.create_job(self.tenant, pauses)
+            self.assertTrue(_wait(lambda: self._status(job.id) == "failed"))
+        record = store.read_job(self.tenant, job.id)
+        self.assertIn("resuming is turned off", record["error"])
+        self.assertFalse(store.job_is_active(self.tenant, job.id), "it would hold its schedule for ever")
+
+        def cannot_resume(job):
+            paused = ScanPaused("Scan paused: free disk on the data volume is low")
+            paused.resumable = False
+            raise paused
+
+        job = jobs.create_job(self.tenant, cannot_resume)
+        self.assertTrue(_wait(lambda: self._status(job.id) == "failed"))
+        error = store.read_job(self.tenant, job.id)["error"]
+        self.assertIn("cannot be resumed", error)
+        self.assertIn("free disk space ran low", error)
+
+    def test_a_cancel_reaches_a_job_another_backend_took_up_again(self) -> None:
+        def pauses(job):
+            raise ScanPaused("Scan paused: no part of it finished for a long time")
+
+        job = jobs.create_job(self.tenant, pauses)
+        self.assertTrue(_wait(lambda: job.status == jobs.PAUSED and self._status(job.id) == "paused"))
+        # Another backend's sweep resumed it: its row is running, and names that backend.
+        self._row(job.id, "running", host="other-host", instance="other-backend", beat_age=1)
+        self.assertTrue(jobs.request_cancel(self.tenant, job.id), "the stale paused copy refused the cancel")
+        self.assertTrue(store.read_job(self.tenant, job.id)["cancel_requested"])
+        self.assertEqual(store.pending_job_cancellations("other-backend"), [job.id])
+
+    def test_a_terminal_write_that_did_not_land_is_made_again(self) -> None:
+        real = store.record_job
+        lost = {"once": True}
+
+        def flaky(row):
+            if row.get("status") == "completed" and lost.pop("once", False):
+                raise store.db.OperationalError("database is locked")
+            return real(row)
+
+        with mock.patch.object(store, "record_job", side_effect=flaky):
+            job = jobs.create_job(self.tenant, lambda job: {"scan_id": "scan-z"})
+            self.assertTrue(_wait(lambda: job.status == "completed"))
+            self.assertEqual(self._status(job.id), "running", "the write was meant to be lost")
+            jobs.heartbeat_once()
+        self.assertEqual(self._status(job.id), "completed")
+
+    def test_this_processs_row_for_a_job_it_no_longer_runs_is_recovered(self) -> None:
+        self._row("job-mine-live", host=jobs.HOST, pid=jobs.PID, instance=jobs.INSTANCE_ID, beat_age=900)
+        self._row("job-mine-lost", host=jobs.HOST, pid=jobs.PID, instance=jobs.INSTANCE_ID, beat_age=900)
+        store.recover_interrupted_jobs(this_instance=jobs.INSTANCE_ID, this_host=jobs.HOST,
+                                       live_here={"job-mine-live"})
+        self.assertEqual(self._status("job-mine-live"), "running", "a job this process runs is alive")
+        self.assertEqual(self._status("job-mine-lost"), "failed")
+        self._row("job-mine-fresh", host=jobs.HOST, pid=jobs.PID, instance=jobs.INSTANCE_ID, beat_age=5)
+        store.recover_interrupted_jobs(this_instance=jobs.INSTANCE_ID, this_host=jobs.HOST, live_here=set())
+        self.assertEqual(self._status("job-mine-fresh"), "running", "its final write may still be landing")
+
+    def test_a_run_that_ended_before_its_start_was_recorded_keeps_its_outcome(self) -> None:
+        schedule = store.create_scan_schedule(self.tenant, name="nightly", request=REQUEST, interval_seconds=3600,
+                                              first_run_at=datetime.now(timezone.utc), created_by="t")
+        sid = schedule["schedule_id"]
+        store.record_schedule_run(self.tenant, sid, scan_id="scan-fast", status="completed", job_id="job-fast")
+        store.record_schedule_run(self.tenant, sid, status="started", job_id="job-fast")
+        after = store.read_scan_schedule(self.tenant, sid)
+        self.assertEqual((after["last_status"], after["last_scan_id"], after["last_job_id"]),
+                         ("completed", "scan-fast", "job-fast"))
+
+    def test_a_reconciled_scan_that_missed_part_of_its_target_is_incomplete(self) -> None:
+        self._row("job-gap", beat_age=900)
+        store.register_partitioned_scan(self.tenant, "scan-gap", job_id="job-gap", request=REQUEST,
+                                        header={"timestamp": "t"})
+        store.recover_interrupted_jobs(this_instance="new", this_host="here")
+        store.mark_partitioned_scan(self.tenant, "scan-gap", "done")
+        missed = {"scan_id": "scan-gap", "scan_diagnostics": {"incremental": {"complete": False},
+                                                              "unreadable_dirs": ["/HR/locked"]}}
+        with mock.patch.object(store, "read_scan_report_compact", return_value=missed):
+            self.assertEqual(store.reconcile_paused_jobs(jobs.completion_of), 1)
+        record = store.read_job(self.tenant, "job-gap")
+        self.assertEqual((record["status"], record["scan_id"]), ("incomplete", "scan-gap"))
+        self.assertIn("1 folder(s) could not be listed", record["message"])
+
+    def test_heartbeats_are_judged_on_the_databases_clock(self) -> None:
+        real = datetime
+
+        def skewed(by: timedelta):
+            class Clock(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return real.now(tz) + by
+            return Clock
+
+        # The owner's clock runs an hour behind, the recovering host's an hour ahead: by
+        # their own clocks the heartbeat is two hours old. By the database's it is fresh.
+        with mock.patch.object(store, "datetime", skewed(timedelta(hours=-1))):
+            self._row("job-skewed", host="slow-host", instance="slow-backend")
+        with mock.patch.object(store, "datetime", skewed(timedelta(hours=1))):
+            store.recover_interrupted_jobs(this_instance="fast-backend", this_host="fast-host")
+        self.assertEqual(self._status("job-skewed"), "running", "a live job was taken over for a clock")
+
+
 class TheLedgerQueueTakesTurnsTest(unittest.TestCase):
 
     def test_workspaces_then_scans_take_turns(self) -> None:

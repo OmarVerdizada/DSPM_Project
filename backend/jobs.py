@@ -27,6 +27,12 @@ HOST = socket.gethostname()
 PID = os.getpid()
 
 
+# Jobs whose last milestone write did not land. The heartbeat writes them again: a lost
+# terminal write would otherwise leave the row "running" - and, since W2.4, its schedule
+# skipping every run - until a restart (W2.4 review).
+_unpersisted: set[str] = set()
+
+
 def _persist(job: "ScanJob") -> None:
     """Best-effort durable-state write (ARCH-003); never breaks a running job. The row
     names this process as the job's owner, and the scan its result is once it has one."""
@@ -37,7 +43,9 @@ def _persist(job: "ScanJob") -> None:
         store.record_job({**job.to_dict(), "owner_host": HOST, "owner_pid": PID, "owner_instance": INSTANCE_ID,
                           "result_scan_id": result_scan_id})
     except Exception:
-        pass
+        _unpersisted.add(job.id)
+    else:
+        _unpersisted.discard(job.id)
     publish_progress(job, force=True)
 
 
@@ -282,8 +290,9 @@ def request_cancel(tenant_id: str, job_id: str) -> bool:
                     job.status, job.message, job.error = "cancelled", "Cancelled", "Scan was cancelled."
                     job.finished_at = datetime.now(timezone.utc).isoformat()
         return True
-    if job is not None:
-        return False
+    # Not paused in its row: another backend took the job up again, or it ended. This
+    # process's paused copy is stale, so the cancel goes to the row - which refuses a job
+    # that has ended, and which the backend now running it reads at its next heartbeat.
     return store.request_job_cancel(tenant_id, job_id)
 
 
@@ -305,6 +314,31 @@ def _is_pause(exc: BaseException) -> bool:
     return isinstance(exc, ScanPaused)
 
 
+def _resume_follows(exc: BaseException) -> bool:
+    """Whether anything will continue a paused scan: it can be resumed, and resuming is on.
+    A job paused with nothing to continue it would stay paused for ever - and hold its
+    schedule, which skips a run while the last one is going (W2.4 review)."""
+    from backend import scan_resumer
+
+    return bool(getattr(exc, "resumable", True)) and scan_resumer.resume_interval_seconds() > 0
+
+
+def _stopped_for_good(exc: BaseException) -> str:
+    """Why a scan that paused with nothing to continue it failed instead."""
+    reason = "free disk space ran low" if "free disk" in str(exc).lower() else "it stopped making progress"
+    if not getattr(exc, "resumable", True):
+        return (f"Scan stopped because {reason}, and it cannot be resumed: it was started without a request "
+                "to rebuild it from. Run the scan again.")
+    return (f"Scan stopped because {reason}, and resuming is turned off on this backend "
+            "(DSPM_SCAN_RESUME_INTERVAL_SECONDS=0), so nothing will continue it. Run the scan again.")
+
+
+def active_job_ids() -> set[str]:
+    """The jobs this process is running now."""
+    with _lock:
+        return {job.id for job in _jobs.values() if job.status in _ACTIVE_STATES}
+
+
 # W2.4: while this process runs jobs it says so through their rows, and carries out the
 # cancels other backends asked for.
 HEARTBEAT_SECONDS = max(1.0, float(os.getenv("DSPM_JOB_HEARTBEAT_SECONDS") or "15"))
@@ -314,7 +348,14 @@ _heartbeat_stop = threading.Event()
 
 
 def heartbeat_once() -> int:
-    """Renew this process's jobs and carry out the cancels asked for them; returns the jobs renewed."""
+    """Renew this process's jobs and carry out the cancels asked for them; returns the jobs renewed.
+    A milestone write that did not land is made again first."""
+    for job_id in list(_unpersisted):
+        job = get_job(job_id)
+        if job is None:
+            _unpersisted.discard(job_id)
+        else:
+            _persist(job)
     with _lock:
         active = [job.id for job in _jobs.values() if job.status in _ACTIVE_STATES]
     if not active:
@@ -422,8 +463,11 @@ def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
         if job.cancel_requested:
             return
         if _is_pause(exc):
-            # Left for the resume sweep - paused, which is not failed (W2.4).
-            _pause(job, _safe_job_error(exc))
+            if _resume_follows(exc):
+                # Left for the resume sweep - paused, which is not failed (W2.4).
+                _pause(job, _safe_job_error(exc))
+            else:
+                _finalize(job, "failed", message="Failed", error=_stopped_for_good(exc))
             return
         _finalize(job, "failed", message="Failed", error=_safe_job_error(exc))
         print(f"[scan-job-error] job={job.id} error={exc}\n{traceback.format_exc()}", file=sys.stderr)
