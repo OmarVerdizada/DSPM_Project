@@ -89,6 +89,15 @@ def describe(store, label: str, before: dict, after: dict, files: int, elapsed: 
     print(f"{label}: {elapsed:.1f} s, {files / elapsed:.0f} files/s, peak RSS +{peak_mib:.0f} MiB | "
           f"WAL {wal / 1048576:.1f} MiB ({wal / max(files, 1) / 1024:.1f} KiB/file) | rows ins {inserted} "
           f"upd {updated} (HOT {hot}) del {deleted} | table growth {growth / 1048576:+.1f} MiB", flush=True)
+    if os.environ.get("BENCH_PER_TABLE") == "1":
+        for table in TABLES:
+            first, last = before["tables"].get(table) or {}, after["tables"].get(table) or {}
+            delta = {key: int(last.get(key) or 0) - int(first.get(key) or 0)
+                     for key in ("n_tup_ins", "n_tup_upd", "n_tup_hot_upd", "n_tup_del", "bytes")}
+            if any(delta.values()):
+                print(f"    {table:<22} ins {delta['n_tup_ins']:>6} upd {delta['n_tup_upd']:>6} "
+                      f"(HOT {delta['n_tup_hot_upd']:>6}) del {delta['n_tup_del']:>6} "
+                      f"growth {delta['bytes'] / 1048576:+7.2f} MiB", flush=True)
 
 
 def measured(fn) -> tuple[float, float]:

@@ -105,10 +105,13 @@ class TheUnseenAssetsOfANamedScanLeaveTest(unittest.TestCase):
             self.assertNotIn("(SELECT", sql.upper().replace("( SELECT", "(SELECT"), sql)
         self.assertEqual(self._paths(), set())
 
-    def test_the_stale_read_is_served_by_the_prune_index(self) -> None:
-        sql = ("SELECT current_scan_id, id FROM assets WHERE tenant_id = ? AND scan_label = ? "
-               "AND current_scan_id < ? AND (current_scan_id, id) > (?, ?) ORDER BY current_scan_id, id LIMIT ?")
-        params = (self.tenant, LABEL, "scan-b", "", "", 900)
+    def test_the_stale_read_is_served_by_the_scope_index(self) -> None:
+        # W2.1 (revision 0042): current_scan_id is no longer indexed - moving it on every
+        # unchanged file rewrote an entry in every index of assets. The stale read walks
+        # the scope in id order instead: one index range, no sort, whatever the statistics.
+        sql = ("SELECT id FROM assets WHERE tenant_id = ? AND scan_label = ? AND id > ? "
+               "AND current_scan_id <> ? ORDER BY id LIMIT ?")
+        params = (self.tenant, LABEL, "", "scan-b", 900)
         with store._connect() as conn:
             if db.is_postgres():
                 # Whether the index is chosen on a near-empty table is the planner's call;
@@ -120,7 +123,7 @@ class TheUnseenAssetsOfANamedScanLeaveTest(unittest.TestCase):
             else:
                 plan = " ".join(str(row[-1]) for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall())
                 self.assertNotIn("TEMP B-TREE", plan.upper(), plan)
-        self.assertIn("idx_assets_tenant_scan_label_current_id", plan)
+        self.assertIn("idx_assets_tenant_scan_label_id", plan)
 
 
 _WRITE = re.compile(r"^\s*(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE|DELETE\s+FROM)\s+(\w+)", re.IGNORECASE)

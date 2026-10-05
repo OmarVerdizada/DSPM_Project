@@ -1387,6 +1387,51 @@ def add_job_ownership(conn) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_jobs_status ON scan_jobs (status)")
 
 
+def add_delta_persistence(conn) -> None:
+    """Revision 0042: an unchanged rescan writes what changed, not the estate again (W2.1).
+
+    A rescan of 4,000 unchanged files wrote 109 MiB of WAL - more than the first scan -
+    because every file rewrote its asset row (24 indexes, and its detail re-toasted), its
+    findings twice (retired, then re-asserted, 18 indexes each time), its version, its
+    access rows and its baseline snapshot. The rows now carry a digest of what they say
+    (``assets.row_digest``, ``findings.row_digest``,
+    ``scan_object_baselines.snapshot_digest``); a scan that brings the same content leaves
+    the row and moves only its presence marker.
+
+    Those markers were indexed (revision 0039's prune index on ``current_scan_id``, the
+    baselines' generation index on ``last_scan_id``), so even moving one rewrote an entry
+    in every index of the table. Both indexes go: the prunes read their scope through
+    ``(tenant_id, scan_label, id)`` and the baselines' primary key instead, once per
+    finalize, and a presence update can then stay on its page (HOT). For that the page
+    needs room for a second version of the row: an asset row was about 1.4 KB with its
+    detail inline, so ``toast_tuple_target = 256`` moves the detail out of line and
+    fillfactor 60 leaves the room (findings likewise; baselines' snapshots are moved out the
+    same way). Measured on 4,000 files: an unchanged rescan's WAL 108.6 -> 30.0 MiB, with
+    two thirds of the asset and finding updates HOT. Autovacuum visits these tables at 5%
+    churn, not 20%. On PostgreSQL these settings take a SHARE UPDATE EXCLUSIVE lock -
+    reads and writes go on - and apply to rows as they are written.
+
+    Re-runnable: each column is added only if missing, with a constant default; the drops
+    are IF EXISTS; the storage parameters are set, not toggled. An existing row's digest is
+    empty, so the first rescan after the upgrade writes it once more. Rollback: restore
+    the pre-upgrade backup (older code ignores the columns; revision 0039's index can be
+    built again by re-running it)."""
+    for table, column in (("assets", "row_digest"), ("findings", "row_digest"),
+                          ("scan_object_baselines", "snapshot_digest")):
+        if column not in db.table_columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+    conn.execute("DROP INDEX IF EXISTS idx_assets_tenant_scan_label_current_id")
+    conn.execute("DROP INDEX IF EXISTS idx_scan_object_baselines_generation")
+    if db.is_postgres():
+        for table, storage in (("assets", "fillfactor = 60, toast_tuple_target = 256"),
+                               ("findings", "fillfactor = 60"),
+                               ("scan_object_baselines", "fillfactor = 80, toast_tuple_target = 256")):
+            conn.execute(
+                f"ALTER TABLE {table} SET ({storage}, autovacuum_vacuum_scale_factor = 0.05, "
+                "autovacuum_analyze_scale_factor = 0.02)"
+            )
+
+
 def remove_two_step_sign_in(conn) -> None:
     """Revision 0038: two-step sign-in is gone - the product owner's decision (2026-10-02):
     Sentro runs fully offline and signs people in with a password or the directory.
@@ -2163,6 +2208,7 @@ def apply_baseline_schema(conn) -> None:
             -- written here once, when the blob that defines them is written.
             reason_count INTEGER NOT NULL DEFAULT 0,
             dlp_count INTEGER NOT NULL DEFAULT 0,
+            row_digest TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (tenant_id, id)
         );
 
@@ -2193,6 +2239,7 @@ def apply_baseline_schema(conn) -> None:
             last_seen_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             snapshot_json TEXT NOT NULL DEFAULT '{}',
+            snapshot_digest TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (tenant_id, scope_key, object_key)
         );
 
@@ -2228,6 +2275,7 @@ def apply_baseline_schema(conn) -> None:
             -- `severity`; this exists so "worst first" is an index range scan
             -- rather than a CASE expression sorted in temp space.
             severity_rank INTEGER NOT NULL DEFAULT 0,
+            row_digest TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (tenant_id, id)
         );
 
@@ -2305,8 +2353,6 @@ def apply_baseline_schema(conn) -> None:
             ON findings (tenant_id, is_current, status, sla_due, id);
         CREATE INDEX IF NOT EXISTS idx_findings_tenant_current_name_id
             ON findings (tenant_id, is_current, display_name, id);
-        CREATE INDEX IF NOT EXISTS idx_scan_object_baselines_generation
-            ON scan_object_baselines (tenant_id, scope_key, last_scan_id);
 
         -- Durable job state (ARCH-003). The executor is still in-memory,
         -- but the job RECORD survives a restart so status/history are not
@@ -2696,8 +2742,11 @@ def apply_baseline_schema(conn) -> None:
     _alert_event_columns(conn)  # D3 (revision 0033)
     for statement in _ALERT_DELIVERY_DDL:
         conn.executescript(statement)
-    add_asset_prune_index(conn)  # W1.4 (revision 0039)
+    # W1.4 (revision 0039) built the prune index this convergence used to re-create here;
+    # W2.1 (revision 0042) dropped it, so the converged schema is 0042's.
     add_finding_lifecycle_detail(conn)  # W1.4 (revision 0040)
+    add_job_ownership(conn)  # W2.4 (revision 0041)
+    add_delta_persistence(conn)  # W2.1 (revision 0042)
     conn.execute(
         """
         INSERT OR IGNORE INTO tenants (tenant_id, display_name, registration_code, created_at, updated_at)
@@ -3364,7 +3413,7 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
             if not object_key:
                 continue
             result = conn.execute(
-                "UPDATE scan_object_baselines SET snapshot_json = ?, updated_at = ? "
+                "UPDATE scan_object_baselines SET snapshot_json = ?, updated_at = ?, snapshot_digest = '' "
                 "WHERE tenant_id = ? AND scope_key = ? AND object_key = ? AND last_scan_id = ?",
                 (
                     pack_json_text(json.dumps(record, ensure_ascii=False, separators=(",", ":"))),
@@ -3403,20 +3452,34 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
     }
 
     def flush_rows() -> None:
+        """W2.1: an object whose snapshot is what is stored moves only its presence marker,
+        set-based; the rest are written whole."""
         nonlocal rows_written
         if not rows:
             return
+        stored = _stored_values(conn, "scan_object_baselines", "object_key", "snapshot_digest", tenant_id,
+                                [row[2] for row in rows], scope=("scope_key", scope_key))
+        same = [row[2] for row in rows if row[12] and stored.get(row[2]) == row[12]]
+        same_keys = set(same)
+        for key_chunk in _id_chunks(same):
+            placeholders = ",".join("?" for _ in key_chunk)
+            conn.execute(
+                "UPDATE scan_object_baselines SET last_scan_id = ?, last_seen_at = ?, updated_at = ? "
+                f"WHERE tenant_id = ? AND scope_key = ? AND object_key IN ({placeholders})",
+                (scan_id, now, now, tenant_id, scope_key, *key_chunk),
+            )
         conn.executemany(
             """
             INSERT OR REPLACE INTO scan_object_baselines
                 (tenant_id, scope_key, object_key, asset_id, size, mtime,
                  content_hash, version_signature, last_scan_id, last_seen_at,
-                 updated_at, snapshot_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 updated_at, snapshot_json, snapshot_digest)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            rows,
+            [row for row in rows if row[2] not in same_keys],
         )
         rows_written += len(rows)
+        incremental["baseline_rows_unchanged"] = int(incremental.get("baseline_rows_unchanged") or 0) + len(same)
         rows.clear()
 
     for record in report.get("files") or []:
@@ -3444,20 +3507,23 @@ def _write_incremental_baseline(conn, tenant_id: str, report: dict, *, is_new_sc
         # reads it again instead of replaying "nothing found" until the file changes.
         reusable = not record_analysis_failed(record)
         failed += 0 if reusable else 1
+        size = int(record.get("size") or record.get("total_bytes") or 0)
+        signature = version_signature if reusable else ""
         rows.append(
             (
                 tenant_id,
                 scope_key,
                 object_key,
                 asset_id,
-                int(record.get("size") or record.get("total_bytes") or 0),
+                size,
                 mtime,
                 content_hash,
-                version_signature if reusable else "",
+                signature,
                 scan_id,
                 now,
                 now,
                 pack_json_text(json.dumps(record, ensure_ascii=False, separators=(",", ":"))),
+                _material_digest(record, asset_id, size, mtime, content_hash, signature),
             )
         )
         if len(rows) >= 500:
@@ -3779,16 +3845,67 @@ def _existing_finding_lifecycle(conn, tenant_id: str, finding_ids) -> dict:
     for chunk in _id_chunks(finding_ids):
         placeholders = ",".join("?" for _ in chunk)
         rows = conn.execute(
-            f"SELECT id, status, owner, sla_due, severity_rank FROM findings "
-            f"WHERE tenant_id = ? AND id IN ({placeholders})",
+            f"SELECT id, status, owner, sla_due, severity_rank, row_digest, seq, last_seen, is_current "
+            f"FROM findings WHERE tenant_id = ? AND id IN ({placeholders})",
             (tenant_id, *chunk),
         ).fetchall()
         for row in rows:
             existing[str(row["id"])] = {
                 "status": row["status"], "owner": row["owner"], "sla_due": row["sla_due"],
                 "severity_rank": row["severity_rank"],
+                # W2.1: what the row says, and where it sits - to leave an unchanged one be.
+                "row_digest": str(row["row_digest"] or ""), "seq": row["seq"],
+                "last_seen": str(row["last_seen"] or ""), "is_current": int(row["is_current"] or 0),
             }
     return existing
+
+
+# W2.1: what a reused record carries that says nothing about the file - when it was looked
+# at, how long detection took, that it came from a cache. A record that differs from the
+# stored one only in these is the same record. Only top-level keys: a finding's own fields
+# all count, so a file analysed afresh is always written again - never skipped on a guess.
+_VOLATILE_RECORD_KEYS = frozenset({
+    "last_scanned_at", "incremental_scan_reason", "detector_elapsed_ms", "detector_metrics",
+    "cache_reused", "incremental_reused", "reused_preview", "baseline_result", "observed_at",
+})
+
+
+def _material_digest(*parts) -> str:
+    """A digest of what rows say, without the volatile keys of a record among them."""
+    digest = hashlib.sha256()
+    for part in parts:
+        if isinstance(part, dict):
+            part = {key: value for key, value in part.items() if key not in _VOLATILE_RECORD_KEYS}
+        digest.update(json.dumps(part, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                                 default=str).encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def _stored_values(conn, table: str, key_column: str, value_column: str, tenant_id: str, keys,
+                   *, scope: tuple[str, str] | None = None) -> dict[str, str]:
+    """``key -> value`` of one column for these rows, read in id chunks (W2.1)."""
+    found: dict[str, str] = {}
+    scope_sql, scope_args = (f" AND {scope[0]} = ?", (scope[1],)) if scope else ("", ())
+    for chunk in _id_chunks(keys):
+        placeholders = ",".join("?" for _ in chunk)
+        for row in conn.execute(
+            f"SELECT {key_column} AS k, {value_column} AS v FROM {table} "
+            f"WHERE tenant_id = ?{scope_sql} AND {key_column} IN ({placeholders})",
+            (tenant_id, *scope_args, *chunk),
+        ).fetchall():
+            found[str(row["k"])] = str(row["v"] or "")
+    return found
+
+
+# The positions in a finding row (_operational_finding_params) that say where and when it
+# was seen rather than what it is: first_seen (kept by the upsert anyway), last_seen,
+# scan_id, seq, is_current.
+_FINDING_PRESENCE_POSITIONS = frozenset({8, 9, 10, 11, 12})
+
+
+def _finding_row_digest(row: tuple) -> str:
+    return _material_digest([value for index, value in enumerate(row) if index not in _FINDING_PRESENCE_POSITIONS])
 
 
 def _operational_finding_id(tenant_id: str, asset_id: str, file_obj: dict, finding: dict) -> str:
@@ -3809,7 +3926,8 @@ _FINDING_UPSERT_SQL = (
     "INSERT INTO findings (tenant_id, id, asset_id, rule, severity, category, framework, status, "
     "first_seen, last_seen, scan_id, seq, is_current, risk_score, owner, sla_due, display_name, "
     "data_type, exposure, affected_asset, file_name, file_path, source, occurrence_count, confidence, "
-    "frameworks_json, search_text, severity_rank) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+    "frameworks_json, search_text, severity_rank, row_digest) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
     "ON CONFLICT (tenant_id, id) DO UPDATE SET asset_id = excluded.asset_id, rule = excluded.rule, "
     "severity = excluded.severity, category = excluded.category, framework = excluded.framework, status = excluded.status, "
     "first_seen = COALESCE(NULLIF(findings.first_seen, ''), excluded.first_seen), last_seen = excluded.last_seen, "
@@ -3821,7 +3939,7 @@ _FINDING_UPSERT_SQL = (
     "affected_asset = excluded.affected_asset, file_name = excluded.file_name, file_path = excluded.file_path, "
     "source = excluded.source, occurrence_count = excluded.occurrence_count, confidence = excluded.confidence, "
     "frameworks_json = excluded.frameworks_json, search_text = excluded.search_text, "
-    "severity_rank = excluded.severity_rank "
+    "severity_rank = excluded.severity_rank, row_digest = excluded.row_digest "
     # A row belongs to the newest scan that saw the finding. Re-saving an older report - any
     # lifecycle action on a finding only that scan holds re-saved the whole report, before W1.4 - wrote
     # its stale status, owner, severity and last_seen over every finding it shares with a
@@ -3921,7 +4039,7 @@ def _operational_finding_params(
     exposure = str(finding.get("exposure") or finding.get("exposure_state") or "")
     search_text = _finding_search_text(finding_id, display_name, rule, path, file_name, affected_asset, owner,
                                        data_type, exposure, frameworks)
-    return (
+    row = (
         tenant_id, finding_id, asset_id, rule, severity,
         str(finding.get("category") or finding.get("finding_category") or ""), frameworks[0], status,
         first_seen, last_seen, scan_id, seq, 1 if is_current else 0, risk_score, owner,
@@ -3930,6 +4048,7 @@ def _operational_finding_params(
         int(finding.get("confidence") or 0), json.dumps(frameworks, ensure_ascii=False, separators=(",", ":")),
         search_text, severity_rank(severity),
     )
+    return (*row, _finding_row_digest(row))
 
 
 def _finding_search_text(finding_id: str, display_name: str, rule: str, path: str, file_name: str,
@@ -4022,6 +4141,12 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             # here, the save no longer normalises the whole report a second time to
             # build them (15% of a save, and a second dump of every record).
             inventory_rows.extend(_inventory_row(asset, scan_id) for asset in piece.assets)
+        # Only this batch's paths. A report that lists the same path twice, with
+        # the copies in different batches, still resolves: the projection emits
+        # one asset for it, and the identity is recomputed from the record.
+        asset_ids_by_path = {asset.path: asset.id for asset in piece.assets}
+        changed_assets = _assets_to_write(conn, tenant_id, scan_id, observed_at, piece.assets, records,
+                                          asset_ids_by_path) if estate_rows else []
         _executemany(
             conn,
             "INSERT INTO assets "
@@ -4029,8 +4154,8 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "risk_level, risk_score, size, owner, modified_at, finding_count, "
             "top_frameworks, is_hidden, is_system, is_protected, search_text, "
             "finding_types, framework_keys, detail_json, scan_label, current_scan_id, observed_at, "
-            "reason_count, dlp_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "reason_count, dlp_count, row_digest) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (tenant_id, id) DO UPDATE SET "
             "source = excluded.source, stable_object_id = excluded.stable_object_id, "
             "path = excluded.path, name = excluded.name, extension = excluded.extension, "
@@ -4042,42 +4167,34 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
             "finding_types = excluded.finding_types, framework_keys = excluded.framework_keys, "
             "detail_json = excluded.detail_json, scan_label = excluded.scan_label, "
             "current_scan_id = excluded.current_scan_id, observed_at = excluded.observed_at, "
-        "reason_count = excluded.reason_count, dlp_count = excluded.dlp_count",
+        "reason_count = excluded.reason_count, dlp_count = excluded.dlp_count, row_digest = excluded.row_digest",
             (
                 (tenant_id, asset.id, asset.source, asset.stable_object_id, asset.path, asset.name,
                  asset.extension, asset.share, asset.risk_level, asset.risk_score, asset.size,
                  asset.owner, asset.modified_at, asset.finding_count, asset.top_frameworks,
                  asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
                  asset.finding_types, asset.framework_keys, pack_json_text(asset.detail_json), asset.scan_label,
-                 scan_id, observed_at, asset.reason_count, asset.dlp_count)
-                for asset in (piece.assets if estate_rows else [])
+                 scan_id, observed_at, asset.reason_count, asset.dlp_count, digest)
+                for asset, digest in changed_assets
             ),
         )
+        # W2.1: a version already recorded as it is - the common case - is not written again.
         _executemany(
             conn,
-            "INSERT OR REPLACE INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO asset_versions (tenant_id, asset_id, version, size, mtime, content_hash, coverage) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (tenant_id, asset_id, version) DO UPDATE SET size = excluded.size, mtime = excluded.mtime, "
+            "content_hash = excluded.content_hash, coverage = excluded.coverage "
+            "WHERE asset_versions.size <> excluded.size OR COALESCE(asset_versions.mtime, '') <> COALESCE(excluded.mtime, '') "
+            "OR COALESCE(asset_versions.content_hash, '') <> COALESCE(excluded.content_hash, '') "
+            "OR COALESCE(asset_versions.coverage, '') <> COALESCE(excluded.coverage, '')",
             (
                 (tenant_id, version.asset_id, version.version, version.size, version.mtime, version.content_hash, version.coverage)
                 for version in (piece.asset_versions if estate_rows else [])
             ),
         )
-        # Only this batch's paths. A report that lists the same path twice, with
-        # the copies in different batches, still resolves: the projection emits
-        # one asset for it, and the identity is recomputed from the record.
-        asset_ids_by_path = {asset.path: asset.id for asset in piece.assets}
         if estate_rows:
             _write_asset_access(conn, tenant_id, scan_id, records, asset_ids_by_path)
-        if estate_rows:
-            # Every finding on the assets this batch touched becomes historical,
-            # and the current ones are re-asserted by the upsert below. This was
-            # one UPDATE per asset - a million statements on a million-file scan
-            # - to express a set operation the database can do in one.
-            for id_chunk in _id_chunks(asset_ids_by_path.values()):
-                placeholders = ",".join("?" for _ in id_chunk)
-                conn.execute(
-                    f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})",
-                    (tenant_id, *id_chunk),
-                )
         if write_estate:
             # Two passes, because the lifecycle state an analyst set on a
             # previous scan has to be read BEFORE the rows are built - and
@@ -4106,17 +4223,19 @@ def _write_normalized_rows(conn, tenant_id: str, report: dict, *, refresh_curren
                 _existing_finding_lifecycle(conn, tenant_id, [item[4] for item in pending])
                 if refresh_current and pending else {}
             )
-            _executemany(
-                conn,
-                _FINDING_UPSERT_SQL,
-                (
-                    _operational_finding_params(
-                        tenant_id, scan_id, item_seq, item_asset_id, item_file, item_finding,
-                        item_id, existing.get(item_id), is_current=refresh_current,
-                    )
-                    for item_seq, item_asset_id, item_file, item_finding, item_id in pending
-                ),
-            )
+            if estate_rows:
+                _retire_absent_findings(conn, tenant_id, asset_ids_by_path.values(),
+                                        {item[4] for item in pending})
+            params = [
+                _operational_finding_params(
+                    tenant_id, scan_id, item_seq, item_asset_id, item_file, item_finding,
+                    item_id, existing.get(item_id), is_current=refresh_current,
+                )
+                for item_seq, item_asset_id, item_file, item_finding, item_id in pending
+            ]
+            if refresh_current:
+                params = _assert_unchanged_findings(conn, tenant_id, scan_id, params, existing)
+            _executemany(conn, _FINDING_UPSERT_SQL, params)
         if partition is not None:
             # Only this partition's occurrences, so running it again replaces them.
             # Each id is cleared once per call: a report can list a file twice, and
@@ -4168,7 +4287,26 @@ def _write_asset_access(conn, tenant_id: str, scan_id: str, records: list, asset
             rows[(asset_id, access.key)] = (
                 tenant_id, asset_id, access.key, access.principal[:256], access.sid[:184], int(access.read),
                 int(access.write), int(access.broad), int(access.privileged), int(access.service), scan_id)
-    for id_chunk in _id_chunks(asset_ids_by_path.values()):
+    # W2.1: an asset whose access is what is stored keeps its rows - and the scan that
+    # recorded them. Only the assets whose access changed are deleted and written.
+    wanted: dict[str, set] = {}
+    for (asset_id, _key), row in rows.items():
+        wanted.setdefault(asset_id, set()).add(row[2:10])
+    stored: dict[str, set] = {}
+    batch_ids = list(dict.fromkeys(asset_ids_by_path.values()))
+    for id_chunk in _id_chunks(batch_ids):
+        placeholders = ",".join("?" for _ in id_chunk)
+        for row in conn.execute(
+            "SELECT asset_id, principal_key, principal, sid, can_read, can_write, broad, privileged, service "
+            f"FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})",
+            (tenant_id, *id_chunk),
+        ).fetchall():
+            stored.setdefault(str(row["asset_id"]), set()).add((
+                str(row["principal_key"]), str(row["principal"]), str(row["sid"]), int(row["can_read"]),
+                int(row["can_write"]), int(row["broad"]), int(row["privileged"]), int(row["service"])))
+    changed = [asset_id for asset_id in batch_ids if stored.get(asset_id, set()) != wanted.get(asset_id, set())]
+    changed_set = set(changed)
+    for id_chunk in _id_chunks(changed):
         placeholders = ",".join("?" for _ in id_chunk)
         conn.execute(f"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})",
                      (tenant_id, *id_chunk))
@@ -4176,8 +4314,92 @@ def _write_asset_access(conn, tenant_id: str, scan_id: str, records: list, asset
         conn,
         "INSERT INTO asset_access (tenant_id, asset_id, principal_key, principal, sid, can_read, can_write, "
         "broad, privileged, service, scan_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        rows.values(),
+        (row for (asset_id, _key), row in rows.items() if asset_id in changed_set),
     )
+
+
+def _assets_to_write(conn, tenant_id: str, scan_id: str, observed_at: str, assets, records,
+                     asset_ids_by_path: dict) -> list[tuple]:
+    """W2.1: the batch's assets that must be written whole, with their digests; the rest -
+    the same content as stored - are only marked seen by this scan, one statement a chunk.
+
+    The digest covers every column but the presence markers, with the record in place of
+    the detail it is stored as, less the keys a reuse changes on every scan."""
+    record_by_id: dict[str, dict] = {}
+    for file_obj in records:
+        asset_id = asset_ids_by_path.get(str(file_obj.get("path") or file_obj.get("name") or ""))
+        if asset_id and asset_id not in record_by_id:
+            record_by_id[asset_id] = file_obj
+    digests = []
+    for asset in assets:
+        digests.append((asset, _material_digest(
+            asset.source, asset.stable_object_id, asset.path, asset.name, asset.extension, asset.share,
+            asset.risk_level, asset.risk_score, asset.size, asset.owner, asset.modified_at, asset.finding_count,
+            asset.top_frameworks, asset.is_hidden, asset.is_system, asset.is_protected, asset.search_text,
+            asset.finding_types, asset.framework_keys, asset.scan_label, asset.reason_count, asset.dlp_count,
+            record_by_id.get(asset.id) or asset.detail_json,
+        )))
+    stored = _stored_values(conn, "assets", "id", "row_digest", tenant_id, [asset.id for asset, _ in digests])
+    same = [asset.id for asset, digest in digests if stored.get(asset.id) == digest]
+    for id_chunk in _id_chunks(same):
+        placeholders = ",".join("?" for _ in id_chunk)
+        conn.execute(
+            f"UPDATE assets SET current_scan_id = ?, observed_at = ? WHERE tenant_id = ? AND id IN ({placeholders}) "
+            "AND current_scan_id <> ?",
+            (scan_id, observed_at, tenant_id, *id_chunk, scan_id),
+        )
+    unchanged = set(same)
+    return [(asset, digest) for asset, digest in digests if asset.id not in unchanged]
+
+
+def _retire_absent_findings(conn, tenant_id: str, asset_ids, present: set) -> None:
+    """The findings of these assets that this scan did not bring become historical (W2.1).
+
+    It used to retire every finding of the batch's assets and let the upsert re-assert the
+    current ones - two writes, through 18 indexes each, of every finding that had not
+    changed. The current ones are read first, and only those now absent are retired."""
+    absent: list[str] = []
+    for id_chunk in _id_chunks(asset_ids):
+        placeholders = ",".join("?" for _ in id_chunk)
+        absent.extend(
+            str(row["id"]) for row in conn.execute(
+                f"SELECT id FROM findings WHERE tenant_id = ? AND is_current = 1 AND asset_id IN ({placeholders})",
+                (tenant_id, *id_chunk),
+            ).fetchall()
+            if str(row["id"]) not in present
+        )
+    for id_chunk in _id_chunks(absent):
+        placeholders = ",".join("?" for _ in id_chunk)
+        conn.execute(f"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND id IN ({placeholders})",
+                     (tenant_id, *id_chunk))
+
+
+def _assert_unchanged_findings(conn, tenant_id: str, scan_id: str, params: list[tuple], existing: dict) -> list[tuple]:
+    """W2.1: a current scan's findings that say what their rows say are only marked seen;
+    returns the rest, for the upsert.
+
+    Marked seen is ``scan_id`` - and ``seq``, ``last_seen`` where those moved, one row at a
+    time. ``scan_id`` is not indexed, so the common case leaves every index alone."""
+    rest: list[tuple] = []
+    same_place: list[str] = []
+    moved: list[tuple] = []
+    for row in params:
+        prior = existing.get(row[1])
+        if prior is None or not prior.get("row_digest") or prior["row_digest"] != row[-1]:
+            rest.append(row)
+        elif prior.get("seq") == row[11] and prior.get("last_seen") == row[9] and prior.get("is_current") == 1:
+            same_place.append(row[1])
+        else:
+            moved.append((row[9], row[10], row[11], tenant_id, row[1]))
+    for id_chunk in _id_chunks(same_place):
+        placeholders = ",".join("?" for _ in id_chunk)
+        conn.execute(
+            f"UPDATE findings SET scan_id = ? WHERE tenant_id = ? AND id IN ({placeholders}) AND scan_id <> ?",
+            (scan_id, tenant_id, *id_chunk, scan_id),
+        )
+    _executemany(conn, "UPDATE findings SET last_seen = ?, scan_id = ?, seq = ?, is_current = 1 "
+                       "WHERE tenant_id = ? AND id = ?", moved)
+    return rest
 
 
 def _prune_unseen_assets(conn, tenant_id: str, scan_label: str, scan_id: str) -> None:
@@ -4228,31 +4450,27 @@ def _prune_unseen_assets(conn, tenant_id: str, scan_label: str, scan_id: str) ->
 def _stale_asset_chunks(conn, tenant_id: str, scan_label: str, scan_id: str):
     """The ids of a named scope's assets that `scan_id` did not see, a chunk at a time.
 
-    ``current_scan_id <> ?`` is not a range an index can seek, so each side of it is
-    read as its own range of ``(tenant_id, scan_label, current_scan_id, id)``: a
-    re-scan that saw every file reads nothing. Each chunk starts after the last row
-    of the one before - the caller deletes as it goes, and PostgreSQL keeps those
-    deleted rows in the index until the transaction ends."""
-    for side in ("<", ">"):
-        after: tuple | None = None
-        while True:
-            sql = (
-                "SELECT current_scan_id, id FROM assets WHERE tenant_id = ? AND scan_label = ? "
-                f"AND current_scan_id {side} ?"
-            )
-            params: list = [tenant_id, scan_label, scan_id]
-            if after is not None:
-                sql += " AND (current_scan_id, id) > (?, ?)"
-                params.extend(after)
-            sql += " ORDER BY current_scan_id, id LIMIT ?"
-            params.append(_ID_CHUNK)
-            rows = conn.execute(sql, params).fetchall()  # noqa: S608 - side is one of two literals
-            if not rows:
-                break
-            yield [str(row[1]) for row in rows]
-            if len(rows) < _ID_CHUNK:
-                break
-            after = (rows[-1][0], rows[-1][1])
+    Read in id order through ``(tenant_id, scan_label, id)``, filtered on
+    ``current_scan_id``: a re-scan that saw every file reads its scope once and removes
+    nothing. Revision 0039 indexed ``current_scan_id`` so this could seek; that made every
+    file's presence update rewrite an entry in every index of ``assets`` on every scan,
+    and revision 0042 dropped it (W2.1). The plan still does not depend on statistics: one
+    index range, in its own order. Each chunk starts after the last id of the one before
+    - the caller deletes as it goes, and PostgreSQL keeps those deleted rows in the index
+    until the transaction ends."""
+    after = ""
+    while True:
+        rows = conn.execute(
+            "SELECT id FROM assets WHERE tenant_id = ? AND scan_label = ? AND id > ? AND current_scan_id <> ? "
+            "ORDER BY id LIMIT ?",
+            (tenant_id, scan_label, after, scan_id, _ID_CHUNK),
+        ).fetchall()
+        if not rows:
+            break
+        yield [str(row[0]) for row in rows]
+        if len(rows) < _ID_CHUNK:
+            break
+        after = str(rows[-1][0])
 
 
 SEVERITY_RANKS = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -9175,7 +9393,8 @@ def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dic
         try:
             with _connect() as conn:
                 row = conn.execute(
-                    f"SELECT {', '.join(_INVENTORY_COLS)}, detail_json FROM assets WHERE tenant_id = ? AND id = ?",
+                    f"SELECT {', '.join(_INVENTORY_COLS)}, detail_json, observed_at FROM assets "
+                    "WHERE tenant_id = ? AND id = ?",
                     (tenant_id, asset_id),
                 ).fetchone()
             if row:
@@ -9183,6 +9402,11 @@ def get_inventory_asset(tenant_id: str, asset_id: str, scan_id: str = "") -> dic
                     detail = json.loads(unpack_json_text(row["detail_json"]) or "{}")
                 except (json.JSONDecodeError, TypeError):
                     detail = {}
+                # W2.1: an unchanged file keeps the detail it was written with; the scan
+                # that last saw it is its presence marker.
+                observed = str(row["observed_at"] or "")
+                if isinstance(detail, dict) and observed > str(detail.get("last_scanned_at") or ""):
+                    detail["last_scanned_at"] = observed
                 return detail | {column: row[column] for column in _INVENTORY_COLS}
             return None
         except Exception as exc:  # pragma: no cover - operational failure path

@@ -46,7 +46,17 @@ _REVISION_41_COLUMNS = (
     ("scan_jobs", "owner_host"), ("scan_jobs", "owner_pid"), ("scan_jobs", "owner_instance"),
     ("scan_jobs", "heartbeat_at"), ("scan_jobs", "cancel_requested"), ("scan_jobs", "resumes"),
     ("scan_schedules", "last_job_id"),
+    # Revision 42 (W2.1): the row digests.
+    ("assets", "row_digest"), ("findings", "row_digest"), ("scan_object_baselines", "snapshot_digest"),
 )
+
+
+def _index_names(conn) -> set[str]:
+    if db.is_postgres():
+        rows = conn.execute("SELECT indexname AS name FROM pg_indexes WHERE schemaname = current_schema()").fetchall()
+    else:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+    return {str(row["name"]) for row in rows}
 
 
 class _Upgrade:
@@ -70,13 +80,20 @@ class _Upgrade:
             for table, column in _REVISION_41_COLUMNS:
                 if column in db.table_columns(conn, table):
                     conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            # Revision 42 dropped the generation index the baseline schema had at 37.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_object_baselines_generation "
+                         "ON scan_object_baselines (tenant_id, scope_key, last_scan_id)")
             conn.execute("DELETE FROM schema_migrations WHERE revision > 37")
 
-    def _fill(self) -> None:
+    def _fill_scans(self) -> None:
+        # Written by this build's code while the schema is still whole: the old install is
+        # shaped afterwards, and the rows written here are what the upgrade must keep.
         self.tenant = f"upgrade-{uuid4().hex[:8]}"
         store.create_tenant(self.tenant, "Upgrade")
         store.save_scan_history(self.tenant, _report("s1", 5))
         store.save_scan_history(self.tenant, _report("s2", 3))
+
+    def _fill(self) -> None:
         with store._connect() as conn, db.platform_scope("migration"):
             conn.execute("INSERT INTO users (username, tenant_id, password_hash, role, created_at, updated_at) "
                          "VALUES (?, ?, 'x', 'analyst', '2026-09-01', '2026-09-01')", (f"ana-{self.tenant}", self.tenant))
@@ -87,7 +104,7 @@ class _Upgrade:
 
     def _counts(self) -> dict:
         with store._connect() as conn, db.platform_scope("migration"):
-            return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])  # noqa: S608
+            return {table: int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
                     for table in _COUNTED}
 
     def _assert_upgraded(self, before: dict) -> None:
@@ -100,6 +117,9 @@ class _Upgrade:
             self.assertIn("lifecycle_json", db.table_columns(conn, "findings"))
             for table, column in _REVISION_41_COLUMNS:
                 self.assertIn(column, db.table_columns(conn, table))
+            indexes = _index_names(conn)
+            self.assertNotIn("idx_scan_object_baselines_generation", indexes)
+            self.assertNotIn("idx_assets_tenant_scan_label_current_id", indexes)
             self.assertEqual(int(conn.execute("SELECT COUNT(*) FROM findings WHERE lifecycle_json <> ''")
                                  .fetchone()[0]), 0)
         self.assertEqual(self._counts(), before, "the upgrade lost or added rows")
@@ -121,9 +141,8 @@ class _Upgrade:
 
         revisions = migrations._revisions()
         failing = [*revisions, (revisions[-1][0] + 1, "fails_on_purpose", boom)]
-        with patch.object(migrations, "_revisions", lambda: failing):
-            with self.assertRaisesRegex(RuntimeError, "a revision failed"):
-                migrations.upgrade()
+        with patch.object(migrations, "_revisions", lambda: failing),                 self.assertRaisesRegex(RuntimeError, "a revision failed"):
+            migrations.upgrade()
         with store._connect() as conn, db.platform_scope("migration"):
             self.assertEqual(migrations.current_revision(conn), 37, "part of a failed upgrade was recorded")
             self.assertIn("mfa_verified", db.table_columns(conn, "user_sessions"),
@@ -144,6 +163,7 @@ class AnSqliteInstallUpgradesWholeTest(_Upgrade, unittest.TestCase):
         revisions = migrations._revisions()
         with patch.object(migrations, "_revisions", lambda: revisions[:37]):
             migrations.upgrade()
+        self._fill_scans()
         self._make_old_install()
         self._fill()
 
@@ -163,6 +183,7 @@ class APostgresInstallUpgradesWholeTest(_Upgrade, unittest.TestCase):
 
     def setUp(self) -> None:
         self.addCleanup(migrations.upgrade)
+        self._fill_scans()
         self._make_old_install()
         self._fill()
         with store._connect() as conn:

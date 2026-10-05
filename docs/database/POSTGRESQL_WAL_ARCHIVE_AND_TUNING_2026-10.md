@@ -228,10 +228,55 @@ persist measured on the host.
 
 ### Per-table autovacuum and fillfactor
 
-Per-table settings ship as a migration once W2.1 shows which tables update in
-place (section 7). They are not guessed here.
+Revision 0042 sets these from the W2.1 measurements (section 7). They apply to
+rows as they are written, and take only a SHARE UPDATE EXCLUSIVE lock.
+
+| Table | Settings | Why |
+|---|---|---|
+| `assets` | `fillfactor = 60`, `toast_tuple_target = 256` | an unchanged file moves only `current_scan_id`; the row (about 1.4 KB with its detail inline) needs room on its page for that update to be HOT |
+| `findings` | `fillfactor = 60` | an unchanged finding moves only `scan_id`, which no index covers |
+| `scan_object_baselines` | `fillfactor = 80`, `toast_tuple_target = 256` | the snapshot moves out of line; presence moves `last_scan_id` |
+| all three | `autovacuum_vacuum_scale_factor = 0.05`, `autovacuum_analyze_scale_factor = 0.02` | vacuumed at 5% churn, not 20% |
+
+The heap of `assets` and `findings` takes up to about 1.7 times the pages it
+did; their indexes do not change.
 
 ## 7. After W2.1
 
-Filled in by the W2.1 delta-persistence work with the same benchmark, so the
-before and after can be compared.
+**What changed.** A row whose content is what is already stored is no longer
+written again; only its presence marker moves.
+
+- **How "unchanged" is decided.** Rows carry digests (`assets.row_digest`,
+  `findings.row_digest`, `scan_object_baselines.snapshot_digest`). Each digest
+  covers the content, minus the keys a reuse rewrites on every scan.
+- **Assets, findings and baselines.** The presence markers move set-based: one
+  statement per 900 rows.
+- **Findings no longer flip twice.** They were retired and then re-asserted;
+  now only the absent ones are retired.
+- **Versions and access rows.** An unchanged asset version is not rewritten,
+  and access rows are rewritten only for assets whose access changed.
+- **Indexes.** The presence markers' indexes (revision 0039's
+  `idx_assets_tenant_scan_label_current_id`, the baselines' generation index)
+  were dropped. The prune reads its scope in id order instead, so presence
+  updates can be HOT.
+
+**Measured** with the same benchmark: `sentro_test`, 4,000 files with 2
+findings each, partitioned, same host.
+
+| Unchanged rescan | Before W2.1 | After W2.1 |
+|---|---|---|
+| Time | 9.1 s (439 files/s) | 4.2 s (943 files/s) |
+| WAL | 108.6 MiB (27.8 KiB/file) | 30.0 MiB (7.7 KiB/file) |
+| Row updates | 24,006 (15 HOT) | 12,006 (8,064 HOT) |
+| Table growth | +37.7 MiB | +11.4 MiB |
+
+The first save is unchanged: 76 MiB of WAL.
+
+**What remains.** Most of a rescan's WAL is now the per-scan history: one
+`finding_index` row and one `finding_occurrences` row per finding per scan.
+That history is kept by design. Deduplicating its response bodies is the next
+step, and is listed in the scaling roadmap.
+
+The benchmark records carry no ACL and no incremental baseline. Both paths are
+covered by `tests/test_w2_delta_persistence.py`, but their WAL was not
+measured here.

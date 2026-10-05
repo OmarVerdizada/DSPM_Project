@@ -39,6 +39,8 @@ TENANT = "partitioned-local"
 _VOLATILE_COLUMNS = {
     "current_scan_id", "scan_id", "last_scan_id", "observed_at", "first_seen", "last_seen",
     "sla_due", "last_seen_at", "updated_at", "seq",
+    # W2.1: digests of what a row says, over the run's own record - a cache key, like updated_at.
+    "row_digest", "snapshot_digest",
 }
 _TABLES = ("assets", "asset_versions", "findings", "finding_occurrences", "finding_index", "scan_object_baselines")
 
