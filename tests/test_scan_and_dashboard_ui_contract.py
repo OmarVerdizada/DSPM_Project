@@ -141,7 +141,9 @@ class ScanAndDashboardUiContractTests(unittest.TestCase):
         # and stage message (which now moves past the old collection ceiling),
         # not a fixed client-side value.
         poll_start = self.app_js.index("async function pollScan(")
-        poll_body = self.app_js[poll_start:poll_start + 1600]
+        # The whole function, not a fixed slice of it: the incomplete state (W2.4) moved
+        # the failure branch past the first 1,600 characters.
+        poll_body = self.app_js[poll_start:self.app_js.index("\n}\n", poll_start)]
         self.assertIn("job.progress", poll_body)
         self.assertIn("job.message", poll_body)
         # Completion pins 100 and failure/cancel surfaces an error (no stale bar).
