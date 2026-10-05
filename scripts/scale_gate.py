@@ -396,8 +396,11 @@ def endpoint_paging_check(files: int, file_bytes: int = MB) -> dict:
         report = Report()
         # Plain functions, never Mocks: a Mock remembers every call's arguments, and the
         # batches would stay alive in its call list (B4's probe learned this the hard way).
+        # The single path's batching: a frontier page (W1.3) reads its files through the same
+        # batches, and this fake answers the whole scope at once, as the single walk does.
         with mock.patch.dict(os.environ, {"DSPM_ENDPOINT_FETCH_BATCH_BYTES": str(batch_bytes),
                                           "DSPM_ENDPOINT_MAX_FILE_TEXT_BYTES": str(5 * MB)}), \
+                mock.patch("backend.app.partitioned_scans_enabled", lambda: False), \
                 mock.patch("backend.app.ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE", batch_files), \
                 mock.patch("backend.app._endpoint_analysis_engine", lambda *a, **k: report), \
                 mock.patch("backend.app.WinRMEndpointScanner", Scanner), \

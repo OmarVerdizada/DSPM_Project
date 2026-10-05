@@ -291,13 +291,23 @@ class AHugeFlatFolderTest(_RangeTest):
                         "Big", unit["folder"], int(unit["depth"]), name_range=(unit["name_from"], unit["name_to"]))
                 return len(built.slots)
 
-            tracemalloc.start()
-            self.assertEqual(enumerate_unit(ranges[7]), 2000)
-            _current, unit_peak = tracemalloc.get_traced_memory()
-            tracemalloc.reset_peak()
-            self.assertEqual(enumerate_unit(), self.ENTRIES)
-            _current, whole_peak = tracemalloc.get_traced_memory()
-            tracemalloc.stop()
+            def peak_of(run) -> int:
+                # Above what is already allocated: tracing may have been left on by an earlier
+                # test, and its peak would count that test's memory as this one's.
+                tracemalloc.reset_peak()
+                before = tracemalloc.get_traced_memory()[0]
+                run()
+                return tracemalloc.get_traced_memory()[1] - before
+
+            was_tracing = tracemalloc.is_tracing()
+            if not was_tracing:
+                tracemalloc.start()
+            try:
+                unit_peak = peak_of(lambda: self.assertEqual(enumerate_unit(ranges[7]), 2000))
+                whole_peak = peak_of(lambda: self.assertEqual(enumerate_unit(), self.ENTRIES))
+            finally:
+                if not was_tracing:
+                    tracemalloc.stop()
         self.assertLess(unit_peak * 10, whole_peak,
                         f"one unit peaked at {unit_peak} bytes against {whole_peak} for the whole folder")
 
