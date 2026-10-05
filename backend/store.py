@@ -3899,9 +3899,19 @@ def _material_digest(*parts) -> str:
     return digest.hexdigest()
 
 
+# The (table, key column, value column, scope column) shapes _stored_values reads: its SQL
+# is built from these names, so nothing else is let through.
+_STORED_VALUE_SHAPES = frozenset({
+    ("assets", "id", "row_digest", None),
+    ("scan_object_baselines", "object_key", "snapshot_digest", "scope_key"),
+})
+
+
 def _stored_values(conn, table: str, key_column: str, value_column: str, tenant_id: str, keys,
                    *, scope: tuple[str, str] | None = None) -> dict[str, str]:
     """``key -> value`` of one column for these rows, read in id chunks (W2.1)."""
+    if (table, key_column, value_column, scope[0] if scope else None) not in _STORED_VALUE_SHAPES:
+        raise ValueError(f"_stored_values does not read {table}.{value_column}")
     found: dict[str, str] = {}
     scope_sql, scope_args = (f" AND {scope[0]} = ?", (scope[1],)) if scope else ("", ())
     for chunk in _id_chunks(keys):
