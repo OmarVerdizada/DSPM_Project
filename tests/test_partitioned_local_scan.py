@@ -410,12 +410,12 @@ class WhenNotToPartitionTest(_LocalTest):
             _write(self.estate / "enterprise_test_data" / f"sample{index}.txt", index)
         self.assertIsNone(partitioned_scan.run_partitioned_scan(TENANT, self._config("demo"), max_files=3))
 
-    def test_the_flag_is_off_by_default(self) -> None:
+    def test_the_flag_is_on_by_default_since_g0(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DSPM_PARTITIONED_SCANS", None)
-            self.assertFalse(partitioned_scan.partitioned_scans_enabled())
-        with mock.patch.dict(os.environ, {"DSPM_PARTITIONED_SCANS": "1"}):
             self.assertTrue(partitioned_scan.partitioned_scans_enabled())
+        with mock.patch.dict(os.environ, {"DSPM_PARTITIONED_SCANS": "0"}):
+            self.assertFalse(partitioned_scan.partitioned_scans_enabled())
 
 
 class StoppingTest(_LocalTest):

@@ -12,9 +12,11 @@ import platform
 import re
 import secrets
 import socket
+import threading
 import time
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -51,11 +53,13 @@ from backend.partitioned_scan import (
     continue_partitioned_scan,
     enqueue_partitioned_scan,
     follow_partitioned_scan,
+    partition_max_files,
     partitioned_scans_enabled,
     queued_execution,
     run_partitioned_scan,
     start_partitioned_scan,
 )
+from backend.partitioned_scan import register_unit_runner as partitioned_register_unit_runner
 from backend.reporting.router import router as reporting_router
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
@@ -84,6 +88,9 @@ from backend.security import (
 from backend.security import _token_jti
 from backend.store import (
     allocate_account_key,
+    create_scan_partitions,
+    read_partitioned_scan,
+    register_partitioned_scan,
     delete_directory_settings,
     find_user_by_login,
     get_directory_settings,
@@ -5224,6 +5231,10 @@ def rebuild_scan_config(record: dict) -> ScanConfig:
     The same validation and credential resolution a scan started from the console
     gets. A resumed scan (B2.4) and a queue worker (B3) both start here.
     """
+    if str((record.get("header") or {}).get("source") or "") == "endpoint-winrm":
+        # An endpoint page is run by its own runner, from the scan's stored request (W1.3);
+        # the engine configuration only carries the workspace.
+        return ScanConfig(tenant_id=record["tenant_id"])
     return _to_config(ScanRequest.model_validate(record["request"]), record["tenant_id"])
 
 
@@ -5239,6 +5250,9 @@ def _resume_partitioned_scan(record: dict) -> None:
     from backend.scan_resumer import ResumeLater
     from backend.store import bind_partitioned_scan_job
 
+    if str((record.get("header") or {}).get("source") or "") == "endpoint-winrm":
+        _resume_endpoint_scan(record)
+        return
     tenant_id = record["tenant_id"]
     scan_id = record["scan_id"]
     payload = ScanRequest.model_validate(record["request"])
@@ -5523,6 +5537,319 @@ def _assembled_endpoint_records(
     return records, missing
 
 
+def _read_endpoint_metadata(
+    scanner,
+    config: WinRMEndpointConfig,
+    report: DSPMDiscoveryEngine,
+    job,
+    metadata_records: list[dict],
+    host_key: str,
+    incremental_baseline_available: bool,
+) -> tuple[list[dict], dict]:
+    """A metadata pass's records, analyzed: reused from the baseline, or read in bounded
+    content batches (B4), and put back in walk order. Returns them with the diagnostics that
+    say how - the whole scan's on the single path, one page's on the frontier (W1.3)."""
+    reused_by_path: dict[str, dict] = {}
+    reused_archive_records: list[dict] = []
+    wanted_paths: list[str] = []
+    for record in metadata_records:
+        path = str(record.get("path") or "")
+        object_key = qualified_object_key("endpoint-winrm", host_key, path)
+        snapshot = (
+            report._reuse_probe(
+                object_key,
+                int(record.get("size") or 0),
+                str(record.get("modified_at") or ""),
+            )
+            if incremental_baseline_available
+            else None
+        )
+        if isinstance(snapshot, dict):
+            reused_by_path[path.casefold()] = apply_reuse_snapshot(record, snapshot, object_key)
+            for prior in snapshot.get("archive_records") or []:
+                if not isinstance(prior, dict):
+                    continue
+                child_key = str(prior.get("reuse_key") or qualified_object_key(
+                    "endpoint-winrm", host_key, str(prior.get("path") or "")
+                ))
+                reused_archive_records.append(
+                    apply_reuse_snapshot(prior, reuse_snapshot_from_result(prior), child_key)
+                )
+        else:
+            wanted_paths.append(path)
+
+    sizes_by_path = {
+        str(record.get("path") or "").casefold(): int(record.get("size") or 0)
+        for record in metadata_records
+    }
+    (
+        analyzed_by_path,
+        analyzed_archive_records,
+        fetch_commands,
+        fetch_errors,
+        scanner_fields,
+    ) = _fetch_endpoint_content_in_batches(
+        scanner,
+        config,
+        report,
+        job,
+        host_key,
+        wanted_paths,
+        sizes_by_path,
+        message="Reading changed endpoint files" if incremental_baseline_available else "Reading endpoint files",
+        # A reused record is compared against a stored hash and owner, so a
+        # warm scan reads both whatever the request asked for. A first scan
+        # has nothing to compare against and keeps the request's own answer.
+        scan_overrides={"hash_files": True, "read_owner": True} if incremental_baseline_available else None,
+    )
+    records, missing_paths = _assembled_endpoint_records(
+        report,
+        job,
+        metadata_records,
+        host_key,
+        analyzed_by_path=analyzed_by_path,
+        reused_by_path=reused_by_path,
+        reused_archive_records=reused_archive_records,
+        analyzed_archive_records=analyzed_archive_records,
+        unreadable_note=(
+            "Changed file could not be fetched during incremental scan"
+            if incremental_baseline_available
+            else "File could not be read during the scan"
+        ),
+    )
+    if missing_paths:
+        fetch_errors.append("MissingChangedRecords" if incremental_baseline_available else "MissingRecords")
+    return records, {
+        **scanner_fields,
+        "incremental_metadata_pass": True,
+        "incremental_first_scan_single_pass": not incremental_baseline_available and fetch_commands <= 1,
+        "incremental_changed_paths": len(wanted_paths),
+        "incremental_content_fetch_commands": fetch_commands,
+        "incremental_fetch_batch_size": ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE,
+        "incremental_fetch_batch_bytes": endpoint_fetch_batch_bytes(),
+        "endpoint_max_file_text_bytes": endpoint_max_file_text_bytes(),
+        "incremental_fetch_errors": fetch_errors[:20],
+        "incremental_missing_changed_paths": missing_paths[:20],
+    }
+
+
+# ---- W1.3: an endpoint scan in the ledger, paged by a folder frontier ---------------------------------
+
+
+def endpoint_page_folders() -> int:
+    """How many folders one page command lists at most (``DSPM_ENDPOINT_PAGE_FOLDERS``, 500)."""
+    try:
+        return max(1, min(int(os.getenv("DSPM_ENDPOINT_PAGE_FOLDERS") or "500"), 10_000))
+    except ValueError:
+        return 500
+
+
+@dataclass
+class _EndpointRun:
+    """What every page of one endpoint scan shares while it runs in this process."""
+
+    config: WinRMEndpointConfig
+    payload: EndpointScanRequest
+    principal: Principal
+    scanner: WinRMEndpointScanner
+    baseline_available: bool
+    lock: threading.Lock = dataclass_field(default_factory=threading.Lock)
+
+
+_ENDPOINT_RUNS: dict[tuple[str, str], _EndpointRun] = {}
+
+
+def _endpoint_run_for(tenant_id: str, scan_id: str) -> _EndpointRun:
+    """The run's shared state: the job's own, or - for a resumed scan, or a page a queue worker
+    took - rebuilt from the scan's stored request, its vaulted credential resolved again."""
+    run = _ENDPOINT_RUNS.get((tenant_id, scan_id))
+    if run is not None:
+        return run
+    record = read_partitioned_scan(tenant_id, scan_id)
+    if record is None:
+        raise LookupError(f"endpoint scan {scan_id} is not recorded")
+    payload = EndpointScanRequest.model_validate(record["request"])
+    config = _to_endpoint_config(payload, tenant_id)
+    header = record.get("header") or {}
+    principal = Principal(subject=str(header.get("requested_by") or "system:scan-resumer"), role="analyst",
+                          tenant_id=tenant_id, auth_type="system")
+    baseline = bool(payload.incremental_enabled) and incremental_baseline_exists(tenant_id, _endpoint_scan_scope(config))
+    run = _EndpointRun(config, payload, principal, WinRMEndpointScanner(config), baseline)
+    _ENDPOINT_RUNS[(tenant_id, scan_id)] = run
+    return run
+
+
+def _endpoint_frontier_units(hand_on: dict, max_folders: int) -> list[dict]:
+    """The units a page hands on: where its listing stopped, then the subfolders it met."""
+    units: list[dict] = []
+    rest = [dict(item) for item in hand_on.get("continuation") or [] if isinstance(item, dict)]
+    if rest:
+        units.append({"kind": "endpoint_page", "folders": rest})
+    found = [dict(item) for item in hand_on.get("folders") or [] if isinstance(item, dict)]
+    for start in range(0, len(found), max_folders):
+        units.append({"kind": "endpoint_page", "folders": found[start:start + max_folders]})
+    return units
+
+
+def _run_endpoint_page(scan, unit: dict, *, job, stop_reason) -> tuple[dict, list[dict], list[dict]]:
+    """One page of an endpoint scan: list its folders, read and analyze what changed, and hand
+    on the rest of the frontier. Returns the partition's header, records and new units."""
+    from backend.compliance_service import ComplianceReportAccumulator
+
+    run = _endpoint_run_for(scan.tenant_id, scan.scan_id)
+    max_folders = endpoint_page_folders()
+    page = {"folders": list(unit["spec"].get("folders") or []),
+            "page_size": partition_max_files(), "max_folders": max_folders}
+    # One WinRM session serves the scan; pages of one scan take turns on it.
+    with run.lock:
+        scanner, config = run.scanner, run.config
+        scanner.config = replace(config, read_content=False, read_acl=False, inspect_archives=False,
+                                 hash_files=False, read_owner=False)
+        try:
+            with collection_heartbeat(job, max_seconds=0) if job is not None else nullcontext():
+                metadata_records = scanner.scan(page=page)
+        finally:
+            scanner.config = config
+        hand_on = dict(scanner.last_page or {})
+        page_diagnostics = dict(scanner.last_scan_diagnostics or {})
+        host_key = config.host or scanner.last_connection_host
+        report = _endpoint_analysis_engine(config, run.payload, run.principal, baseline_available=run.baseline_available)
+        with _releasing_reuse_index(report):
+            if config.read_content:
+                report.last_scan_diagnostics = page_diagnostics
+                analyzed, read_diagnostics = _read_endpoint_metadata(
+                    scanner, config, report, job, metadata_records, host_key, run.baseline_available,
+                )
+            else:
+                for record in metadata_records:
+                    record["reuse_key"] = qualified_object_key("endpoint-winrm", host_key, str(record.get("path") or ""))
+                report.last_scan_diagnostics = page_diagnostics
+                analyzed = _analyze_endpoint_records(report, metadata_records, job, close_index=False)
+                read_diagnostics = {}
+            report.last_scan_diagnostics = {**dict(report.last_scan_diagnostics or {}), **page_diagnostics,
+                                            **read_diagnostics}
+            report._finalize_incremental_diagnostics(analyzed)
+            if run.payload.incremental_enabled and config.read_content and not run.baseline_available:
+                incremental = report.last_scan_diagnostics.get("incremental") or {}
+                incremental["new_objects"] = len(analyzed)
+                incremental["changed_objects"] = 0
+                incremental["unclassified_fresh_objects"] = 0
+            if not config.read_content:
+                report.last_scan_diagnostics["incremental"]["content_reads"] = 0
+                report.last_scan_diagnostics["incremental"]["delta_ratio"] = 0.0
+            summary = report._build_summary(analyzed).to_dict()
+            diagnostics = dict(report.last_scan_diagnostics or {})
+    reason = stop_reason()
+    if reason:
+        raise RuntimeError(reason)
+    enrichment = ComplianceReportAccumulator(scan.compliance_enabled, list(scan.compliance_frameworks))
+    for record in analyzed:
+        enrichment.prepare(record)
+    diagnostics["frontier_page_folders"] = len(page["folders"])
+    header = {
+        "timestamp": scan.timestamp,
+        "source": "endpoint-winrm",
+        "mode": "incremental" if run.payload.incremental_enabled else "full",
+        "summary": summary,
+        "scan_diagnostics": diagnostics,
+    }
+    if scan.label:
+        header["scan_label"] = scan.label
+    return header, analyzed, _endpoint_frontier_units(hand_on, max_folders)
+
+
+partitioned_register_unit_runner("endpoint-winrm", _run_endpoint_page)
+
+
+def _endpoint_report_extra(config: WinRMEndpointConfig) -> dict:
+    """The ``endpoint`` section a partitioned endpoint report carries beside its files."""
+    return {"endpoint": {
+        "host": config.host,
+        "target_username": config.target_username,
+        "paths": config.paths,
+        "max_depth": config.max_depth,
+        "allowed_extensions": config.allowed_extensions or [],
+        "extension_filter_enabled": config.extension_filter_enabled,
+        "include_hidden": config.include_hidden,
+        "include_system": config.include_system,
+        "hidden_filter_enabled": config.hidden_filter_enabled,
+        "system_filter_enabled": config.system_filter_enabled,
+        "read_content": config.read_content,
+        "read_acl": config.read_acl,
+        "inspect_archives": config.inspect_archives,
+        "frontier": True,
+    }}
+
+
+def _run_partitioned_endpoint_scan(config: WinRMEndpointConfig, payload: EndpointScanRequest,
+                                   principal: Principal, job=None) -> dict:
+    """An endpoint scan of any size (W1.3): pages of a folder frontier, each a unit of the ledger.
+
+    The single path listed the whole endpoint in one command, kept the first 5,000 files and
+    dropped the rest, and held every record until one save. Here the first unit lists the
+    scan's roots; each page lists at most a partition's worth of files and DSPM_ENDPOINT_PAGE_FOLDERS
+    folders, reads what changed in bounded batches (B4), is written as it finishes, and hands
+    on the subfolders it met and where it stopped. Nothing caps the record count; what the
+    backend holds follows the page. A restart continues from the frontier in the ledger.
+    """
+    if job is not None:
+        job.progress = max(job.progress, 7)
+        job.message = "Listing the endpoint"
+    scanner = WinRMEndpointScanner(config)
+    scan_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    header = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "endpoint-winrm",
+        "scan_label": str(getattr(payload, "scan_label", "") or "").strip()[:80],
+        "compliance_enabled": bool(payload.compliance_enabled),
+        "compliance_frameworks": list(payload.compliance_frameworks or []),
+        "requested_by": str(getattr(principal, "subject", "") or ""),
+        "host": config.host,
+        "report_extra": _endpoint_report_extra(config),
+    }
+    register_partitioned_scan(principal.tenant_id, scan_id, job_id=str(getattr(job, "id", "") or ""),
+                              request=payload.model_dump(mode="json"), header=header)
+    create_scan_partitions(principal.tenant_id, scan_id, str(getattr(job, "id", "") or ""), [{
+        "kind": "endpoint_page",
+        "folders": [{"path": path, "depth": 0, "after": "", "root": True} for path in scanner._target_paths()],
+    }])
+    baseline = bool(payload.incremental_enabled) and incremental_baseline_exists(
+        principal.tenant_id, _endpoint_scan_scope(config))
+    _ENDPOINT_RUNS[(principal.tenant_id, scan_id)] = _EndpointRun(config, payload, principal, scanner, baseline)
+    return _continue_endpoint_scan(scan_id, payload, principal, job)
+
+
+def _continue_endpoint_scan(scan_id: str, payload: EndpointScanRequest, principal: Principal, job) -> dict:
+    run = _endpoint_run_for(principal.tenant_id, scan_id)
+    try:
+        # One WinRS shell for every page and content batch of the scan (W1.3).
+        with run.scanner.reusing_shell():
+            data = continue_partitioned_scan(principal.tenant_id, scan_id, ScanConfig(tenant_id=principal.tenant_id),
+                                             job=job)
+    finally:
+        _ENDPOINT_RUNS.pop((principal.tenant_id, scan_id), None)
+    return _finish_partitioned_scan_payload(data, payload, principal)
+
+
+def _resume_endpoint_scan(record: dict) -> None:
+    """Continue an endpoint scan a stopped process left unfinished, from its frontier."""
+    from backend.scan_resumer import ResumeLater
+    from backend.store import bind_partitioned_scan_job
+
+    tenant_id = record["tenant_id"]
+    scan_id = record["scan_id"]
+    payload = EndpointScanRequest.model_validate(record["request"])
+    run = _endpoint_run_for(tenant_id, scan_id)
+    try:
+        job = create_job(tenant_id, lambda job: _continue_endpoint_scan(scan_id, payload, run.principal, job),
+                         job_id=record.get("job_id") or None)
+    except (RuntimeError, ValueError) as exc:
+        _ENDPOINT_RUNS.pop((tenant_id, scan_id), None)
+        raise ResumeLater(str(exc)) from exc
+    bind_partitioned_scan_job(tenant_id, scan_id, job.id)
+    audit(tenant_id, "system:scan-resumer", "scan.resumed", {"scan_id": scan_id, "job_id": job.id})
+
+
 @contextmanager
 def _releasing_reuse_index(engine):
     """Close the engine's reuse index however an endpoint scan ends.
@@ -5548,6 +5875,8 @@ def _run_endpoint_scan_payload(
 ) -> dict:
     if _is_local_endpoint_host(config.host):
         return _run_local_endpoint_scan_payload(config, payload, principal, job)
+    if partitioned_scans_enabled():
+        return _run_partitioned_endpoint_scan(config, payload, principal, job)
 
     incremental_baseline_available = bool(payload.incremental_enabled) and incremental_baseline_exists(
         principal.tenant_id,
@@ -5605,97 +5934,17 @@ def _collect_and_persist_remote_endpoint(
         collection_diagnostics = dict(scanner.last_scan_diagnostics or {})
         report.last_scan_diagnostics = collection_diagnostics
         host_key = config.host or scanner.last_connection_host
-        reused_by_path: dict[str, dict] = {}
-        reused_archive_records: list[dict] = []
-        wanted_paths: list[str] = []
-        for record in metadata_records:
-            path = str(record.get("path") or "")
-            object_key = qualified_object_key("endpoint-winrm", host_key, path)
-            snapshot = (
-                report._reuse_probe(
-                    object_key,
-                    int(record.get("size") or 0),
-                    str(record.get("modified_at") or ""),
-                )
-                if incremental_baseline_available
-                else None
-            )
-            if isinstance(snapshot, dict):
-                reused_by_path[path.casefold()] = apply_reuse_snapshot(record, snapshot, object_key)
-                for prior in snapshot.get("archive_records") or []:
-                    if not isinstance(prior, dict):
-                        continue
-                    child_key = str(prior.get("reuse_key") or qualified_object_key(
-                        "endpoint-winrm", host_key, str(prior.get("path") or "")
-                    ))
-                    reused_archive_records.append(
-                        apply_reuse_snapshot(prior, reuse_snapshot_from_result(prior), child_key)
-                    )
-            else:
-                wanted_paths.append(path)
-
-        sizes_by_path = {
-            str(record.get("path") or "").casefold(): int(record.get("size") or 0)
-            for record in metadata_records
-        }
-        (
-            analyzed_by_path,
-            analyzed_archive_records,
-            fetch_commands,
-            fetch_errors,
-            scanner_fields,
-        ) = _fetch_endpoint_content_in_batches(
-            scanner,
-            config,
-            report,
-            job,
-            host_key,
-            wanted_paths,
-            sizes_by_path,
-            message="Reading changed endpoint files" if incremental_baseline_available else "Reading endpoint files",
-            # A reused record is compared against a stored hash and owner, so a
-            # warm scan reads both whatever the request asked for. A first scan
-            # has nothing to compare against and keeps the request's own answer.
-            scan_overrides={"hash_files": True, "read_owner": True} if incremental_baseline_available else None,
-        )
-        records, missing_paths = _assembled_endpoint_records(
-            report,
-            job,
-            metadata_records,
-            host_key,
-            analyzed_by_path=analyzed_by_path,
-            reused_by_path=reused_by_path,
-            reused_archive_records=reused_archive_records,
-            analyzed_archive_records=analyzed_archive_records,
-            unreadable_note=(
-                "Changed file could not be fetched during incremental scan"
-                if incremental_baseline_available
-                else "File could not be read during the scan"
-            ),
+        records, read_diagnostics = _read_endpoint_metadata(
+            scanner, config, report, job, metadata_records, host_key, incremental_baseline_available,
         )
         analyzed = records
-        if missing_paths:
-            fetch_errors.append("MissingChangedRecords" if incremental_baseline_available else "MissingRecords")
         # Analysis rebinds the engine's diagnostics to a copy of its own, so the
         # collection facts are re-applied over what analysis left behind.
         collection_diagnostics = {
             **dict(report.last_scan_diagnostics or {}),
             **collection_diagnostics,
-            **scanner_fields,
+            **read_diagnostics,
         }
-        collection_diagnostics.update(
-            {
-                "incremental_metadata_pass": True,
-                "incremental_first_scan_single_pass": not incremental_baseline_available and fetch_commands <= 1,
-                "incremental_changed_paths": len(wanted_paths),
-                "incremental_content_fetch_commands": fetch_commands,
-                "incremental_fetch_batch_size": ENDPOINT_INCREMENTAL_FETCH_BATCH_SIZE,
-                "incremental_fetch_batch_bytes": endpoint_fetch_batch_bytes(),
-                "endpoint_max_file_text_bytes": endpoint_max_file_text_bytes(),
-                "incremental_fetch_errors": fetch_errors[:20],
-                "incremental_missing_changed_paths": missing_paths[:20],
-            }
-        )
     else:
         # Nothing to read: the walk is the scan, and a metadata record is small.
         with collection_heartbeat(job, ceiling=60):

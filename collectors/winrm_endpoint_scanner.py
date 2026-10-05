@@ -14,6 +14,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
@@ -614,6 +615,24 @@ def _format_windows_username(username: str, domain: str) -> str:
     return username
 
 
+class WinRMCommandTimedOut(RuntimeError):
+    """A remote command ran past its wall clock; its shell was closed, which stops it (W1.3)."""
+
+
+def winrm_command_timeout_seconds() -> int:
+    """How long one WinRM command may run (``DSPM_WINRM_COMMAND_TIMEOUT_SECONDS``; 0 = no limit).
+
+    The output loop retried the WS-Man operation timeout for ever, so a remote command
+    that hung held its scan for ever too. Past this the command is abandoned and its shell
+    closed, which ends the process on the endpoint. Fifteen minutes by default: a page or
+    a content batch takes seconds.
+    """
+    try:
+        return max(0, min(int(os.getenv("DSPM_WINRM_COMMAND_TIMEOUT_SECONDS") or "900"), 86_400))
+    except ValueError:
+        return 900
+
+
 class WinRMKerberosUnavailable(RuntimeError):
     """Kerberos was required and this install cannot provide it."""
 
@@ -758,6 +777,12 @@ class WinRMEndpointScanner:
         # deliberately not process-global: credentials and sessions do not
         # outlive the operation that supplied them.
         self._session_binding: _WinRMSessionBinding | None = None
+        # W1.3: one WinRS shell for a block of commands (reusing_shell), and what a page left.
+        self._shell_reuse = False
+        self._reused_shell: tuple | None = None
+        self._shells_opened = 0
+        self._shells_reused = 0
+        self.last_page: dict = {"folders": [], "continuation": []}
         self._session_creations = 0
         self._session_negotiations = 0
         self._session_reuse_count = 0
@@ -1017,8 +1042,12 @@ class WinRMEndpointScanner:
             return min(int(override), 16)
         return max(1, min(int(resolve_parallelism().io_workers), 8))
 
-    def scan(self) -> list[dict]:
-        target_paths = self._target_paths()
+    def scan(self, page: dict | None = None) -> list[dict]:
+        """The collector's records. With ``page`` (W1.3), one level of the page's folders;
+        the subfolders it met and where the next command takes over are left in
+        ``last_page`` as ``{"folders": [...], "continuation": [...]}``."""
+        self.last_page = {"folders": [], "continuation": []}
+        target_paths = [] if page else self._target_paths()
         ps_script = _scan_script(
             target_paths,
             max_depth=self.config.max_depth,
@@ -1035,6 +1064,7 @@ class WinRMEndpointScanner:
             hash_files=self.config.hash_files,
             read_owner=self.config.read_owner,
             parallel_workers=self._winrm_worker_count(),
+            page=page,
         )
         # P-B.2: the WinRM collector runs its whole walk as ONE remote PowerShell
         # session, but that session now parallelizes the expensive per-file work
@@ -1065,7 +1095,14 @@ class WinRMEndpointScanner:
             }
             self.last_scan_diagnostics.update(self._session_diagnostics())
             return []
-        if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
+        if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), (list, dict)):
+            if page:
+                self.last_page = {
+                    "folders": [item for item in _listed(raw_records.get("folders")) if isinstance(item, dict)],
+                    "continuation": [item for item in _listed(raw_records.get("continuation")) if isinstance(item, dict)],
+                }
+            if isinstance(raw_records.get("records"), dict):
+                raw_records["records"] = [raw_records["records"]]
             self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
             self.last_scan_diagnostics["connection_host"] = self.last_connection_host or self._connection_host()
             self.last_scan_diagnostics["connection_candidates"] = self._connection_hosts()
@@ -1403,6 +1440,8 @@ class WinRMEndpointScanner:
             "session_creations": int(self._session_creations),
             "session_negotiations": int(self._session_negotiations),
             "session_failovers": int(self._session_failovers),
+            "shells_opened": int(self._shells_opened),
+            "shells_reused": int(self._shells_reused),
             "connection_transport": self.last_connection_transport,
             # C0.1: what was asked for, beside what was negotiated. A saved scan can
             # then answer "was this carried over TLS, and was the certificate checked".
@@ -1420,6 +1459,10 @@ class WinRMEndpointScanner:
         if binding is not None and binding.identity == identity:
             try:
                 result = operation(binding.session)
+            except WinRMCommandTimedOut:
+                # The command reached the endpoint and ran too long. Another host or
+                # transport would only run it again for as long.
+                raise
             except Exception as exc:
                 # A once-good connection can expire during a long scan. Drop it
                 # and use the normal candidate/transport failover below. Scan
@@ -1454,6 +1497,8 @@ class WinRMEndpointScanner:
                     self.last_connection_host = connection_host
                     self.last_connection_transport = transport
                     return result
+                except WinRMCommandTimedOut:
+                    raise
                 except Exception as exc:
                     last_error = exc
                     continue
@@ -1598,8 +1643,10 @@ class WinRMEndpointScanner:
         protocol = session.protocol
         shell_id = ""
         command_id = ""
+        keep_shell = False
         try:
-            shell_id = protocol.open_shell(codepage=65001)
+            shell_id = self._shell_for(protocol)
+            keep_shell = self._shell_reuse
             command_id = protocol.run_command(
                 shell_id,
                 "powershell.exe",
@@ -1619,6 +1666,10 @@ class WinRMEndpointScanner:
                     end=index + _WINRM_STDIN_CHUNK_BYTES >= len(payload),
                 )
             return Response(self._get_command_output(protocol, shell_id, command_id))
+        except BaseException:
+            # A shell a command failed or timed out in is not trusted with the next one.
+            keep_shell = False
+            raise
         finally:
             # Preserve the delivery/output exception if cleanup also fails; the
             # caller then takes the compatible disk-based path on this session.
@@ -1627,11 +1678,50 @@ class WinRMEndpointScanner:
                     protocol.cleanup_command(shell_id, command_id)
                 except Exception:
                     pass
-            if shell_id:
+            if shell_id and not keep_shell:
+                if self._reused_shell is not None and self._reused_shell[1] == shell_id:
+                    self._reused_shell = None
                 try:
                     protocol.close_shell(shell_id)
                 except Exception:
                     pass
+
+    @contextmanager
+    def reusing_shell(self):
+        """Run every command of the block in one WinRS shell (W1.3).
+
+        Each command opened and closed a shell of its own: a page, then every content
+        batch, each paid for a shell. Inside this block the first command opens one and
+        the rest use it; a command that fails or times out closes it, and the next opens
+        another. The shell is closed when the block ends.
+        """
+        previous = self._shell_reuse
+        self._shell_reuse = True
+        try:
+            yield self
+        finally:
+            self._shell_reuse = previous
+            if not previous:
+                self._close_reused_shell()
+
+    def _shell_for(self, protocol) -> str:
+        if self._shell_reuse and self._reused_shell is not None and self._reused_shell[0] is protocol:
+            self._shells_reused += 1
+            return self._reused_shell[1]
+        self._close_reused_shell()
+        shell_id = protocol.open_shell(codepage=65001)
+        self._shells_opened += 1
+        if self._shell_reuse:
+            self._reused_shell = (protocol, shell_id)
+        return shell_id
+
+    def _close_reused_shell(self) -> None:
+        held, self._reused_shell = self._reused_shell, None
+        if held is not None:
+            try:
+                held[0].close_shell(held[1])
+            except Exception:
+                pass
 
     def _get_command_output(self, protocol, shell_id: str, command_id: str):
         """Collect output while counting the actual WS-Man Receive envelopes.
@@ -1655,7 +1745,13 @@ class WinRMEndpointScanner:
         stderr_buffer: list[bytes] = []
         return_code = -1
         command_done = False
+        limit = winrm_command_timeout_seconds()
+        deadline = time.monotonic() + limit if limit else None
         while not command_done:
+            if deadline is not None and time.monotonic() > deadline:
+                raise WinRMCommandTimedOut(
+                    f"a WinRM command on {self.config.host} ran past its {limit} s wall clock and was stopped"
+                )
             self._response_envelopes_current += 1
             try:
                 stdout, stderr, return_code, command_done = get_raw(shell_id, command_id)
@@ -1810,8 +1906,18 @@ def _scan_script(
     hash_files: bool = True,
     read_owner: bool = True,
     parallel_workers: int = 1,
+    page: dict | None = None,
 ) -> str:
+    """The collector script. With ``page`` (W1.3) it lists one level of the folders the page
+    names - ``{"folders": [{"path", "depth", "after", "root"}], "page_size", "max_folders"}`` -
+    instead of walking ``paths``: at most ``page_size`` file records and ``max_folders``
+    folders, in ordinal case-insensitive name order, and returns the subfolders it met and
+    where the next command takes over. Without it, the whole walk (capped at 5,000 records)."""
     encoded_paths = base64.b64encode(json.dumps(paths).encode("utf-8")).decode("ascii")
+    encoded_page = base64.b64encode(json.dumps(page or {}).encode("utf-8")).decode("ascii")
+    page_mode_value = "$true" if page else "$false"
+    # A page is bounded by page_size; the whole-walk cap is for the walk alone.
+    max_records_value = 2147483647 if page else 5000
     encoded_extensions = base64.b64encode(json.dumps(allowed_extensions).encode("utf-8")).decode("ascii")
     read_content_value = "$true" if read_content else "$false"
     extension_filter_value = "$true" if extension_filter_enabled else "$false"
@@ -1855,7 +1961,7 @@ def _scan_script(
     $binaryExtensions = @({binary_extensions})
     $archiveExtensions = @(".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip")
     $scanArchiveEntries = {inspect_archives_value}
-    $maxRecords = 5000
+    $maxRecords = {max_records_value}
     $maxArchiveEntriesPerFile = 200
     $maxArchiveEntryBytes = 26214400
     $maxArchiveTotalBytes = 209715200
@@ -2701,6 +2807,99 @@ def _scan_script(
     }}
     . $dspmEngine
 
+    # ---- W1.3 page mode: one level of the page's folders, in ordinal case-insensitive
+    # name order, at most page_size file records and max_folders folders. A folder cut
+    # short is handed on with the last name listed ("after"); the folders not reached are
+    # handed on as they came. Subfolders met are returned for the backend's frontier. ----
+    $dspmPageFolders = New-Object System.Collections.Generic.List[object]
+    $dspmPageRest = New-Object System.Collections.Generic.List[object]
+    function Read-DspmPageFolder($spec, $pageSize) {{
+      $current = [string]$spec.path
+      $depth = [int]$spec.depth
+      $after = [string]$spec.after
+      if ($depth -gt {int(max_depth)}) {{ return $null }}
+      if (Test-DspmSkippedPath $current) {{
+        $diagnostics.skipped_dirs += 1
+        return $null
+      }}
+      $dspmChildErrors = @()
+      $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue -ErrorVariable dspmChildErrors)
+      foreach ($dspmError in @($dspmChildErrors)) {{
+        if ($diagnostics.unreadable_dirs.Count -lt 20) {{
+          $diagnostics.unreadable_dirs += "$($current): $($dspmError.Exception.Message)"
+        }}
+      }}
+      if ($entries.Count -eq 0) {{ return $null }}
+      $dspmKeys = [string[]]@($entries | ForEach-Object {{ [string]$_.Name }})
+      $dspmSorted = [object[]]$entries
+      [Array]::Sort($dspmKeys, $dspmSorted, [StringComparer]::OrdinalIgnoreCase)
+      foreach ($entry in $dspmSorted) {{
+        if ($after -and [StringComparer]::OrdinalIgnoreCase.Compare([string]$entry.Name, $after) -le 0) {{ continue }}
+        if ($entry.PSIsContainer) {{
+          $dirHidden = [bool]($entry.Attributes -band [IO.FileAttributes]::Hidden)
+          $dirReparse = [bool]($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)
+          if ($dirReparse -or (Test-DspmSkippedPath $entry.FullName) -or ($dirHidden -and -not ({include_hidden_value} -or {hidden_filter_value}))) {{
+            $diagnostics.skipped_dirs += 1
+            continue
+          }}
+          if (($depth + 1) -le {int(max_depth)}) {{
+            $dspmPageFolders.Add([PSCustomObject]@{{ path = $entry.FullName; depth = ($depth + 1); after = ""; root = $false }}) | Out-Null
+          }}
+          continue
+        }}
+        Add-DspmFileRecord $entry $current
+        if ($records.Count -ge $pageSize) {{
+          return [PSCustomObject]@{{ path = $current; depth = $depth; after = [string]$entry.Name; root = $false }}
+        }}
+      }}
+      return $null
+    }}
+    if ({page_mode_value}) {{
+      $dspmPage = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_page}")))
+      $dspmPageSize = [Math]::Max(1, [int]$dspmPage.page_size)
+      $dspmMaxFolders = [Math]::Max(1, [int]$dspmPage.max_folders)
+      $dspmListed = 0
+      $dspmStopped = $false
+      foreach ($spec in @($dspmPage.folders)) {{
+        if ($dspmStopped -or $dspmListed -ge $dspmMaxFolders) {{
+          $dspmPageRest.Add($spec) | Out-Null
+          continue
+        }}
+        $dspmFolders = @()
+        if ([bool]$spec.root) {{
+          $resolvedRoots = @(Resolve-DspmRoot ([string]$spec.path))
+          if (-not $resolvedRoots -or $resolvedRoots.Count -eq 0) {{
+            $diagnostics.missing_roots += [string]$spec.path
+            continue
+          }}
+          foreach ($root in $resolvedRoots) {{
+            $diagnostics.resolved_roots += $root
+            $rootItem = Get-Item -LiteralPath $root -ErrorAction SilentlyContinue
+            if ($rootItem -and -not $rootItem.PSIsContainer) {{
+              Add-DspmFileRecord $rootItem $root
+            }} elseif ($rootItem) {{
+              $dspmFolders += [PSCustomObject]@{{ path = $root; depth = 0; after = ""; root = $false }}
+            }}
+          }}
+        }} else {{
+          $dspmFolders = @($spec)
+        }}
+        foreach ($folder in $dspmFolders) {{
+          if ($dspmStopped -or $dspmListed -ge $dspmMaxFolders) {{
+            $dspmPageRest.Add($folder) | Out-Null
+            continue
+          }}
+          $dspmListed += 1
+          $handOn = Read-DspmPageFolder $folder $dspmPageSize
+          if ($handOn) {{
+            $dspmPageRest.Add($handOn) | Out-Null
+            $dspmStopped = $true
+          }}
+        }}
+      }}
+      $targetPaths = @()
+    }}
+
     # ---- Phase 1: serial enumeration walk (metadata only) - deterministic order,
     # filters, and the record cap. Populates $records with archive-entry records +
     # ordered $null placeholders, and $workItems with the per-file work to run. ----
@@ -2725,7 +2924,7 @@ def _scan_script(
     # Parallel across a runspace pool on real fan-out (the engine is dot-sourced
     # once per pooled runspace, then reused); results are written back by their
     # reserved index, so output order is identical to the serial path. ----
-    $dspmMaxWorkers = {parallel_workers_value}
+    $dspmMaxWorkers = if ({page_mode_value}) {{ 1 }} else {{ {parallel_workers_value} }}
     if ($dspmMaxWorkers -gt 1 -and $workItems.Count -gt 1) {{
       $engineSrc = $dspmEngine.ToString()
       # Worker params are dspm-namespaced: dot-sourcing the engine runs its
@@ -2772,6 +2971,8 @@ if (-not (Test-Path Function:\\Build-DspmFileRecord)) {{ . ([scriptblock]::Creat
     $dspmJson = [PSCustomObject]@{{
       records = @($records.ToArray() | Where-Object {{ $null -ne $_ }})
       diagnostics = $diagnostics
+      folders = @($dspmPageFolders.ToArray())
+      continuation = @($dspmPageRest.ToArray())
     }} | ConvertTo-Json -Depth 6 -Compress
     $dspmResponse = $dspmJson
     $dspmResponseStream = $null

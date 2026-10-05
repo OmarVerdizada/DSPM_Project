@@ -104,6 +104,10 @@ class AWarmScanFetchesInBoundedCommandsTest(unittest.TestCase):
     """The end of the story: a profile of large changed files is read in several commands."""
 
     def setUp(self) -> None:
+        # The single path's B4 batching, which a partitioned endpoint scan (W1.3) reuses per page.
+        single = mock.patch("backend.app.partitioned_scans_enabled", return_value=False)
+        single.start()
+        self.addCleanup(single.stop)
         self.config = WinRMEndpointConfig(
             host="endpoint-01", username="scan", password="secret", paths=["documents"], read_content=True,
         )
@@ -162,6 +166,10 @@ class AFullScanIsReadInBoundedCommandsTest(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        # The single path's B4 batching, which a partitioned endpoint scan (W1.3) reuses per page.
+        single = mock.patch("backend.app.partitioned_scans_enabled", return_value=False)
+        single.start()
+        self.addCleanup(single.stop)
         self.config = WinRMEndpointConfig(
             host="endpoint-01", username="scan", password="secret", paths=["documents"], read_content=True,
         )

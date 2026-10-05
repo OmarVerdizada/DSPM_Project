@@ -69,6 +69,10 @@ class _Report:
 
 class EndpointP2SingleDeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        # The single path's B4 batching, which a partitioned endpoint scan (W1.3) reuses per page.
+        single = mock.patch("backend.app.partitioned_scans_enabled", return_value=False)
+        single.start()
+        self.addCleanup(single.stop)
         self.config = WinRMEndpointConfig(
             host="endpoint-01",
             username="scan",

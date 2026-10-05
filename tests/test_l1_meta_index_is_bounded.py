@@ -456,7 +456,8 @@ class AStoppedCacheIsNeverSilentTest(_EstateTest):
 
                 with patch.object(app_module, "_endpoint_analysis_engine", return_value=engine), \
                         patch.object(app_module, body, side_effect=probe_then_cancel), \
-                        patch.object(app_module, "_is_local_endpoint_host", return_value=False):
+                        patch.object(app_module, "_is_local_endpoint_host", return_value=False), \
+                        patch.object(app_module, "partitioned_scans_enabled", return_value=False):
                     with self.assertRaises(RuntimeError):
                         runner(MagicMock(host="endpoint-host"), MagicMock(incremental_enabled=False), MagicMock())
                 self.assertTrue(opened.get("db"), "the probe never opened the index, so this proves nothing")

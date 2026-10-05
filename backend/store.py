@@ -5327,6 +5327,36 @@ def create_scan_partitions(tenant_id: str, scan_id: str, job_id: str, specs: lis
     return ids
 
 
+def _append_scan_partitions(conn, tenant_id: str, scan_id: str, specs: list[dict], now: str) -> list[str]:
+    """Add units to a scan's plan after every unit it has, inside the caller's transaction.
+
+    The ordinal is where a unit's findings sit in the scan's order, so new units come after
+    the ones that exist; the estate-write lock the caller holds keeps two appends to one
+    scan from taking the same ordinals."""
+    row = conn.execute(
+        "SELECT COALESCE(MAX(ordinal), -1) AS last, MAX(job_id) AS job_id FROM scan_partitions "
+        "WHERE tenant_id = ? AND scan_id = ?",
+        (tenant_id, scan_id),
+    ).fetchone()
+    first = int(row["last"] if row["last"] is not None else -1) + 1
+    if first + len(specs) > MAX_SCAN_PARTITIONS:
+        raise ValueError(
+            f"a scan can be ordered across at most {MAX_SCAN_PARTITIONS} partitions; "
+            f"scan {scan_id} would grow to {first + len(specs)}"
+        )
+    ids = [f"p{ordinal:05d}" for ordinal in range(first, first + len(specs))]
+    conn.executemany(
+        "INSERT INTO scan_partitions (tenant_id, scan_id, partition_id, job_id, ordinal, spec_json, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (tenant_id, scan_id, partition_id, str(row["job_id"] or ""), first + offset,
+             json.dumps(spec, ensure_ascii=False, separators=(",", ":"), default=str), now)
+            for offset, (partition_id, spec) in enumerate(zip(ids, specs))
+        ],
+    )
+    return ids
+
+
 def _touch_scan_record(conn, tenant_id: str, scan_id: str, now: str) -> None:
     """Inside a partition's own transaction: its scan is alive (B2.4 review).
 
@@ -5880,8 +5910,14 @@ def persist_partition(
     records: list[dict],
     *,
     write_estate: bool,
+    new_units: list[dict] | None = None,
 ) -> dict:
     """Write one finished partition of a scan: its rows, and its records for finalize.
+
+    ``new_units`` (W1.3) are the units this one found - a page of a folder frontier hands
+    on the subfolders it met and where its listing stopped. They are appended to the
+    scan's plan in this same transaction, after every unit it has, so a unit retried after
+    a failure never adds them twice, and finalize waits for them.
 
     ``header`` is the partition's report without its files - timestamp, source,
     mode, label, and the partition's own ``summary`` and ``scan_diagnostics``.
@@ -5992,6 +6028,8 @@ def persist_partition(
         )
         if int(finished.rowcount or 0) != 1:
             raise not_claimed()
+        if new_units:
+            _append_scan_partitions(conn, tenant_id, str(scan_id), new_units, now)
     _invalidate_inventory_query_cache(tenant_id)
     _invalidate_remediation_query_cache(tenant_id)
     # The search projection is best effort and runs after the authoritative

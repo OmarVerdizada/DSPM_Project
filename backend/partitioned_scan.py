@@ -32,7 +32,7 @@ import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable
@@ -103,6 +103,7 @@ def finalize_scan(
     write_estate: bool = True,
     diagnostics_overrides: dict | None = None,
     diagnostics_increments: dict | None = None,
+    report_extra: dict | None = None,
 ) -> dict:
     """Finish a partitioned scan whose partitions are all done; returns its compact report.
 
@@ -154,6 +155,8 @@ def finalize_scan(
         "scan_diagnostics": diagnostics,
     }
     sections.apply(report)
+    for key, value in (report_extra or {}).items():
+        report.setdefault(str(key), value)
     label = str(scan_label or "").strip()[:80]
     if label:
         report["scan_label"] = label
@@ -361,6 +364,16 @@ class PartitionConnectionLost(RuntimeError):
     """A unit's SMB session kept resetting, so it did not read everything (W1.2)."""
 
 
+# W1.3: a source whose units are not an engine run - an endpoint's folder frontier - runs
+# them through a runner of its own: runner(scan, unit, job=..., stop_reason=...) returns the
+# partition's (header, records, new_units). backend.app registers the endpoint's.
+_UNIT_RUNNERS: dict[str, Callable] = {}
+
+
+def register_unit_runner(source: str, runner: Callable) -> None:
+    _UNIT_RUNNERS[str(source)] = runner
+
+
 _running_here: set[tuple[str, str]] = set()
 _running_here_lock = threading.Lock()
 
@@ -455,6 +468,8 @@ class _Scan:
     max_depth: int
     worker: str
     lease_seconds: int
+    # What the finished report carries beside its files (an endpoint scan's "endpoint").
+    report_extra: dict = field(default_factory=dict)
 
 
 def _scan_from_record(record: dict, config: ScanConfig, *, worker: str | None = None) -> _Scan:
@@ -476,6 +491,7 @@ def _scan_from_record(record: dict, config: ScanConfig, *, worker: str | None = 
         max_depth=int(header.get("max_depth", config.max_depth)),
         worker=worker or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
         lease_seconds=partition_lease_seconds(),
+        report_extra=dict(header.get("report_extra") or {}),
     )
 
 
@@ -687,9 +703,11 @@ def _run_partitions(scan: _Scan, *, job, stop_reason, poll_seconds: float) -> No
     running: dict = {}
 
     def finished_one() -> None:
-        nonlocal done, last_progress
+        nonlocal done, last_progress, total
         done += 1
         last_progress = time.monotonic()
+        # A frontier grows as it runs (W1.3): the plan has as many units as it has now.
+        total = max(total, done)
         if job is not None:
             job.progress = max(job.progress, min(94, 8 + int(86 * done / total)))
             _share_progress(job)
@@ -809,6 +827,18 @@ def _run_unit(scan: _Scan, unit: dict, *, job, stop_reason) -> bool:
 
     try:
         with _holding_lease(scan, unit):
+            new_units: list[dict] | None = None
+            runner = _UNIT_RUNNERS.get(scan.source)
+            if runner is not None:
+                header, records, new_units = runner(scan, unit, job=job, stop_reason=stop_reason)
+                reason = stop_reason()
+                if reason:
+                    raise ScanStopped(reason)
+                store.persist_partition(
+                    scan.tenant_id, scan.scan_id, unit["partition_id"], unit["attempt"], header, records,
+                    write_estate=True, new_units=new_units,
+                )
+                return True
             if scan.source == "smb":
                 engine_config = _share_unit_config(scan.config, unit["spec"])
             elif not Path(scan.scan_root).is_dir():
@@ -908,6 +938,7 @@ def _finalize(scan: _Scan) -> dict:
         scan_label=scan.label,
         compliance_enabled=scan.compliance_enabled,
         compliance_frameworks=list(scan.compliance_frameworks),
+        report_extra=scan.report_extra,
         write_estate=True,
         # A local scan's diagnostics name its root and depth; each run's name its own.
         diagnostics_overrides=(
