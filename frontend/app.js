@@ -2049,6 +2049,33 @@ function shortHash(hash = "") {
   return value.length > 18 ? `${value.slice(0, 12)}...${value.slice(-8)}` : value;
 }
 
+// W2.2: what a scan inspected of a file - its record's content_coverage - in plain words.
+// "Metadata only" and "Not read by policy" are not failures, and a partial read is never
+// shown as a full one.
+const CONTENT_COVERAGE_LABELS = {
+  FULL_CONTENT: "Full content inspected",
+  PARTIAL_CONTENT: "Partially inspected",
+  METADATA_ONLY: "Metadata only",
+  SKIPPED_POLICY: "Not read by policy",
+  FAILED: "Read failed",
+};
+
+function contentCoverageLabel(file = {}) {
+  const label = CONTENT_COVERAGE_LABELS[String(file.content_coverage || "").toUpperCase()] || "";
+  if (!label) return "";
+  return file.skip_reason ? `${label}: ${file.skip_reason}` : label;
+}
+
+// A file not read whole is named by its metadata or a sample, not by a content hash.
+function fileIdentityKind(hash = "") {
+  const value = String(hash || "");
+  if (value.startsWith("meta:")) return "Metadata identity (size, modified time, file id), not a content hash";
+  if (value.startsWith("sampled:")) return "Sampled hash (size, first and last MiB)";
+  const head = /^head:(\d+):/.exec(value);
+  if (head) return `SHA-256 of the first ${formatBytes(Number(head[1]))}, the part inspected`;
+  return "";
+}
+
 function hasHashChanged(file = {}) {
   return changedHashKeys().has(hashComparisonKey(file));
 }
@@ -2093,8 +2120,10 @@ function renderFilePropertyRows(file = {}, sha256 = fileHashValue(file), hashCha
     { label: "Source", value: file.source || file.share || "workspace" },
     { label: "Share", value: file.share || file.host || file.server || "" },
     { label: "Content status", value: file.content_status || file.scan_error || "" },
+    { label: "Content coverage", value: contentCoverageLabel(file) },
     { label: "Scan mode", value: file.scan_mode || "" },
     { label: "SHA-256", value: sha256 ? `<span title="${escapeHtml(sha256)}">${escapeHtml(shortHash(sha256))}</span>` : "-", html: Boolean(sha256), required: true },
+    { label: "Identity", value: fileIdentityKind(sha256) },
     { label: "Hash status", value: hashChanged ? "Hash changed since previous scan" : "" },
     { label: "Duplicate hash", value: duplicateHashPath ? "Same SHA-256 appears at another path" : "" },
     { label: "Path", value: file.path || file.full_path || "", required: true },
@@ -4391,6 +4420,7 @@ function renderInventoryExpandedDetails(file) {
     "path", "full_path", "name", "size", "source", "share", "host", "server",
   ]);
   const scanRows = [
+    { label: "Content coverage", value: contentCoverageLabel(file) },
     { label: "Collection completeness", value: file.scan_completeness },
     { label: "Coverage", value: coverage },
     { label: "Scan mode", value: file.scan_mode },

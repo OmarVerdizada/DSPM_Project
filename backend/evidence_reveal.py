@@ -5,7 +5,8 @@ each value (`classification.regex_classifier._fingerprint`). Revealing therefore
 reads a stored secret - there is none. It reads the FILE again:
 
   1. the finding, and the fingerprint the person chose, which must be one of its own;
-  2. the asset's recorded identity (whole-file SHA-256 and size);
+  2. the asset's recorded identity (whole-file SHA-256 and size - or, for a text file
+     inspected up to its cap, the SHA-256 of exactly the bytes inspected, ``head:``, W2.2);
   3. the file, from where the scan read it - the server's own disk for a local scan, or
      the SMB share with the saved credential the scan used. A scan run with a password
      typed at scan time kept no credential, so it cannot be read again: unrevealable;
@@ -84,6 +85,14 @@ def _is_product_file(path: Path) -> bool:
     return False
 
 
+def _head_cap(asset: dict) -> int | None:
+    """The cap a ``head:`` identity was taken at: the re-read takes the same bytes, so a cap
+    changed since the scan does not read as a changed file."""
+    from collectors.content_policy import head_identity_cap
+
+    return head_identity_cap(_identity(asset)[0])
+
+
 def _read_local(asset: dict) -> tuple[str, str, int]:
     from collectors.file_scanner import read_text_preview_and_sha256
 
@@ -96,7 +105,7 @@ def _read_local(asset: dict) -> tuple[str, str, int]:
         _refuse("source_missing", "The file is no longer where the scan found it.")
     try:
         size = path.stat().st_size
-        text, digest = read_text_preview_and_sha256(path)
+        text, digest = read_text_preview_and_sha256(path, _head_cap(asset))
     except FileNotFoundError:
         _refuse("source_missing", "The file is no longer where the scan found it.")
     return text, digest, size
@@ -135,6 +144,9 @@ def _read_smb(tenant_id: str, asset: dict, source: dict) -> tuple[str, str, int]
         except Exception:
             _refuse("source_missing", "The file is no longer where the scan found it on the share.")
         _identity_digest, recorded = _identity(asset)
+        cap = _head_cap(asset)
+        if cap is not None:
+            scanner.config.max_read_bytes = cap
         if recorded and size != recorded:
             _refuse("file_changed", "The file has changed since the scan. Scan it again; nothing is revealed from a "
                                     "file that is not the one the finding came from.")
@@ -169,6 +181,11 @@ def reread(tenant_id: str, asset: dict, source: dict | None) -> str:
     if not expected_digest:
         _refuse("no_identity", "The scan recorded no digest for this file, so a changed file could not be told "
                                "from the one scanned. Nothing is revealed.")
+    if expected_digest.startswith(("meta:", "sampled:")):
+        # Named by its metadata or a sample, not by the bytes a value came from: a changed
+        # file could pass as the one scanned (W2.2). Not a source a value is revealed from.
+        _refuse("no_identity", "The scan did not read this file whole, so a changed file could not be told from "
+                               "the one scanned. Nothing is revealed.")
     if digest.lower() != expected_digest or (expected_size and size and size != expected_size):
         _refuse("file_changed", "The file has changed since the scan. Scan it again; nothing is revealed from a "
                                 "file that is not the one the finding came from.")

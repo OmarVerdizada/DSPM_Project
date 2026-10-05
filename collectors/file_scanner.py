@@ -13,8 +13,9 @@ import threading
 import time
 import zipfile
 
-from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text, extract_binary_text_with_status
-from collectors.ocr import extract_text_from_image, is_ocr_scannable
+from collectors import content_policy
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_bytes_detail, extract_binary_text
+from collectors.ocr import extract_text_from_image, is_ocr_scannable, max_image_bytes
 from collectors.text_decode import TextDecoder
 from collectors import win_security
 from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
@@ -194,7 +195,9 @@ MAX_ARCHIVE_NESTING = 2
 # advertised-but-cosmetic per-entry timeout. Bounds a slow/pathological multi-
 # entry archive; a single hung entry parse is bounded separately (M8/extraction).
 ARCHIVE_TOTAL_TIMEOUT_SECONDS = int(os.getenv("DSPM_ARCHIVE_TIMEOUT_SECONDS", "30"))
-DEFAULT_TEXT_SCAN_MAX_BYTES = int(os.getenv("DSPM_TEXT_SCAN_MAX_BYTES", str(100 * 1024 * 1024)))
+# The cap a collector that is configured once (SMB, WinRM) starts from; a local read asks
+# content_policy.text_cap_bytes() each time (W2.2: 16 MiB, was 100 MiB).
+DEFAULT_TEXT_SCAN_MAX_BYTES = int(os.getenv("DSPM_TEXT_SCAN_MAX_BYTES", str(content_policy.DEFAULT_TEXT_CAP_BYTES)))
 TEXT_SCAN_CHUNK_BYTES = 1024 * 1024
 
 
@@ -371,13 +374,16 @@ class FileRecord:
     incremental_reused: bool = False
     baseline_result: dict | None = None
     reuse_key: str = ""
+    # Why a content type was not read (W2.2: over a size cap) - not an error, and so not
+    # in scan_error, which marks a record unfit for reuse.
+    skip_reason: str = ""
 
     def to_dict(self) -> dict:
         scan_mode = scan_mode_for_extension(self.extension)
         status = self.content_status or content_status_for_extension(self.extension, self.content)
         scannable = self.content_scannable if self.content_scannable is not None else (self.extension in CONTENT_EXTENSIONS or is_ocr_scannable(self.extension))
         protected = self.protected or status in {"protected", "password_protected", "encrypted", "locked", "protected_or_uninspectable_archive"}
-        return {
+        record = {
             "cache_reused": self.cache_reused,
             "incremental_reused": self.incremental_reused,
             "reused_preview": self.reused_preview,
@@ -413,10 +419,13 @@ class FileRecord:
             "truncated": self.truncated,
             "archive_scan_status": self.archive_scan_status,
             "archive_safety": self.archive_safety or {},
+            "skip_reason": self.skip_reason,
         }
+        record["content_coverage"] = content_policy.coverage_state(record)
+        return record
 
 
-def read_text_preview(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_MAX_BYTES) -> str:
+def read_text_preview(path: Path, max_bytes: int | None = None) -> str:
     extension = detect_extension(path)
     if extension in BINARY_TEXT_EXTENSIONS:
         return extract_binary_text(path)
@@ -443,14 +452,31 @@ _EXTRACTION_OUTCOMES = {
 }
 
 
-def _note_read(path: Path, outcome: dict | None = None) -> None:
-    _last_read.outcome = (str(path), dict(outcome or {}))
+def _note_read(path: Path, outcome: dict | None = None, truncated: bool = False) -> None:
+    _last_read.outcome = (str(path), dict(outcome or {}), bool(truncated))
 
 
-def _take_read_outcome(path: Path) -> dict:
+def _take_read_outcome(path: Path) -> tuple[dict, bool]:
+    """(why the read got no text, whether the text it got is cut short)."""
     noted = getattr(_last_read, "outcome", None)
     _last_read.outcome = None
-    return noted[1] if noted and noted[0] == str(path) else {}
+    return (noted[1], noted[2]) if noted and noted[0] == str(path) else ({}, False)
+
+
+def _note_bytes(count: int) -> None:
+    _last_read.bytes = int(getattr(_last_read, "bytes", 0) or 0) + int(count)
+
+
+def take_read_bytes() -> int:
+    """The bytes this thread read from files since it last asked (W2.2 measurements)."""
+    count = int(getattr(_last_read, "bytes", 0) or 0)
+    _last_read.bytes = 0
+    return count
+
+
+def _over_cap(cap_name: str, cap: int) -> dict:
+    return {"content_status": "over_size_cap",
+            "skip_reason": f"Larger than {cap_name} ({cap // (1024 * 1024)} MiB); its content was not read"}
 
 
 def _unreadable(exc_type: str) -> dict:
@@ -458,41 +484,60 @@ def _unreadable(exc_type: str) -> dict:
     return {"content_status": "unreadable", "scan_error": f"The file could not be read ({exc_type})"}
 
 
-def read_text_preview_and_sha256(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_MAX_BYTES) -> tuple[str, str]:
+def read_text_preview_and_sha256(path: Path, max_bytes: int | None = None) -> tuple[str, str]:
+    """(the text a scan inspects, the file's identity) - from one read (W2.2).
+
+    A text file is read up to its cap: within it, the identity is the whole-file SHA-256
+    of the same bytes; past it, ``head:<cap>:<SHA-256 of the bytes inspected>`` (or, under
+    DSPM_HASH_POLICY=full, the rest is hashed too). A document or image within its cap is
+    read once into memory - the hash and the text from the same bytes; over it, it is not
+    read. Anything else is not read for content: its identity follows DSPM_HASH_POLICY.
+    The evidence reveal calls this too, and gets the same identity from the same bytes.
+    """
     extension = detect_extension(path)
     if extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension):
-        if extension in BINARY_TEXT_EXTENSIONS:
-            text, reason = extract_binary_text_with_status(path)
-        else:
-            text, reason = extract_text_from_image(path), ""
-        sha256, error = _sha256_and_error(path)
-        # A document that could not be opened is a failed read, not one with no text.
-        _note_read(path, _unreadable(error) if error else _EXTRACTION_OUTCOMES.get(reason))
-        return text, sha256
-
+        return _read_document(path, extension)
     _note_read(path)
     if extension not in TEXT_EXTENSIONS:
-        return "", sha256_file(path)
+        return "", identity_without_content(path)
+    cap = content_policy.text_cap_bytes() if max_bytes is None else max(0, int(max_bytes or 0))
+    if cap <= 0:
+        return "", identity_without_content(path)
+    return _read_text(path, cap)
 
+
+def _read_text(path: Path, cap: int) -> tuple[str, str]:
+    full = content_policy.hash_policy() == "full"
     digest = hashlib.sha256()
     try:
         with path.open("rb") as handle:
-            remaining = max(0, int(max_bytes or 0))
             # One decoder across the chunks: it knows the file's encoding (a UTF-16
             # export is not UTF-8) and carries a character split by a chunk boundary.
             decoder = TextDecoder()
             chunks: list[str] = []
-            while True:
-                chunk = handle.read(TEXT_SCAN_CHUNK_BYTES)
+            remaining = cap
+            while remaining > 0:
+                chunk = handle.read(min(TEXT_SCAN_CHUNK_BYTES, remaining))
                 if not chunk:
                     break
+                _note_bytes(len(chunk))
                 digest.update(chunk)
-                if remaining > 0:
-                    preview_chunk = chunk[:remaining]
-                    chunks.append(decoder.decode(preview_chunk))
-                    remaining -= len(preview_chunk)
+                chunks.append(decoder.decode(chunk))
+                remaining -= len(chunk)
+            beyond = handle.read(1) if remaining == 0 else b""
+            if beyond:
+                _note_bytes(1)
+            if beyond and full:
+                # The whole-file digest asked for: hash the rest, keep none of it.
+                digest.update(beyond)
+                for chunk in iter(lambda: handle.read(TEXT_SCAN_CHUNK_BYTES), b""):
+                    _note_bytes(len(chunk))
+                    digest.update(chunk)
             chunks.append(decoder.decode(b"", final=True))
-        return "".join(chunks), digest.hexdigest()
+        text = "".join(chunks)
+        if beyond and not full:
+            return text, content_policy.head_identity(cap, digest.hexdigest())
+        return text, digest.hexdigest()
     except OSError as exc:
         # Said on the record: a file that could not be opened (a sharing violation, read
         # denied) is not an empty file, and is read again next time rather than reused.
@@ -500,11 +545,64 @@ def read_text_preview_and_sha256(path: Path, max_bytes: int = DEFAULT_TEXT_SCAN_
         return "", ""
 
 
-def scan_completeness_for_path(path: Path, content: str, protected: bool = False, max_bytes: int = DEFAULT_TEXT_SCAN_MAX_BYTES) -> dict:
+def _read_document(path: Path, extension: str) -> tuple[str, str]:
+    """A document or an image: within its cap, read once - the whole-file SHA-256 and the
+    text from the same bytes (it used to be extracted, then read again to hash, E4)."""
+    image = extension not in BINARY_TEXT_EXTENSIONS
+    cap = max_image_bytes() if image else content_policy.document_cap_bytes()
+    try:
+        size = path.stat().st_size
+        if size > cap:
+            _note_read(path, _over_cap("DSPM_OCR_MAX_FILE_BYTES" if image else "DSPM_DOCUMENT_SCAN_MAX_BYTES", cap))
+            return "", identity_without_content(path)
+        data = path.read_bytes()
+    except OSError as exc:
+        # A document that could not be opened is a failed read, not one with no text.
+        _note_read(path, _unreadable(type(exc).__name__))
+        return "", ""
+    _note_bytes(len(data))
+    sha256 = hashlib.sha256(data).hexdigest()
+    if image:
+        text, reason, truncated = extract_text_from_image(path, digest=sha256), "", False
+    else:
+        text, reason, truncated = extract_binary_bytes_detail(data, extension)
+    _note_read(path, _EXTRACTION_OUTCOMES.get(reason), truncated=truncated)
+    return text, sha256
+
+
+def identity_without_content(path: Path) -> str:
+    """The identity of a file whose content is not read whole, by DSPM_HASH_POLICY: meta
+    (size, mtime, file id; nothing read), sampled (first and last MiB), full (every byte)."""
+    policy = content_policy.hash_policy()
+    try:
+        stat = path.stat()
+    except OSError:
+        return ""
+    if policy == "full" or (policy == "sampled" and not content_policy.needs_sample(stat.st_size)):
+        # A file of at most 2 MiB is hashed whole under "sampled": that is all a sample reads.
+        return _sha256_and_error(path)[0]
+    if policy == "sampled":
+        sample = content_policy.SAMPLE_BYTES
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(sample)
+                handle.seek(-sample, os.SEEK_END)
+                tail = handle.read(sample)
+        except OSError:
+            return ""
+        _note_bytes(len(head) + len(tail))
+        return content_policy.sampled_identity(stat.st_size, head, tail)
+    file_id = f"{stat.st_dev}:{stat.st_ino}" if getattr(stat, "st_ino", 0) else ""
+    return content_policy.meta_identity(stat.st_size, stat.st_mtime_ns, file_id)
+
+
+def scan_completeness_for_path(path: Path, content: str, protected: bool = False, max_bytes: int | None = None) -> dict:
     """How much of the file the scan read - and, when the read that produced ``content``
-    got no text out of it, why: ``content_status`` (with ``scan_error`` and
-    ``protection_type`` when there is one to say) for the record."""
-    outcome = _take_read_outcome(path)
+    got no text out of it, why: ``content_status`` (with ``scan_error``,
+    ``protection_type`` or ``skip_reason`` when there is one to say) for the record."""
+    if max_bytes is None:
+        max_bytes = content_policy.text_cap_bytes()
+    outcome, cut_short = _take_read_outcome(path)
     try:
         total_bytes = path.stat().st_size
     except OSError:
@@ -520,7 +618,9 @@ def scan_completeness_for_path(path: Path, content: str, protected: bool = False
         truncated = total_bytes > max(0, int(max_bytes or 0))
     elif extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension):
         bytes_scanned = total_bytes if content else 0
-        truncated = len(content) >= 120_000
+        # The extractor says when it stopped with document left or skipped a part; the
+        # character budget alone missed a part dropped as too large (E5).
+        truncated = bool(content) and (cut_short or len(content) >= 120_000)
     else:
         bytes_scanned = 0
         truncated = False
@@ -546,6 +646,7 @@ def _sha256_and_error(path: Path, chunk_size: int = 1024 * 1024) -> tuple[str, s
     try:
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(chunk_size), b""):
+                _note_bytes(len(chunk))
                 digest.update(chunk)
         return digest.hexdigest(), ""
     except OSError as exc:
@@ -893,9 +994,11 @@ def scan_directory(
 
         if protected:
             content = ""
-            sha256 = sha256_file(item)
+            sha256 = identity_without_content(item)
         else:
             content, sha256 = read_text_preview_and_sha256(item)
+        if diagnostics is not None:
+            diagnostics["content_bytes_read"] = int(diagnostics.get("content_bytes_read") or 0) + take_read_bytes()
         scan_meta = scan_completeness_for_path(item, content, protected)
         _append_record(
             FileRecord(
@@ -913,6 +1016,7 @@ def scan_directory(
                 scan_error=scan_error or str(scan_meta.get("scan_error") or ""),
                 protected=protected,
                 protection_type=protection_type or str(scan_meta.get("protection_type") or ""),
+                skip_reason=str(scan_meta.get("skip_reason") or ""),
                 owner=owner,
                 acl=acl,
                 created_at=created_at,
@@ -1038,10 +1142,7 @@ def scan_directory(
                                 content=content,
                                 sha256=sha256,
                                 content_hash=content_hash_value(content),
-                                scan_completeness="PARTIAL" if entry.file_size > MAX_ARCHIVE_ENTRY_BYTES else "FULL",
-                                bytes_scanned=min(int(entry.file_size or 0), MAX_ARCHIVE_ENTRY_BYTES),
-                                total_bytes=int(entry.file_size or 0),
-                                truncated=int(entry.file_size or 0) > MAX_ARCHIVE_ENTRY_BYTES,
+                                **_zip_entry_coverage(entry, extension),
                                 archive_scan_status="entry_scanned",
                                 archive_safety=_archive_safety_metadata(".zip"),
                             )
@@ -1120,10 +1221,7 @@ def scan_directory(
                                                 content=nested_content,
                                                 sha256=nested_sha256,
                                                 content_hash=content_hash_value(nested_content),
-                                                scan_completeness="PARTIAL" if nested_entry.file_size > MAX_ARCHIVE_ENTRY_BYTES else "FULL",
-                                                bytes_scanned=min(int(nested_entry.file_size or 0), MAX_ARCHIVE_ENTRY_BYTES),
-                                                total_bytes=int(nested_entry.file_size or 0),
-                                                truncated=int(nested_entry.file_size or 0) > MAX_ARCHIVE_ENTRY_BYTES,
+                                                **_zip_entry_coverage(nested_entry, nested_extension),
                                                 archive_scan_status="entry_scanned",
                                                 archive_safety=_archive_safety_metadata(".zip"),
                                             )
@@ -1197,6 +1295,18 @@ def scan_directory(
 
     _emit_progress(force=True)
     return [record.to_dict() if isinstance(record, FileRecord) else record for record in records]
+
+
+def _zip_entry_coverage(entry: zipfile.ZipInfo, extension: str) -> dict:
+    """What a record says it read of an archive entry. Only a text entry is read for
+    content; any other entry used to be FULL with every byte "scanned" (E5)."""
+    size = int(entry.file_size or 0)
+    if extension not in TEXT_EXTENSIONS or not _is_safe_archive_entry(entry):
+        return {"scan_completeness": "FULL" if size == 0 else "NONE", "bytes_scanned": 0,
+                "total_bytes": size, "truncated": False}
+    return {"scan_completeness": "PARTIAL" if size > MAX_ARCHIVE_ENTRY_BYTES else "FULL",
+            "bytes_scanned": min(size, MAX_ARCHIVE_ENTRY_BYTES), "total_bytes": size,
+            "truncated": size > MAX_ARCHIVE_ENTRY_BYTES}
 
 
 def read_zip_entry_preview(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, extension: str, max_bytes: int = MAX_ARCHIVE_ENTRY_BYTES) -> str:
@@ -1356,8 +1466,11 @@ def normalize_records(records: Iterable[dict]) -> list[dict]:
                 "reused_preview": record.get("reused_preview"),
                 "baseline_result": record.get("baseline_result") if isinstance(record.get("baseline_result"), dict) else None,
                 "reuse_key": str(record.get("reuse_key") or ""),
+                "skip_reason": str(record.get("skip_reason") or ""),
             }
         )
+        # W2.2: every collector's records say what was inspected, from their own fields.
+        normalized[-1]["content_coverage"] = content_policy.coverage_state(normalized[-1])
         if isinstance(record.get("database"), dict):
             # D6: a sampled database column carries its table, row count and sample size.
             normalized[-1]["database"] = dict(record["database"])

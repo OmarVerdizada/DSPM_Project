@@ -436,6 +436,11 @@ class ALargeZipOnAShareIsOpenedAtItsEndTest(unittest.TestCase):
         record = _smb_records(_smb_scanner(_FakeSmbServer({"Docs": {"/big.zip": data}})))["Docs:/big.zip"]
         self.assertEqual((record["protected"], record["content_status"], record["scan_error"]),
                          (False, "metadata_only", ""))
+        # W2.2: a zip whose entries are not inspected is named by its metadata, not read
+        # whole; DSPM_HASH_POLICY=full still hashes it whole.
+        self.assertTrue(record["sha256"].startswith("meta:"), record["sha256"])
+        with patch.dict(os.environ, {"DSPM_HASH_POLICY": "full"}):
+            record = _smb_records(_smb_scanner(_FakeSmbServer({"Docs": {"/big.zip": data}})))["Docs:/big.zip"]
         self.assertEqual(record["sha256"], hashlib.sha256(data).hexdigest(), "still hashed whole")
 
     def test_an_encrypted_entry_past_the_capture_is_found(self) -> None:

@@ -26,6 +26,7 @@ from classification.compliance.keyword_library import custom_keyword_groups_for_
 from classification.compliance.nist_catalog import nist_catalog_status
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
 from classification.regex_classifier import RULES
+from collectors import content_policy
 from collectors.file_scanner import normalize_records, scan_directory
 from collectors.smb_scanner import SMBConfig, SMBScanner
 from discovery import scan_cache, triage
@@ -1262,6 +1263,7 @@ class DSPMDiscoveryEngine:
             "bytes_scanned": int(record.get("bytes_scanned") or 0),
             "total_bytes": int(record.get("total_bytes") or record.get("size") or 0),
             "truncated": bool(record.get("truncated", False)),
+            "skip_reason": record.get("skip_reason", ""),
             "preview": (
                 record.get("reused_preview")
                 if isinstance(record.get("reused_preview"), dict)
@@ -1607,6 +1609,9 @@ class DSPMDiscoveryEngine:
             "total_bytes": int(record.get("total_bytes") or record.get("size") or 0),
             "truncated": bool(record.get("truncated")),
         }
+        # W2.2: what was inspected, in one of five states, for every source - stamped
+        # after triage, which can sample a large text and make it PARTIAL.
+        record["content_coverage"] = content_policy.coverage_state(record)
         acl_assessment = analyze_acl(record.get("acl") or {}, record)
         # The entity registry keys its fallback fingerprints with the workspace, which
         # the collector record does not carry (D2).
@@ -1669,10 +1674,12 @@ class DSPMDiscoveryEngine:
             "accessed_at", "attributes", "sha256", "file_hash", "content_hash",
             "content_status", "content_scannable", "scan_error", "protected",
             "protection_type", "scan_completeness", "bytes_scanned", "total_bytes",
-            "truncated", "reuse_key", "stable_object_id",
+            "truncated", "reuse_key", "stable_object_id", "skip_reason",
         ):
             if key in record:
                 public_record[key] = copy.deepcopy(record[key])
+        # A record analyzed before W2.2 has no coverage state: derived from its own fields.
+        public_record["content_coverage"] = content_policy.coverage_state(public_record)
         public_record.pop("content", None)
         public_record.pop("baseline_result", None)
         public_record.pop("asset_overrides", None)

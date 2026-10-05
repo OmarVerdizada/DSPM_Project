@@ -61,6 +61,7 @@ def reuse_snapshot_from_result(result: dict[str, Any]) -> dict[str, Any]:
         "bytes_scanned": int(result.get("bytes_scanned") or 0),
         "total_bytes": int(result.get("total_bytes") or result.get("size") or 0),
         "truncated": bool(result.get("truncated", False)),
+        "skip_reason": result.get("skip_reason", ""),
         "preview": preview,
         # Internal only. The discovery engine removes this before returning or
         # persisting the current file record.
@@ -122,6 +123,7 @@ def apply_reuse_snapshot(record: dict[str, Any], snapshot: dict[str, Any], objec
             "bytes_scanned": int(snapshot.get("bytes_scanned") or 0),
             "total_bytes": int(snapshot.get("total_bytes") or reused.get("size") or 0),
             "truncated": bool(snapshot.get("truncated", False)),
+            "skip_reason": str(snapshot.get("skip_reason") or ""),
             "cache_reused": True,
             "incremental_reused": True,
             "reused_preview": snapshot.get("preview") if isinstance(snapshot.get("preview"), dict) else None,

@@ -22,6 +22,7 @@ from uuid import uuid4
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
 from collectors.net_guard import resolve_and_pin
 from discovery.parallelism import host_admission_budget, resolve_parallelism
+from collectors import content_policy
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     DEFAULT_TEXT_SCAN_MAX_BYTES,
@@ -109,6 +110,22 @@ def _listed(value) -> list:
     if value is None:
         return []
     return list(value) if isinstance(value, list) else [value]
+
+
+def _endpoint_identity(item: dict) -> str:
+    """The endpoint file's identity: the SHA-256 the endpoint took, or - for a file the
+    policy did not read whole (W2.2) - a meta identity of its size and modified time."""
+    digest = str(item.get("sha256") or "")
+    if digest or not item.get("hash_skipped"):
+        return digest
+    return content_policy.meta_identity(int(item.get("size") or 0), str(item.get("modified_at") or ""))
+
+
+def _endpoint_skip_reason(item: dict) -> str:
+    if str(item.get("content_status") or "") != "over_size_cap":
+        return ""
+    cap = content_policy.document_cap_bytes()
+    return f"Larger than DSPM_DOCUMENT_SCAN_MAX_BYTES ({cap // (1024 * 1024)} MiB); its content was not read"
 
 
 def _endpoint_acl(item: dict) -> dict:
@@ -1151,8 +1168,9 @@ class WinRMEndpointScanner:
                     "modified_at": item.get("modified_at", ""),
                     "accessed_at": item.get("accessed_at", ""),
                     "attributes": item.get("attributes", ""),
-                    "sha256": item.get("sha256", ""),
-                    "file_hash": item.get("sha256", ""),
+                    "sha256": _endpoint_identity(item),
+                    "file_hash": _endpoint_identity(item),
+                    "skip_reason": _endpoint_skip_reason(item),
                     "scan_completeness": item.get("scan_completeness", "UNKNOWN"),
                     "bytes_scanned": int(item.get("bytes_scanned") or 0),
                     "total_bytes": int(item.get("total_bytes") or item.get("size") or 0),
@@ -1928,6 +1946,12 @@ def _scan_script(
     read_acl_value = "$true" if read_acl else "$false"
     inspect_archives_value = "$true" if inspect_archives else "$false"
     hash_files_value = "$true" if hash_files else "$false"
+    # W2.2 on the endpoint: the whole-file SHA-256 is taken of a file read whole for its
+    # content - a text file within its cap, a document within the document cap - and of
+    # every file only under DSPM_HASH_POLICY=full. Any other file is not read to name
+    # it: the collector gives it a meta identity (sampled falls back to meta here).
+    whole_hash_value = "$true" if content_policy.hash_policy() == "full" else "$false"
+    document_cap = int(content_policy.document_cap_bytes())
     read_owner_value = "$true" if read_owner else "$false"
     text_extensions = ",".join(f'"{item}"' for item in sorted(TEXT_EXTENSIONS))
     binary_extensions = ",".join(f'"{item}"' for item in sorted(BINARY_TEXT_EXTENSIONS))
@@ -2724,17 +2748,30 @@ def _scan_script(
       if ({read_content_value} -and ($textExtensions -contains $extension)) {{
         $content = Read-PlainText $file.FullName {int(max_read_bytes)}
       }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
-        $extracted = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
-        $content = [string]$extracted.text
-        $contentStatus = [string]$extracted.status
-        $contentTruncated = [bool]$extracted.truncated
+        if ($file.Length -gt {document_cap}) {{
+          # Over the document cap: not read at all (W2.2) - said, not an error.
+          $contentStatus = "over_size_cap"
+        }} else {{
+          $extracted = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
+          $content = [string]$extracted.text
+          $contentStatus = [string]$extracted.status
+          $contentTruncated = [bool]$extracted.truncated
+        }}
       }}
       $sha256 = ""
+      $hashSkipped = $false
       if ({hash_files_value}) {{
-        try {{
-          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
-        }} catch {{
-          $sha256 = ""
+        $readWhole = ({read_content_value}) -and (
+          (($textExtensions -contains $extension) -and $file.Length -le {int(max_read_bytes)}) -or
+          (($binaryExtensions -contains $extension) -and $file.Length -le {document_cap}))
+        if ({whole_hash_value} -or $readWhole) {{
+          try {{
+            $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
+          }} catch {{
+            $sha256 = ""
+          }}
+        }} else {{
+          $hashSkipped = $true
         }}
       }}
       return [PSCustomObject]@{{
@@ -2749,6 +2786,7 @@ def _scan_script(
         accessed_at = $file.LastAccessTimeUtc.ToString("o")
         attributes = $file.Attributes.ToString()
         sha256 = $sha256
+        hash_skipped = $hashSkipped
         protected = [bool]$zipProtection.protected
         content_status = if ($zipProtection.content_status) {{ $zipProtection.content_status }} elseif ($contentStatus) {{ $contentStatus }} else {{ "" }}
         content_scannable = if ($zipProtection.protected) {{ $false }} else {{ $null }}

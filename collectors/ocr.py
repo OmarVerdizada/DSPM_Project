@@ -323,10 +323,19 @@ def _run_ocr_with_budget(engine, image):
     return box.get("result")
 
 
-def extract_text_from_image(path: Path | str, max_chars: int | None = None) -> str:
+def max_image_bytes() -> int:
+    """The largest image OCR reads (DSPM_OCR_MAX_FILE_BYTES)."""
+    return _max_file_bytes()
+
+
+def extract_text_from_image(path: Path | str, max_chars: int | None = None, digest: str | None = None) -> str:
     """Extract text from an image via OCR. Fail-CLOSED: returns "" when OCR is
     disabled/unavailable, the image is rejected by a cap, the budget is exceeded,
-    or anything goes wrong. Never raises."""
+    or anything goes wrong. Never raises.
+
+    ``digest`` is the image's SHA-256 when the caller has read it already (W2.2): the
+    cache key then costs no second read. An image over the size cap is refused before
+    it is hashed - it used to be read whole for a cache key, then rejected."""
     if not ocr_enabled():
         return ""
     engine = _get_engine()
@@ -334,10 +343,16 @@ def extract_text_from_image(path: Path | str, max_chars: int | None = None) -> s
         return ""
     path = Path(path)
     limit = _max_chars() if max_chars is None else max_chars
+    try:
+        if path.stat().st_size > _max_file_bytes():
+            return ""
+    except OSError:
+        return ""
 
     # Cache lookup by content hash: an unchanged image returns its prior result
     # WITHOUT re-running OCR (same bytes -> same text, so accuracy is identical).
-    digest = _file_sha256(path) if _ocr_cache_max() > 0 else None
+    if digest is None or _ocr_cache_max() <= 0:
+        digest = _file_sha256(path) if _ocr_cache_max() > 0 else None
     cached = _cache_get(digest)
     if cached is not None:
         return cached[:limit] if limit else cached

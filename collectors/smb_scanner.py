@@ -13,6 +13,7 @@ import threading
 import zipfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -21,12 +22,13 @@ from typing import Callable
 
 from discovery.parallelism import host_admission_budget, resolve_parallelism
 
-from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text_with_status
+from collectors import content_policy
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_bytes_detail
 from collectors.net_guard import TargetNotAllowed, resolve_and_pin
 from collectors.text_decode import decode_text
 from collectors import win_security
 from collectors.smb3_transport import ACL_TRANSPORT, ACL_TRANSPORT_NOTE
-from collectors.ocr import extract_text_from_image, is_ocr_scannable
+from collectors.ocr import extract_text_from_image, is_ocr_scannable, max_image_bytes
 from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
 from collectors.file_scanner import (
     ARCHIVE_EXTENSIONS,
@@ -225,6 +227,8 @@ class _SMBFileWork:
     reuse_key: str
     include_top: bool
     inspect_archive_entries: bool
+    # The share's id for the file, when the server lists one: part of a meta identity.
+    file_id: str = ""
 
 
 @dataclass(slots=True)
@@ -252,6 +256,54 @@ class _SMBFileData:
     # type of the error that kept the file from being read at all.
     extraction_reason: str = ""
     read_error: str = ""
+    # The document extractor stopped with document left or skipped a part (W2.2, E5).
+    truncated: bool = False
+    # A content type not read by policy (over its size cap): said, not an error.
+    skip_reason: str = ""
+
+
+# Bytes every SMB reader of this process holds in memory at once for content (W2.2).
+# Each read takes its share before it starts and gives it back once its text is out,
+# so io_workers x the document cap is not the bound - this is.
+_DEFAULT_CAPTURE_BUDGET_MB = 256
+
+
+class _ByteBudget:
+    def __init__(self, total: int) -> None:
+        self.total = max(1, int(total))
+        self._free = self.total
+        self._cond = threading.Condition()
+
+    @contextmanager
+    def take(self, amount: int):
+        amount = min(max(0, int(amount)), self.total)
+        with self._cond:
+            while self._free < amount:
+                self._cond.wait()
+            self._free -= amount
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._free += amount
+                self._cond.notify_all()
+
+
+_capture_budget: _ByteBudget | None = None
+_capture_budget_lock = threading.Lock()
+
+
+def capture_budget() -> _ByteBudget:
+    """``DSPM_SMB_CAPTURE_BUDGET_MB`` (256): read once per process."""
+    global _capture_budget
+    with _capture_budget_lock:
+        if _capture_budget is None:
+            try:
+                megabytes = int(os.getenv("DSPM_SMB_CAPTURE_BUDGET_MB") or _DEFAULT_CAPTURE_BUDGET_MB)
+            except ValueError:
+                megabytes = _DEFAULT_CAPTURE_BUDGET_MB
+            _capture_budget = _ByteBudget(max(16, megabytes) * 1024 * 1024)
+        return _capture_budget
 
 
 @dataclass(slots=True)
@@ -951,6 +1003,7 @@ class SMBScanner:
                     reuse_key=reuse_key,
                     include_top=include_top,
                     inspect_archive_entries=inspect_entries,
+                    file_id=str(getattr(entry, "file_id", "") or ""),
                 )
             )
         return plan
@@ -1095,32 +1148,77 @@ class SMBScanner:
         *,
         inspect_archive_entries: bool = False,
         chunk_size: int = 1024 * 1024,
+        modified_at: str = "",
+        file_id: str = "",
     ) -> _SMBFileData:
-        """Hash a remote file while retaining its bounded preview/archive head.
+        """Read what the scan inspects of a remote file - once - and name it (W2.2).
 
-        The legacy collector independently fetched the preview, ZIP inspection
-        buffer(s), and full hash. P2 performs one forward read and derives all of
-        them from the same byte snapshot. Any transport/short-read failure falls
-        back to the original independent readers, so optimization cannot reduce
-        content or hash coverage.
+        One forward read gives the text, the archive head and the identity. Before W2.2 it
+        read every file to its last byte for a whole-file hash; now it reads:
+
+        - a text file up to its cap (``max_read_bytes``): whole within it, identity the
+          whole-file SHA-256; past it, the first ``cap`` bytes, identity ``head:``;
+        - a document or image within its cap: whole; over it, nothing (SKIPPED_POLICY);
+        - a zip whose entries are inspected: up to MAX_ARCHIVE_TOTAL_BYTES, as before;
+        - anything else: nothing, identity by DSPM_HASH_POLICY (meta by default; a zip's
+          protection is read from its directory by range, not from a capture).
+
+        Under DSPM_HASH_POLICY=full every byte is read, as before. A transport or
+        short-read failure falls back to the independent readers.
         """
+        file_size = max(0, int(size or 0))
+        preview_requested = self._preview_requested(extension)
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        if preview_requested and document:
+            cap = max_image_bytes() if extension not in BINARY_TEXT_EXTENSIONS else content_policy.document_cap_bytes()
+            if file_size > cap:
+                cap_name = "DSPM_DOCUMENT_SCAN_MAX_BYTES" if extension in BINARY_TEXT_EXTENSIONS else "DSPM_OCR_MAX_FILE_BYTES"
+                self._bump_diag("content_skipped_over_cap")
+                return _SMBFileData(
+                    content="", extraction_reason="over_size_cap",
+                    sha256=self._identity_without_content(share_name, path, file_size, modified_at, file_id),
+                    skip_reason=f"Larger than {cap_name} ({cap // (1024 * 1024)} MiB); its content was not read")
         if not self._single_pass_enabled() or self.connection is None:
-            return self._read_separately(share_name, path, extension, size)
+            return self._read_separately(share_name, path, extension, size, modified_at=modified_at, file_id=file_id,
+                                         inspect_archive_entries=inspect_archive_entries)
 
         started = time.perf_counter()
-        file_size = max(0, int(size or 0))
-        preview_requested = bool(
-            self.config.read_content
-            and (
-                extension in TEXT_EXTENSIONS
-                or extension in BINARY_TEXT_EXTENSIONS
-                or is_ocr_scannable(extension)
-            )
-        )
-        preview_limit = max(0, int(self.config.max_read_bytes or 0)) if preview_requested else 0
-        capture_archive = extension == ".zip"
+        whole_hash = content_policy.hash_policy() == "full"
+        text_cap = max(0, int(self.config.max_read_bytes or 0))
+        if preview_requested and document:
+            preview_limit = read_limit = file_size
+        elif preview_requested:
+            preview_limit = text_cap
+            read_limit = file_size if whole_hash else min(file_size, text_cap)
+        else:
+            preview_limit = 0
+            read_limit = file_size if whole_hash else 0
+        capture_archive = extension == ".zip" and inspect_archive_entries
         archive_limit = MAX_ARCHIVE_TOTAL_BYTES if capture_archive else 0
-        capture_limit = min(file_size, max(preview_limit, archive_limit))
+        if capture_archive and file_size <= archive_limit:
+            # Its entries are read from this capture: the whole archive, as before.
+            read_limit = file_size
+        capture_limit = min(read_limit, max(preview_limit, archive_limit))
+        if read_limit == 0:
+            return _SMBFileData(
+                content="", sha256=self._identity_without_content(share_name, path, file_size, modified_at, file_id))
+        with capture_budget().take(capture_limit):
+            acquired = self._single_pass(share_name, path, extension, file_size, read_limit, capture_limit,
+                                         preview_requested, preview_limit, capture_archive, archive_limit,
+                                         inspect_archive_entries, chunk_size, started, modified_at, file_id)
+        if acquired is None:
+            # Outside the budget: the fallback takes its own share, never one on top of this.
+            self._bump_diag("single_pass_fallbacks")
+            return self._read_separately(share_name, path, extension, file_size, modified_at=modified_at,
+                                         file_id=file_id, inspect_archive_entries=inspect_archive_entries)
+        return acquired
+
+    def _single_pass(self, share_name: str, path: str, extension: str, file_size: int, read_limit: int,
+                     capture_limit: int, preview_requested: bool, preview_limit: int, capture_archive: bool,
+                     archive_limit: int, inspect_archive_entries: bool, chunk_size: int, started: float,
+                     modified_at: str, file_id: str) -> _SMBFileData | None:
+        """The one forward read; None when it failed short and the independent readers
+        should try."""
         captured = bytearray()
         digest = hashlib.sha256()
         offset = 0
@@ -1128,8 +1226,8 @@ class SMBScanner:
         failed = False
 
         try:
-            while offset < file_size:
-                request_size = min(max(1, int(chunk_size)), file_size - offset)
+            while offset < read_limit:
+                request_size = min(max(1, int(chunk_size)), read_limit - offset)
                 buffer = io.BytesIO()
                 self.connection.retrieveFileFromOffset(
                     share_name,
@@ -1144,8 +1242,8 @@ class SMBScanner:
                     failed = True
                     break
                 # A defensive cap keeps a misbehaving transport from hashing or
-                # retaining bytes beyond the enumerated file snapshot.
-                chunk = chunk[: file_size - offset]
+                # retaining bytes beyond what this read asked for.
+                chunk = chunk[: read_limit - offset]
                 digest.update(chunk)
                 if len(captured) < capture_limit:
                     remaining = capture_limit - len(captured)
@@ -1164,18 +1262,25 @@ class SMBScanner:
             self._bump_diag("single_pass_transferred_bytes", offset)
             self._add_diag_ms("single_pass_elapsed_ms", (time.perf_counter() - started) * 1000)
 
-        if failed or offset != file_size:
-            self._bump_diag("single_pass_fallbacks")
-            return self._read_separately(share_name, path, extension, file_size)
+        if failed or offset != read_limit:
+            return None
 
         preview_bytes = bytes(captured[:preview_limit]) if preview_requested else b""
+        truncated = False
         try:
-            content, reason = self._preview_from_bytes(preview_bytes, extension) if preview_requested else ("", "")
+            content, reason, truncated = (self._extract_from_bytes(preview_bytes, extension)
+                                          if preview_requested else ("", "", False))
         except Exception as exc:
             # Extraction failure historically produced empty content while the
             # separate hash remained valid. Preserve that exact behavior.
             logger.debug("Could not extract preview for %s:%s: %s", share_name, path, exc)
             content, reason = "", "not_extracted"
+        if offset == file_size:
+            identity = digest.hexdigest()
+        elif preview_requested and offset == preview_limit:
+            identity = content_policy.head_identity(preview_limit, digest.hexdigest())
+        else:
+            identity = self._identity_without_content(share_name, path, file_size, modified_at, file_id)
 
         archive_bytes = bytes(captured[:archive_limit]) if capture_archive else None
         avoided_fetches = int(preview_requested)
@@ -1190,29 +1295,67 @@ class SMBScanner:
         self._bump_diag("single_pass_avoided_transfer_bytes", avoided_bytes)
         return _SMBFileData(
             content=content,
-            sha256=digest.hexdigest(),
+            sha256=identity,
             archive_bytes=archive_bytes,
             extraction_reason=reason,
+            truncated=truncated,
         )
 
-    def _read_separately(self, share_name: str, path: str, extension: str, size: int) -> _SMBFileData:
-        """The preview and the hash, each read on its own - with single pass off, or after
-        it failed. A dropped connection is the chunk's to retry on a fresh one. A read this
-        file alone refused is said on its record: it used to come back as content '' and
-        sha '', a file with nothing in it, and the scan counted as complete."""
-        content, reason, read_error = "", "", ""
-        if self.connection is not None and self._preview_requested(extension):
+    def _identity_without_content(self, share_name: str, path: str, size: int, modified_at: str = "",
+                                  file_id: str = "") -> str:
+        """A file not read whole for content, by DSPM_HASH_POLICY: meta (nothing read),
+        sampled (first and last MiB), full (every byte)."""
+        policy = content_policy.hash_policy()
+        if policy == "full" or (policy == "sampled" and not content_policy.needs_sample(size)):
+            return self._hash_file(share_name, path, size)
+        if policy == "sampled" and self.connection is not None:
+            sample = content_policy.SAMPLE_BYTES
             try:
-                content, reason = self._fetch_preview(share_name, path, extension)
+                head, tail = io.BytesIO(), io.BytesIO()
+                self.connection.retrieveFileFromOffset(share_name, path, head, offset=0, max_length=sample)
+                self.connection.retrieveFileFromOffset(share_name, path, tail, offset=max(0, size - sample),
+                                                       max_length=sample)
+                self._bump_diag("single_pass_transferred_bytes", len(head.getvalue()) + len(tail.getvalue()))
+                return content_policy.sampled_identity(size, head.getvalue(), tail.getvalue())
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+                return ""
+        self._bump_diag("identity_without_read")
+        return content_policy.meta_identity(size, modified_at, file_id)
+
+    def _read_separately(self, share_name: str, path: str, extension: str, size: int, *, modified_at: str = "",
+                         file_id: str = "", inspect_archive_entries: bool = False) -> _SMBFileData:
+        """The preview and the identity, each read on its own - with single pass off, or
+        after it failed. A dropped connection is the chunk's to retry on a fresh one. A read
+        this file alone refused is said on its record: it used to come back as content ''
+        and sha '', a file with nothing in it, and the scan counted as complete."""
+        content, reason, read_error, truncated = "", "", "", False
+        preview = self.connection is not None and self._preview_requested(extension)
+        if preview:
+            try:
+                content, reason, truncated = self._fetch_preview(share_name, path, extension, size)
             except Exception as exc:
                 if _is_connection_error(exc):
                     raise _SmbConnectionLost(share_name, _brief(exc)) from exc
                 logger.debug("Could not read preview for %s:%s: %s", share_name, path, _brief(exc))
                 read_error = type(exc).__name__
-        sha256 = self._hash_file(share_name, path, size)
+        text_cap = max(0, int(self.config.max_read_bytes or 0))
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        # A zip whose entries are read is read whole within the archive cap: named as the
+        # single pass names it.
+        whole_zip = extension == ".zip" and inspect_archive_entries and size <= MAX_ARCHIVE_TOTAL_BYTES
+        if content_policy.hash_policy() == "full" or whole_zip or (preview and (document or size <= text_cap)):
+            sha256 = self._hash_file(share_name, path, size)
+        elif preview:
+            prefix = self._hash_file(share_name, path, text_cap)
+            sha256 = content_policy.head_identity(text_cap, prefix)
+        else:
+            sha256 = self._identity_without_content(share_name, path, size, modified_at, file_id)
         if not sha256 and self.connection is not None:
             read_error = read_error or "IncompleteRead"
-        return _SMBFileData(content=content, sha256=sha256, extraction_reason=reason, read_error=read_error)
+        return _SMBFileData(content=content, sha256=sha256, extraction_reason=reason, read_error=read_error,
+                            truncated=truncated)
 
     def _preview_requested(self, extension: str) -> bool:
         return bool(self.config.read_content and (
@@ -1220,9 +1363,12 @@ class SMBScanner:
 
     def _content_fields(self, extension: str, file_size: int, acquired: _SMBFileData, protected_metadata: dict) -> dict:
         """What a file record says about its content: its status, whether it is protected,
-        why it was not read, and how much of it was."""
+        why it was not read, and how much of it was. A document is read whole within its
+        cap, so it is partial only when the extractor cut its text short (W2.2, E5)."""
         content = acquired.content
-        max_read = self.config.max_read_bytes
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        max_read = file_size if document else self.config.max_read_bytes
+        cut = bool(content) and (file_size > max_read or acquired.truncated)
         fields = {
             "content": "" if protected_metadata else content,
             "content_status": protected_metadata.get("content_status")
@@ -1232,12 +1378,17 @@ class SMBScanner:
             "protected": bool(protected_metadata.get("protected", False)),
             "protection_type": protected_metadata.get("protection_type", ""),
             "scan_error": protected_metadata.get("scan_error", ""),
-            "scan_completeness": "PARTIAL" if content and file_size > max_read
+            "scan_completeness": "PARTIAL" if cut
             else "FULL" if content or file_size == 0 else "NONE",
             "bytes_scanned": min(file_size, max_read) if content else 0,
-            "truncated": bool(content and file_size > max_read),
+            "truncated": cut,
+            "skip_reason": "",
         }
         if protected_metadata or content:
+            return fields
+        if acquired.skip_reason:
+            fields.update({"content_status": acquired.extraction_reason or "over_size_cap",
+                           "scan_completeness": "NONE", "skip_reason": acquired.skip_reason})
             return fields
         if acquired.read_error:
             fields.update({"content_status": "unreadable", "scan_completeness": "NONE", "bytes_scanned": 0,
@@ -1281,6 +1432,8 @@ class SMBScanner:
             work.extension,
             work.file_size,
             inspect_archive_entries=work.inspect_archive_entries,
+            modified_at=work.modified_at,
+            file_id=work.file_id,
         )
         if work.inspect_archive_entries:
             records.extend(
@@ -1300,6 +1453,7 @@ class SMBScanner:
                 work.remote_path,
                 archive_data=acquired.archive_bytes,
                 size=work.file_size,
+                directory_only=not work.inspect_archive_entries,
             )
             if work.extension == ".zip"
             else {}
@@ -1339,6 +1493,7 @@ class SMBScanner:
                 "bytes_scanned": fields["bytes_scanned"],
                 "total_bytes": work.file_size,
                 "truncated": fields["truncated"],
+                "skip_reason": fields["skip_reason"],
                 "reuse_key": work.reuse_key,
             }
         )
@@ -1947,6 +2102,8 @@ class SMBScanner:
                 extension,
                 file_size,
                 inspect_archive_entries=inspect_archive_entries,
+                modified_at=modified_at,
+                file_id=str(getattr(entry, "file_id", "") or ""),
             )
             if inspect_archive_entries:
                 records.extend(
@@ -1966,6 +2123,7 @@ class SMBScanner:
                     remote_path,
                     archive_data=acquired.archive_bytes,
                     size=file_size,
+                    directory_only=not inspect_archive_entries,
                 )
                 if extension == ".zip"
                 else {}
@@ -2005,6 +2163,7 @@ class SMBScanner:
                     "bytes_scanned": fields["bytes_scanned"],
                     "total_bytes": file_size,
                     "truncated": fields["truncated"],
+                    "skip_reason": fields["skip_reason"],
                     "reuse_key": reuse_key,
                 }
             )
@@ -2124,13 +2283,15 @@ class SMBScanner:
             logger.debug("Could not inspect archive entries for %s:%s: %s", share_name, path, _brief(exc))
             return []
 
-    def _archive_source(self, share_name: str, path: str, archive_data: bytes | None, size: int | None):
+    def _archive_source(self, share_name: str, path: str, archive_data: bytes | None, size: int | None,
+                        directory_only: bool = False):
         """What zipfile opens the archive from: the bytes already captured when they are the
         whole file; the remote file read by range when it is larger than a scan keeps (its
-        directory is at the end, past any prefix); else the whole file, fetched now."""
+        directory is at the end, past any prefix) or when only its directory is wanted (W2.2:
+        a protection check reads the directory, not the archive); else the whole file."""
         if archive_data is not None and (size is None or len(archive_data) >= size):
             return io.BytesIO(archive_data)
-        if size is not None and size > MAX_ARCHIVE_TOTAL_BYTES:
+        if size is not None and (size > MAX_ARCHIVE_TOTAL_BYTES or directory_only):
             ranged = _SmbRangeFile(self.connection, share_name, path, size, MAX_ARCHIVE_TOTAL_BYTES)
             return io.BufferedReader(ranged, buffer_size=_RANGE_READ_BUFFER)
         buffer = io.BytesIO()
@@ -2150,11 +2311,13 @@ class SMBScanner:
         path: str,
         archive_data: bytes | None = None,
         size: int | None = None,
+        directory_only: bool = False,
     ) -> dict[str, str | bool]:
         if self.connection is None and archive_data is None:
             return {}
         try:
-            with zipfile.ZipFile(self._archive_source(share_name, path, archive_data, size)) as archive:
+            with zipfile.ZipFile(self._archive_source(share_name, path, archive_data, size,
+                                                      directory_only)) as archive:
                 encrypted = any(bool(entry.flag_bits & 0x1) for entry in archive.infolist()[:2000])
                 if encrypted:
                     return {
@@ -2665,12 +2828,24 @@ class SMBScanner:
         return SMBScanner._preview_from_bytes(data, extension)[0]
 
     @staticmethod
+    def _extract_from_bytes(data: bytes, extension: str) -> tuple[str, str, bool]:
+        """(text, why there is none, whether it is cut short) for acquired bytes. A
+        document is extracted from memory - its bytes no longer touch the disk."""
+        if extension in BINARY_TEXT_EXTENSIONS:
+            return extract_binary_bytes_detail(data, extension)
+        text, reason = SMBScanner._preview_from_bytes(data, extension)
+        return text, reason, False
+
+    @staticmethod
     def _preview_from_bytes(data: bytes, extension: str) -> tuple[str, str]:
         """(text, why there is none) for acquired bytes - the document extractor's reason,
-        or "" (collectors.binary_extractor.extract_binary_text_with_status)."""
+        or "" (collectors.binary_extractor.extract_binary_bytes_detail)."""
         if extension not in BINARY_TEXT_EXTENSIONS and not is_ocr_scannable(extension):
             # The file's encoding, from its byte-order mark (a UTF-16 export is not UTF-8).
             return decode_text(data), ""
+        if extension in BINARY_TEXT_EXTENSIONS:
+            text, reason, _truncated = extract_binary_bytes_detail(data, extension)
+            return text, reason
 
         temp_path = None
         try:
@@ -2685,9 +2860,7 @@ class SMBScanner:
                 temp_file.write(data)
             from pathlib import Path
 
-            if is_ocr_scannable(extension):
-                return extract_text_from_image(Path(temp_path)), ""
-            return extract_binary_text_with_status(Path(temp_path))
+            return extract_text_from_image(Path(temp_path)), ""
         finally:
             if temp_path:
                 from pathlib import Path
@@ -2705,20 +2878,24 @@ class SMBScanner:
                     pass
                 Path(temp_path).unlink(missing_ok=True)
 
-    def _fetch_preview(self, share_name: str, path: str, extension: str) -> tuple[str, str]:
-        """(text, why there is none) for the file's first ``max_read_bytes``; raises when the
-        read fails."""
+    def _fetch_preview(self, share_name: str, path: str, extension: str, size: int | None = None) -> tuple[str, str, bool]:
+        """(text, why there is none, cut short) for what the scan inspects of the file: a
+        text file's first ``max_read_bytes``, a document whole (within its cap - the caller
+        checked). Raises when the read fails."""
         from io import BytesIO
 
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        limit = int(size) if document and size is not None else self.config.max_read_bytes
         buffer = BytesIO()
-        self.connection.retrieveFileFromOffset(
-            share_name,
-            path,
-            buffer,
-            offset=0,
-            max_length=self.config.max_read_bytes,
-        )
-        return self._preview_from_bytes(buffer.getvalue(), extension)
+        with capture_budget().take(limit):
+            self.connection.retrieveFileFromOffset(
+                share_name,
+                path,
+                buffer,
+                offset=0,
+                max_length=limit,
+            )
+            return self._extract_from_bytes(buffer.getvalue(), extension)
 
     def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
         if self.connection is None or not self._preview_requested(extension):

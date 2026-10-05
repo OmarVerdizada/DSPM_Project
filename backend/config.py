@@ -271,6 +271,10 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_NIST_DETECTOR_TIMEOUT_SECONDS", "float", {"minimum": 0}),
     ("DSPM_ARCHIVE_TIMEOUT_SECONDS", "float", {"minimum": 0}),
     ("DSPM_TEXT_SCAN_MAX_BYTES", "int", {"minimum": 1}),
+    # W2.2: bytes read follow bytes inspected.
+    ("DSPM_DOCUMENT_SCAN_MAX_BYTES", "int", {"minimum": 1}),
+    ("DSPM_HASH_POLICY", "enum", {"default": "meta", "choices": ("meta", "sampled", "full")}),
+    ("DSPM_SMB_CAPTURE_BUDGET_MB", "int", {"minimum": 16}),
     ("DSPM_HOST_IO_BUDGET", "int", {"minimum": 1}),
     ("DSPM_PIPELINE_ENABLED", "bool"),
     ("DSPM_PIPELINE_BUFFER", "int", {"minimum": 1}),
