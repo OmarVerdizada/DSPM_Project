@@ -75,7 +75,10 @@ def publish_progress(job: "ScanJob", *, force: bool = False) -> None:
         pass
 
 
-_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+# "incomplete" is a scan that finished but could not see all of its target - a share
+# whose session kept resetting, a folder it could not list, a stop before the end. It is
+# over, like "completed", and never shown as one (W2.4 operator states).
+_TERMINAL_STATES = frozenset({"completed", "incomplete", "failed", "cancelled"})
 # Not over, and not running here: a partitioned scan that stopped making progress, or ran
 # out of disk, and that the resume sweep continues under the same job (W2.4). It holds no
 # slot, a cancel ends it, and it is never shown as failed.
@@ -194,7 +197,7 @@ def cleanup_jobs() -> None:
         stale = [
             job_id
             for job_id, job in _jobs.items()
-            if job.status in {"completed", "failed", "cancelled"} and _parse_time(job.finished_at) < cutoff
+            if job.status in _TERMINAL_STATES and _parse_time(job.finished_at) < cutoff
         ]
         for job_id in stale:
             _jobs.pop(job_id, None)
@@ -428,8 +431,31 @@ def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
     if job.cancel_requested:
         return
     # If the deadline heartbeat already failed this job, _finalize no-ops and the
-    # failure stands; otherwise this completes it.
-    _finalize(job, "completed", message="Completed", progress=100, result=_shrink_result(data))
+    # failure stands; otherwise this completes it - or says it is incomplete.
+    status, message = completion_of(data)
+    _finalize(job, status, message=message, progress=100, result=_shrink_result(data))
+
+
+def completion_of(data) -> tuple[str, str]:
+    """("completed" | "incomplete", the message) for a scan's result. A scan that did not
+    see all of its target says so, and what it missed, rather than "Completed"."""
+    diagnostics = data.get("scan_diagnostics") if isinstance(data, dict) else None
+    incremental = diagnostics.get("incremental") if isinstance(diagnostics, dict) else None
+    if not isinstance(incremental, dict) or incremental.get("complete") is not False:
+        return "completed", "Completed"
+    gaps: list[str] = []
+    reset = diagnostics.get("shares_connection_reset") or []
+    if reset:
+        gaps.append(f"{len(reset)} share(s) kept resetting the connection")
+    unreadable = diagnostics.get("unreadable_dirs") or []
+    if unreadable:
+        gaps.append(f"{len(unreadable)} folder(s) could not be listed")
+    if diagnostics.get("record_limit_reached"):
+        gaps.append("the file limit was reached")
+    if diagnostics.get("scan_aborted_reason"):
+        gaps.append("collection stopped early")
+    detail = "; ".join(gaps) or "part of the target could not be read"
+    return "incomplete", f"Completed with gaps: {detail}. Nothing it missed was treated as deleted."
 
 
 @contextlib.contextmanager

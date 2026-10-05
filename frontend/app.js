@@ -10049,12 +10049,18 @@ async function pollScan(jobId, onProgress = null) {
       setStatus(`${job.message} (${displayedProgress}%)`);
       setScanProgress(true, displayedProgress, job.message || "Scanning...", job.elapsed_seconds || 0);
     }
-    if (job.status === "completed") {
+    // "incomplete" finished too, without seeing all of its target: said, never shown as
+    // a plain completion (W2.4).
+    if (job.status === "completed" || job.status === "incomplete") {
       const elapsedSeconds = job.elapsed_seconds || scanElapsedSeconds(onProgress ? endpointScanStartedAt : scanStartedAt);
+      const finished = job.status === "incomplete" ? (job.message || "Completed with gaps") : "Completed";
       if (onProgress) {
-        onProgress({ ...job, progress: 100, message: "Completed", elapsed_seconds: elapsedSeconds });
+        onProgress({ ...job, progress: 100, message: finished, elapsed_seconds: elapsedSeconds });
       } else {
-        setScanProgress(true, 100, "Scan completed", elapsedSeconds);
+        setScanProgress(true, 100, job.status === "incomplete" ? finished : "Scan completed", elapsedSeconds);
+      }
+      if (job.status === "incomplete") {
+        showToast("Scan finished with gaps", job.message || "Part of the target could not be read", "warning");
       }
       if (job.result && typeof job.result === "object") {
         job.result.__job_elapsed_seconds = elapsedSeconds;

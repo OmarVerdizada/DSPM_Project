@@ -199,6 +199,25 @@ class ThisProcessRunsItsJobsTest(_Database):
                          "the sweep would have resumed a cancelled scan")
 
 
+class AnIncompleteScanIsNotCalledCompletedTest(_Database):
+
+    def test_a_scan_that_missed_part_of_its_target_ends_incomplete_and_says_what(self) -> None:
+        missed = {"scan_id": "scan-gap", "scan_diagnostics": {
+            "incremental": {"complete": False}, "shares_connection_reset": ["Finance"],
+            "unreadable_dirs": ["/HR/locked", "/HR/old"]}}
+        job = jobs.create_job(self.tenant, lambda job: missed)
+        self.assertTrue(_wait(lambda: self._status(job.id) == "incomplete"))
+        record = store.read_job(self.tenant, job.id)
+        self.assertIn("1 share(s) kept resetting", record["message"])
+        self.assertIn("2 folder(s) could not be listed", record["message"])
+        self.assertEqual(jobs.active_job_count(self.tenant), 0, "an incomplete job is over")
+
+    def test_a_whole_scan_still_completes(self) -> None:
+        self.assertEqual(jobs.completion_of({"scan_diagnostics": {"incremental": {"complete": True}}}),
+                         ("completed", "Completed"))
+        self.assertEqual(jobs.completion_of({"files": []})[0], "completed", "no diagnostics is no gap")
+
+
 class ASchedulesRunsDoNotOverlapTest(_Database):
 
     def test_a_schedule_whose_last_run_is_still_going_is_skipped(self) -> None:

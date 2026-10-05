@@ -4715,7 +4715,7 @@ def record_job(job: dict) -> None:
                                 WHEN scan_jobs.status IN ('paused', 'failed')
                                      AND excluded.status IN ('queued', 'running') THEN 1 ELSE 0 END,
                             cancel_requested = CASE
-                                WHEN excluded.status IN ('completed', 'failed', 'cancelled') THEN 0
+                                WHEN excluded.status IN ('completed', 'incomplete', 'failed', 'cancelled') THEN 0
                                 ELSE scan_jobs.cancel_requested END
                         """,
                         params,
@@ -4747,7 +4747,7 @@ def record_job_progress(tenant_id: str, job_id: str, progress: int, message: str
             conn.execute(f"PRAGMA busy_timeout = {_PROGRESS_BUSY_TIMEOUT_MS}")
         conn.execute(
             "UPDATE scan_jobs SET progress = ?, message = ?, updated_at = ? "
-            "WHERE id = ? AND tenant_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'paused')",
+            "WHERE id = ? AND tenant_id = ? AND status NOT IN ('completed', 'incomplete', 'failed', 'cancelled', 'paused')",
             (int(progress or 0), message, datetime.now(timezone.utc).isoformat(), str(job_id), str(tenant_id)),
         )
 
@@ -6869,7 +6869,7 @@ def prune_job_records(max_age_seconds: int) -> int:
     with _lock:
         with _connect() as conn:
             cursor = conn.execute(
-                "DELETE FROM scan_jobs WHERE status IN ('completed', 'failed', 'cancelled') AND updated_at < ?",
+                "DELETE FROM scan_jobs WHERE status IN ('completed', 'incomplete', 'failed', 'cancelled') AND updated_at < ?",
                 (cutoff,),
             )
             return cursor.rowcount

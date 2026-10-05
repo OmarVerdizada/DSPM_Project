@@ -5363,8 +5363,11 @@ def _scheduled_scan_payload(schedule: dict, config: ScanConfig, payload: ScanReq
         with suppress(Exception):
             record_schedule_run(tenant_id, schedule_id, status="failed", error=type(exc).__name__)
         raise
+    from backend.jobs import completion_of
+
     with suppress(Exception):
-        record_schedule_run(tenant_id, schedule_id, scan_id=str(data.get("scan_id") or ""), status="completed")
+        record_schedule_run(tenant_id, schedule_id, scan_id=str(data.get("scan_id") or ""),
+                            status=completion_of(data)[0])
     return data
 
 
