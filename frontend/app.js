@@ -1011,6 +1011,7 @@ function readPayload() {
     system_filter_enabled: selectedExtensions.includes("__system__"),
     include_admin_shares: Boolean(data.get("include_admin_shares")),
     inspect_archives: Boolean(data.get("inspect_archives")),
+    scan_level: String(data.get("scan_level") || "standard"),
     smb_encryption: Boolean(data.get("smb_encryption")),
     smb_shares: String(data.get("smb_shares") || "").split(/[,;]/).map((name) => name.trim()).filter(Boolean),
     async_scan: Boolean(data.get("async_scan")),
@@ -10389,9 +10390,24 @@ function buildHistoryRows(items) {
       source: historySourceLabel(item.source),
       files: Number(summary.total_files || 0),
       withFindings: Number(summary.sensitive_files || 0),
+      coverageNote: scanCoverageNote(summary),
       scanId: String(item.scan_id || ""),
     };
   });
+}
+
+// W2.2/W2.6: what a scan did not read in full, from its summary's coverage counts.
+// Files of a type the scan never reads (metadata only) are not counted: that is the
+// policy working, not a gap.
+function scanCoverageNote(summary = {}) {
+  const parts = [];
+  const partial = Number(summary.content_partial || 0);
+  const skipped = Number(summary.content_skipped_policy || 0);
+  const failed = Number(summary.content_failed || 0);
+  if (partial) parts.push(`${partial.toLocaleString()} partly read`);
+  if (skipped) parts.push(`${skipped.toLocaleString()} not read by policy`);
+  if (failed) parts.push(`${failed.toLocaleString()} unreadable`);
+  return parts.join(" · ");
 }
 
 // A scan id is twenty digits of timestamp. It identifies a run; it does not
@@ -10504,7 +10520,7 @@ function renderHistoryTable(visibleItems = filterHistoryItems(latestHistoryItems
         <span class="history-sub" title="${escapeHtml(row.scanId)}">${escapeHtml(shortScanId(row.scanId))}</span>
       </td>
       <td>${escapeHtml(row.source)}</td>
-      <td class="is-numeric">${row.files.toLocaleString()}<span class="history-sub">${row.withFindings.toLocaleString()} with findings</span></td>
+      <td class="is-numeric">${row.files.toLocaleString()}<span class="history-sub">${row.withFindings.toLocaleString()} with findings</span>${row.coverageNote ? `<span class="history-sub">${escapeHtml(row.coverageNote)}</span>` : ""}</td>
       ${["critical", "high", "medium", "low"].map((level) => `
         <td class="is-numeric"><span class="history-count" data-severity="${level.toUpperCase()}"${row[level] ? "" : ' data-zero="true"'}>${row[level].toLocaleString()}</span></td>`).join("")}
       <td class="is-numeric">${historyChangeCell(row)}</td>

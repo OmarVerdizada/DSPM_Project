@@ -32,8 +32,22 @@
     var title = card && card.querySelector(".ext-preset-title");
     return title ? title.textContent.trim() : "—";
   }
+  // W2.6: what each scan level costs and covers, said where it is chosen.
+  var levelHints = {
+    inventory: "Lists files, owners and access without reading any content. Fastest; every file shows as not read by policy.",
+    standard: "Reads text up to 16 MiB and documents up to 64 MiB, once each. Larger files and other types are named by their metadata.",
+    full: "Standard, with every compliance framework applied and ZIP archives opened. The slowest and most thorough.",
+  };
+  function levelLabel() {
+    var select = document.getElementById("scan_level");
+    var option = select && select.options[select.selectedIndex];
+    return option ? option.textContent.split(" - ")[0] : "Standard";
+  }
   function render() {
     var server = fieldValue("server", "");
+    var level = fieldValue("scan_level", "standard");
+    setText("scan-level-hint", levelHints[level] || levelHints.standard);
+    setText("scan-summary-level", levelLabel());
     setText("scan-summary-target", server || "Local dataset");
     setText("scan-summary-domain", fieldValue("domain", "—"));
     setText("scan-summary-path", server ? "\\\\" + server + "\\" + fieldValue("smb_shares", "*") : fieldValue("local_path", "—"));

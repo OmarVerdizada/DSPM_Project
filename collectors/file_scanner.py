@@ -755,8 +755,13 @@ def scan_directory(
     containment_root: str | Path | None = None,
     resolve_root: bool = True,
     cancel_check: Callable[[], bool] | None = None,
+    read_content: bool = True,
 ) -> list[dict]:
     """Walk a folder - or read one file - into file records.
+
+    ``read_content=False`` is the inventory level (W2.6): names, sizes, owners and
+    access, no byte of content - each file named by its metadata, and said to be not
+    read (SKIPPED_POLICY).
 
     A partitioned scan reads one run of a folder's entries at a time (B2.2b), and has
     to get exactly the records, in exactly the order, a whole walk would:
@@ -992,14 +997,20 @@ def scan_directory(
             protection_type = str(archive_metadata.get("protection_type") or "")
             scan_error = str(archive_metadata.get("scan_error") or "")
 
-        if protected:
+        if protected or not read_content:
             content = ""
             sha256 = identity_without_content(item)
+            if not protected and (extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension)):
+                content_status = "not_requested"
         else:
             content, sha256 = read_text_preview_and_sha256(item)
         if diagnostics is not None:
             diagnostics["content_bytes_read"] = int(diagnostics.get("content_bytes_read") or 0) + take_read_bytes()
         scan_meta = scan_completeness_for_path(item, content, protected)
+        if not read_content and not protected:
+            # Nothing was read: a text file must not count its first bytes as scanned.
+            scan_meta = {"scan_completeness": "FULL" if stat.st_size == 0 else "NONE", "bytes_scanned": 0,
+                         "total_bytes": stat.st_size, "truncated": False}
         _append_record(
             FileRecord(
                 source="local",

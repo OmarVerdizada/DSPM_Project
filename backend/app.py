@@ -61,7 +61,7 @@ from backend.partitioned_scan import (
 )
 from backend.partitioned_scan import register_unit_runner as partitioned_register_unit_runner
 from backend.reporting.router import router as reporting_router
-from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
+from backend.compliance_service import enrich_report_with_compliance, load_compliance_profiles, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
 from backend.jobs import cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
 from backend.inventory_export import inventory_export_response_metadata, inventory_export_stream
@@ -893,6 +893,9 @@ class AssetOverride(BaseModel):
 class ScanRequest(ConnectionRequest):
     save_report: bool = True
     async_scan: bool = False
+    # W2.6: how much of each file the scan reads - inventory (metadata and access only),
+    # standard (content within the caps), full (standard, every framework, archives).
+    scan_level: Literal["inventory", "standard", "full"] = "standard"
     compact_result: bool = False
     asset_overrides: list[AssetOverride] = Field(default_factory=list)
     compliance_enabled: bool = False
@@ -6421,6 +6424,11 @@ def _file_scan_scope(
             "system_filter_enabled": payload.system_filter_enabled,
             "include_admin_shares": payload.include_admin_shares,
             "inspect_archives": payload.inspect_archives,
+            # W2.6: an inventory or full scan keeps its own baseline - an inventory scan's
+            # "nothing found" must never be replayed into a content scan. A standard scan
+            # keeps the scope it always had, so no baseline is orphaned.
+            **({"scan_level": payload.scan_level}
+               if getattr(payload, "scan_level", "standard") != "standard" else {}),
         },
     )
 
@@ -6503,7 +6511,23 @@ def _resolve_saved_credential(tenant_id: str, credential_ref: str) -> dict:
         raise SavedCredentialMissing("Saved credential not found") from exc
 
 
+def _apply_scan_level(payload: ConnectionRequest) -> ConnectionRequest:
+    """What a scan level means for the request (W2.6). Applied wherever a request becomes a
+    configuration - a new scan, a resumed one, a queue worker's - so they agree."""
+    level = str(getattr(payload, "scan_level", "standard") or "standard")
+    if level == "inventory":
+        return payload.model_copy(update={"inspect_archives": False, "compliance_enabled": False,
+                                           "compliance_frameworks": []})
+    if level == "full":
+        frameworks = list(getattr(payload, "compliance_frameworks", []) or []) or [
+            str(profile["id"]) for profile in load_compliance_profiles()]
+        return payload.model_copy(update={"inspect_archives": True, "compliance_enabled": True,
+                                           "compliance_frameworks": frameworks[:12]})
+    return payload
+
+
 def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
+    payload = _apply_scan_level(payload)
     username = payload.username.strip()
     password = payload.password
     domain = payload.domain.strip() or "WORKGROUP"
@@ -6545,6 +6569,7 @@ def _to_config(payload: ConnectionRequest, tenant_id: str) -> ScanConfig:
         system_filter_enabled=payload.system_filter_enabled,
         include_admin_shares=payload.include_admin_shares,
         inspect_archives=payload.inspect_archives,
+        read_content=str(getattr(payload, "scan_level", "standard") or "standard") != "inventory",
         smb_shares=shares or None,
         smb_require_encryption=_smb_encryption_required(payload),
         compliance_enabled=bool(getattr(payload, "compliance_enabled", False)),

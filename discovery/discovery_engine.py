@@ -99,6 +99,8 @@ class ScanConfig:
     inspect_archives: bool = False
     compliance_enabled: bool = False
     compliance_frameworks: list[str] = field(default_factory=list)
+    # W2.6: False is the inventory level - files, owners and access, no content read.
+    read_content: bool = True
     cancel_check: Callable[[], bool] | None = None
     progress_callback: Callable[[str, int, int], None] | None = None
     # Zero means adaptive; a positive value remains an explicit operator/test cap.
@@ -157,6 +159,13 @@ class ScanSummary:
     # difference between "what we looked at" and "what we found" is an
     # unexplained gap, which is how an operator concludes the scan is broken.
     clear: int = 0
+    # W2.2/W2.6: how much of the files' content was inspected, one count per coverage
+    # state. Flat numbers, so a partitioned scan's partitions add up to the scan's.
+    content_full: int = 0
+    content_partial: int = 0
+    content_metadata_only: int = 0
+    content_skipped_policy: int = 0
+    content_failed: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -169,7 +178,21 @@ class ScanSummary:
             "sensitive_files": self.sensitive_files,
             "hidden_files": self.hidden_files,
             "protected_files": self.protected_files,
+            "content_full": self.content_full,
+            "content_partial": self.content_partial,
+            "content_metadata_only": self.content_metadata_only,
+            "content_skipped_policy": self.content_skipped_policy,
+            "content_failed": self.content_failed,
         }
+
+
+_COVERAGE_FIELDS = {
+    content_policy.FULL_CONTENT: "content_full",
+    content_policy.PARTIAL_CONTENT: "content_partial",
+    content_policy.METADATA_ONLY: "content_metadata_only",
+    content_policy.SKIPPED_POLICY: "content_skipped_policy",
+    content_policy.FAILED: "content_failed",
+}
 
 
 class ScanSummaryAccumulator:
@@ -179,7 +202,7 @@ class ScanSummaryAccumulator:
     this way without holding them.
     """
 
-    __slots__ = ("counts", "total", "sensitive_files", "hidden_files", "protected_files")
+    __slots__ = ("counts", "total", "sensitive_files", "hidden_files", "protected_files", "coverage")
 
     def __init__(self) -> None:
         self.counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
@@ -187,6 +210,7 @@ class ScanSummaryAccumulator:
         self.sensitive_files = 0
         self.hidden_files = 0
         self.protected_files = 0
+        self.coverage = dict.fromkeys(_COVERAGE_FIELDS.values(), 0)
 
     def add(self, item: dict) -> None:
         self.total += 1
@@ -202,6 +226,10 @@ class ScanSummaryAccumulator:
         # count and the score can never disagree about what the word means.
         if _is_protected_content(item):
             self.protected_files += 1
+        if not item.get("is_dir"):
+            field_name = _COVERAGE_FIELDS.get(item.get("content_coverage") or content_policy.coverage_state(item))
+            if field_name:
+                self.coverage[field_name] += 1
 
     def result(self) -> ScanSummary:
         return ScanSummary(
@@ -214,6 +242,7 @@ class ScanSummaryAccumulator:
             sensitive_files=self.sensitive_files,
             hidden_files=self.hidden_files,
             protected_files=self.protected_files,
+            **self.coverage,
         )
 
 
@@ -712,6 +741,15 @@ class DSPMDiscoveryEngine:
             detector_version,
             rule_catalog_version,
             tuple(sorted(framework_ids)),
+            # W2.2/W2.6: what a scan reads of a file. A record made under other caps, another
+            # hash policy or the inventory level says something else about the file, so it
+            # is read again rather than replayed (once, after this was added).
+            (
+                bool(self.config.read_content),
+                content_policy.text_cap_bytes(),
+                content_policy.document_cap_bytes(),
+                content_policy.hash_policy(),
+            ),
             (
                 os.getenv("DSPM_ML_NER_ENABLED", "0"),
                 os.getenv("DSPM_OCR_ENABLED", "0"),
@@ -1376,6 +1414,7 @@ class DSPMDiscoveryEngine:
                     system_filter_enabled=self.config.system_filter_enabled,
                     include_admin_shares=self.config.include_admin_shares,
                     inspect_archives=self.config.inspect_archives,
+                    read_content=self.config.read_content,
                     cancel_check=self._cancelled,  # M14: job-cancel OR engine deadline stops a hung collection
                     reuse_probe=self._reuse_probe,
                     progress_callback=self._collection_progress,
@@ -1404,6 +1443,7 @@ class DSPMDiscoveryEngine:
                 system_filter_enabled=self.config.system_filter_enabled,
                 max_depth=self.config.max_depth,
                 inspect_archives=self.config.inspect_archives,
+                read_content=self.config.read_content,
                 diagnostics=walk_diagnostics,
                 reuse_probe=self._reuse_probe,
                 progress_callback=self._collection_progress,

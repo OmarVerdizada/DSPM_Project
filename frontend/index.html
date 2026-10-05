@@ -318,6 +318,15 @@
                   </div>
                   <div class="wizard-behavior-fields">
                     <label>
+                      Scan level
+                      <select id="scan_level" name="scan_level" aria-describedby="scan-level-hint">
+                        <option value="inventory">Inventory - metadata and access only</option>
+                        <option value="standard" selected>Standard - content within the caps</option>
+                        <option value="full">Full compliance - every framework, archives opened</option>
+                      </select>
+                      <small id="scan-level-hint" class="field-hint">Reads text up to 16 MiB and documents up to 64 MiB, once each. Larger files and other types are named by their metadata.</small>
+                    </label>
+                    <label>
                       Max folder depth
                       <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
                     </label>
@@ -431,6 +440,11 @@
                       <button type="button" class="review-row" data-wizard-goto="2">
                         <span class="review-label">Path</span>
                         <span class="review-value scan-summary-mono" id="scan-summary-path">enterprise_test_data</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Scan level</span>
+                        <span class="review-value" id="scan-summary-level">Standard</span>
                         <span class="review-edit" aria-hidden="true">Edit</span>
                       </button>
                       <button type="button" class="review-row" data-wizard-goto="2">
