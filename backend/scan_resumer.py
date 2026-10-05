@@ -105,8 +105,23 @@ _thread: threading.Thread | None = None
 _thread_lock = threading.Lock()
 
 
+def recover_jobs() -> int:
+    """Jobs whose owner stopped while this backend runs - a worker, another backend - are
+    recovered as at startup, and paused jobs whose scan ended take its outcome (W2.4)."""
+    if schema_guard.stand_down("job recovery"):
+        return 0
+    from backend import jobs
+
+    recovered = store.recover_interrupted_jobs(resuming=True, this_instance=jobs.INSTANCE_ID, this_host=jobs.HOST)
+    return recovered + store.reconcile_paused_jobs()
+
+
 def _loop(resume: Callable[[dict], object], interval: int) -> None:
     while True:
+        try:
+            recover_jobs()
+        except Exception as exc:  # noqa: BLE001 - a sweep must never end the thread
+            logger.warning("Recovering interrupted jobs failed: %s", type(exc).__name__)
         try:
             resume_stale_scans(resume)
         except Exception as exc:  # pragma: no cover - a sweep must never end the thread

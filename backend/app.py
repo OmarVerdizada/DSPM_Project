@@ -63,7 +63,7 @@ from backend.partitioned_scan import register_unit_runner as partitioned_registe
 from backend.reporting.router import router as reporting_router
 from backend.compliance_service import enrich_report_with_compliance, normalize_framework_ids
 from backend.finding_contracts import build_nist_finding_detail, get_finding_display_name, normalize_framework_id
-from backend.jobs import cancel_job, cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
+from backend.jobs import cleanup_jobs, collection_heartbeat, create_job, create_scan_job, get_job
 from backend.inventory_export import inventory_export_response_metadata, inventory_export_stream
 from backend.security import (
     REFRESH_COOKIE,
@@ -3635,8 +3635,10 @@ def sftp_scan(payload: SftpScanRequest, principal: Principal = Depends(require_p
 def scan_job(job_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     cleanup_jobs()
     job = get_job(job_id)
-    if job is not None and job.tenant_id == principal.tenant_id:
+    if job is not None and job.tenant_id == principal.tenant_id and job.status != "paused":
         return job.to_dict()
+    # A paused job is followed through its row: what continues it (here or elsewhere)
+    # and what reconciles it write there, not into this process's copy (W2.4).
     # ARCH-003: fall back to the durable record so a job that outlived its
     # in-memory entry (retention cleanup, or a backend restart) is still visible.
     # B3.1: it is also how a console on this backend watches a scan running on another
@@ -3649,10 +3651,13 @@ def scan_job(job_id: str, principal: Principal = Depends(require_permission("inv
 
 @app.post("/api/scans/{job_id}/cancel")
 def stop_scan(job_id: str, principal: Principal = Depends(require_permission("scan.run"))) -> dict:
+    from backend.jobs import request_cancel
+
     job = get_job(job_id)
-    if job is None or job.tenant_id != principal.tenant_id:
+    if (job is None or job.tenant_id != principal.tenant_id) and read_job(principal.tenant_id, job_id) is None:
         raise HTTPException(status_code=404, detail="Scan job not found")
-    stopped = cancel_job(job_id)
+    # W2.4: a job another backend or worker runs is cancelled through its row.
+    stopped = request_cancel(principal.tenant_id, job_id)
     audit(principal.tenant_id, principal.subject, "scan.cancel", {"job_id": job_id, "stopped": stopped})
     return {"cancelled": stopped}
 
@@ -5293,7 +5298,19 @@ def _start_scheduled_scan(schedule: dict) -> None:
     What became of the run is written back to the schedule, so a week of unattended
     nights can be read afterwards.
     """
+    from backend.store import job_is_active, record_schedule_run
+
     tenant_id = schedule["tenant_id"]
+    previous = str(schedule.get("last_job_id") or "")
+    if previous and job_is_active(tenant_id, previous):
+        # W2.4: the last run is still going - queued, running, or paused to be resumed. Two
+        # runs of one schedule would scan the same estate at once; this one is skipped,
+        # said on the schedule, and the next is due an interval from now.
+        record_schedule_run(tenant_id, schedule["schedule_id"], status="skipped",
+                            error="The previous run of this schedule is still going; this run was skipped.")
+        audit(tenant_id, "system:scheduler", "scan.schedule_skipped",
+              {"schedule_id": schedule["schedule_id"], "running_job_id": previous})
+        return
     payload = ScanRequest.model_validate({**(schedule.get("request") or {}), "async_scan": True})
     # The same preparation a scan from the console gets: the bundled demo dataset is
     # generated if it is missing, and a custom path that does not exist fails here,
@@ -5307,6 +5324,7 @@ def _start_scheduled_scan(schedule: dict) -> None:
         auth_type="system",
     )
     job = create_job(tenant_id, lambda job: _scheduled_scan_payload(schedule, config, payload, principal, job))
+    record_schedule_run(tenant_id, schedule["schedule_id"], status="started", job_id=job.id)
     audit(tenant_id, "system:scheduler", "scan.scheduled",
           {"schedule_id": schedule["schedule_id"], "job_id": job.id, "name": schedule.get("name", "")})
 

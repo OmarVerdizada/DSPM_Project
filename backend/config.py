@@ -259,6 +259,9 @@ SETTINGS: dict[str, Setting] = _settings(
     ("DSPM_SCAN_MAX_SECONDS", "int", {"minimum": 0}),
     ("DSPM_SCAN_QUEUE_MAX_SECONDS", "int", {"minimum": 0}),
     ("DSPM_SCAN_RESUME_INTERVAL_SECONDS", "int", {"minimum": 0}),
+    # W2.4: a job's owner renews its row; recovery takes over only jobs whose owner is gone.
+    ("DSPM_JOB_HEARTBEAT_SECONDS", "float", {"default": "15", "minimum": 1}),
+    ("DSPM_JOB_STALE_SECONDS", "int", {"default": "120", "minimum": 30}),
     ("DSPM_SCAN_SCHEDULER_INTERVAL_SECONDS", "int", {"minimum": 0}),
     ("DSPM_SCAN_REPORT_ROWS_CACHE", "int", {"minimum": 0}),
     ("DSPM_SCAN_RUN_VIEW_MAX_FILES", "int", {"default": "20000", "minimum": 1, "maximum": 10000000}),

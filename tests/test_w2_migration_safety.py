@@ -42,6 +42,13 @@ def _report(scan_id: str, count: int) -> dict:
             "timestamp": "2026-09-01T00:00:00+00:00", "files": files}
 
 
+_REVISION_41_COLUMNS = (
+    ("scan_jobs", "owner_host"), ("scan_jobs", "owner_pid"), ("scan_jobs", "owner_instance"),
+    ("scan_jobs", "heartbeat_at"), ("scan_jobs", "cancel_requested"), ("scan_jobs", "resumes"),
+    ("scan_schedules", "last_job_id"),
+)
+
+
 class _Upgrade:
     """What every upgrade test does: an install as revision 37 left it, filled, upgraded."""
 
@@ -58,6 +65,11 @@ class _Upgrade:
             for table in ("user_sessions", "refresh_tokens"):
                 if "mfa_verified" not in db.table_columns(conn, table):
                     conn.execute(f"ALTER TABLE {table} ADD COLUMN mfa_verified INTEGER NOT NULL DEFAULT 0")
+            # Revision 41 (W2.4): job ownership and the schedule's last job.
+            conn.execute("DROP INDEX IF EXISTS idx_scan_jobs_status")
+            for table, column in _REVISION_41_COLUMNS:
+                if column in db.table_columns(conn, table):
+                    conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
             conn.execute("DELETE FROM schema_migrations WHERE revision > 37")
 
     def _fill(self) -> None:
@@ -86,6 +98,8 @@ class _Upgrade:
             self.assertNotIn("mfa_verified", db.table_columns(conn, "refresh_tokens"))
             self.assertEqual(db.table_columns(conn, "user_mfa"), set(), "revision 38 left the MFA secrets")
             self.assertIn("lifecycle_json", db.table_columns(conn, "findings"))
+            for table, column in _REVISION_41_COLUMNS:
+                self.assertIn(column, db.table_columns(conn, table))
             self.assertEqual(int(conn.execute("SELECT COUNT(*) FROM findings WHERE lifecycle_json <> ''")
                                  .fetchone()[0]), 0)
         self.assertEqual(self._counts(), before, "the upgrade lost or added rows")

@@ -86,6 +86,7 @@ def _revisions() -> list[tuple[int, str, object]]:
     (38, "remove_two_step_sign_in", store.remove_two_step_sign_in),
     (39, "asset_prune_index", store.add_asset_prune_index),
     (40, "finding_lifecycle_detail", store.add_finding_lifecycle_detail),
+    (41, "job_ownership", store.add_job_ownership),
     ]
 
 

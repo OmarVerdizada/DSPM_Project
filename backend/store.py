@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import socket
 import re
 import secrets
 import threading
@@ -1356,6 +1357,36 @@ def add_finding_lifecycle_detail(conn) -> None:
     )
 
 
+def add_job_ownership(conn) -> None:
+    """Revision 0041: a job says who runs it, that it is alive, and what it was asked (W2.4).
+
+    The executor is in memory, so a job's row was all a restart had, and recovery marked
+    every queued or running row failed - including the jobs a live queue worker or a
+    second backend was running. Each row now names its owner (host, process id and a
+    per-process instance id) and carries a heartbeat the owner renews; recovery takes over
+    only jobs whose owner is gone. ``cancel_requested`` is a cancel any backend can ask
+    for and the owner carries out; ``resumes`` counts the times the job was continued after
+    an interruption. ``scan_schedules.last_job_id`` is the job a schedule's last run
+    started, so a schedule does not start again while that run is still going.
+    Re-runnable: each column is added only if missing, with a constant default - a
+    catalogue change, not a rewrite. Rollback: restore the pre-upgrade backup (older code
+    ignores the columns)."""
+    columns = db.table_columns(conn, "scan_jobs")
+    for column, ddl in (
+        ("owner_host", "owner_host TEXT NOT NULL DEFAULT ''"),
+        ("owner_pid", "owner_pid INTEGER NOT NULL DEFAULT 0"),
+        ("owner_instance", "owner_instance TEXT NOT NULL DEFAULT ''"),
+        ("heartbeat_at", "heartbeat_at TEXT NOT NULL DEFAULT ''"),
+        ("cancel_requested", "cancel_requested INTEGER NOT NULL DEFAULT 0"),
+        ("resumes", "resumes INTEGER NOT NULL DEFAULT 0"),
+    ):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE scan_jobs ADD COLUMN {ddl}")
+    if "last_job_id" not in db.table_columns(conn, "scan_schedules"):
+        conn.execute("ALTER TABLE scan_schedules ADD COLUMN last_job_id TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_jobs_status ON scan_jobs (status)")
+
+
 def remove_two_step_sign_in(conn) -> None:
     """Revision 0038: two-step sign-in is gone - the product owner's decision (2026-10-02):
     Sentro runs fully offline and signs people in with a password or the directory.
@@ -2296,10 +2327,21 @@ def apply_baseline_schema(conn) -> None:
             -- not resumable.
             scan_id TEXT NOT NULL DEFAULT '',
             request_json TEXT NOT NULL DEFAULT '{}',
-            resumable INTEGER NOT NULL DEFAULT 0
+            resumable INTEGER NOT NULL DEFAULT 0,
+            owner_host TEXT NOT NULL DEFAULT '',
+            owner_pid INTEGER NOT NULL DEFAULT 0,
+            owner_instance TEXT NOT NULL DEFAULT '',
+            heartbeat_at TEXT NOT NULL DEFAULT '',
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
+            resumes INTEGER NOT NULL DEFAULT 0
         );
+        -- W2.4, revision 0041 (the owner_* to resumes columns): who runs a job and that it
+        -- is alive, a cancel any backend can ask for, and how often it was continued.
+        -- Kept out of the column list: SQLite's DROP COLUMN trips on a comment there.
         CREATE INDEX IF NOT EXISTS idx_scan_jobs_tenant
             ON scan_jobs (tenant_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_scan_jobs_status
+            ON scan_jobs (status);
 
         -- B2, revision 0011: the partition ledger. One row per unit of a scan,
         -- and a restart resumes from the first unit that is not done.
@@ -2363,6 +2405,7 @@ def apply_baseline_schema(conn) -> None:
             created_by TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            last_job_id TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (tenant_id, schedule_id)
         );
         CREATE INDEX IF NOT EXISTS idx_scan_schedules_due
@@ -4383,6 +4426,14 @@ def record_job(job: dict) -> None:
         job.get("finished_at"),
         job.get("error"),
         now,
+        # W2.4: who runs it, and that it was alive now. A row written without an owner
+        # (a tool, a test, an older release) has none, and recovery treats it as orphaned.
+        str(job.get("owner_host") or ""),
+        int(job.get("owner_pid") or 0),
+        str(job.get("owner_instance") or ""),
+        now if job.get("owner_instance") else "",
+        # The scan its result is, once known; an empty one keeps what is there.
+        str(job.get("result_scan_id") or ""),
     )
     # F6: the terminal state write is a job's last chance to record its outcome;
     # if it is lost the row is stuck "running" until a restart-recovery sweep.
@@ -4401,16 +4452,29 @@ def record_job(job: dict) -> None:
                     # default on each progress write. PostgreSQL translates the
                     # same statement into an update and keeps them, so the loss
                     # would have been SQLite-only and invisible in production.
+                    # A job taken up again from paused or failed - a resume - is counted;
+                    # its cancel request ends with it.
                     conn.execute(
                         """
                         INSERT INTO scan_jobs
-                            (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at,
+                             owner_host, owner_pid, owner_instance, heartbeat_at, scan_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (id) DO UPDATE SET
                             tenant_id = excluded.tenant_id, status = excluded.status,
                             progress = excluded.progress, message = excluded.message,
                             created_at = excluded.created_at, finished_at = excluded.finished_at,
-                            error = excluded.error, updated_at = excluded.updated_at
+                            error = excluded.error, updated_at = excluded.updated_at,
+                            owner_host = excluded.owner_host, owner_pid = excluded.owner_pid,
+                            owner_instance = excluded.owner_instance, heartbeat_at = excluded.heartbeat_at,
+                            scan_id = CASE WHEN excluded.scan_id <> '' THEN excluded.scan_id
+                                           ELSE scan_jobs.scan_id END,
+                            resumes = scan_jobs.resumes + CASE
+                                WHEN scan_jobs.status IN ('paused', 'failed')
+                                     AND excluded.status IN ('queued', 'running') THEN 1 ELSE 0 END,
+                            cancel_requested = CASE
+                                WHEN excluded.status IN ('completed', 'failed', 'cancelled') THEN 0
+                                ELSE scan_jobs.cancel_requested END
                         """,
                         params,
                     )
@@ -4441,7 +4505,7 @@ def record_job_progress(tenant_id: str, job_id: str, progress: int, message: str
             conn.execute(f"PRAGMA busy_timeout = {_PROGRESS_BUSY_TIMEOUT_MS}")
         conn.execute(
             "UPDATE scan_jobs SET progress = ?, message = ?, updated_at = ? "
-            "WHERE id = ? AND tenant_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
+            "WHERE id = ? AND tenant_id = ? AND status NOT IN ('completed', 'failed', 'cancelled', 'paused')",
             (int(progress or 0), message, datetime.now(timezone.utc).isoformat(), str(job_id), str(tenant_id)),
         )
 
@@ -4450,7 +4514,9 @@ def read_job(tenant_id: str, job_id: str) -> dict | None:
     """Persisted job record, shaped like ScanJob.to_dict() (no result payload)."""
     with _connect() as conn:
         row = conn.execute(
-            "SELECT id, tenant_id, status, progress, message, created_at, finished_at, error FROM scan_jobs WHERE id = ? AND tenant_id = ?",
+            "SELECT id, tenant_id, status, progress, message, created_at, finished_at, error, scan_id, "
+            "owner_host, owner_pid, heartbeat_at, cancel_requested, resumes "
+            "FROM scan_jobs WHERE id = ? AND tenant_id = ?",
             (job_id, tenant_id),
         ).fetchone()
     if not row:
@@ -4477,6 +4543,13 @@ def read_job(tenant_id: str, job_id: str) -> dict | None:
         "elapsed_seconds": round(max(0.0, end - _ts(created)), 3),
         "result": None,
         "error": row["error"],
+        # W2.4: the scan its result is, who runs it, and whether it is still alive.
+        "scan_id": str(row["scan_id"] or ""),
+        "owner_host": str(row["owner_host"] or ""),
+        "owner_pid": int(row["owner_pid"] or 0),
+        "heartbeat_at": str(row["heartbeat_at"] or ""),
+        "cancel_requested": bool(row["cancel_requested"]),
+        "resumes": int(row["resumes"] or 0),
     }
 
 
@@ -4486,35 +4559,225 @@ RESUMING_JOB_ERROR = (
 )
 
 
-def recover_interrupted_jobs(*, resuming: bool = True) -> int:
-    """Mark jobs left queued/running by a prior process as failed (ARCH-003).
+CANCELLED_JOB_MESSAGE = "Cancelled: the scan stopped before its runner could confirm it."
+DEFAULT_JOB_STALE_SECONDS = 120
 
-    Called at startup: the in-memory executor cannot survive a restart, so any
-    still-open job is orphaned. Returns the number recovered. The job of a
-    partitioned scan that can be resumed says so instead of asking for a re-run:
-    the resume sweep continues that scan under the same job id (B2.4). With resuming
-    turned off, every job asks for a re-run, since nothing will continue it.
+
+def job_stale_seconds() -> int:
+    """``DSPM_JOB_STALE_SECONDS``: how long without a heartbeat before a job's owner counts as gone."""
+    try:
+        return max(30, int(os.getenv("DSPM_JOB_STALE_SECONDS") or DEFAULT_JOB_STALE_SECONDS))
+    except ValueError:
+        return DEFAULT_JOB_STALE_SECONDS
+
+
+def job_owner_state(row: dict, *, this_instance: str, this_host: str, now: datetime,
+                    stale_after_seconds: int, pid_alive=None) -> str:
+    """"alive" or "gone" - whether the process a job row names is still running it (W2.4).
+
+    - this process: alive;
+    - no owner (written before revision 0041, or by a tool): gone;
+    - a process on this host: gone when its pid is not running, or its heartbeat is stale
+      (the pid may have been reused);
+    - a process on another host: gone when its heartbeat is stale.
     """
-    now = datetime.now(timezone.utc).isoformat()
-    with _lock:
-        with _connect() as conn:
-            cursor = conn.execute(
-                """
-                UPDATE scan_jobs
-                SET status = 'failed',
-                    message = 'Interrupted',
-                    error = CASE WHEN EXISTS (
-                        SELECT 1 FROM partitioned_scans p
-                        WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id
-                          AND p.status IN ('running', 'finalizing') AND p.resumable = 1
-                    ) THEN ? ELSE ? END,
-                    finished_at = COALESCE(finished_at, ?),
-                    updated_at = ?
-                WHERE status IN ('queued', 'running')
-                """,
-                (RESUMING_JOB_ERROR if resuming else INTERRUPTED_JOB_ERROR, INTERRUPTED_JOB_ERROR, now, now),
+    instance = str(row.get("owner_instance") or "")
+    if instance and instance == this_instance:
+        return "alive"
+    if not instance:
+        return "gone"
+    try:
+        beat = datetime.fromisoformat(str(row.get("heartbeat_at") or ""))
+        if beat.tzinfo is None:
+            beat = beat.replace(tzinfo=timezone.utc)
+        fresh = (now - beat).total_seconds() < stale_after_seconds
+    except ValueError:
+        fresh = False
+    if str(row.get("owner_host") or "") == this_host:
+        if pid_alive is None:
+            import psutil
+
+            pid_alive = psutil.pid_exists
+        if not pid_alive(int(row.get("owner_pid") or 0)):
+            return "gone"
+    return "alive" if fresh else "gone"
+
+
+def recover_interrupted_jobs(*, resuming: bool = True, this_instance: str = "", this_host: str = "",
+                             stale_after_seconds: int | None = None, pid_alive=None) -> int:
+    """Take over the jobs whose owner is gone; returns how many (ARCH-003, W2.4).
+
+    Called at startup and by the resume sweep. A job whose owner is alive - a queue
+    worker, a second backend - is left alone; it used to be marked failed with the rest.
+    A job whose owner is gone becomes:
+
+    - ``cancelled`` when somebody asked for it to be cancelled;
+    - ``paused`` when it runs a partitioned scan the resume sweep will continue under
+      the same job id (B2.4) - it is not over, and is not called failed;
+    - ``failed`` otherwise, asking for a re-run. With resuming turned off, nothing will
+      continue a scan, so its job asks for a re-run too.
+    """
+    now_moment = datetime.now(timezone.utc)
+    now = now_moment.isoformat()
+    stale = job_stale_seconds() if stale_after_seconds is None else max(0, int(stale_after_seconds))
+    host = this_host or socket.gethostname()
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT j.id, j.tenant_id, j.owner_host, j.owner_pid, j.owner_instance, j.heartbeat_at,
+                   j.cancel_requested,
+                   CASE WHEN EXISTS (
+                       SELECT 1 FROM partitioned_scans p
+                       WHERE p.tenant_id = j.tenant_id AND p.job_id = j.id
+                         AND p.status IN ('running', 'finalizing') AND p.resumable = 1
+                   ) THEN 1 ELSE 0 END AS resumable_scan
+            FROM scan_jobs j
+            WHERE j.status IN ('queued', 'running')
+            """
+        ).fetchall()
+        recovered = 0
+        for row in rows:
+            record = dict(row)
+            if job_owner_state(record, this_instance=this_instance, this_host=host, now=now_moment,
+                               stale_after_seconds=stale, pid_alive=pid_alive) == "alive":
+                continue
+            if record["cancel_requested"]:
+                status, message, error, finished = "cancelled", "Cancelled", CANCELLED_JOB_MESSAGE, now
+            elif record["resumable_scan"] and resuming:
+                status, message, error, finished = "paused", "Interrupted - continues automatically", \
+                    RESUMING_JOB_ERROR, None
+            else:
+                status, message, error, finished = "failed", "Interrupted", INTERRUPTED_JOB_ERROR, now
+            # Compare-and-set on the state read: an owner that came back to life and
+            # wrote meanwhile keeps its job.
+            # A paused job is not over: it has no finish time.
+            finish_sql, finish_args = (("finished_at = NULL", ()) if finished is None
+                                       else ("finished_at = COALESCE(finished_at, ?)", (finished,)))
+            taken = conn.execute(
+                f"UPDATE scan_jobs SET status = ?, message = ?, error = ?, {finish_sql}, "
+                "updated_at = ? WHERE id = ? AND tenant_id = ? AND status IN ('queued', 'running') "
+                "AND owner_instance = ? AND heartbeat_at = ?",
+                (status, message, error, *finish_args, now, record["id"], record["tenant_id"],
+                 str(record["owner_instance"] or ""), str(record["heartbeat_at"] or "")),
             )
-            return cursor.rowcount
+            recovered += int(taken.rowcount or 0)
+        return recovered
+
+
+def heartbeat_jobs(instance: str, job_ids: list[str]) -> int:
+    """Renew this process's claim on the jobs it runs (W2.4); returns the rows renewed."""
+    ids = [str(job_id) for job_id in job_ids if job_id]
+    if not instance or not ids:
+        return 0
+    now = datetime.now(timezone.utc).isoformat()
+    renewed = 0
+    with _connect() as conn:
+        for start in range(0, len(ids), 200):
+            chunk = ids[start:start + 200]
+            marks = ", ".join("?" for _ in chunk)
+            renewed += int(conn.execute(
+                f"UPDATE scan_jobs SET heartbeat_at = ? WHERE owner_instance = ? AND id IN ({marks}) "
+                "AND status IN ('queued', 'running')",
+                (now, instance, *chunk),
+            ).rowcount or 0)
+    return renewed
+
+
+def pending_job_cancellations(instance: str) -> list[str]:
+    """The jobs this process runs that a backend has asked to cancel (W2.4)."""
+    if not instance:
+        return []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT id FROM scan_jobs WHERE owner_instance = ? AND cancel_requested = 1 "
+            "AND status IN ('queued', 'running')",
+            (instance,),
+        ).fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+@_tenant_scoped
+def request_job_cancel(tenant_id: str, job_id: str) -> bool:
+    """Ask for a job to be cancelled wherever it runs (W2.4). The owner carries it out at its
+    next heartbeat; a job whose owner is gone is recorded cancelled by the next recovery."""
+    with _lock, _connect() as conn:
+        return int(conn.execute(
+            "UPDATE scan_jobs SET cancel_requested = 1, updated_at = ? "
+            "WHERE id = ? AND tenant_id = ? AND status IN ('queued', 'running', 'paused')",
+            (datetime.now(timezone.utc).isoformat(), str(job_id), tenant_id),
+        ).rowcount or 0) == 1
+
+
+@_tenant_scoped
+def cancel_paused_job(tenant_id: str, job_id: str) -> bool:
+    """A paused job has no runner to carry a cancel out: it is cancelled here, and the
+    scan it would have resumed is failed so the resume sweep leaves it."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _lock, _connect() as conn:
+        done = int(conn.execute(
+            "UPDATE scan_jobs SET status = 'cancelled', message = 'Cancelled', error = 'Scan was cancelled.', "
+            "finished_at = ?, updated_at = ?, cancel_requested = 0 "
+            "WHERE id = ? AND tenant_id = ? AND status = 'paused'",
+            (now, now, str(job_id), tenant_id),
+        ).rowcount or 0) == 1
+        if done:
+            conn.execute(
+                "UPDATE partitioned_scans SET status = 'failed', error = 'Scan was cancelled.', updated_at = ? "
+                "WHERE tenant_id = ? AND job_id = ? AND status IN ('running', 'finalizing')",
+                (now, tenant_id, str(job_id)),
+            )
+        return done
+
+
+def reconcile_paused_jobs() -> int:
+    """A paused job whose partitioned scan ended anyway - finished by queue workers while
+    the backend following it was down - takes the scan's outcome (W2.4). Without this it
+    would stay paused, and its console would wait for ever."""
+    now = datetime.now(timezone.utc).isoformat()
+    changed = 0
+    with _lock, _connect() as conn:
+        changed += int(conn.execute(
+            """
+            UPDATE scan_jobs SET status = 'completed', progress = 100, message = 'Completed', error = NULL,
+                finished_at = ?, updated_at = ?,
+                scan_id = (SELECT p.scan_id FROM partitioned_scans p
+                           WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id
+                             AND p.status = 'done' LIMIT 1)
+            WHERE status = 'paused' AND EXISTS (
+                SELECT 1 FROM partitioned_scans p
+                WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id AND p.status = 'done')
+            """,
+            (now, now),
+        ).rowcount or 0)
+        changed += int(conn.execute(
+            """
+            UPDATE scan_jobs SET status = 'failed', message = 'Failed', finished_at = ?, updated_at = ?,
+                error = COALESCE((SELECT p.error FROM partitioned_scans p
+                                  WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id
+                                    AND p.status = 'failed' LIMIT 1), 'Scan failed.')
+            WHERE status = 'paused' AND EXISTS (
+                SELECT 1 FROM partitioned_scans p
+                WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id AND p.status = 'failed')
+              AND NOT EXISTS (
+                SELECT 1 FROM partitioned_scans p
+                WHERE p.tenant_id = scan_jobs.tenant_id AND p.job_id = scan_jobs.id
+                  AND p.status IN ('running', 'finalizing', 'done'))
+            """,
+            (now, now),
+        ).rowcount or 0)
+    return changed
+
+
+@_tenant_scoped
+def job_is_active(tenant_id: str, job_id: str) -> bool:
+    """Whether a job is still going - queued, running, or paused to be resumed (W2.4)."""
+    if not job_id:
+        return False
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM scan_jobs WHERE id = ? AND tenant_id = ?", (str(job_id), tenant_id),
+        ).fetchone()
+    return row is not None and str(row["status"]) in {"queued", "running", "paused"}
 
 
 # --- B5: retention, and the housekeeping that runs it -------------------------
@@ -4956,7 +5219,7 @@ def suppression_rules_for_scan(tenant_id: str) -> list[dict]:
 
 _SCHEDULE_COLUMNS = (
     "tenant_id, schedule_id, name, request_json, interval_seconds, enabled, next_run_at, "
-    "last_run_at, last_scan_id, last_status, last_error, runs, created_by, created_at, updated_at"
+    "last_run_at, last_scan_id, last_status, last_error, runs, created_by, created_at, updated_at, last_job_id"
 )
 
 
@@ -4989,6 +5252,7 @@ def _schedule_row(row) -> dict:
         "created_by": str(row["created_by"] or ""),
         "created_at": str(row["created_at"] or ""),
         "updated_at": str(row["updated_at"] or ""),
+        "last_job_id": str(row["last_job_id"] or ""),
     }
 
 
@@ -5145,15 +5409,18 @@ def claim_due_schedules(*, now: datetime | None = None, limit: int = 10) -> list
 
 @_tenant_scoped
 def record_schedule_run(tenant_id: str, schedule_id: str, *, scan_id: str = "", status: str = "",
-                        error: str = "") -> bool:
-    """What became of a scheduled run - the scan it started, and how it ended."""
+                        error: str = "", job_id: str | None = None) -> bool:
+    """What became of a scheduled run - the job and the scan it started, and how it ended.
+    ``job_id`` None keeps the job recorded; a skipped run keeps the scan too."""
     with _lock:
         with _connect() as conn:
             return int(conn.execute(
-                "UPDATE scan_schedules SET last_scan_id = ?, last_status = ?, last_error = ?, updated_at = ? "
+                "UPDATE scan_schedules SET last_scan_id = CASE WHEN ? IN ('skipped', 'started') THEN last_scan_id ELSE ? END, "
+                "last_status = ?, last_error = ?, updated_at = ?, "
+                "last_job_id = COALESCE(?, last_job_id) "
                 "WHERE tenant_id = ? AND schedule_id = ?",
-                (str(scan_id or ""), str(status or "")[:40], str(error or "")[:500],
-                 datetime.now(timezone.utc).isoformat(), tenant_id, str(schedule_id)),
+                (str(status or ""), str(scan_id or ""), str(status or "")[:40], str(error or "")[:500],
+                 datetime.now(timezone.utc).isoformat(), job_id, tenant_id, str(schedule_id)),
             ).rowcount or 0) == 1
 
 
@@ -11592,6 +11859,7 @@ PLATFORM_FUNCTIONS = {
     "_prune_audit_chains": "housekeeping", "prune_event_tables": "housekeeping",
     "prune_job_records": "housekeeping", "referenced_artifact_ids": "housekeeping",
     "recover_interrupted_jobs": "resume", "list_unfinished_partitioned_scans": "resume",
+    "heartbeat_jobs": "resume", "pending_job_cancellations": "resume", "reconcile_paused_jobs": "resume",
     "iter_search_asset_batches": "search-indexer", "get_search_assets_by_refs": "search-indexer",
     "init_db": "migration",
 }

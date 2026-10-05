@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -16,10 +18,24 @@ from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 from backend import store
 
 
+logger = logging.getLogger(__name__)
+
+# W2.4: the process that runs this module's jobs, as their rows name it. The instance id
+# tells this process from an earlier one that had the same pid.
+INSTANCE_ID = uuid.uuid4().hex
+HOST = socket.gethostname()
+PID = os.getpid()
+
+
 def _persist(job: "ScanJob") -> None:
-    """Best-effort durable-state write (ARCH-003); never breaks a running job."""
+    """Best-effort durable-state write (ARCH-003); never breaks a running job. The row
+    names this process as the job's owner, and the scan its result is once it has one."""
     try:
-        store.record_job(job.to_dict())
+        result_scan_id = ""
+        if isinstance(job.result, dict):
+            result_scan_id = str(job.result.get("scan_id") or "")
+        store.record_job({**job.to_dict(), "owner_host": HOST, "owner_pid": PID, "owner_instance": INSTANCE_ID,
+                          "result_scan_id": result_scan_id})
     except Exception:
         pass
     publish_progress(job, force=True)
@@ -60,6 +76,11 @@ def publish_progress(job: "ScanJob", *, force: bool = False) -> None:
 
 
 _TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+# Not over, and not running here: a partitioned scan that stopped making progress, or ran
+# out of disk, and that the resume sweep continues under the same job (W2.4). It holds no
+# slot, a cancel ends it, and it is never shown as failed.
+PAUSED = "paused"
+_ACTIVE_STATES = frozenset({"queued", "running"})
 
 
 def _finalize(job: "ScanJob", status: str, *, message: str, error: str | None = None,
@@ -128,6 +149,9 @@ class ScanJob:
     # Set once the scan's result is being written (see `begin_saving`).
     saving: bool = False
 
+    # Times this job was taken up again after it paused or its process stopped (W2.4).
+    resumes: int = 0
+
     def to_dict(self) -> dict:
         return {
             "id": self.id,
@@ -140,6 +164,8 @@ class ScanJob:
             "elapsed_seconds": _elapsed_seconds(self.created_at, self.finished_at),
             "result": self.result,
             "error": self.error,
+            "resumes": self.resumes,
+            "cancel_requested": self.cancel_requested,
         }
 
 
@@ -200,9 +226,13 @@ def create_job(tenant_id: str, runner: Callable[[ScanJob], dict], *, job_id: str
             raise RuntimeError("Too many active scans for this tenant")
         if job_id and job_id in _jobs and _jobs[job_id].status in {"queued", "running"}:
             raise ValueError(f"job {job_id} is still active")
+        previous = _jobs.get(str(job_id)) if job_id else None
         job = ScanJob(id=str(job_id or uuid.uuid4()), tenant_id=tenant_id)
+        if previous is not None:
+            job.resumes = previous.resumes + (1 if previous.status in {PAUSED, "failed"} else 0)
         _jobs[job.id] = job
     _persist(job)
+    _ensure_heartbeat()
     executor.submit(_run_custom_job, job, runner)
     return job
 
@@ -226,6 +256,88 @@ def cancel_job(job_id: str) -> bool:
         # no-ops and we report that we did not cancel it.
         job.cancel_requested = True
     return _finalize(job, "cancelled", message="Cancellation requested")
+
+
+def request_cancel(tenant_id: str, job_id: str) -> bool:
+    """Cancel a job wherever it runs (W2.4); returns whether a cancel was made or asked for.
+
+    A job this process runs is cancelled here. A paused job has no runner, so it is
+    cancelled at once - its scan with it. A job another process runs is asked to stop
+    through its row, and that process carries the cancel out at its next heartbeat; if
+    it is gone, recovery records the job cancelled.
+    """
+    job = get_job(job_id)
+    if job is not None and job.tenant_id == tenant_id:
+        if job.status in _ACTIVE_STATES:
+            return cancel_job(job_id)
+        if job.status != PAUSED:
+            return False
+    if store.cancel_paused_job(tenant_id, job_id):
+        if job is not None:
+            with _lock:
+                if job.status == PAUSED:
+                    job.status, job.message, job.error = "cancelled", "Cancelled", "Scan was cancelled."
+                    job.finished_at = datetime.now(timezone.utc).isoformat()
+        return True
+    if job is not None:
+        return False
+    return store.request_job_cancel(tenant_id, job_id)
+
+
+def _pause(job: ScanJob, message: str) -> bool:
+    """The job's scan stopped for now and will be resumed: paused, not failed (W2.4)."""
+    with _lock:
+        if job.status in _TERMINAL_STATES:
+            return False
+        job.status = PAUSED
+        job.message = message
+        job.error = None
+    _persist(job)
+    return True
+
+
+def _is_pause(exc: BaseException) -> bool:
+    from backend.partitioned_scan import ScanPaused
+
+    return isinstance(exc, ScanPaused)
+
+
+# W2.4: while this process runs jobs it says so through their rows, and carries out the
+# cancels other backends asked for.
+HEARTBEAT_SECONDS = max(1.0, float(os.getenv("DSPM_JOB_HEARTBEAT_SECONDS") or "15"))
+_heartbeat_thread: threading.Thread | None = None
+_heartbeat_lock = threading.Lock()
+_heartbeat_stop = threading.Event()
+
+
+def heartbeat_once() -> int:
+    """Renew this process's jobs and carry out the cancels asked for them; returns the jobs renewed."""
+    with _lock:
+        active = [job.id for job in _jobs.values() if job.status in _ACTIVE_STATES]
+    if not active:
+        return 0
+    renewed = store.heartbeat_jobs(INSTANCE_ID, active)
+    for job_id in store.pending_job_cancellations(INSTANCE_ID):
+        cancel_job(job_id)
+    return renewed
+
+
+def _heartbeat_loop() -> None:
+    while not _heartbeat_stop.wait(HEARTBEAT_SECONDS):
+        try:
+            heartbeat_once()
+        except Exception as exc:  # noqa: BLE001 - a heartbeat must never end the thread
+            logger.warning("Job heartbeat failed: %s", type(exc).__name__)
+
+
+def _ensure_heartbeat() -> None:
+    global _heartbeat_thread
+    with _heartbeat_lock:
+        if _heartbeat_thread is not None and _heartbeat_thread.is_alive():
+            return
+        _heartbeat_stop.clear()
+        _heartbeat_thread = threading.Thread(target=_heartbeat_loop, name="job-heartbeat", daemon=True)
+        _heartbeat_thread.start()
 
 
 def begin_saving(job: ScanJob) -> bool:
@@ -305,6 +417,10 @@ def _run_custom_job(job: ScanJob, runner: Callable[[ScanJob], dict]) -> None:
         data = runner(job)
     except Exception as exc:
         if job.cancel_requested:
+            return
+        if _is_pause(exc):
+            # Left for the resume sweep - paused, which is not failed (W2.4).
+            _pause(job, _safe_job_error(exc))
             return
         _finalize(job, "failed", message="Failed", error=_safe_job_error(exc))
         print(f"[scan-job-error] job={job.id} error={exc}\n{traceback.format_exc()}", file=sys.stderr)

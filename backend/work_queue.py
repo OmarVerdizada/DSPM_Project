@@ -104,10 +104,12 @@ class LedgerQueue:
     """Partitions queued in the ledger, taken straight from it.
 
     Nothing is published or acknowledged: a partition is queued in the ledger from the
-    moment its scan is planned, and done once it is written there. ``take`` names the
-    first queued partition of the oldest running, resumable scan this host can run,
-    without claiming it - the worker's claim is the compare-and-set - so two workers may
-    be handed the same partition and exactly one runs it. A scan the worker passed over
+    moment its scan is planned, and done once it is written there. ``take`` names a
+    queued partition of a running, resumable scan this host can run, without claiming it
+    - the worker's claim is the compare-and-set - so two workers may be handed the same
+    partition and exactly one runs it. Scans take turns (W2.4): workspaces in rotation,
+    and within one, its scans in rotation. It used to be the oldest scan's partition
+    every time, so one large scan held every worker until its last partition was taken. A scan the worker passed over
     - planned on another host, or not rebuildable here - is skipped for a while, so it
     never hides the scans behind it. Expired leases are taken back by the worker's
     maintenance pass, for every kind of queue.
@@ -115,6 +117,8 @@ class LedgerQueue:
 
     def __init__(self) -> None:
         self._passed: dict[tuple[str, str], float] = {}
+        self._last_tenant = ""
+        self._last_scan: dict[str, str] = {}
 
     def publish(self, tenant_id: str, scan_id: str, partition_ids: Iterable[str]) -> int:
         # Nothing to send: they are queued in the ledger already, and this says how many
@@ -125,13 +129,19 @@ class LedgerQueue:
         from backend.partitioned_scan import runs_here
 
         now = time.monotonic()
+        by_tenant: dict[str, list[str]] = {}
         for record in store.list_unfinished_partitioned_scans(resumable_only=True):
             key = (record["tenant_id"], record["scan_id"])
             if record["status"] != "running" or self._passed.get(key, 0.0) > now or not runs_here(record):
                 continue
-            partition_id = store.first_queued_partition(*key)
-            if partition_id is not None:
-                return Delivery(tenant_id=key[0], scan_id=key[1], partition_id=partition_id)
+            by_tenant.setdefault(key[0], []).append(key[1])
+        for tenant_id in _rotated(sorted(by_tenant), self._last_tenant):
+            for scan_id in _rotated(by_tenant[tenant_id], self._last_scan.get(tenant_id, "")):
+                partition_id = store.first_queued_partition(tenant_id, scan_id)
+                if partition_id is not None:
+                    self._last_tenant = tenant_id
+                    self._last_scan[tenant_id] = scan_id
+                    return Delivery(tenant_id=tenant_id, scan_id=scan_id, partition_id=partition_id)
         return None
 
     def ack(self, delivery: Delivery) -> None:
@@ -142,6 +152,14 @@ class LedgerQueue:
 
     def pass_over(self, delivery: Delivery, *, seconds: float) -> None:
         self._passed[(delivery.tenant_id, delivery.scan_id)] = time.monotonic() + max(0.0, seconds)
+
+
+def _rotated(items: list[str], last: str) -> list[str]:
+    """``items`` starting after ``last`` - the next turn - or from the start."""
+    if last in items:
+        index = items.index(last) + 1
+        return items[index:] + items[:index]
+    return list(items)
 
 
 def work_queue_from_env() -> PartitionQueue:
