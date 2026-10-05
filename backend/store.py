@@ -1323,17 +1323,18 @@ _BYTE_COUNT_COLUMNS = (
 
 
 def add_asset_prune_index(conn) -> None:
-    """Revision 0039: the index a complete named scan reads its unseen assets through.
+    """Revision 0039: built the index ``(tenant_id, scan_label, current_scan_id, id)`` the
+    prune read its unseen assets through (W1.4).
 
-    The prune after such a scan reads `current_scan_id` below and above the scan's own
-    id within `(tenant_id, scan_label)`; with this index those are two range reads that
-    return only the stale rows, whatever the statistics say. Building it locks writes to
-    `assets` for the length of the build (once, at upgrade). Re-runnable. Rollback:
-    restore the pre-upgrade backup, or drop the index - older code does not read it."""
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_assets_tenant_scan_label_current_id "
-        "ON assets (tenant_id, scan_label, current_scan_id, id)"
-    )
+    Superseded by revision 0042 (W2.1), which drops it: an indexed presence marker made
+    every unchanged file's presence update rewrite an entry in every index of ``assets``,
+    and the prune now walks ``(tenant_id, scan_label, id)`` instead. So it is no longer
+    built here - an install upgrading across both revisions would otherwise lock writes to
+    ``assets`` for the length of a build whose result 0042 throws away. An install that
+    applied 0039 when it built the index keeps it until 0042 drops it. The revision stays
+    in the sequence (revisions are append-only); its record's checksum differs from the
+    one such an install stored, which ``checksum_drift`` reports and nothing gates on."""
+    return None
 
 
 def add_finding_lifecycle_detail(conn) -> None:
