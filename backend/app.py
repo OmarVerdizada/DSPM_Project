@@ -3638,8 +3638,10 @@ def sftp_scan(payload: SftpScanRequest, principal: Principal = Depends(require_p
 def scan_job(job_id: str, principal: Principal = Depends(require_permission("inventory.view"))) -> dict:
     cleanup_jobs()
     job = get_job(job_id)
-    if job is not None and job.tenant_id == principal.tenant_id and job.status != "paused":
-        return job.to_dict()
+    if job is not None and job.tenant_id == principal.tenant_id:
+        current = job.to_dict()
+        if current.get("status") != "paused":
+            return current
     # A paused job is followed through its row: what continues it (here or elsewhere)
     # and what reconciles it write there, not into this process's copy (W2.4).
     # ARCH-003: fall back to the durable record so a job that outlived its

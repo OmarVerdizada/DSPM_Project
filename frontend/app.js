@@ -10705,6 +10705,7 @@ const AUDIT_ACTIONS = {
   "scan.resumed": "Resumed a scan interrupted by a restart",
   "scan.published": "Queued a scan for the workers",
   "scan.scheduled": "Started a scheduled scan",
+  "scan.schedule_skipped": "Skipped a scheduled scan because its last run was still going",
   "schedule.created": "Created a scan schedule",
   "schedule.updated": "Changed a scan schedule",
   "schedule.deleted": "Deleted a scan schedule",
