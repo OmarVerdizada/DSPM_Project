@@ -11,7 +11,7 @@ const source = fs.readFileSync(path.join(__dirname, "..", "..", "frontend", "con
 
 function makeCard(fields = {}, units = {}) {
   const inputs = {};
-  for (const name of ["include_paths", "exclude_paths", "exclude_folder_patterns", "exclude_extensions",
+  for (const name of ["include_paths", "exclude_paths", "exclude_extensions",
     "min_size", "max_size", "modified_after", "skip_hidden"]) {
     inputs[name] = { value: "", checked: false, dispatchEvent() {} };
   }
@@ -27,7 +27,6 @@ function makeCard(fields = {}, units = {}) {
     inputs, unitSelects, details,
     addEventListener() {},
     dispatchEvent() {},
-    // The file-server step's rule rows; the stand-in card has none.
     querySelectorAll() { return []; },
     querySelector(selector) {
       let match = selector.match(/data-scope-field="([^"]+)"/);

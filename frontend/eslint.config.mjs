@@ -35,6 +35,7 @@ const FROM_FEATURES = {
   // console/scan-setup.js
   applyScanSetup: "readonly",
   readSpecialFiles: "readonly",
+  revealSetupField: "readonly",
   scanSetupProblems: "readonly",
   scanTypeMode: "readonly",
   syncScanSetup: "readonly",
@@ -46,7 +47,6 @@ const FROM_SCOPE = {
   scanScopeProblem: "readonly",
 };
 const FROM_APP = {
-  COMPLIANCE_FRAMEWORKS: "readonly",
   accessToken: "readonly",
   allowedExtensionsList: "readonly",
   api: "readonly",
@@ -56,7 +56,6 @@ const FROM_APP = {
   filterInput: "readonly",
   getFriendlyTimestamp: "readonly",
   isCurrentTenantContext: "readonly",
-  readPayload: "readonly",
   readSelectedExtensions: "readonly",
   showToast: "readonly",
   switchTab: "readonly",

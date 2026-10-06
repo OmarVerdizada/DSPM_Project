@@ -34,13 +34,11 @@ REFUSED = [
     ("file-server", {"exclude_paths": "C:\\Shares\\Finance"}, {}, ""),
     ("file-server", {"exclude_paths": "\\\\fs01\\Finance"}, {}, ""),
     ("file-server", {"include_paths": "\\\\other\\Finance"}, {}, "fs01"),
-    ("file-server", {"exclude_folder_patterns": "a/b"}, {}, ""),
-    ("file-server", {"exclude_folder_patterns": "*"}, {}, ""),
     ("endpoint", {"exclude_paths": "Downloads\\ISOs"}, {}, ""),
 ]
 ACCEPTED = [
     ("file-server", {"exclude_extensions": "ISO; *.vhdx, .Mp4", "exclude_paths": "Finance/Archive\nIT/Software",
-                     "exclude_folder_patterns": "backup*, ~snapshot", "min_size": "1", "max_size": "1.5",
+                     "min_size": "1", "max_size": "1.5",
                      "modified_after": "2024-01-31", "skip_hidden": True},
      {"min_size": "KB", "max_size": "GB"}, ""),
     ("file-server", {"include_paths": "\\\\FS01\\Finance\\Reports\nHR"}, {}, "fs01"),
@@ -55,7 +53,7 @@ def _harness(payload: dict) -> dict:
         json.dump(payload, handle)
         name = handle.name
     try:
-        run = subprocess.run([NODE, str(HARNESS), name], capture_output=True, text=True, timeout=60)
+        run = subprocess.run([NODE, str(HARNESS), name], capture_output=True, text=True, timeout=60, check=False)
     finally:
         Path(name).unlink(missing_ok=True)
     if run.returncode != 0:
@@ -103,7 +101,7 @@ class TheConsoleAndTheServerAgreeTest(unittest.TestCase):
         self.assertEqual(first["scope"]["min_size_bytes"], 1024)
         self.assertEqual(first["scope"]["max_size_bytes"], int(1.5 * 1024 ** 3))
         self.assertTrue(first["skipHidden"])
-        self.assertEqual(first["count"], 11, "3 types + 2 folders + 2 patterns + 2 sizes + a date + hidden")
+        self.assertEqual(first["count"], 9, "3 types + 2 folders + 2 sizes + a date + hidden")
         for (kind, _fields, _units, server), result in zip(ACCEPTED, results):
             with self.subTest(kind=kind, scope=result["scope"]):
                 self.assertIsNone(result["problem"])
@@ -117,14 +115,16 @@ class TheConsoleAndTheServerAgreeTest(unittest.TestCase):
 
     def test_a_saved_scope_comes_back_into_the_card_as_it_was(self) -> None:
         saved = {"exclude_extensions": [".iso", ".vhdx"], "exclude_paths": ["Finance/Archive"],
-                 "include_paths": ["Finance", "HR/Contracts"], "exclude_folder_patterns": ["backup*"],
+                 "include_paths": ["Finance", "HR/Contracts"],
                  "min_size_bytes": 2048, "max_size_bytes": 100 * 1024 ** 2, "modified_after": "2025-01-01"}
         results = _harness({"apply": [
             {"kind": "file-server", "scope": saved, "include_hidden": False},
             {"kind": "file-server", "scope": None, "include_hidden": True},
             {"kind": "file-server", "scope": {"max_size_bytes": 1536}, "include_hidden": True},
+            {"kind": "file-server", "scope": {"exclude_folder_patterns": ["backup*"], "exclude_paths": ["Tmp"]},
+             "include_hidden": True},
         ]})["apply"]
-        restored, cleared, odd = results
+        restored, cleared, odd, named = results
         self.assertEqual(restored["scope"], saved)
         self.assertTrue(restored["skipHidden"])
         self.assertTrue(restored["open"], "a saved scan with rules opens on them")
@@ -133,6 +133,16 @@ class TheConsoleAndTheServerAgreeTest(unittest.TestCase):
         self.assertFalse(cleared["skipHidden"])
         self.assertFalse(cleared["open"])
         self.assertEqual(odd["scope"], {"max_size_bytes": 1536}, "a size that is no whole unit survives the round trip")
+        # The folder-name rule is gone from the console: a scan reads every folder of its
+        # target. A scan saved with name patterns is saved again without them.
+        self.assertEqual(named["scope"], {"exclude_paths": ["Tmp"]})
+
+    def test_no_wizard_offers_a_folder_name_rule(self) -> None:
+        scope_js = (ROOT / "frontend" / "console" / "scan-scope.js").read_text(encoding="utf-8")
+        index = (ROOT / "frontend" / "index.html").read_text(encoding="utf-8")
+        for source in (scope_js, index):
+            self.assertNotIn('data-scope-field="exclude_folder_patterns"', source)
+            self.assertNotIn("Skip folders named", source)
 
     def test_the_history_says_a_scan_was_scoped(self) -> None:
         note = _harness({"summary": {"excluded_by_scope": 1250, "folders_skipped_by_scope": 3,

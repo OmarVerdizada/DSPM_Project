@@ -592,9 +592,9 @@ let remediationListAbortController = null;
 let remediationPendingAction = null;
 
 const COMPLIANCE_FRAMEWORKS = [
-  { id: "gdpr", name: "GDPR", desc: "Personal data, IDs, health, biometric, HR and customer records." },
-  { id: "pci_dss", name: "PCI DSS", desc: "CHD and SAD rules: PAN, cardholder name, expiry, service code, track data, CVV, PIN and PIN block." },
-  { id: "nist_sp800_60_enterprise", name: "NIST", desc: "Information types, CIA impact, PII, CUI-aware handling, and catalog health." },
+  { id: "gdpr", name: "GDPR", brief: "EU personal data", desc: "Personal data, IDs, health, biometric, HR and customer records." },
+  { id: "pci_dss", name: "PCI DSS", brief: "Payment card data", desc: "CHD and SAD rules: PAN, cardholder name, expiry, service code, track data, CVV, PIN and PIN block." },
+  { id: "nist_sp800_60_enterprise", name: "NIST", brief: "Information types and impact", desc: "Information types, CIA impact, PII, CUI-aware handling, and catalog health." },
 ];
 const COMPLIANCE_LOGIC = [
   {
@@ -986,9 +986,8 @@ var activeScanLabel = "";
 
 function readPayload() {
   const data = new FormData(form);
-  const selectedComplianceFrameworks = complianceEnabledInput?.checked
-    ? readSelectedComplianceFrameworks("file-server")
-    : [];
+  // The frameworks ticked are the choice: no framework, no mapping.
+  const selectedComplianceFrameworks = readSelectedComplianceFrameworks("file-server");
   // All file types sends no type filter; only selected types sends the chosen set. The
   // text in the type search is a search, not a choice: a type is in only when ticked.
   const selectedFileExtensions = scanTypeMode() === "all"
@@ -1030,12 +1029,12 @@ function readSelectedComplianceFrameworks(scope) {
 function renderComplianceSelectors() {
   complianceFrameworkHosts.forEach((host) => {
     const scope = host.dataset.complianceFrameworks;
-    // The file-server step lists frameworks as compact chips; the description stays
-    // with each one for a screen reader and on hover.
+    // The file-server step lists each framework as a card: its name and, in a few words,
+    // what it maps; the full description on hover.
     host.innerHTML = scope === "file-server" ? COMPLIANCE_FRAMEWORKS.map((framework) => `
-      <label class="cfg-framework" title="${escapeHtml(framework.desc)}">
+      <label class="cfg-card" title="${escapeHtml(framework.desc)}">
         <input type="checkbox" value="${escapeHtml(framework.id)}" />
-        <span>${escapeHtml(framework.name)}<span class="visually-hidden">: ${escapeHtml(framework.desc)}</span></span>
+        <span><b>${escapeHtml(framework.name)}</b><small>${escapeHtml(framework.brief || framework.desc)}</small></span>
       </label>
     `).join("") : COMPLIANCE_FRAMEWORKS.map((framework) => `
       <label class="compliance-framework-card">
@@ -1049,6 +1048,12 @@ function renderComplianceSelectors() {
     `).join("");
     const toggle = scope === "endpoint" ? endpointComplianceEnabledInput : complianceEnabledInput;
     const refresh = () => {
+      // File server: no switch - ticking a framework is the choice, and the hidden
+      // toggle follows it for the review step.
+      if (scope === "file-server") {
+        if (toggle) toggle.checked = readSelectedComplianceFrameworks(scope).length > 0;
+        return;
+      }
       const enabled = Boolean(toggle?.checked);
       host.classList.toggle("disabled", !enabled);
       host.querySelectorAll("input[type='checkbox']").forEach((input) => {
@@ -1202,9 +1207,12 @@ function toggleExtensionPolicyMode(simpleId, advancedId, buttonId) {
 }
 
 function initSimpleExtensionPolicies() {
+  // All file types sends no list and Custom edits the one ticked: neither is a set to tick.
   document.querySelectorAll("input[name='ext-preset']").forEach((radio) => {
     radio.addEventListener("change", () => {
-      if (radio.checked) applySimpleExtensionPolicy(radio.value, allowedExtensionsList, extensionSearch);
+      if (radio.checked && radio.value !== "all" && radio.value !== "custom") {
+        applySimpleExtensionPolicy(radio.value, allowedExtensionsList, extensionSearch);
+      }
     });
   });
   document.querySelectorAll("input[name='endpoint-ext-preset']").forEach((radio) => {
@@ -1217,7 +1225,8 @@ function initSimpleExtensionPolicies() {
 }
 
 function applyDefaultSimpleExtensionPolicies() {
-  const fileServerPreset = document.querySelector("input[name='ext-preset']:checked")?.value || "secrets";
+  const checkedPreset = document.querySelector("input[name='ext-preset']:checked")?.value;
+  const fileServerPreset = SIMPLE_EXTENSION_PRESETS[checkedPreset] ? checkedPreset : "recommended";
   const endpointPreset = document.querySelector("input[name='endpoint-ext-preset']:checked")?.value || "secrets";
   applySimpleExtensionPolicy(fileServerPreset, allowedExtensionsList, extensionSearch);
   applySimpleExtensionPolicy(endpointPreset, endpointAllowedExtensionsList, endpointExtensionSearch);
@@ -13176,9 +13185,13 @@ function validateWizardStep(kind, step) {
   }
   if (step === 2 && kind === "file-server") {
     // Depth, shares under SMB 3 encryption, an empty custom type set, and every scope
-    // rule the server would refuse - each named beside its field.
+    // rule the server would refuse - each named beside its field, which is shown first
+    // when it is inside the folded Advanced options.
     const problems = scanSetupProblems();
-    if (problems.length) return problems[0];
+    if (problems.length) {
+      revealSetupField(problems[0].field);
+      return problems[0];
+    }
   }
   if (step === 2 && kind === "endpoint") {
     // Advanced scan scope: the server's own checks, named beside the field.
@@ -13317,10 +13330,11 @@ function applyFileServerProfile(profile) {
   document.querySelector("#include_admin_shares").checked = Boolean(config.include_admin_shares);
   document.querySelector("#smb_encryption").checked = Boolean(config.smb_encryption);
   document.querySelector("#smb_shares").value = (config.smb_shares || []).join(", ");
-  // "All extensions" was a list of every type Sentro knows; it is now all file types,
-  // which is what it promised. Its type set falls back to Recommended.
+  // All file types ticks no set; the list beneath it is Recommended, where Custom starts.
+  // ("All extensions" was a list of every type Sentro knows; it is now all file types.)
   applyExtensionUiState("file-server", profile && ui.ext_preset !== "all" ? ui : { ext_preset: "recommended" });
   applyComplianceState("file-server", config.compliance_enabled, config.compliance_frameworks);
+  complianceEnabledInput?.dispatchEvent(new Event("change", { bubbles: true }));
   // A saved scan keeps its scope; one saved before scopes existed has none.
   applyScanScope("file-server", config.scope, config.include_hidden);
   // W2.6 level, hidden and system files, the type mode (console/scan-setup.js). A profile

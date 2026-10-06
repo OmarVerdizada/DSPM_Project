@@ -10,9 +10,12 @@
    a mistake is named beside its field instead of as a refused request.
 
    The endpoint wizard's card is rendered here. The file-server wizard's fields are
-   written into its Configuration step (index.html) as rule rows: each rule is a row
-   ([data-scope-rule]) that an "add" button opens and its x closes, so a scan with no
-   rules shows one line, and every rule reads as what it does.
+   written into its Configuration step (index.html): the types to skip beside the file
+   types, the folders, sizes and date under Advanced options.
+
+   There is no folder-name rule: a scan reads every folder of its target, narrowed only
+   by path, type, size and date. (A scan saved with name patterns still says so where
+   its scope is described.)
 
    Loaded before app.js, like every file in console/: definitions and DOM wiring
    only. The console's helpers (escapeHtml ...) are used when a handler runs. */
@@ -26,10 +29,6 @@ const SCOPE_EXTENSION_GROUPS = [
   { label: "Installers & binaries", items: [".exe", ".dll", ".msi", ".sys", ".cab"] },
   { label: "Video & audio", items: [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".mp3", ".wav", ".flac"] },
   { label: "Archives", items: [".zip", ".7z", ".rar", ".tar", ".gz", ".tgz"] },
-];
-const SCOPE_FOLDER_GROUPS = [
-  { label: "Backups", items: ["backup*", "*backups"] },
-  { label: "Temporary", items: ["temp", "tmp", "~*"] },
 ];
 const SCOPE_KINDS = ["file-server", "endpoint"];
 
@@ -76,13 +75,6 @@ function scopeMarkup(kind) {
           <small id="${id("exclude_paths")}-hint" class="field-hint">${endpoint
             ? "One per line, as a full path - C:\\... or \\\\server\\share\\... Everything under each is skipped."
             : "One per line, under the target. Everything under each is skipped."}</small>
-        </div>
-        <div class="scope-field">
-          <label for="${id("exclude_folder_patterns")}">Skip folders named</label>
-          <input id="${id("exclude_folder_patterns")}" data-scope-field="exclude_folder_patterns" autocomplete="off" spellcheck="false"
-            placeholder="backup*, ~snapshot" aria-describedby="${id("exclude_folder_patterns")}-hint" />
-          <small id="${id("exclude_folder_patterns")}-hint" class="field-hint">Any folder whose name matches, at any depth. * is any text, ? one character.</small>
-          <span class="scope-quick">${quick(SCOPE_FOLDER_GROUPS, "exclude_folder_patterns")}</span>
         </div>
         <div class="scope-field">
           <label for="${id("exclude_extensions")}">Skip file types</label>
@@ -149,8 +141,7 @@ function readScopeSize(kind, name) {
 function readScanScope(kind) {
   const scope = {};
   const lists = {
-    include_paths: { lines: true }, exclude_paths: { lines: true },
-    exclude_folder_patterns: {}, exclude_extensions: {},
+    include_paths: { lines: true }, exclude_paths: { lines: true }, exclude_extensions: {},
   };
   Object.entries(lists).forEach(([name, options]) => {
     const values = splitScopeList(scopeField(kind, name)?.value, options);
@@ -188,16 +179,12 @@ function scanScopeProblem(kind, { server = "" } = {}) {
     const today = new Date().toISOString().slice(0, 10);
     if (scope.modified_after > today) return { field: field("modified_after"), message: "The date is in the future: no file would be scanned." };
   }
-  for (const pattern of scope.exclude_folder_patterns || []) {
-    if (/[\\/:<>"|]/.test(pattern)) return { field: field("exclude_folder_patterns"), message: `"${pattern}" names more than a folder - a pattern matches one folder name.` };
-    if (!pattern.replace(/[*?]/g, "")) return { field: field("exclude_folder_patterns"), message: `"${pattern}" would match every folder.` };
-  }
   const host = String(server || "").trim().toLowerCase();
   for (const name of ["include_paths", "exclude_paths"]) {
     for (const path of scope[name] || []) {
       const unc = /^(\\\\|\/\/)/.test(path);
       const drive = /^[a-z]:([\\/]|$)/i.test(path);
-      if (/[*?]/.test(path)) return { field: field(name), message: `"${path}": a path cannot hold * or ? - use "Skip folders named" for patterns.` };
+      if (/[*?]/.test(path)) return { field: field(name), message: `"${path}": a path cannot hold * or ? - give the folder itself.` };
       if (path.split(/[\\/]+/).includes("..")) return { field: field(name), message: `"${path}": a path cannot climb out of the scan with "..".` };
       if (endpoint && !unc && !drive) return { field: field(name), message: `"${path}": on an endpoint, give the full path - C:\\... or \\\\server\\share\\...` };
       if (!endpoint && drive) return { field: field(name), message: `"${path}": give the folder under the target, like Finance/Archive (share/folder on a file server).` };
@@ -259,46 +246,9 @@ function scanScopeReviewText(kind) {
   return `${count} rule${count === 1 ? "" : "s"}: ${describeScanScope(scope, { skipHidden }).join("; ")}`;
 }
 
-// Rule rows: a row is shown while it holds a value or was just added; its "add"
-// button is hidden while it is shown, and the empty line while any row is.
-function syncScopeRules(kind) {
-  const root = scopeRoot(kind);
-  if (!root) return;
-  let shown = 0;
-  root.querySelectorAll("[data-scope-rule]").forEach((row) => {
-    const filled = [...row.querySelectorAll("[data-scope-field]")].some((field) => String(field.value || "").trim());
-    const visible = filled || row.dataset.open === "1";
-    row.hidden = !visible;
-    if (visible) shown += 1;
-    const adder = root.querySelector(`[data-scope-rule-add="${row.dataset.scopeRule}"]`);
-    if (adder) adder.hidden = visible;
-  });
-  const empty = root.querySelector("[data-scope-rules-empty]");
-  if (empty) empty.hidden = shown > 0;
-}
-
-function openScopeRule(kind, name) {
-  const row = scopeRoot(kind)?.querySelector(`[data-scope-rule="${name}"]`);
-  if (!row) return;
-  row.dataset.open = "1";
-  syncScopeRules(kind);
-  row.querySelector("[data-scope-field]")?.focus();
-}
-
-function closeScopeRule(kind, row) {
-  row.querySelectorAll("[data-scope-field]").forEach((field) => { field.value = ""; });
-  row.dataset.open = "";
-  const name = row.dataset.scopeRule;
-  syncScopeRules(kind);
-  // Focus goes where the row's "add" button reappeared, not to the top of the page.
-  scopeRoot(kind)?.querySelector(`[data-scope-rule-add="${name}"]`)?.focus();
-  scopeRoot(kind)?.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
 function refreshScanScope(kind) {
   const root = scopeRoot(kind);
   if (!root) return;
-  syncScopeRules(kind);
   const scope = readScanScope(kind);
   const skipHidden = scanScopeSkipsHidden(kind);
   const count = countScanScopeRules(scope, { skipHidden });
@@ -343,14 +293,12 @@ function applyScanScope(kind, scope, includeHidden = true) {
   };
   set("include_paths", join(saved.include_paths, "\n"));
   set("exclude_paths", join(saved.exclude_paths, "\n"));
-  set("exclude_folder_patterns", join(saved.exclude_folder_patterns, ", "));
   set("exclude_extensions", join(saved.exclude_extensions, ", "));
   setScopeSize(kind, "min_size", saved.min_size_bytes);
   setScopeSize(kind, "max_size", saved.max_size_bytes);
   set("modified_after", saved.modified_after ? String(saved.modified_after).slice(0, 10) : "");
   const hidden = scopeField(kind, "skip_hidden");
   if (hidden) hidden.checked = includeHidden === false;
-  root.querySelectorAll("[data-scope-rule]").forEach((row) => { row.dataset.open = ""; });
   const details = root.querySelector("[data-scope-details]");
   const count = countScanScopeRules(saved, { skipHidden: includeHidden === false });
   // A saved scan with rules opens on them; a new one starts folded.
@@ -397,16 +345,6 @@ function mountScanScope(kind) {
     const add = event.target.closest("[data-scope-add]");
     if (add) {
       addScopeItems(kind, add.dataset.scopeAdd, String(add.dataset.scopeItems || "").split(" ").filter(Boolean));
-      return;
-    }
-    const opener = event.target.closest("[data-scope-rule-add]");
-    if (opener) {
-      openScopeRule(kind, opener.dataset.scopeRuleAdd);
-      return;
-    }
-    const remover = event.target.closest("[data-scope-rule-remove]");
-    if (remover) {
-      closeScopeRule(kind, remover.closest("[data-scope-rule]"));
       return;
     }
     if (event.target.closest("[data-scope-clear]")) {

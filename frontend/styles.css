@@ -17435,6 +17435,7 @@ button.review-row:hover .review-edit { opacity: 1; transform: none; }
   font-size: 12.5px !important;
   font-weight: 500;
 }
+#fs-wizard .cfg-box :is(input:not([type="checkbox"]):not([type="radio"]), select, textarea),
 #fs-wizard .scan-form-grid input,
 #endpoint-wizard .endpoint-form input, #endpoint-wizard .endpoint-form select,
 #endpoint-wizard .endpoint-form textarea {
