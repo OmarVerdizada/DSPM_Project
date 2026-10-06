@@ -155,11 +155,16 @@ class TheWizardIsWiredTest(unittest.TestCase):
         for wiring in ('scope: readScanScope("file-server")', 'scope: readScanScope("endpoint")',
                        'applyScanScope("file-server", config.scope, config.include_hidden)',
                        'applyScanScope("endpoint", config.scope, config.include_hidden)',
-                       "scanScopeProblem(kind, { server })", "scanScopeHistoryNote(summary)",
+                       # The file-server step checks through console/scan-setup.js, which asks
+                       # the scope module the same question.
+                       "const problems = scanSetupProblems();", "scanScopeHistoryNote(summary)",
                        'add("left out by scope", number(scope.excluded_files), { always: true })',
                        "Left out by scope: ",
-                       'include_hidden: !scanScopeSkipsHidden("file-server")'):
+                       # Hidden and system files are two plain choices on the file-server step.
+                       "...specialFiles,"):
             self.assertIn(wiring, app)
+        setup = (ROOT / "frontend" / "console" / "scan-setup.js").read_text(encoding="utf-8")
+        self.assertIn('scanScopeProblem("file-server", { server })', setup)
         summary = (ROOT / "frontend" / "scan-summary.js").read_text(encoding="utf-8")
         self.assertIn('setText("scan-summary-scope", scanScopeReviewText("file-server"))', summary)
 

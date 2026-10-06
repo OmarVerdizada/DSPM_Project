@@ -8,13 +8,14 @@
     <link rel="stylesheet" href="/static/fonts/fonts.css?v=1" />
     <link rel="stylesheet" href="/static/styles/tokens.css?v=11" />
     <link rel="stylesheet" href="/static/styles/components.css?v=1" />
-    <link rel="stylesheet" href="/static/styles.css?v=260" />
+    <link rel="stylesheet" href="/static/styles.css?v=263" />
     <link rel="stylesheet" href="/static/styles/shell.css?v=17" />
     <link rel="stylesheet" href="/static/styles/pages.css?v=22" />
     <link rel="stylesheet" href="/static/styles/remediation.css?v=13" />
     <link rel="stylesheet" href="/static/styles/reports.css?v=6" />
     <link rel="stylesheet" href="/static/styles/history.css?v=2" />
     <link rel="stylesheet" href="/static/styles/toast.css?v=2" />
+    <link rel="stylesheet" href="/static/styles/scan-setup.css?v=9" />
   </head>
   <body class="auth-locked">
     <div class="app-shell">
@@ -279,145 +280,217 @@
 
               <div class="wizard-step hidden" data-wizard-step="2">
                 <p class="wizard-step-eyebrow">Step 2 — Configuration</p>
-<section class="scan-card wizard-behavior-card" aria-label="Scan behavior">
-                  <div class="scan-card-head">
-                    <span class="scan-card-ico" aria-hidden="true">
-                      <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M16 3.5v5M4 12h4M12 12h8M8 9.5v5M4 18h12M16 15.5v5M20 18h0"/></svg>
-                    </span>
-                    <div class="scan-card-heading">
-                      <h4>Behavior &amp; scope</h4>
-                      <span>Queue behavior, incremental reuse, and folder depth</span>
-                    </div>
-                  </div>
-                  <div class="wizard-behavior-grid">
-                    <label class="checkbox-row option-tile">
-                      <input id="async_scan" name="async_scan" type="checkbox" checked />
-                      <span class="scan-option-copy">Async queue</span>
-                      <span class="scan-option-check" aria-hidden="true"></span>
-                    </label>
-                    <label class="checkbox-row option-tile">
-                      <input id="incremental_enabled" name="incremental_enabled" type="checkbox" checked />
-                      <span class="scan-option-copy">Incremental</span>
-                      <span class="scan-option-check" aria-hidden="true"></span>
-                    </label>
-                    <label class="checkbox-row option-tile">
-                      <input id="inspect_archives" name="inspect_archives" type="checkbox" />
-                      <span class="scan-option-copy">ZIP archives</span>
-                      <span class="scan-option-check" aria-hidden="true"></span>
-                    </label>
-                    <label class="checkbox-row option-tile">
-                      <input id="include_admin_shares" name="include_admin_shares" type="checkbox" />
-                      <span class="scan-option-copy">Admin shares</span>
-                      <span class="scan-option-check" aria-hidden="true"></span>
-                    </label>
-                    <label class="checkbox-row option-tile" title="SMB 3.1.1 with the session encrypted. A server that cannot encrypt is refused, never read in the clear.">
-                      <input id="smb_encryption" name="smb_encryption" type="checkbox" aria-describedby="smb-shares-hint" />
-                      <span class="scan-option-copy">SMB 3 encryption</span>
-                      <span class="scan-option-check" aria-hidden="true"></span>
-                    </label>
-                  </div>
-                  <div class="wizard-behavior-fields">
-                    <label>
-                      Scan level
-                      <select id="scan_level" name="scan_level" aria-describedby="scan-level-hint">
-                        <option value="inventory">Inventory - metadata and access only</option>
-                        <option value="standard" selected>Standard - content within the caps</option>
-                        <option value="full">Full compliance - every framework, archives opened</option>
-                      </select>
-                      <small id="scan-level-hint" class="field-hint">Reads text up to 16 MiB and documents up to 64 MiB, once each. Larger files and other types are named by their metadata.</small>
-                    </label>
-                    <label>
-                      Max folder depth
-                      <input id="max_depth" name="max_depth" type="number" min="1" max="12" value="4" />
-                    </label>
-                    <label>
-                      Local sample path
-                      <input id="local_path" name="local_path" value="enterprise_test_data" />
-                    </label>
-                    <label>
-                      Shares
-                      <input id="smb_shares" name="smb_shares" autocomplete="off" placeholder="All shares" aria-describedby="smb-shares-hint" />
-                      <small id="smb-shares-hint" class="field-hint">Comma-separated. Required with SMB 3 encryption, which cannot list a server's shares.</small>
-                    </label>
-                  </div>
-                </section>
-<section class="scan-card" aria-label="Extension policy">
-                <div class="extension-filter scan-form-wide">
-                  <div class="scan-card-head">
-                    <span class="scan-card-ico" aria-hidden="true">
-                      <svg viewBox="0 0 24 24"><path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/></svg>
-                    </span>
-                    <div class="scan-card-heading">
-                      <label>Extension policy</label>
-                      <span>Choose which file types the scan inspects</span>
-                    </div>
-                  </div>
-                  <div id="ext-simple-mode" class="ext-mode-panel">
-                    <div class="ext-preset-grid">
-                      <label class="ext-preset-card">
-                        <input type="radio" name="ext-preset" value="secrets" />
-                        <span class="ext-preset-title">Secrets & credentials</span>
-                        <span class="ext-preset-desc">Keys, vaults, configs, remote access profiles.</span>
-                      </label>
-                      <label class="ext-preset-card">
-                        <input type="radio" name="ext-preset" value="recommended" checked />
-                        <span class="ext-preset-title">Recommended</span>
-                        <span class="ext-preset-desc">Secrets, documents, data exports, mailboxes.</span>
-                      </label>
-                      <label class="ext-preset-card">
-                        <input type="radio" name="ext-preset" value="broad" />
-                        <span class="ext-preset-title">Broad</span>
-                        <span class="ext-preset-desc">Enterprise coverage without media-heavy files.</span>
-                      </label>
-                      <label class="ext-preset-card">
-                        <input type="radio" name="ext-preset" value="all" />
-                        <span class="ext-preset-title">All extensions</span>
-                        <span class="ext-preset-desc">Full inventory sweep across every known file type.</span>
-                      </label>
-                    </div>
-                  </div>
-                  <div id="ext-advanced-mode" class="ext-mode-panel hidden">
-                    <input id="extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
-                    <div class="extension-selected" data-extension-selected-for="file-server"></div>
-                    <div id="allowed_extensions" class="extension-list" role="group" aria-label="Extension filter"></div>
-                    <div class="extension-actions" aria-label="Extension presets">
-                      <button type="button" class="secondary-btn mini-btn" data-extension-preset="all">All</button>
-                      <button type="button" class="secondary-btn mini-btn" data-extension-preset="clear">Clear</button>
-                    </div>
-                    <div class="extension-actions" aria-label="Custom extension">
-                      <input id="custom-extension-input" type="text" placeholder=".custom" />
-                      <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add</button>
-                    </div>
-                  </div>
-                  <button type="button" id="ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
-                </div>
-              </section>
+                <div class="cfg-layout">
+                  <div class="cfg-panel">
 
-<section class="scan-card scope-card" aria-label="Advanced scan scope" data-scan-scope="file-server"></section>
+                    <section class="cfg-section" id="cfg-scope" aria-labelledby="cfg-scope-title" data-scan-scope="file-server">
+                      <header class="cfg-section-head">
+                        <h4 id="cfg-scope-title">Scope</h4>
+                        <p>Which files this scan may read. Anything outside it is never opened.</p>
+                      </header>
 
-<section class="scan-card" aria-label="Compliance mapping">
-                <div class="scan-card-head">
-                  <span class="scan-card-ico" aria-hidden="true">
-                    <svg viewBox="0 0 24 24"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
-                  </span>
-                  <div class="scan-card-heading">
-                    <h4>Compliance mapping</h4>
-                    <span>Map findings to regulatory frameworks during the scan</span>
-                  </div>
-                </div>
-                <div class="compliance-selector scan-form-wide" data-compliance-scope="file-server">
-                  <div class="compliance-selector-head">
-                    <label class="checkbox-row option-tile compliance-toggle">
-                      <input id="compliance-enabled" type="checkbox" />
-                      <span class="compliance-toggle-switch" aria-hidden="true"></span>
-                      <span>Enable compliance mapping</span>
-                    </label>
-                    <span class="compliance-hint">Enable to choose compliance frameworks. GDPR, PCI DSS, and NIST are currently available.</span>
-                  </div>
-                  <div class="compliance-framework-grid" data-compliance-frameworks="file-server"></div>
-                </div>
-              </section>
+                      <div class="cfg-row" data-cfg-target="smb">
+                        <label class="cfg-label" for="smb_shares">Shares</label>
+                        <div class="cfg-body">
+                          <input id="smb_shares" name="smb_shares" autocomplete="off" spellcheck="false" placeholder="All shares on the server" aria-describedby="smb-shares-hint" />
+                          <small id="smb-shares-hint" class="field-hint">Comma-separated. Required with SMB 3 encryption, which cannot list a server's shares.</small>
+                          <div class="cfg-checks">
+                            <label class="cfg-check"><input id="include_admin_shares" name="include_admin_shares" type="checkbox" /><span>Include admin shares <small>C$, ADMIN$</small></span></label>
+                            <label class="cfg-check" title="SMB 3.1.1 with the session encrypted. A server that cannot encrypt is refused, never read in the clear."><input id="smb_encryption" name="smb_encryption" type="checkbox" aria-describedby="smb-shares-hint" /><span>Require SMB 3 encryption</span></label>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="cfg-row" data-cfg-target="local">
+                        <label class="cfg-label" for="local_path">Folder</label>
+                        <div class="cfg-body">
+                          <input id="local_path" name="local_path" value="enterprise_test_data" spellcheck="false" aria-describedby="local-path-hint" />
+                          <small id="local-path-hint" class="field-hint">A folder inside the Sentro installation. Name a file server in Basics to scan its shares.</small>
+                        </div>
+                      </div>
+                      <div class="cfg-row">
+                        <label class="cfg-label" for="max_depth">Folder depth</label>
+                        <div class="cfg-body cfg-inline">
+                          <input id="max_depth" name="max_depth" class="cfg-number" type="number" min="1" max="12" value="4" aria-describedby="max-depth-hint" />
+                          <small id="max-depth-hint" class="field-hint">levels below each share or folder, 1 to 12</small>
+                        </div>
+                      </div>
 
+                      <div class="cfg-row">
+                        <span class="cfg-label" id="cfg-types-label">File types</span>
+                        <div class="cfg-body">
+                          <div class="cfg-segmented" role="radiogroup" aria-labelledby="cfg-types-label">
+                            <label><input type="radio" name="ext-type-mode" value="selected" checked /><span>Only selected types</span></label>
+                            <label><input type="radio" name="ext-type-mode" value="all" /><span>All file types</span></label>
+                          </div>
+                          <div class="cfg-types-selected" data-types-mode="selected">
+                            <div id="ext-simple-mode" class="cfg-presets" role="radiogroup" aria-label="Type set">
+                              <label class="cfg-preset"><input type="radio" name="ext-preset" value="recommended" checked /><span>Recommended</span></label>
+                              <label class="cfg-preset"><input type="radio" name="ext-preset" value="secrets" /><span>Secrets &amp; credentials</span></label>
+                              <label class="cfg-preset"><input type="radio" name="ext-preset" value="broad" /><span>Broad</span></label>
+                              <button type="button" id="ext-custom-toggle" class="cfg-preset cfg-preset-custom plain-btn" aria-pressed="false" aria-controls="ext-advanced-mode">Custom…</button>
+                            </div>
+                            <small class="field-hint" id="ext-preset-desc" aria-live="polite"></small>
+                            <div id="ext-advanced-mode" class="cfg-picker hidden">
+                              <div class="cfg-picker-bar">
+                                <input id="extension-search" type="search" placeholder="Find a type - docx, pdf, key" aria-label="Find a file type" />
+                                <div class="cfg-picker-groups" role="group" aria-label="Show one group of types" data-picker-groups></div>
+                                <span class="cfg-picker-actions">
+                                  <button type="button" class="cfg-link-btn plain-btn" data-extension-preset="all">Select all</button>
+                                  <button type="button" class="cfg-link-btn plain-btn" data-extension-preset="clear">Clear</button>
+                                </span>
+                              </div>
+                              <div id="allowed_extensions" class="cfg-type-list" role="group" aria-label="File types to scan"></div>
+                              <div class="cfg-picker-foot">
+                                <div class="extension-selected cfg-selected" data-extension-selected-for="file-server"></div>
+                                <span class="cfg-custom-add">
+                                  <input id="custom-extension-input" type="text" placeholder=".custom" aria-label="Add another file type" spellcheck="false" />
+                                  <button type="button" class="secondary-btn mini-btn" id="add-custom-extension-btn">Add type</button>
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                          <div class="cfg-types-all" data-types-mode="all">
+                            <label class="cfg-sublabel" for="file-server-scope-exclude_extensions">Except these types <small>optional</small></label>
+                            <input id="file-server-scope-exclude_extensions" data-scope-field="exclude_extensions" autocomplete="off" spellcheck="false" placeholder=".iso, .vhdx, .mp4" aria-describedby="exclude-types-hint" />
+                            <span class="cfg-quick" aria-label="Add a group of types">
+                              <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".iso .img .vhd .vhdx .vmdk .ova .qcow2">+ Disk images &amp; VMs</button>
+                              <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".exe .dll .msi .sys .cab">+ Installers</button>
+                              <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".mp4 .mkv .avi .mov .wmv .mp3 .wav .flac">+ Video &amp; audio</button>
+                              <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".zip .7z .rar .tar .gz .tgz">+ Archives</button>
+                            </span>
+                            <small id="exclude-types-hint" class="field-hint">Every other file is in scope, including types Sentro does not list.</small>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="cfg-row">
+                        <span class="cfg-label" id="cfg-special-label">Hidden &amp; system</span>
+                        <div class="cfg-body cfg-pair" role="group" aria-labelledby="cfg-special-label">
+                          <label class="cfg-field">
+                            <span>Hidden files</span>
+                            <select id="fs-hidden-files">
+                              <option value="include" selected>Include</option>
+                              <option value="skip">Skip, with hidden folders</option>
+                              <option value="only">Only hidden files</option>
+                            </select>
+                          </label>
+                          <label class="cfg-field">
+                            <span>System files</span>
+                            <select id="fs-system-files">
+                              <option value="skip" selected>Skip</option>
+                              <option value="include">Include</option>
+                              <option value="only">Only system files</option>
+                            </select>
+                          </label>
+                        </div>
+                      </div>
+
+                      <div class="cfg-row">
+                        <span class="cfg-label" id="cfg-rules-label">Rules <small>optional</small></span>
+                        <div class="cfg-body">
+                          <ul class="cfg-rules" aria-labelledby="cfg-rules-label">
+                            <li class="cfg-rule" data-scope-rule="include_paths" hidden>
+                              <label for="file-server-scope-include_paths">Only these folders</label>
+                              <textarea id="file-server-scope-include_paths" data-scope-field="include_paths" rows="2" spellcheck="false" placeholder="Finance/Reports&#10;HR/Contracts" aria-describedby="rule-include-hint"></textarea>
+                              <button type="button" class="cfg-rule-remove plain-btn" data-scope-rule-remove aria-label="Remove the rule Only these folders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                              <small id="rule-include-hint" class="field-hint">One per line, under the target - share/folder on a file server.</small>
+                            </li>
+                            <li class="cfg-rule" data-scope-rule="exclude_paths" hidden>
+                              <label for="file-server-scope-exclude_paths">Skip folders</label>
+                              <textarea id="file-server-scope-exclude_paths" data-scope-field="exclude_paths" rows="2" spellcheck="false" placeholder="Finance/Archive&#10;IT/Software" aria-describedby="rule-exclude-hint"></textarea>
+                              <button type="button" class="cfg-rule-remove plain-btn" data-scope-rule-remove aria-label="Remove the rule Skip folders"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                              <small id="rule-exclude-hint" class="field-hint">One per line. Everything under each is skipped.</small>
+                            </li>
+                            <li class="cfg-rule" data-scope-rule="exclude_folder_patterns" hidden>
+                              <label for="file-server-scope-exclude_folder_patterns">Skip folders named</label>
+                              <input id="file-server-scope-exclude_folder_patterns" data-scope-field="exclude_folder_patterns" autocomplete="off" spellcheck="false" placeholder="backup*, ~snapshot" aria-describedby="rule-pattern-hint" />
+                              <button type="button" class="cfg-rule-remove plain-btn" data-scope-rule-remove aria-label="Remove the rule Skip folders named"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                              <span class="cfg-quick">
+                                <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_folder_patterns" data-scope-items="backup* *backups">+ Backups</button>
+                                <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_folder_patterns" data-scope-items="temp tmp ~*">+ Temporary</button>
+                              </span>
+                              <small id="rule-pattern-hint" class="field-hint">Any folder whose name matches, at any depth. * is any text, ? one character.</small>
+                            </li>
+                            <li class="cfg-rule" data-scope-rule="size" hidden>
+                              <span class="cfg-rule-name">File size</span>
+                              <span class="cfg-size">
+                                <label for="file-server-scope-min_size">at least</label>
+                                <input id="file-server-scope-min_size" data-scope-field="min_size" class="cfg-number" type="number" min="0" step="any" inputmode="decimal" placeholder="any" />
+                                <select data-scope-unit="min_size" aria-label="Unit of the minimum size"><option value="KB" selected>KB</option><option value="MB">MB</option><option value="GB">GB</option></select>
+                                <label for="file-server-scope-max_size">at most</label>
+                                <input id="file-server-scope-max_size" data-scope-field="max_size" class="cfg-number" type="number" min="0" step="any" inputmode="decimal" placeholder="any" />
+                                <select data-scope-unit="max_size" aria-label="Unit of the maximum size"><option value="KB">KB</option><option value="MB" selected>MB</option><option value="GB">GB</option></select>
+                              </span>
+                              <button type="button" class="cfg-rule-remove plain-btn" data-scope-rule-remove aria-label="Remove the rule File size"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                              <small class="field-hint">Decided from the file listing: a file over the limit is never downloaded to find out.</small>
+                            </li>
+                            <li class="cfg-rule" data-scope-rule="modified_after" hidden>
+                              <label for="file-server-scope-modified_after">Modified on or after</label>
+                              <input id="file-server-scope-modified_after" data-scope-field="modified_after" type="date" />
+                              <button type="button" class="cfg-rule-remove plain-btn" data-scope-rule-remove aria-label="Remove the rule Modified on or after"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+                            </li>
+                          </ul>
+                          <div class="cfg-rule-adders" aria-label="Add a rule">
+                            <span class="cfg-rules-empty" data-scope-rules-empty>No rules: every folder and file of the chosen types is in scope.</span>
+                            <button type="button" class="cfg-add-btn plain-btn" data-scope-rule-add="include_paths">+ Only these folders</button>
+                            <button type="button" class="cfg-add-btn plain-btn" data-scope-rule-add="exclude_paths">+ Skip folders</button>
+                            <button type="button" class="cfg-add-btn plain-btn" data-scope-rule-add="exclude_folder_patterns">+ Skip folders named</button>
+                            <button type="button" class="cfg-add-btn plain-btn" data-scope-rule-add="size">+ File size</button>
+                            <button type="button" class="cfg-add-btn plain-btn" data-scope-rule-add="modified_after">+ Modified date</button>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="cfg-section" id="cfg-method" aria-labelledby="cfg-method-title">
+                      <header class="cfg-section-head">
+                        <h4 id="cfg-method-title">Method</h4>
+                        <p>How each file in scope is read.</p>
+                      </header>
+                      <div class="cfg-row">
+                        <span class="cfg-label" id="cfg-level-label">Scan level</span>
+                        <div class="cfg-body">
+                          <div class="cfg-levels" role="radiogroup" aria-labelledby="cfg-level-label">
+                            <label class="cfg-level"><input type="radio" name="scan_level" value="inventory" /><span><b>Inventory</b><small>Names, sizes, owners and access. No content is read.</small></span></label>
+                            <label class="cfg-level"><input type="radio" name="scan_level" value="standard" checked /><span><b>Standard</b><small>Text up to 16 MiB, documents up to 64 MiB, once each.</small></span></label>
+                            <label class="cfg-level"><input type="radio" name="scan_level" value="full" /><span><b>Full compliance</b><small>Standard, every framework, archives opened. Slowest.</small></span></label>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="cfg-row">
+                        <span class="cfg-label" id="cfg-options-label">Options</span>
+                        <div class="cfg-body cfg-checks" role="group" aria-labelledby="cfg-options-label">
+                          <label class="cfg-check"><input id="incremental_enabled" name="incremental_enabled" type="checkbox" checked /><span>Incremental <small>reuse results for unchanged files</small></span></label>
+                          <label class="cfg-check"><input id="async_scan" name="async_scan" type="checkbox" checked /><span>Run in background <small>leave the page while it scans</small></span></label>
+                          <label class="cfg-check"><input id="inspect_archives" name="inspect_archives" type="checkbox" /><span>Open ZIP archives <small id="archives-note">read the files inside</small></span></label>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="cfg-section" id="cfg-compliance" aria-label="Compliance mapping">
+                      <header class="cfg-section-head">
+                        <h4>Compliance</h4>
+                        <p>Which regulations findings are mapped to.</p>
+                      </header>
+                      <div class="cfg-row">
+                        <span class="cfg-label" id="cfg-frameworks-label">Frameworks</span>
+                        <div class="cfg-body">
+                          <div class="cfg-frameworks" data-compliance-scope="file-server">
+                            <label class="cfg-switch"><input id="compliance-enabled" type="checkbox" role="switch" /><span class="cfg-switch-track" aria-hidden="true"></span><span>Map findings</span></label>
+                            <div class="cfg-framework-chips" role="group" aria-labelledby="cfg-frameworks-label" data-compliance-frameworks="file-server"></div>
+                          </div>
+                          <small class="field-hint" id="compliance-hint">Choose one or more. Full compliance level applies every framework.</small>
+                        </div>
+                      </div>
+                    </section>
+                  </div>
+
+                  <aside class="cfg-manifest" aria-labelledby="cfg-manifest-title">
+                    <h4 id="cfg-manifest-title">Scan manifest</h4>
+                    <ul class="cfg-manifest-list" id="cfg-manifest"></ul>
+                    <p class="cfg-manifest-status" id="cfg-manifest-status" role="status" aria-live="polite"></p>
+                  </aside>
+                </div>
               </div>
 
               <div class="wizard-step hidden" data-wizard-step="3">
@@ -496,7 +569,7 @@
               </div>
 
               <footer class="scan-wizard-footer">
-                <button type="button" id="fs-wizard-delete" class="wizard-delete-btn hidden">Delete this scan</button>
+                <button type="button" id="fs-wizard-delete" class="wizard-delete-btn plain-btn hidden">Delete this scan</button>
                 <span id="fs-wizard-hint" class="wizard-hint" aria-live="polite"></span>
                 <div class="wizard-nav">
                   <button type="button" id="fs-wizard-back" class="secondary-btn" disabled>Back</button>
@@ -1690,7 +1763,7 @@
               </div>
 
               <footer class="scan-wizard-footer">
-                <button type="button" id="endpoint-wizard-delete" class="wizard-delete-btn hidden">Delete this scan</button>
+                <button type="button" id="endpoint-wizard-delete" class="wizard-delete-btn plain-btn hidden">Delete this scan</button>
                 <span id="endpoint-wizard-hint" class="wizard-hint" aria-live="polite"></span>
                 <div class="wizard-nav">
                   <button type="button" id="endpoint-wizard-back" class="secondary-btn" disabled>Back</button>
@@ -2036,10 +2109,11 @@
     <script src="/static/console/alerts.js?v=1"></script>
     <script src="/static/console/access.js?v=1"></script>
     <script src="/static/console/exact-match.js?v=1"></script>
-    <script src="/static/console/scan-scope.js?v=1"></script>
-    <script src="/static/app.js?v=258"></script>
+    <script src="/static/console/scan-scope.js?v=10"></script>
+    <script src="/static/console/scan-setup.js?v=9"></script>
+    <script src="/static/app.js?v=267"></script>
     <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
-    <script src="/static/scan-summary.js?v=3"></script>
+    <script src="/static/scan-summary.js?v=12"></script>
     <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
     <script src="/static/sentro-fx.js?v=16" defer></script>
   </body>

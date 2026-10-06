@@ -986,15 +986,15 @@ var activeScanLabel = "";
 
 function readPayload() {
   const data = new FormData(form);
-  const selectedExtensions = readSelectedExtensions();
-  const searchedExtension = readSearchExtension(extensionSearch);
   const selectedComplianceFrameworks = complianceEnabledInput?.checked
     ? readSelectedComplianceFrameworks("file-server")
     : [];
-  if (searchedExtension && !selectedExtensions.includes(searchedExtension)) {
-    selectedExtensions.push(searchedExtension);
-  }
-  const selectedFileExtensions = selectedExtensions.filter((item) => item.startsWith("."));
+  // All file types sends no type filter; only selected types sends the chosen set. The
+  // text in the type search is a search, not a choice: a type is in only when ticked.
+  const selectedFileExtensions = scanTypeMode() === "all"
+    ? []
+    : readSelectedExtensions().filter((item) => item.startsWith("."));
+  const specialFiles = readSpecialFiles();
   return {
     server: data.get("server") || "",
     domain: data.get("domain") || "WORKGROUP",
@@ -1005,10 +1005,8 @@ function readPayload() {
     max_depth: Number(data.get("max_depth") || 4),
     allowed_extensions: selectedFileExtensions,
     extension_filter_enabled: selectedFileExtensions.length > 0,
-    include_hidden: !scanScopeSkipsHidden("file-server"),
-    include_system: selectedExtensions.includes("__system__"),
-    hidden_filter_enabled: selectedExtensions.includes("__hidden__"),
-    system_filter_enabled: selectedExtensions.includes("__system__"),
+    // Hidden and system files: two plain choices (console/scan-setup.js).
+    ...specialFiles,
     // Advanced scan scope (console/scan-scope.js): applied by the server as it enumerates.
     scope: readScanScope("file-server"),
     include_admin_shares: Boolean(data.get("include_admin_shares")),
@@ -1032,7 +1030,14 @@ function readSelectedComplianceFrameworks(scope) {
 function renderComplianceSelectors() {
   complianceFrameworkHosts.forEach((host) => {
     const scope = host.dataset.complianceFrameworks;
-    host.innerHTML = COMPLIANCE_FRAMEWORKS.map((framework) => `
+    // The file-server step lists frameworks as compact chips; the description stays
+    // with each one for a screen reader and on hover.
+    host.innerHTML = scope === "file-server" ? COMPLIANCE_FRAMEWORKS.map((framework) => `
+      <label class="cfg-framework" title="${escapeHtml(framework.desc)}">
+        <input type="checkbox" value="${escapeHtml(framework.id)}" />
+        <span>${escapeHtml(framework.name)}<span class="visually-hidden">: ${escapeHtml(framework.desc)}</span></span>
+      </label>
+    `).join("") : COMPLIANCE_FRAMEWORKS.map((framework) => `
       <label class="compliance-framework-card">
         <input type="checkbox" value="${escapeHtml(framework.id)}" />
         <span class="compliance-framework-copy">
@@ -12901,7 +12906,7 @@ function profileChips(profile) {
     if (config.read_acl) chips.push({ label: "ACL", on: true });
     if (config.incremental_enabled) chips.push({ label: "Incremental", on: true });
   } else {
-    chips.push({ label: EXT_PRESET_LABELS[ui.ext_preset] || "Custom types", on: true });
+    chips.push({ label: ui.ext_mode === "all" ? "All file types" : EXT_PRESET_LABELS[ui.ext_preset] || "Custom types", on: true });
     if (scopeRules) chips.push({ label: `Scope rules ${scopeRules}`, on: true });
     chips.push({ label: `Depth ${config.max_depth ?? 4}` });
     if (config.incremental_enabled) chips.push({ label: "Incremental", on: true });
@@ -13023,6 +13028,11 @@ function setWizardStep(kind, step) {
   }
   const visiblePanel = wizard.querySelector(".wizard-step:not(.hidden)");
   if (visiblePanel) visiblePanel.scrollTop = 0;
+  // The page is the step's scroller and Next stays in reach at its bottom edge, so a
+  // new step starts at the top of the page rather than wherever the last one was left.
+  if (window.scrollY > 0) window.scrollTo({ top: 0 });
+  if (kind === "file-server" && step === 2) syncScanSetup();
+  if (kind === "file-server" && step === 3) document.dispatchEvent(new Event("scan-form-updated"));
 }
 
 function setWizardHint(kind, message) {
@@ -13164,10 +13174,15 @@ function validateWizardStep(kind, step) {
       }
     }
   }
-  if (step === 2) {
+  if (step === 2 && kind === "file-server") {
+    // Depth, shares under SMB 3 encryption, an empty custom type set, and every scope
+    // rule the server would refuse - each named beside its field.
+    const problems = scanSetupProblems();
+    if (problems.length) return problems[0];
+  }
+  if (step === 2 && kind === "endpoint") {
     // Advanced scan scope: the server's own checks, named beside the field.
-    const server = kind === "file-server" ? document.querySelector("#server").value.trim() : "";
-    const scopeProblem = scanScopeProblem(kind, { server });
+    const scopeProblem = scanScopeProblem(kind, { server: "" });
     if (scopeProblem) return scopeProblem;
     const hiddenOnly = readSelectedExtensions(kind === "endpoint" ? endpointAllowedExtensionsList : undefined)
       .includes("__hidden__");
@@ -13217,6 +13232,8 @@ function collectUiState(scope) {
   const list = isEndpoint ? endpointAllowedExtensionsList : allowedExtensionsList;
   return {
     ext_preset: advancedVisible ? "" : presetInput?.value || "",
+    // The file-server step's type mode: every type, or the chosen set.
+    ext_mode: isEndpoint ? undefined : scanTypeMode(),
     extensions: readSelectedExtensions(list),
     path_scope: isEndpoint ? document.querySelector("#endpoint-path-scope").value : undefined,
     custom_paths: isEndpoint ? document.querySelector("#endpoint-custom-paths").value : undefined,
@@ -13297,16 +13314,19 @@ function applyFileServerProfile(profile) {
   document.querySelector("#async_scan").checked = config.async_scan ?? true;
   document.querySelector("#incremental_enabled").checked = config.incremental_enabled ?? true;
   document.querySelector("#inspect_archives").checked = Boolean(config.inspect_archives);
-  // W2.6: a saved profile keeps its scan level; one saved before levels existed is standard.
-  const scanLevel = document.querySelector("#scan_level");
-  if (scanLevel) scanLevel.value = ["inventory", "standard", "full"].includes(config.scan_level) ? config.scan_level : "standard";
   document.querySelector("#include_admin_shares").checked = Boolean(config.include_admin_shares);
   document.querySelector("#smb_encryption").checked = Boolean(config.smb_encryption);
   document.querySelector("#smb_shares").value = (config.smb_shares || []).join(", ");
-  applyExtensionUiState("file-server", profile ? ui : { ext_preset: "recommended" });
+  // "All extensions" was a list of every type Sentro knows; it is now all file types,
+  // which is what it promised. Its type set falls back to Recommended.
+  applyExtensionUiState("file-server", profile && ui.ext_preset !== "all" ? ui : { ext_preset: "recommended" });
   applyComplianceState("file-server", config.compliance_enabled, config.compliance_frameworks);
   // A saved scan keeps its scope; one saved before scopes existed has none.
   applyScanScope("file-server", config.scope, config.include_hidden);
+  // W2.6 level, hidden and system files, the type mode (console/scan-setup.js). A profile
+  // saved before levels existed is standard; one saved with the hidden or system pseudo
+  // types keeps what they meant.
+  applyScanSetup(config, ui);
   document.dispatchEvent(new Event("scan-form-updated"));
 }
 

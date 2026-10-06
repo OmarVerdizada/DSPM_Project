@@ -22,6 +22,8 @@
     if (el && el.textContent !== value) el.textContent = value;
   }
   function policyLabel() {
+    // The Configuration step says it itself (console/scan-setup.js).
+    if (typeof scanTypesLabel === "function") return scanTypesLabel();
     var advanced = document.getElementById("ext-advanced-mode");
     if (advanced && !advanced.classList.contains("hidden")) {
       var count = document.querySelectorAll("#allowed_extensions input:checked").length;
@@ -39,13 +41,14 @@
     full: "Standard, with every compliance framework applied and ZIP archives opened. The slowest and most thorough.",
   };
   function levelLabel() {
-    var select = document.getElementById("scan_level");
-    var option = select && select.options[select.selectedIndex];
-    return option ? option.textContent.split(" - ")[0] : "Standard";
+    var checked = document.querySelector("input[name='scan_level']:checked");
+    var name = checked && checked.parentElement && checked.parentElement.querySelector("b");
+    return name ? name.textContent.trim() : "Standard";
   }
   function render() {
     var server = fieldValue("server", "");
-    var level = fieldValue("scan_level", "standard");
+    var levelInput = document.querySelector("input[name='scan_level']:checked");
+    var level = levelInput ? levelInput.value : "standard";
     setText("scan-level-hint", levelHints[level] || levelHints.standard);
     setText("scan-summary-level", levelLabel());
     setText("scan-summary-target", server || "Local dataset");
@@ -73,5 +76,8 @@
   form.addEventListener("input", schedule);
   form.addEventListener("change", schedule);
   form.addEventListener("click", schedule);
+  // A restored scan, or the review step opening: rendered now, not on the next frame,
+  // which a page in the background never paints.
+  document.addEventListener("scan-form-updated", render);
   render();
 })();

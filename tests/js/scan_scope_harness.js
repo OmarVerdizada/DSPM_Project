@@ -26,6 +26,9 @@ function makeCard(fields = {}, units = {}) {
     innerHTML: "",
     inputs, unitSelects, details,
     addEventListener() {},
+    dispatchEvent() {},
+    // The file-server step's rule rows; the stand-in card has none.
+    querySelectorAll() { return []; },
     querySelector(selector) {
       let match = selector.match(/data-scope-field="([^"]+)"/);
       if (match) return inputs[match[1]] || null;

@@ -9,6 +9,11 @@
    hashed or stored. It checks the rules again; the checks here are the same ones, so
    a mistake is named beside its field instead of as a refused request.
 
+   The endpoint wizard's card is rendered here. The file-server wizard's fields are
+   written into its Configuration step (index.html) as rule rows: each rule is a row
+   ([data-scope-rule]) that an "add" button opens and its x closes, so a scan with no
+   rules shows one line, and every rule reads as what it does.
+
    Loaded before app.js, like every file in console/: definitions and DOM wiring
    only. The console's helpers (escapeHtml ...) are used when a handler runs. */
 
@@ -254,9 +259,46 @@ function scanScopeReviewText(kind) {
   return `${count} rule${count === 1 ? "" : "s"}: ${describeScanScope(scope, { skipHidden }).join("; ")}`;
 }
 
+// Rule rows: a row is shown while it holds a value or was just added; its "add"
+// button is hidden while it is shown, and the empty line while any row is.
+function syncScopeRules(kind) {
+  const root = scopeRoot(kind);
+  if (!root) return;
+  let shown = 0;
+  root.querySelectorAll("[data-scope-rule]").forEach((row) => {
+    const filled = [...row.querySelectorAll("[data-scope-field]")].some((field) => String(field.value || "").trim());
+    const visible = filled || row.dataset.open === "1";
+    row.hidden = !visible;
+    if (visible) shown += 1;
+    const adder = root.querySelector(`[data-scope-rule-add="${row.dataset.scopeRule}"]`);
+    if (adder) adder.hidden = visible;
+  });
+  const empty = root.querySelector("[data-scope-rules-empty]");
+  if (empty) empty.hidden = shown > 0;
+}
+
+function openScopeRule(kind, name) {
+  const row = scopeRoot(kind)?.querySelector(`[data-scope-rule="${name}"]`);
+  if (!row) return;
+  row.dataset.open = "1";
+  syncScopeRules(kind);
+  row.querySelector("[data-scope-field]")?.focus();
+}
+
+function closeScopeRule(kind, row) {
+  row.querySelectorAll("[data-scope-field]").forEach((field) => { field.value = ""; });
+  row.dataset.open = "";
+  const name = row.dataset.scopeRule;
+  syncScopeRules(kind);
+  // Focus goes where the row's "add" button reappeared, not to the top of the page.
+  scopeRoot(kind)?.querySelector(`[data-scope-rule-add="${name}"]`)?.focus();
+  scopeRoot(kind)?.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 function refreshScanScope(kind) {
   const root = scopeRoot(kind);
   if (!root) return;
+  syncScopeRules(kind);
   const scope = readScanScope(kind);
   const skipHidden = scanScopeSkipsHidden(kind);
   const count = countScanScopeRules(scope, { skipHidden });
@@ -308,6 +350,7 @@ function applyScanScope(kind, scope, includeHidden = true) {
   set("modified_after", saved.modified_after ? String(saved.modified_after).slice(0, 10) : "");
   const hidden = scopeField(kind, "skip_hidden");
   if (hidden) hidden.checked = includeHidden === false;
+  root.querySelectorAll("[data-scope-rule]").forEach((row) => { row.dataset.open = ""; });
   const details = root.querySelector("[data-scope-details]");
   const count = countScanScopeRules(saved, { skipHidden: includeHidden === false });
   // A saved scan with rules opens on them; a new one starts folded.
@@ -346,13 +389,24 @@ function mountScanScope(kind) {
   const root = scopeRoot(kind);
   if (!root || root.dataset.scopeMounted) return;
   root.dataset.scopeMounted = "1";
-  root.innerHTML = scopeMarkup(kind);
+  // A wizard that writes its own fields (the file-server Configuration step) keeps them.
+  if (!root.querySelector("[data-scope-field]")) root.innerHTML = scopeMarkup(kind);
   root.addEventListener("input", () => refreshScanScope(kind));
   root.addEventListener("change", () => refreshScanScope(kind));
   root.addEventListener("click", (event) => {
     const add = event.target.closest("[data-scope-add]");
     if (add) {
       addScopeItems(kind, add.dataset.scopeAdd, String(add.dataset.scopeItems || "").split(" ").filter(Boolean));
+      return;
+    }
+    const opener = event.target.closest("[data-scope-rule-add]");
+    if (opener) {
+      openScopeRule(kind, opener.dataset.scopeRuleAdd);
+      return;
+    }
+    const remover = event.target.closest("[data-scope-rule-remove]");
+    if (remover) {
+      closeScopeRule(kind, remover.closest("[data-scope-rule]"));
       return;
     }
     if (event.target.closest("[data-scope-clear]")) {

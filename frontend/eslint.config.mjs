@@ -32,9 +32,23 @@ const FROM_FEATURES = {
   scanScopeProblem: "readonly",
   scanScopeReviewText: "readonly",
   scanScopeSkipsHidden: "readonly",
+  // console/scan-setup.js
+  applyScanSetup: "readonly",
+  readSpecialFiles: "readonly",
+  scanSetupProblems: "readonly",
+  scanTypeMode: "readonly",
+  syncScanSetup: "readonly",
+};
+// console/scan-setup.js reads the scope through console/scan-scope.js, which loads first.
+const FROM_SCOPE = {
+  formatScopeBytes: "readonly",
+  readScanScope: "readonly",
+  scanScopeProblem: "readonly",
 };
 const FROM_APP = {
+  COMPLIANCE_FRAMEWORKS: "readonly",
   accessToken: "readonly",
+  allowedExtensionsList: "readonly",
   api: "readonly",
   can: "readonly",
   captureTenantContext: "readonly",
@@ -42,6 +56,8 @@ const FROM_APP = {
   filterInput: "readonly",
   getFriendlyTimestamp: "readonly",
   isCurrentTenantContext: "readonly",
+  readPayload: "readonly",
+  readSelectedExtensions: "readonly",
   showToast: "readonly",
   switchTab: "readonly",
 };
@@ -61,11 +77,11 @@ export default [
   {
     // The wizard's review mirror reads the scope's one-line summary when it renders.
     files: ["scan-summary.js"],
-    languageOptions: { ...base, globals: { ...globals.browser, scanScopeReviewText: "readonly" } },
+    languageOptions: { ...base, globals: { ...globals.browser, scanScopeReviewText: "readonly", scanTypesLabel: "readonly" } },
   },
   {
     files: ["console/*.js"],
-    languageOptions: { ...base, globals: { ...globals.browser, ...FROM_APP } },
+    languageOptions: { ...base, globals: { ...globals.browser, ...FROM_APP, ...FROM_SCOPE } },
     rules: { "no-undef": "error" },
   },
 ];
