@@ -39,25 +39,25 @@ class TheRulesTest(unittest.TestCase):
 
     def test_an_exclusion_wins_over_an_inclusion(self) -> None:
         rules = _rules(include_paths=["Finance"], exclude_paths=["Finance/Archive"])
-        self.assertEqual(rules.folder_reason("finance", "Finance"), "")
-        self.assertEqual(rules.folder_reason("finance/archive", "Archive"), scan_scope.EXCLUDED_FOLDER)
+        self.assertEqual(rules.folder_reason("finance"), "")
+        self.assertEqual(rules.folder_reason("finance/archive"), scan_scope.EXCLUDED_FOLDER)
         self.assertEqual(rules.file_reason("finance/archive/q1.pdf", ".pdf"), scan_scope.EXCLUDED_FOLDER)
         self.assertEqual(rules.file_reason("finance/q1.pdf", ".pdf"), "")
-        self.assertEqual(rules.folder_reason("hr", "HR"), scan_scope.OUTSIDE_INCLUDED)
+        self.assertEqual(rules.folder_reason("hr"), scan_scope.OUTSIDE_INCLUDED)
         self.assertEqual(rules.file_reason("readme.txt", ".txt"), scan_scope.OUTSIDE_INCLUDED,
                          "a file beside the included folder is outside it")
-        self.assertEqual(rules.folder_reason("", ""), "", "the root holds the included folder")
+        self.assertEqual(rules.folder_reason(""), "", "the root holds the included folder")
 
     def test_paths_compare_without_case_or_separator(self) -> None:
         rules = _rules(exclude_paths=["Finance\\ARCHIVE\\"])
-        self.assertEqual(rules.folder_reason(rules.path_of("finance/archive"), "archive"), scan_scope.EXCLUDED_FOLDER)
-        self.assertEqual(rules.folder_reason(rules.path_of("Finance/Archive2"), "Archive2"), "",
+        self.assertEqual(rules.folder_reason(rules.path_of("finance/archive")), scan_scope.EXCLUDED_FOLDER)
+        self.assertEqual(rules.folder_reason(rules.path_of("Finance/Archive2")), "",
                          "a prefix of a name is not the folder")
         endpoint = ScopeRules.from_dict(scan_scope.canonical(
             {"exclude_paths": ["C:\\Users\\Ana\\Downloads\\ISOs", "\\\\nas\\share\\VMs"]}, absolute=True))
         self.assertTrue(endpoint.file_reason(endpoint.path_of("c:/users/ana/downloads/isos/x.iso"), ".iso"))
-        self.assertTrue(endpoint.folder_reason(endpoint.path_of("\\\\NAS\\Share\\vms"), "vms"))
-        self.assertFalse(endpoint.folder_reason(endpoint.path_of("\\\\nas\\share"), "share"))
+        self.assertTrue(endpoint.folder_reason(endpoint.path_of("\\\\NAS\\Share\\vms")))
+        self.assertFalse(endpoint.folder_reason(endpoint.path_of("\\\\nas\\share")))
 
     def test_size_limits_are_inclusive_and_dates_are_utc_days(self) -> None:
         rules = _rules(min_size_bytes=10, max_size_bytes=100, modified_after="2024-01-01")
@@ -75,12 +75,13 @@ class TheRulesTest(unittest.TestCase):
         self.assertEqual(rules.file_meta_reason(None, None), "")
         self.assertEqual(rules.file_meta_reason(None, "not a time"), "")
 
-    def test_a_folder_pattern_knows_only_star_and_question_mark(self) -> None:
-        rules = _rules(exclude_folder_patterns=["Backup*", "~snapshot", "[old]?"])
-        for name in ("Backup", "backup_2020", "~SNAPSHOT", "[old]1"):
-            self.assertEqual(rules.folder_reason(name.casefold(), name), scan_scope.FOLDER_PATTERN, name)
-        for name in ("MyBackup", "o1", "old1", "snapshot"):
-            self.assertEqual(rules.folder_reason(name.casefold(), name), "", name)
+    def test_there_is_no_folder_name_rule(self) -> None:
+        # The console offers none: a scan reads every folder of its target, narrowed by
+        # path, type, size and date. A folder-name rule is not part of a scope.
+        self.assertIsNone(scan_scope.canonical({"exclude_folder_patterns": ["backup*"]}, absolute=False))
+        self.assertFalse(scan_scope.rules_for({"exclude_folder_patterns": ["backup*"]}).active)
+        for name in ("FOLDER_PATTERN", "clean_patterns"):
+            self.assertFalse(hasattr(scan_scope, name), name)
 
     def test_extensions_compare_without_case(self) -> None:
         rules = _rules(exclude_extensions=[".ISO", ".vhdx"])
@@ -95,12 +96,12 @@ class TheRulesTest(unittest.TestCase):
         self.assertEqual(scan_scope.summary_fields({"scope": None}), {})
 
     def test_one_scope_has_one_name_however_it_is_spelled(self) -> None:
-        first = scan_scope.canonical({"exclude_extensions": [".iso", ".VHD"], "exclude_paths": ["A\\B", "c/d/"],
-                                      "exclude_folder_patterns": ["Tmp*"]}, absolute=False)
-        second = scan_scope.canonical({"exclude_extensions": [".vhd", ".ISO"], "exclude_paths": ["/c/d", "a/b"],
-                                       "exclude_folder_patterns": ["tmp*"]}, absolute=False)
+        first = scan_scope.canonical({"exclude_extensions": [".iso", ".VHD"], "exclude_paths": ["A\\B", "c/d/"]},
+                                     absolute=False)
+        second = scan_scope.canonical({"exclude_extensions": [".vhd", ".ISO"], "exclude_paths": ["/c/d", "a/b"]},
+                                      absolute=False)
         self.assertEqual(scan_scope.digest(first), scan_scope.digest(second))
-        self.assertEqual(scan_scope.rule_count(first), 5)
+        self.assertEqual(scan_scope.rule_count(first), 4)
 
 
 class TheRequestTest(unittest.TestCase):
@@ -122,8 +123,7 @@ class TheRequestTest(unittest.TestCase):
         return EndpointScanRequest.model_validate({"host": "ws-17", "scope": scope})
 
     def test_input_is_normalized(self) -> None:
-        scope = self._scan(exclude_extensions=["ISO", "*.vhdx", ".Mp4, mkv"], exclude_paths=["Finance\\Archive\\"],
-                           exclude_folder_patterns=["Backup*"]).scope
+        scope = self._scan(exclude_extensions=["ISO", "*.vhdx", ".Mp4, mkv"], exclude_paths=["Finance\\Archive\\"]).scope
         self.assertEqual(scope.exclude_extensions, [".iso", ".mkv", ".mp4", ".vhdx"])
         self.assertEqual(scope.exclude_paths, ["Finance\\Archive\\"])
         self.assertEqual(self._smb(include_paths=["\\\\FS01.corp.local\\Finance\\Reports"]).scope.include_paths,
@@ -140,8 +140,9 @@ class TheRequestTest(unittest.TestCase):
             lambda: self._scan(exclude_paths=["C:\\Shares\\Finance"]),
             lambda: self._scan(exclude_paths=["\\\\fs01\\share\\x"]),
             lambda: self._smb(include_paths=["\\\\another-server\\Finance"]),
-            lambda: self._scan(exclude_folder_patterns=["a/b"]),
-            lambda: self._scan(exclude_folder_patterns=["*"]),
+            # A rule the console does not offer is refused, never silently ignored.
+            lambda: self._scan(exclude_folder_patterns=["backup*"]),
+            lambda: self._scan(skip_hidden=True),
             lambda: self._endpoint(include_paths=["C:\\Users\\ana"]),
             lambda: self._endpoint(exclude_paths=["Downloads"]),
         ]
@@ -188,8 +189,8 @@ def _corpus(root: Path) -> dict[str, Path]:
     return files
 
 
-SCOPE = {"exclude_extensions": [".iso"], "max_size_bytes": 4096, "exclude_paths": ["Finance/Archive"],
-         "exclude_folder_patterns": ["backup*"], "modified_after": "2020-01-01"}
+SCOPE = {"exclude_extensions": [".iso"], "max_size_bytes": 4096, "exclude_paths": ["Finance/Archive", "HR/Backup_2020"],
+         "modified_after": "2020-01-01"}
 OUT_OF_SCOPE = ("iso", "large", "archived", "backup", "stale")
 
 
@@ -238,7 +239,7 @@ class TheLocalWalkDoesNoWorkOutOfScopeTest(_LocalTest):
         self.assertIn(str(self.files["in_pdf"].resolve()), touched, "an in-scope file was not read")
         scope = diagnostics["scope"]
         self.assertEqual(scope["excluded_by"], {"extension": 1, "larger_than_maximum": 1, "modified_before_date": 1})
-        self.assertEqual(scope["skipped_folders_by"], {"excluded_folder": 1, "folder_pattern": 1})
+        self.assertEqual(scope["skipped_folders_by"], {"excluded_folder": 2})
         self.assertEqual(diagnostics["visited_files"], 5, "the excluded files were discovered, not hidden")
 
     def test_an_included_folder_is_all_that_is_listed(self) -> None:
@@ -375,7 +376,7 @@ class TheSmbCollectorDoesNoWorkOutOfScopeTest(_RangeTest):
         self.assertEqual(calls, [])
 
     def test_the_range_planner_does_not_list_an_excluded_folder(self) -> None:
-        rules = scan_scope.canonical({"exclude_folder_patterns": ["flat"]}, absolute=False)
+        rules = scan_scope.canonical({"exclude_paths": ["Big/flat"]}, absolute=False)
         plan = plan_share_partitions(self._config(scope=rules), max_files=4, max_bytes=1 << 30)
         self.assertNotIn(("Big", "/flat"), set(self.server.listed))
         self.assertTrue(plan is None or all(unit.get("folder") != "/flat" for unit in plan["units"]))
@@ -392,6 +393,8 @@ class TheEndpointScriptDoesNoWorkOutOfScopeTest(unittest.TestCase):
         # %TEMP% is under AppData, which the script always skips; a drive-root folder is not.
         self.root = Path(tempfile.mkdtemp(dir="C:\\"))
         self.addCleanup(shutil.rmtree, self.root, True)
+        # "[old]1" holds brackets, which PowerShell's -like and wildcard paths would read
+        # as a set: a literal path must still be walked.
         for relative, body in (("keep.txt", CARD), ("image.iso", "x"), ("big.log", "y" * 4000),
                                ("Backups/dump.txt", CARD), ("VMs/disk.txt", CARD), ("sub/ok.txt", CARD),
                                ("sub/[old]1/z.txt", CARD)):
@@ -402,8 +405,9 @@ class TheEndpointScriptDoesNoWorkOutOfScopeTest(unittest.TestCase):
         stale.write_text(CARD, encoding="utf-8")
         os.utime(stale, (OLD, OLD))
         self.scope = scan_scope.canonical(
-            {"exclude_extensions": [".iso"], "max_size_bytes": 1000, "exclude_paths": [str(self.root / "VMs")],
-             "exclude_folder_patterns": ["backup*", "[old]?"], "modified_after": "2020-01-01"}, absolute=True)
+            {"exclude_extensions": [".iso"], "max_size_bytes": 1000,
+             "exclude_paths": [str(self.root / "VMs"), str(self.root / "Backups")],
+             "modified_after": "2020-01-01"}, absolute=True)
 
     def _run(self, script: str) -> dict:
         from tests.test_winrm_parallel_parity import _run
@@ -423,11 +427,11 @@ class TheEndpointScriptDoesNoWorkOutOfScopeTest(unittest.TestCase):
     def test_the_whole_walk_leaves_out_what_is_out_of_scope(self) -> None:
         result = self._run(self._script(paths=[str(self.root)]))
         names = sorted(Path(record["path"]).name for record in result.get("records") or [])
-        self.assertEqual(names, ["keep.txt", "ok.txt"])
+        self.assertEqual(names, ["keep.txt", "ok.txt", "z.txt"])
         diagnostics = result["diagnostics"]
         self.assertEqual(diagnostics["scope_excluded_by"],
                          {"extension": 1, "larger_than_maximum": 1, "modified_before_date": 1})
-        self.assertEqual(diagnostics["scope_skipped_folders_by"], {"excluded_folder": 1, "folder_pattern": 2})
+        self.assertEqual(diagnostics["scope_skipped_folders_by"], {"excluded_folder": 2})
 
     def test_a_page_hands_on_no_excluded_folder(self) -> None:
         page = {"folders": [{"path": str(self.root), "depth": 0, "after": "", "root": True}],
@@ -467,7 +471,7 @@ class AScanKeepsItsScopeWhereverItRunsTest(unittest.TestCase):
             first_run_at=datetime.now(timezone.utc) + timedelta(days=30), created_by="admin")
         self.addCleanup(store.delete_scan_schedule, "default", schedule["schedule_id"])
         schedule = store.read_scan_schedule("default", schedule["schedule_id"])
-        self.assertEqual(schedule["request"]["scope"]["exclude_paths"], ["Finance/Archive"])
+        self.assertEqual(schedule["request"]["scope"]["exclude_paths"], ["Finance/Archive", "HR/Backup_2020"])
         with mock.patch.object(app_module, "create_job", return_value=mock.MagicMock(id="job-scoped")) as create_job:
             app_module._start_scheduled_scan(schedule)
         runner = create_job.call_args[0][1]
@@ -507,7 +511,8 @@ class TheApiTest(unittest.TestCase):
         names = {Path(record["path"]).name for record in data["files"]}
         self.assertEqual(names, {"q1.pdf", "staff.txt"})
         self.assertEqual(data["summary"]["excluded_by_scope"], 3)
-        self.assertEqual(data["scan_diagnostics"]["scope"]["rules"]["exclude_paths"], ["finance/archive"])
+        self.assertEqual(data["scan_diagnostics"]["scope"]["rules"]["exclude_paths"],
+                         ["finance/archive", "hr/backup_2020"])
 
 
 if __name__ == "__main__":

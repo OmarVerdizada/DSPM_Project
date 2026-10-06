@@ -2013,8 +2013,6 @@ def _scan_script(
       if ($scopeItem) {{ $scopeExcludeExtensions[([string]$scopeItem).ToLowerInvariant()] = $true }}
     }}
     $scopeExcludePaths = @(@($dspmScope.exclude_paths) | Where-Object {{ $_ }} | ForEach-Object {{ ([string]$_).ToLowerInvariant().TrimEnd('/') }})
-    # A folder-name pattern knows * and ? only; -like would read [ and ] as a set.
-    $scopeFolderPatterns = @(@($dspmScope.exclude_folder_patterns) | Where-Object {{ $_ }} | ForEach-Object {{ ([string]$_).ToLowerInvariant().Replace('[', '`[').Replace(']', '`]') }})
     $scopeMinSize = if ($null -ne $dspmScope.min_size_bytes) {{ [int64]$dspmScope.min_size_bytes }} else {{ [int64]-1 }}
     $scopeMaxSize = if ($null -ne $dspmScope.max_size_bytes) {{ [int64]$dspmScope.max_size_bytes }} else {{ [int64]-1 }}
     $scopeModifiedAfter = $null
@@ -2106,14 +2104,10 @@ def _scan_script(
     }}
 
     # Advanced scope: why a folder is not listed ("" when it is).
-    function Get-DspmScopeFolderReason($fullName, $name) {{
+    function Get-DspmScopeFolderReason($fullName) {{
       if (-not $scopeActive) {{ return "" }}
       $normalized = ([string]$fullName).ToLowerInvariant().Replace([string][char]92, '/').TrimEnd('/')
       if (Test-DspmScopeExcludedPath $normalized) {{ return "excluded_folder" }}
-      $folded = ([string]$name).ToLowerInvariant()
-      foreach ($pattern in $scopeFolderPatterns) {{
-        if ($folded -like $pattern) {{ return "folder_pattern" }}
-      }}
       return ""
     }}
 
@@ -2892,7 +2886,7 @@ def _scan_script(
         return
       }}
       if ($depth -eq 0) {{
-        $scopeReason = Get-DspmScopeFolderReason $current (Split-Path -Leaf $current)
+        $scopeReason = Get-DspmScopeFolderReason $current
         if ($scopeReason) {{
           Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
           return
@@ -2921,7 +2915,7 @@ def _scan_script(
             $diagnostics.skipped_dirs += 1
             continue
           }}
-          $scopeReason = Get-DspmScopeFolderReason $entry.FullName $entry.Name
+          $scopeReason = Get-DspmScopeFolderReason $entry.FullName
           if ($scopeReason) {{
             Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
             continue
@@ -2952,7 +2946,7 @@ def _scan_script(
         return $null
       }}
       if ($depth -eq 0 -and -not $after) {{
-        $scopeReason = Get-DspmScopeFolderReason $current (Split-Path -Leaf $current)
+        $scopeReason = Get-DspmScopeFolderReason $current
         if ($scopeReason) {{
           Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
           return $null
@@ -2978,7 +2972,7 @@ def _scan_script(
             $diagnostics.skipped_dirs += 1
             continue
           }}
-          $scopeReason = Get-DspmScopeFolderReason $entry.FullName $entry.Name
+          $scopeReason = Get-DspmScopeFolderReason $entry.FullName
           if ($scopeReason) {{
             Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
             continue

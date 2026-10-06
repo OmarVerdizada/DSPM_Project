@@ -906,9 +906,6 @@ def scan_directory(
                     diagnostics["visited_files"] = int(diagnostics.get("visited_files") or 0) + 1
                 scope_tally.file(reason)
                 return
-        is_hidden = is_hidden_path(item)
-        is_system = is_system_path(item)
-        attributes = file_attribute_label(item, is_hidden, is_system)
         progress_counters["visited"] += 1
         _emit_progress()
         if diagnostics is not None:
@@ -916,6 +913,22 @@ def scan_directory(
             extension_key = extension or "no extension"
             histogram = diagnostics.setdefault("extension_histogram", {})
             histogram[extension_key] = int(histogram.get(extension_key) or 0) + 1
+        # The file-type policy needs the name alone: a file it leaves out costs no
+        # syscall - unless it is an archive this scan opens, whose entries are judged
+        # one by one.
+        if extension_filter_enabled and extension not in extension_filter \
+                and not (scan_archive_entries and extension == ".zip"):
+            return
+        # One stat answers hidden, system, the attribute label and the record's size and
+        # times (the scope's own stat, when it took one).
+        try:
+            stat = scoped_stat or item.stat()
+        except OSError:
+            return
+        file_attributes = int(getattr(stat, "st_file_attributes", 0) or 0)
+        is_hidden = hidden_by(item, file_attributes)
+        is_system = system_by(item, file_attributes)
+        attributes = attribute_label(file_attributes, is_hidden, is_system)
         zip_protection: dict[str, str | bool] = {}
         include_top = matches_scan_filters(
             extension,
@@ -934,10 +947,6 @@ def scan_directory(
         if not include_top:
             return
 
-        try:
-            stat = scoped_stat or item.stat()
-        except OSError:
-            return
         created_at = datetime.fromtimestamp(stat.st_ctime, timezone.utc).isoformat()
         modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
         protected_extension = extension in PROTECTED_CONTENT_EXTENSIONS
@@ -1334,7 +1343,7 @@ def scan_directory(
                         diagnostics["skipped_dirs"] = int(diagnostics.get("skipped_dirs") or 0) + 1
                     continue
                 if scope_tally is not None:
-                    reason = scope_rules.folder_reason(_scope_path(item), item.name)
+                    reason = scope_rules.folder_reason(_scope_path(item))
                     if reason:
                         # Out of scope: not listed, so nothing under it is counted or read.
                         scope_tally.folder(reason)
@@ -1405,6 +1414,11 @@ def read_zip_entry_preview_and_sha256(archive: zipfile.ZipFile, entry: zipfile.Z
         return "", ""
 
 
+def hidden_by(path: Path, file_attributes: int) -> bool:
+    """Hidden: under a dotted name, or carrying the hidden attribute."""
+    return any(part.startswith(".") for part in path.parts) or bool(file_attributes & 0x2)
+
+
 def is_hidden_path(path: Path) -> bool:
     if any(part.startswith(".") for part in path.parts):
         return True
@@ -1412,9 +1426,7 @@ def is_hidden_path(path: Path) -> bool:
         stat = path.stat()
     except OSError:
         return False
-    if hasattr(stat, "st_file_attributes"):
-        return bool(stat.st_file_attributes & 0x2)
-    return False
+    return hidden_by(path, int(getattr(stat, "st_file_attributes", 0) or 0))
 
 
 def is_skipped_scan_path(path: Path) -> bool:
@@ -1448,24 +1460,17 @@ def is_skipped_scan_path(path: Path) -> bool:
     return any(fragment in normalized for fragment in skip_fragments)
 
 
-def is_system_path(path: Path) -> bool:
-    system_parts = {"$recycle.bin", "system volume information", "windows", "program files", "program files (x86)"}
-    try:
-        stat = path.stat()
-    except OSError:
-        return False
-    if hasattr(stat, "st_file_attributes"):
-        return bool(stat.st_file_attributes & 0x4) or any(part.lower() in system_parts for part in path.parts)
-    return any(part.lower() in system_parts for part in path.parts)
+_SYSTEM_PARTS = frozenset({"$recycle.bin", "system volume information", "windows", "program files",
+                           "program files (x86)"})
 
 
-def file_attribute_label(path: Path, is_hidden: bool = False, is_system: bool = False) -> str:
+def system_by(path: Path, file_attributes: int) -> bool:
+    """System: carrying the system attribute, or inside a Windows system folder."""
+    return bool(file_attributes & 0x4) or any(part.lower() in _SYSTEM_PARTS for part in path.parts)
+
+
+def attribute_label(attributes: int, is_hidden: bool = False, is_system: bool = False) -> str:
     labels: list[str] = []
-    try:
-        stat = path.stat()
-        attributes = getattr(stat, "st_file_attributes", 0)
-    except OSError:
-        attributes = 0
     if attributes & 0x20:
         labels.append("A")
     if attributes & 0x1:

@@ -315,7 +315,7 @@ def _plan_runs(config: ScanConfig, root: Path, excluded: list[Path], budget: int
                 if is_excluded(resolved_item):
                     children.append((item.name, 0, None))
                     continue
-                if scope.active and scope.folder_reason(scope_path(resolved_item), item.name):
+                if scope.active and scope.folder_reason(scope_path(resolved_item)):
                     # Out of scope: not listed here either; the walk meets it, skips it
                     # and counts it, so it stays in a run and weighs nothing.
                     children.append((item.name, 0, None))

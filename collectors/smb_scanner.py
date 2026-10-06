@@ -953,7 +953,7 @@ class SMBScanner:
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
                     continue
-                if self._scope_skips_folder(share_name, remote_path, entry.filename):
+                if self._scope_skips_folder(share_name, remote_path):
                     continue
                 self._enumerate_share_plan(share_name, remote_path, depth + 1, plan)
                 continue
@@ -1842,8 +1842,7 @@ class SMBScanner:
                 if entry.isDirectory:
                     if bool(getattr(entry, "isHidden", False)) and not include_hidden_dirs:
                         continue
-                    if self._scope.active and self._scope.folder_reason(
-                            self._scope_path(share_name, remote_path), entry.filename):
+                    if self._scope.active and self._scope.folder_reason(self._scope_path(share_name, remote_path)):
                         # The walk skips it, and counts it: it weighs nothing here.
                         continue
                     child_files, child_bytes, child_units = visit(remote_path, depth + 1)
@@ -2069,12 +2068,11 @@ class SMBScanner:
         """A share-relative path in the scope's form: ``share/folder/file``."""
         return self._scope.path_of(f"{share_name}/{remote_path}")
 
-    def _scope_skips_folder(self, share_name: str, folder: str, name: str = "") -> bool:
+    def _scope_skips_folder(self, share_name: str, folder: str) -> bool:
         """Whether a folder - or a whole share, at ``/`` - is out of scope; counted when it is."""
         if self._scope_tally is None:
             return False
-        reason = self._scope.folder_reason(self._scope_path(share_name, folder),
-                                           name or (share_name if folder in ("", "/") else ""))
+        reason = self._scope.folder_reason(self._scope_path(share_name, folder))
         if reason:
             self._scope_tally.folder(reason)
         return bool(reason)
@@ -2138,7 +2136,7 @@ class SMBScanner:
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
                     continue
-                if self._scope_skips_folder(share_name, remote_path, entry.filename):
+                if self._scope_skips_folder(share_name, remote_path):
                     continue
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
                 continue

@@ -28,7 +28,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # C5: the network boundary is checked before any other backend module loads - an unsafe
 # production configuration refuses to start, it is not logged (backend/deployment_boundary).
@@ -850,9 +850,15 @@ class ScanScope(BaseModel):
 
     Every rule is optional, and an exclusion always wins. On a file server, paths are
     relative to the scan's target - ``Finance/Archive`` under the local folder, or
-    ``share/folder`` (or ``\\server\share\folder``) over SMB; on an endpoint, absolute.
+    ``share/folder`` (or ``\\\\server\\share\\folder``) over SMB; on an endpoint, absolute.
     The extension policy (``allowed_extensions``) stays the include side for file types.
+
+    Exactly the rules the console offers. A rule this model does not know is refused,
+    never ignored: a scan told to leave something out that it then reads would look
+    as if it worked.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     exclude_extensions: list[str] = Field(default_factory=list, max_length=200,
                                           description="Never scan files with these extensions")
@@ -864,19 +870,12 @@ class ScanScope(BaseModel):
                                      description="Walk only these folders (and what is under them)")
     exclude_paths: list[str] = Field(default_factory=list, max_length=200,
                                      description="Skip these folders or files and everything under them")
-    exclude_folder_patterns: list[str] = Field(default_factory=list, max_length=100,
-                                               description="Skip any folder whose name matches (* and ?)")
     modified_after: date | None = Field(default=None, description="Skip files last modified before this date (UTC)")
 
     @field_validator("exclude_extensions")
     @classmethod
     def _clean_extensions(cls, values: list[str]) -> list[str]:
         return scan_scope.clean_extensions(values)
-
-    @field_validator("exclude_folder_patterns")
-    @classmethod
-    def _clean_patterns(cls, values: list[str]) -> list[str]:
-        return scan_scope.clean_patterns(values)
 
     @field_validator("include_paths", "exclude_paths")
     @classmethod
@@ -1012,6 +1011,14 @@ class ScanRequest(ConnectionRequest):
             return normalize_framework_ids(values)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
+
+    @model_validator(mode="after")
+    def _compliance_follows_the_frameworks(self) -> "ScanRequest":
+        """The frameworks chosen are the choice, as on the console's Configuration step:
+        mapping is on exactly when one is named. A switch on with none named mapped
+        nothing yet built a detector pool; frameworks named with it off were dropped."""
+        self.compliance_enabled = bool(self.compliance_frameworks)
+        return self
 
 
 class EndpointScanRequest(BaseModel):

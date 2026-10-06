@@ -121,10 +121,8 @@ class TheConsoleAndTheServerAgreeTest(unittest.TestCase):
             {"kind": "file-server", "scope": saved, "include_hidden": False},
             {"kind": "file-server", "scope": None, "include_hidden": True},
             {"kind": "file-server", "scope": {"max_size_bytes": 1536}, "include_hidden": True},
-            {"kind": "file-server", "scope": {"exclude_folder_patterns": ["backup*"], "exclude_paths": ["Tmp"]},
-             "include_hidden": True},
         ]})["apply"]
-        restored, cleared, odd, named = results
+        restored, cleared, odd = results
         self.assertEqual(restored["scope"], saved)
         self.assertTrue(restored["skipHidden"])
         self.assertTrue(restored["open"], "a saved scan with rules opens on them")
@@ -133,9 +131,6 @@ class TheConsoleAndTheServerAgreeTest(unittest.TestCase):
         self.assertFalse(cleared["skipHidden"])
         self.assertFalse(cleared["open"])
         self.assertEqual(odd["scope"], {"max_size_bytes": 1536}, "a size that is no whole unit survives the round trip")
-        # The folder-name rule is gone from the console: a scan reads every folder of its
-        # target. A scan saved with name patterns is saved again without them.
-        self.assertEqual(named["scope"], {"exclude_paths": ["Tmp"]})
 
     def test_no_wizard_offers_a_folder_name_rule(self) -> None:
         scope_js = (ROOT / "frontend" / "console" / "scan-scope.js").read_text(encoding="utf-8")

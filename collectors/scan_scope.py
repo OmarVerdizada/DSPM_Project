@@ -11,20 +11,18 @@ rules. Every rule is optional; with none, a scan is what it always was.
 - ``min_size_bytes`` / ``max_size_bytes`` - files smaller or larger are not opened.
 - ``include_paths`` - only these folders, and what is under them, are walked.
 - ``exclude_paths`` - these folders (or files), and everything under them, are skipped.
-- ``exclude_folder_patterns`` - a folder whose *name* matches one of these, at any depth,
-  is skipped with everything under it. ``*`` is any run of characters, ``?`` one.
 - ``modified_after`` - files last modified before this date (UTC) are not opened.
 
 **Precedence** is fixed, and an exclusion always wins: a file is in scope when it is
 inside an included folder (or no folder is included), outside every excluded folder,
-under no folder whose name matches an excluded pattern, its extension is not excluded -
+its extension is not excluded -
 and, when the extension policy names extensions, is one of them - its size is within the
 limits, and it was modified on or after the date. Paths compare without regard to case
 and to ``\\`` versus ``/``, as Windows file servers compare them.
 
 **Where each rule is applied** - the earliest point the facts it needs exist:
 
-- folder rules (excluded paths, name patterns, included paths): before a folder is listed,
+- folder rules (excluded and included paths): before a folder is listed,
   so its subtree is never enumerated - by the walk and by the partition planner alike;
 - name rules (path, extension): as a file is listed - before a stat, an open, a hash, an
   extraction, a classification or a database row;
@@ -35,6 +33,9 @@ and to ``\\`` versus ``/``, as Windows file servers compare them.
 Paths are relative to the scan's target for a file-server scan - ``Finance/Archive`` under
 the local folder, or ``share/folder`` on an SMB server - and absolute (``C:\\Users\\...`` or
 ``\\\\server\\share\\...``) on an endpoint, whose folders are already chosen by its paths.
+
+There is no folder-name rule: a scan reads every folder of its target, narrowed only by
+path, type, size and date - what the console offers.
 """
 from __future__ import annotations
 
@@ -51,7 +52,6 @@ from collectors.file_scanner import normalize_one_extension
 
 # Reasons a file or folder is out of scope, as diagnostics and the console name them.
 EXCLUDED_FOLDER = "excluded_folder"
-FOLDER_PATTERN = "folder_pattern"
 OUTSIDE_INCLUDED = "outside_included_folders"
 EXTENSION = "extension"
 TOO_SMALL = "smaller_than_minimum"
@@ -60,10 +60,8 @@ MODIFIED_BEFORE = "modified_before_date"
 
 MAX_SCOPE_BYTES = 1 << 44  # 16 TiB: larger than any single file a scan meets
 MAX_PATH_LENGTH = 1024
-MAX_PATTERN_LENGTH = 120
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _DRIVE = re.compile(r"^[a-z]:(/|$)", re.IGNORECASE)
-_PATTERN_ALLOWED = re.compile(r"^[^/\\:<>\"|]+$")
 
 
 # ---------------------------------------------------------------- validation (the API's)
@@ -85,7 +83,7 @@ def clean_extensions(values: Iterable[str] | None) -> list[str]:
 
 def clean_path(value: str, *, absolute: bool | None) -> str:
     """One folder or file path as the operator wrote it, tidied: separators kept as typed,
-    no control characters, no ``..``, no wildcards (those are folder-name patterns).
+    no control characters, no ``..``, no wildcards - a path names one folder or file.
     ``absolute`` True requires a drive or UNC path, False refuses a drive path, None
     checks neither (the request's field check; the scan type decides later)."""
     text = _CONTROL.sub("", str(value or "")).strip().strip('"').strip()
@@ -94,7 +92,7 @@ def clean_path(value: str, *, absolute: bool | None) -> str:
     if len(text) > MAX_PATH_LENGTH:
         raise ValueError(f"path is longer than {MAX_PATH_LENGTH} characters: {text[:40]}...")
     if any(char in text for char in "*?"):
-        raise ValueError(f"{text!r}: a path cannot hold wildcards - use a folder-name pattern instead")
+        raise ValueError(f"{text!r}: a path cannot hold wildcards - name the folder itself")
     parts = [part for part in re.split(r"[\\/]+", text) if part]
     if ".." in parts:
         raise ValueError(f"{text!r}: a path cannot climb out of the scan with '..'")
@@ -115,22 +113,6 @@ def clean_paths(values: Iterable[str] | None, *, absolute: bool | None) -> list[
         cleaned = clean_path(value, absolute=absolute)
         if cleaned:
             seen.setdefault(normalize_path(cleaned, absolute=bool(absolute)), cleaned)
-    return list(seen.values())
-
-
-def clean_patterns(values: Iterable[str] | None) -> list[str]:
-    seen: dict[str, str] = {}
-    for value in values or []:
-        text = _CONTROL.sub("", str(value or "")).strip()
-        if not text:
-            continue
-        if len(text) > MAX_PATTERN_LENGTH:
-            raise ValueError(f"folder pattern is longer than {MAX_PATTERN_LENGTH} characters: {text[:40]}...")
-        if not _PATTERN_ALLOWED.match(text):
-            raise ValueError(f"{text!r}: a folder-name pattern matches one folder name - no \\ / : < > \" or |")
-        if text.strip("*?") == "":
-            raise ValueError(f"{text!r} would match every folder")
-        seen.setdefault(text.casefold(), text)
     return list(seen.values())
 
 
@@ -166,11 +148,6 @@ def _under(path: str, prefix: str) -> bool:
     return prefix == "" or path == prefix or path.startswith(prefix + "/")
 
 
-def _compile_pattern(pattern: str) -> re.Pattern:
-    body = "".join(".*" if char == "*" else "." if char == "?" else re.escape(char) for char in pattern.casefold())
-    return re.compile(body + r"\Z", re.DOTALL)
-
-
 def _epoch(value) -> float | None:
     """A modification time as seconds since the epoch, from what collectors carry."""
     if value is None or value == "":
@@ -197,7 +174,6 @@ class ScopeRules:
     max_size: int | None = None
     include_paths: tuple = ()
     exclude_paths: tuple = ()
-    folder_patterns: tuple = ()
     modified_after: float | None = None
     absolute: bool = False
 
@@ -216,7 +192,6 @@ class ScopeRules:
             max_size=int(data["max_size_bytes"]) if data.get("max_size_bytes") not in (None, "") else None,
             include_paths=tuple(normalize_path(item, absolute=absolute) for item in data.get("include_paths") or ()),
             exclude_paths=tuple(normalize_path(item, absolute=absolute) for item in data.get("exclude_paths") or ()),
-            folder_patterns=tuple(_compile_pattern(str(item)) for item in data.get("exclude_folder_patterns") or ()),
             modified_after=threshold,
             absolute=absolute,
         )
@@ -224,8 +199,7 @@ class ScopeRules:
     @property
     def active(self) -> bool:
         return bool(self.exclude_extensions or self.min_size is not None or self.max_size is not None
-                    or self.include_paths or self.exclude_paths or self.folder_patterns
-                    or self.modified_after is not None)
+                    or self.include_paths or self.exclude_paths or self.modified_after is not None)
 
     @property
     def needs_metadata(self) -> bool:
@@ -235,15 +209,12 @@ class ScopeRules:
     def path_of(self, value: str) -> str:
         return normalize_path(value, absolute=self.absolute)
 
-    def folder_reason(self, path: str, name: str = "") -> str:
+    def folder_reason(self, path: str) -> str:
         """Why a folder is not walked ("" when it is). ``path`` is in the scope's form."""
         if not self.active:
             return ""
         if any(_under(path, excluded) for excluded in self.exclude_paths):
             return EXCLUDED_FOLDER
-        folded = str(name or path.rsplit("/", 1)[-1]).casefold()
-        if folded and any(pattern.match(folded) for pattern in self.folder_patterns):
-            return FOLDER_PATTERN
         if self.include_paths and not any(_under(path, item) or _under(item, path) for item in self.include_paths):
             return OUTSIDE_INCLUDED
         return ""
@@ -302,8 +273,6 @@ def canonical(scope: dict | None, *, absolute: bool) -> dict | None:
     for key in ("include_paths", "exclude_paths"):
         if scope.get(key):
             rules[key] = sorted({normalize_path(item, absolute=absolute) for item in scope[key]} - {""})
-    if scope.get("exclude_folder_patterns"):
-        rules["exclude_folder_patterns"] = sorted({str(item).casefold() for item in scope["exclude_folder_patterns"]})
     if scope.get("modified_after"):
         rules["modified_after"] = str(scope["modified_after"])[:10]
     rules = {key: value for key, value in rules.items() if value not in ([], None)}
@@ -321,7 +290,7 @@ def digest(rules: dict | None) -> str:
 
 
 def rule_count(rules: dict | None) -> int:
-    """How many rules a canonical scope holds - one per path, pattern and extension, one per limit."""
+    """How many rules a canonical scope holds - one per path and extension, one per limit."""
     if not rules:
         return 0
     count = 0

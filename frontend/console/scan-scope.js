@@ -14,8 +14,7 @@
    types, the folders, sizes and date under Advanced options.
 
    There is no folder-name rule: a scan reads every folder of its target, narrowed only
-   by path, type, size and date. (A scan saved with name patterns still says so where
-   its scope is described.)
+   by path, type, size and date - the rules the server accepts (collectors/scan_scope.py).
 
    Loaded before app.js, like every file in console/: definitions and DOM wiring
    only. The console's helpers (escapeHtml ...) are used when a handler runs. */
@@ -210,10 +209,10 @@ function formatScopeBytes(bytes) {
   return `${value} bytes`;
 }
 
-// How many rules a scope holds - one per path, name pattern and type, one per limit.
+// How many rules a scope holds - one per path and type, one per limit.
 function countScanScopeRules(scope = {}, { skipHidden = false } = {}) {
   let count = 0;
-  ["include_paths", "exclude_paths", "exclude_folder_patterns", "exclude_extensions"].forEach((name) => {
+  ["include_paths", "exclude_paths", "exclude_extensions"].forEach((name) => {
     count += Array.isArray(scope[name]) ? scope[name].length : 0;
   });
   ["min_size_bytes", "max_size_bytes", "modified_after"].forEach((name) => {
@@ -229,7 +228,6 @@ function describeScanScope(scope = {}, { skipHidden = false } = {}) {
   const plural = (count, word) => `${count} ${word}${count === 1 ? "" : "s"}`;
   if (scope.include_paths?.length) parts.push(`only ${list(scope.include_paths, 2)}`);
   if (scope.exclude_paths?.length) parts.push(`skip ${plural(scope.exclude_paths.length, "folder")}`);
-  if (scope.exclude_folder_patterns?.length) parts.push(`skip folders named ${list(scope.exclude_folder_patterns)}`);
   if (scope.exclude_extensions?.length) parts.push(`skip ${list(scope.exclude_extensions, 4)}`);
   if (scope.min_size_bytes != null) parts.push(`smaller than ${formatScopeBytes(scope.min_size_bytes)} skipped`);
   if (scope.max_size_bytes != null) parts.push(`larger than ${formatScopeBytes(scope.max_size_bytes)} skipped`);
