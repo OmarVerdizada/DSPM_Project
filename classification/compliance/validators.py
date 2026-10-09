@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import ipaddress
 import re
+import threading
 from datetime import date
+
+from classification import masking
 
 
 EMAIL_RE = re.compile(r"\b[A-Za-z0-9](?:[A-Za-z0-9._%+-]{0,62}[A-Za-z0-9])?@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24}\b")
 PHONE_RE = re.compile(r"(?<![\w@])(?:\+994|0|\+\d{1,3})[\s().-]?\d{2,3}[\s().-]?\d{3}[\s().-]?\d{2}[\s().-]?\d{2}(?![\w@])")
 DATE_RE = re.compile(r"\b(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})\b")
 FIN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9]{7}(?![A-Za-z0-9])")
-NATIONAL_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:AZE|OR|AA)[ -]?\d{7,8}(?![A-Za-z0-9])", re.IGNORECASE)
-PASSPORT_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]{8}(?![A-Za-z0-9])")
+# A series is written in capitals. Case-insensitive, the English word "or" was one:
+# "Ship order 10020030 or 10020031" reported a HIGH national ID.
+NATIONAL_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:AZE|OR|AA)[ -]?\d{7,8}(?![A-Za-z0-9])")
+# A passport number has a digit in it. Without one, any nine-letter word near the word
+# "passport" was one: "bring your passport and identity DOCUMENTS to RECEPTION".
+PASSPORT_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z](?=[A-Za-z]{0,7}\d)[A-Za-z0-9]{8}(?![A-Za-z0-9])")
 MRZ_RE = re.compile(r"\bP<[A-Z]{3}[A-Z0-9<]{20,}", re.IGNORECASE)
 DIGITAL_SIGNATURE_RE = re.compile(
     r"(?:<SignatureValue>[^<]{40,}</SignatureValue>|/ByteRange\s*\[|/SubFilter\s*/adbe\.pkcs7|signature[_-]?(?:value|hash|digest)\s*[:=]\s*[A-Za-z0-9+/=_-]{32,})",
@@ -32,7 +40,9 @@ UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]
 COOKIE_VALUE_RE = re.compile(r"\b[A-Za-z0-9._~+/=-]{16,256}\b")
 GA_CLIENT_ID_RE = re.compile(r"\bGA\d\.\d\.\d{6,}\.\d{6,}\b", re.IGNORECASE)
 CLICK_ID_RE = re.compile(r"\b(?:gclid|fbclid|msclkid|ttclid|yclid|gbraid|wbraid)[=:]\s*[A-Za-z0-9_-]{12,}\b", re.IGNORECASE)
-PUSH_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_-]{80,}:[A-Za-z0-9_-]{20,}\b")
+# Starts only where a run of token characters starts, and takes the run whole: from every
+# word boundary inside a run ("x-x-x...") the old \b start re-read the rest of it.
+PUSH_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{80,}+:[A-Za-z0-9_-]{20,}\b")
 TCF_STRING_RE = re.compile(r"\b(?:CO|CP|BO)[A-Za-z0-9._-]{40,}\b")
 MAC_ADDRESS_RE = re.compile(r"(?<![A-Fa-f0-9])(?:[A-Fa-f0-9]{2}[:-]){5}[A-Fa-f0-9]{2}(?![A-Fa-f0-9])")
 MAC_DOTTED_RE = re.compile(r"(?<![A-Fa-f0-9])(?:[A-Fa-f0-9]{4}\.){2}[A-Fa-f0-9]{4}(?![A-Fa-f0-9])")
@@ -73,10 +83,18 @@ CARD_CVV_RE = re.compile(r"(?<!\d)\d{3,4}(?!\d)")
 IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b", re.IGNORECASE)
 SWIFT_BIC_RE = re.compile(r"\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b", re.IGNORECASE)
 ROUTING_ACCOUNT_RE = re.compile(r"\b(?:routing|aba|account(?: number)?|hesab(?: nomresi)?)\s*[:=]?\s*[A-Z0-9 -]{8,34}\b", re.IGNORECASE)
-MONEY_AMOUNT_RE = re.compile(r"(?<!\w)(?:[$€£₼]|AZN|USD|EUR|GBP)?\s*\d{1,3}(?:[ ,]\d{3})*(?:\.\d{2})?\s*(?:AZN|USD|EUR|GBP|manat)?(?!\w)", re.IGNORECASE)
+# Whitespace belongs to an amount only after its currency. A leading \s* made every
+# position of a whitespace run a start that re-read the rest of the run - quadratic in
+# the run - and put the run into the matched text (values are fingerprinted stripped).
+MONEY_AMOUNT_RE = re.compile(r"(?<!\w)(?:(?:[$€£₼]|AZN|USD|EUR|GBP)\s*)?\d{1,3}(?:[ ,]\d{3})*(?:\.\d{2})?\s*(?:AZN|USD|EUR|GBP|manat)?(?!\w)", re.IGNORECASE)
 CREDIT_SCORE_RE = re.compile(r"\b(?:[3-8]\d{2}|900)\b")
+# A match starts where an identifier run starts, a lookahead finds the keyword in the
+# run, and the run is then taken whole. The old leading [A-Za-z0-9_.-]* re-read the rest
+# of the run from every word boundary in it, quadratic in the run ("a.a.a...", "9-9-...").
+# The value (group 1) is the same; a match may now start at the run's leading "." or "-".
 SECRET_ASSIGNMENT_RE = re.compile(
-    r"\b[A-Za-z0-9_.-]*(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|client[_-]?secret|private[_-]?key)[A-Za-z0-9_.-]*\s*[:=]\s*([^\s'\";,#]{6,512}|['\"][^'\"]{6,512}['\"])",
+    r"(?<![A-Za-z0-9_.-])(?=[A-Za-z0-9_.-]*?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|client[_-]?secret|private[_-]?key))"
+    r"[A-Za-z0-9_.-]*+\s*[:=]\s*([^\s'\";,#]{6,512}|['\"][^'\"]{6,512}['\"])",
     re.IGNORECASE,
 )
 PASSWORD_HASH_RE = re.compile(
@@ -91,12 +109,15 @@ PRIVATE_KEY_BLOCK_RE = re.compile(
     r"-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----[\s\S]{40,}?-----END (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----",
     re.IGNORECASE,
 )
+# In a raw string "\\r" is a backslash and an "r": these patterns forbade the letters r and n
+# in a value and wanted a literal backslash after each ';', so no ordinary connection string
+# ("Server=db01;Database=hr;...") and no mongodb+srv URI ever matched.
 DATABASE_URI_RE = re.compile(
-    r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\\+srv)?|redis|rediss|mssql|sqlserver|oracle|jdbc:[a-z0-9]+)://[^\s'\"<>]{8,512}",
+    r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|rediss|mssql|sqlserver|oracle|jdbc:[a-z0-9]+)://[^\s'\"<>]{8,512}",
     re.IGNORECASE,
 )
 DB_KV_CONNECTION_RE = re.compile(
-    r"\b(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\\r\\n]{1,160}(?:;\\s*(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\\r\\n]{1,160}){1,}",
+    r"\b(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\r\n]{1,160}(?:;\s*(?:server|host|data source|user id|uid|username|password|pwd|database|initial catalog)\s*=\s*[^;\r\n]{1,160}){1,}",
     re.IGNORECASE,
 )
 MFA_RECOVERY_CODE_RE = re.compile(r"\b[A-Z0-9]{4,8}(?:[-\s][A-Z0-9]{4,8}){1,5}\b", re.IGNORECASE)
@@ -121,22 +142,151 @@ PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv"}
 
 
-def redact(value: str) -> str:
-    value = " ".join(str(value or "").strip().split())
-    if len(value) <= 6:
-        return "***"
-    return f"{value[:3]}***{value[-2:]}"
+def redact(value: str, data_class: str = masking.GENERIC) -> str:
+    """What a GDPR or NIST sample shows: the value masked for its class (A6).
+
+    This used to keep the first three and last two characters of anything, so a
+    seven-character FIN showed five of them and a password "Hunter2!" read
+    "Hun***2!" - while the generic detector showed the same password as stars.
+    """
+    return masking.mask(" ".join(str(value or "").strip().split()), data_class)
+
+
+# ── The keyword helpers ──────────────────────────────────────────────────
+# All three answer a question about a rule's keyword catalog: does one occur
+# near this value, and what follows one. A catalog is 600 to 1,000 terms, and
+# each helper used to work against the whole of it on every call - re.escape
+# over every term, a sort, a join, and a fresh alternation compiled and run
+# across the file.
+#
+# At most a handful of those terms are in any one file. So the catalog is
+# narrowed to the ones that are, once per (file, catalog), and everything
+# below works on that handful instead. The narrowing itself is a substring
+# test per term against the lowered content, which is a C memmem and about
+# ten times cheaper than the alternation it replaces.
+#
+# Measured on one 7KB HR export against the GDPR catalog: 828 calls into these
+# helpers, 411,000 keyword comparisons, 350ms of the detector's 360ms.
+
+# Keyed by object identity, because the catalogs are module-level constants
+# reused thousands of times a file and hashing a 1,000-item tuple costs as
+# much as the work it would save. The tuple is held alongside so its id cannot
+# be reused, and the cap bounds the ad-hoc tuples some rules build by
+# concatenation.
+_LOWERED_CACHE: dict[int, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+_PRESENT_STATE = threading.local()
+
+
+def _lowered_terms(keywords: tuple[str, ...]) -> tuple[str, ...]:
+    key = id(keywords)
+    cached = _LOWERED_CACHE.get(key)
+    if cached is not None and cached[0] is keywords:
+        return cached[1]
+    if len(_LOWERED_CACHE) > 1024:
+        _LOWERED_CACHE.clear()
+    # Empty terms are kept: "" is a substring of everything, which is the
+    # answer the any()-over-`in` form gave.
+    lowered = tuple(str(item or "").lower() for item in keywords)
+    _LOWERED_CACHE[key] = (keywords, lowered)
+    return lowered
+
+
+# P1 (2026-09-24). Narrowing a catalog is a loop over every term of it, and it runs for
+# every catalog a file's rules ask about: 8.1 of the 91 CPU-seconds of the quality audit's
+# workload scanned in one process, over 126,632 calls. Two faster-looking answers were
+# measured in that scan and lost. The Aho-Corasick index keyword_index builds walks the
+# text a character at a time in Python. A trie-shaped regex tried at every position cost
+# 11.2 s against the loop's 8.1: most files are small, and a C substring test is hard to
+# beat on a small string. What wins is testing fewer terms. A term cannot occur unless
+# its first three characters do, so each catalog is indexed by that trigram once, each
+# file's trigrams are taken once, and only the terms whose trigram the file contains are
+# tested - with the same `in`, so the answer is the loop's, in the catalog's order.
+_TRIGRAM_INDEXES: dict[int, tuple[tuple[str, ...], "_TrigramIndex"]] = {}
+
+
+class _TrigramIndex:
+    __slots__ = ("by_trigram", "keys", "short")
+
+    def __init__(self, lowered: tuple[str, ...]) -> None:
+        by_trigram: dict[str, list[tuple[int, str]]] = {}
+        short: list[tuple[int, str]] = []
+        for position, term in enumerate(lowered):
+            if len(term) < 3:
+                # "" and one- or two-character terms have no trigram: always tested.
+                short.append((position, term))
+            else:
+                by_trigram.setdefault(term[:3], []).append((position, term))
+        self.by_trigram = {trigram: tuple(entries) for trigram, entries in by_trigram.items()}
+        self.keys = frozenset(by_trigram)
+        self.short = tuple(short)
+
+
+def _trigram_index(keywords: tuple[str, ...]) -> _TrigramIndex:
+    key = id(keywords)
+    cached = _TRIGRAM_INDEXES.get(key)
+    if cached is not None and cached[0] is keywords:
+        return cached[1]
+    index = _TrigramIndex(_lowered_terms(keywords))
+    if len(_TRIGRAM_INDEXES) > 1024:
+        _TRIGRAM_INDEXES.clear()
+    _TRIGRAM_INDEXES[key] = (keywords, index)
+    return index
+
+
+def _content_trigrams(lowered_content: str) -> frozenset[str]:
+    return frozenset(lowered_content[i:i + 3] for i in range(len(lowered_content) - 2))
+
+
+def _present_keywords(content: str, keywords: tuple[str, ...]) -> tuple[str, ...]:
+    """The terms from this catalog that occur anywhere in this content.
+
+    A term that is not in the file cannot be in a window of it, and cannot be
+    the keyword an alternation matches - so dropping it changes no answer.
+    """
+    state = getattr(_PRESENT_STATE, "slot", None)
+    if state is None or state[0] is not content:
+        # [content, lowered, per-catalog answers, the content's trigrams once asked for]
+        state = [content, content.lower(), {}, None]
+        _PRESENT_STATE.slot = state
+    lowered_content = state[1]
+    per_catalog = state[2]
+    key = id(keywords)
+    cached = per_catalog.get(key)
+    if cached is not None and cached[0] is keywords:
+        return cached[1]
+    index = _trigram_index(keywords)
+    hits = [(position, term) for position, term in index.short if term in lowered_content]
+    if index.keys:
+        trigrams = state[3]
+        if trigrams is None:
+            trigrams = state[3] = _content_trigrams(lowered_content)
+        by_trigram = index.by_trigram
+        for trigram in index.keys & trigrams:
+            hits.extend((position, term) for position, term in by_trigram[trigram] if term in lowered_content)
+    hits.sort()
+    present = tuple(term for _, term in hits)
+    per_catalog[key] = (keywords, present)
+    return present
+
+
+@functools.lru_cache(maxsize=2048)
+def _context_value_pattern(terms: tuple[str, ...], max_chars: int, capture_keyword: bool) -> re.Pattern | None:
+    """Cached on the NARROWED term tuple, which is small enough to hash."""
+    keyword_pattern = "|".join(sorted((re.escape(item) for item in terms if item), key=len, reverse=True))
+    if not keyword_pattern:
+        return None
+    group = f"({keyword_pattern})" if capture_keyword else f"(?:{keyword_pattern})"
+    return re.compile(
+        rf"(?<![A-Za-z0-9_]){group}(?![A-Za-z0-9_])\s*(?:[:=,-]|\bis\b)?\s*([^\r\n;]{{1,{max_chars}}})",
+        re.IGNORECASE,
+    )
 
 
 def context_values(content: str, keywords: tuple[str, ...], max_chars: int = 140) -> list[str]:
     values: list[str] = []
-    keyword_pattern = "|".join(sorted((re.escape(item) for item in keywords if item), key=len, reverse=True))
-    if not keyword_pattern:
+    pattern = _context_value_pattern(_present_keywords(content, keywords), max_chars, False)
+    if pattern is None:
         return values
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_])(?:{keyword_pattern})(?![A-Za-z0-9_])\s*(?:[:=,-]|\bis\b)?\s*([^\r\n;]{{1,{max_chars}}})",
-        re.IGNORECASE,
-    )
     for match in pattern.finditer(content):
         value = match.group(1).strip(" \t:=-,")
         if value:
@@ -148,13 +298,9 @@ def context_values(content: str, keywords: tuple[str, ...], max_chars: int = 140
 
 def context_keyword_values(content: str, keywords: tuple[str, ...], max_chars: int = 140) -> list[tuple[str, str]]:
     values: list[tuple[str, str]] = []
-    keyword_pattern = "|".join(sorted((re.escape(item) for item in keywords if item), key=len, reverse=True))
-    if not keyword_pattern:
+    pattern = _context_value_pattern(_present_keywords(content, keywords), max_chars, True)
+    if pattern is None:
         return values
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_])({keyword_pattern})(?![A-Za-z0-9_])\s*(?:[:=,-]|\bis\b)?\s*([^\r\n;]{{1,{max_chars}}})",
-        re.IGNORECASE,
-    )
     for match in pattern.finditer(content):
         value = match.group(2).strip(" \t:=-,")
         if value:
@@ -165,8 +311,11 @@ def context_keyword_values(content: str, keywords: tuple[str, ...], max_chars: i
 
 
 def has_keyword_context(content: str, value_start: int, keywords: tuple[str, ...], window: int = 80) -> bool:
+    present = _present_keywords(content, keywords)
+    if not present:
+        return False
     left = content[max(0, value_start - window):value_start].lower()
-    return any(keyword.lower() in left for keyword in keywords)
+    return any(term in left for term in present)
 
 
 def is_valid_email(value: str) -> bool:

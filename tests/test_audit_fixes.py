@@ -83,6 +83,7 @@ class JobPruneTests(unittest.TestCase):
         # F8: bound scan_jobs growth.
         tenant = f"prune-{uuid4().hex[:8]}"
         old_id, run_id = f"{tenant}-old", f"{tenant}-run"
+        store.create_tenant(tenant, tenant)
         with store._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO scan_jobs (id, tenant_id, status, progress, message, created_at, finished_at, error, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
@@ -125,18 +126,24 @@ class NormalizedReadinessTests(unittest.TestCase):
             self.assertTrue(store._normalized_ready(tenant))
             self.assertEqual(ids(), ["fa", "fb"])
 
-            # (a) completeness: drop the scan_run the dual-write would have written
+            # (a) completeness: drop the scan_run the dual-write would have written.
+            # The readiness answer is cached per tenant and every in-process
+            # transition invalidates it; editing the rows underneath is the one
+            # route that cannot, so the reset is explicit here.
             with store._connect() as conn:
                 conn.execute("DELETE FROM scan_runs WHERE tenant_id = ?", (tenant,))
+            store.refresh_read_model_state(tenant)
             self.assertFalse(store._normalized_ready(tenant))
             self.assertEqual(ids(), ["fa", "fb"])  # blob fallback, nothing dropped
 
             store.backfill_normalized_scans(tenant)
+            store.refresh_read_model_state(tenant)
             self.assertTrue(store._normalized_ready(tenant))
 
             # (b) currency: stamp an older logic version
             with store._connect() as conn:
                 conn.execute("UPDATE finding_index SET index_version = 'OLD' WHERE tenant_id = ?", (tenant,))
+            store.refresh_read_model_state(tenant)
             self.assertFalse(store._normalized_ready(tenant))
             self.assertEqual(ids(), ["fa", "fb"])  # blob fallback again
         finally:
@@ -166,6 +173,7 @@ class RecordJobRetryTests(unittest.TestCase):
         # the terminal write.
         tenant = f"lock-{uuid4().hex[:8]}"
         job_id = f"{tenant}-j"
+        store.create_tenant(tenant, tenant)
         real_connect = store._connect
         calls = {"n": 0}
 

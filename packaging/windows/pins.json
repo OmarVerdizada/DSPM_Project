@@ -1,0 +1,30 @@
+{
+  "_comment": "C11: the third-party files the offline Windows package carries, pinned by SHA-256. build_package.py downloads each once, refuses a file whose digest differs, and records these in the package manifest. Change a pin only with the new digest checked against its publisher.",
+  "python": {
+    "version": "3.14.6",
+    "file": "python-3.14.6-embed-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.14.6/python-3.14.6-embed-amd64.zip",
+    "sha256": "df901e84a896ff1ee720ad03377e0c8d8c2244fda79808aeeaff6316df1cb75c",
+    "provenance": "Digest equals the SHA-256 python.org publishes for 'Windows embeddable package (64-bit)' on the 3.14.6 release page (checked 2026-09-28); python.exe and python314.dll carry valid Authenticode signatures by the Python Software Foundation, which the build checks again.",
+    "authenticode_signer": "Python Software Foundation",
+    "why": "The embeddable distribution needs no installer and writes nothing to the registry, so two installs never share or modify each other's interpreter. 3.14 is the interpreter every suite result in this repository was measured on; the product's floor is 3.12 (main.MINIMUM_PYTHON)."
+  },
+  "winsw": {
+    "version": "2.12.0",
+    "file": "WinSW-x64.exe",
+    "url": "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe",
+    "sha256": "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da",
+    "license": "MIT",
+    "license_file": "WinSW-LICENSE.txt",
+    "license_url": "https://raw.githubusercontent.com/winsw/winsw/v2.12.0/LICENSE.txt",
+    "license_sha256": "1cdf703c10a70e5973bf3acf2a5eeabe7746237155b92db2034aeae26fdf7802",
+    "provenance": "Downloaded over HTTPS from the project's GitHub release v2.12.0 (published 2023-01-28; size 18,243,033 bytes as the release lists). The release publishes no digest and the binary is not Authenticode-signed upstream; the pin is the digest of that download.",
+    "why": "A single self-contained service wrapper (no .NET install needed for the x64 build): automatic start, restart on failure, graceful stop, and its own size-rolled capture of the child's output. Chosen over NSSM (unmaintained since 2017) and pywin32's service host (fragile with an isolated interpreter)."
+  },
+  "pip": {
+    "version": "26.2.1",
+    "file": "pip-26.2.1-py3-none-any.whl",
+    "sha256": "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e",
+    "provenance": "Digest equals the one PyPI publishes for this file (checked 2026-09-28). Used only by the installer to place the wheelhouse - run from the wheel file, not installed."
+  }
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import FrozenInstanceError
 
 from backend.domain import (
     Asset,
@@ -65,7 +66,7 @@ class NormalizeReportTests(unittest.TestCase):
         self.assertEqual(self.scan.scan_run.id, "scan-001")
         self.assertEqual(self.scan.scan_run.tenant_id, "tenant-x")
         self.assertEqual(self.scan.scan_run.total_files, 2)
-        with self.assertRaises(Exception):
+        with self.assertRaises(FrozenInstanceError):
             self.scan.scan_run.status = "tampered"  # frozen
 
     def test_assets_and_versions_derived_per_file(self) -> None:

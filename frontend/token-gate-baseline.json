@@ -1,0 +1,1068 @@
+{
+ "reviewed": "2026-09-28",
+ "base": "origin/main",
+ "entries": [
+  {
+   "file": "frontend/login.css",
+   "rule": "important",
+   "text": ".is-hidden { display: none !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ctxt:   #e9f1ff;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ctxt:   #ffffff;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--divdr:  #1e293b;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--divdr:  #f3f4f6;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--doton:  #38bdf8;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--doton:  #ffffff;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ibdr:   #334155;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ibdr:   #e5e7eb;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ibg:    #1e293b;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ibg:    #f9fafb;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ifoc:   #2563eb;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ifoc:   #3b82f6;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--iph:    #475569;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--iph:    #9ca3af;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--itxt:   #111827;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--itxt:   #f1f5f9;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lbg:    #0f172a;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lbg:    #ffffff;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lmut:   #475569;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lmut:   #9ca3af;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lnk:    #2563eb;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lnk:    #60a5fa;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lsub:   #6b7280;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--lsub:   #94a3b8;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ltxt:   #111827;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--ltxt:   #f1f5f9;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--rbg:    #060914;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--rbg:    #1d4ed8;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--rtxt:   #e9f1ff;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--rtxt:   #ffffff;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--tbdr:   #334155;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--tbdr:   #e5e7eb;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--tbg:    #1e293b;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--tbg:    #f3f4f6;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--tico:   #374151;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "--tico:   #94a3b8;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": ".dc-badge.crit { color: #f87171; background: rgba(248,113,113,.15); }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": ".dc-badge.high { color: #fb923c; background: rgba(251,146,60,.15); }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": ".dc-badge.med { color: #facc15; background: rgba(250,204,21,.15); }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": ".dc-dot.crit { background: #f87171; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": ".dc-dot.high { background: #fb923c; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": ".dc-dot.med { background: #facc15; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "raw-colour",
+   "text": "color: #fff; border: none; border-radius: 8px;",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "uppercase",
+   "text": ".dc-badge { font-size: .48rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 5px; border-radius: 4px; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "uppercase",
+   "text": ".sat-lbl { font-size: .44rem; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--rsub); margin-top: 1px; transition: color .3s; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/login.css",
+   "rule": "uppercase",
+   "text": "font-size: .52rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "font-size-floor",
+   "text": "font-size: 11px;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "font-size-scale",
+   "text": ".fx-legend div { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "font-size-scale",
+   "text": "font-size: 30px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "font-size-scale",
+   "text": "font-size: clamp(22px, 2.1vw, 30px);",
+   "count": 2
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "#tab-security .fx-sweep { animation: none !important; display: none !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": ".metric.critical strong { color: var(--status-critical) !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": ".metric.high strong     { color: var(--status-high) !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": ".metric.low strong      { color: var(--status-low) !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": ".metric.medium strong   { color: var(--status-medium) !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": ":root[data-theme=\"dark\"] #tab-reports #export-csv-btn:hover:not(:disabled) { color: #34d399 !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": ":root[data-theme=\"dark\"] #tab-reports #export-word-btn:hover:not(:disabled) { color: #60a5fa !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background-color: var(--surface) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background-position: center !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background-repeat: no-repeat !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background-size: cover !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background: color-mix(in srgb, #059669 9%, var(--card)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background: color-mix(in srgb, #2563eb 9%, var(--card)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background: color-mix(in srgb, var(--surface-soft) 68%, var(--card)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background: linear-gradient(135deg, color-mix(in srgb, #ef4444 9%, var(--card)), var(--card)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background: linear-gradient(135deg, color-mix(in srgb, #f59e0b 10%, var(--card)), var(--card)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background: linear-gradient(135deg, color-mix(in srgb, var(--critical) 10%, var(--card)), var(--card)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "background: transparent !important;",
+   "count": 3
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border-color: color-mix(in srgb, #059669 45%, var(--line)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border-color: color-mix(in srgb, #2563eb 45%, var(--line)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border-color: color-mix(in srgb, #ef4444 32%, var(--line)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border-color: color-mix(in srgb, #f59e0b 32%, var(--line)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border-radius: 16px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border-radius: var(--radius-sm, 8px) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border: 0 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border: 1px solid color-mix(in srgb, var(--accent) 14%, var(--line)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border: 1px solid var(--line) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "border: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "box-shadow: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "box-shadow: var(--shadow) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "clip-path: inset(50%) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "clip: rect(0 0 0 0) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "color: #047857 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "color: #1d4ed8 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "color: transparent !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "color: var(--muted) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "color: var(--text) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "display: block !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "display: grid !important;",
+   "count": 3
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "display: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "font-size: 30px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "font-weight: 500 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "gap: 12px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "gap: 8px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "height: 1px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "height: auto !important;",
+   "count": 2
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "letter-spacing: -.02em !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "line-height: 1 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "line-height: 1.42 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "max-height: 430px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "max-height: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "max-width: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "min-height: 0 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "min-width: 0 !important;",
+   "count": 4
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "overflow-wrap: anywhere !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "overflow: hidden !important;",
+   "count": 2
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "overflow: visible !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "padding: 0 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "padding: 0 2px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "padding: 10px 12px !important;",
+   "count": 2
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "padding: 64px 24px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "position: absolute !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "resize: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "text-overflow: clip !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "text-shadow: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "transform: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "transition: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "vertical-align: top !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "white-space: normal !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "white-space: nowrap !important;",
+   "count": 2
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "width: 1px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "word-break: break-word !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "important",
+   "text": "word-break: normal !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "raw-colour",
+   "text": ":root[data-theme=\"dark\"] #tab-reports #export-csv-btn:hover:not(:disabled) { color: #34d399 !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "raw-colour",
+   "text": ":root[data-theme=\"dark\"] #tab-reports #export-word-btn:hover:not(:disabled) { color: #60a5fa !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "raw-colour",
+   "text": "color: #047857 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles.css",
+   "rule": "raw-colour",
+   "text": "color: #1d4ed8 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "font-size-floor",
+   "text": "#tab-overview .dash-sub { margin-bottom: var(--space-2); font-size: 10.5px; line-height: 1.4; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "font-size-floor",
+   "text": ".gauge-read small { color: var(--ink-muted); font-size: 10.5px; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "font-size-floor",
+   "text": "font-size: 10.5px;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "font-size-floor",
+   "text": "font-size: 10px;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "font-size-scale",
+   "text": "#tab-overview .gauge-read strong { font-size: 25px; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "font-size-scale",
+   "text": "font-size: 24px;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "font-size-scale",
+   "text": "font-size: 46px;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/pages.css",
+   "rule": "important",
+   "text": "overflow: visible !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "font-size-floor",
+   "text": "#remediation-workspace .inventory-context-metrics > div small { font-size: 10px; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "font-size-floor",
+   "text": "#remediation-workspace .inventory-context-metrics > div span { font-size: 10.5px; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "font-size-floor",
+   "text": "font-size: 11px;",
+   "count": 3
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "#remediation-workflow .inventory-table-wrap { overflow-x: hidden !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "#remediation-workflow { overflow: visible !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "#remediation-workflow.remediation-workflow { overflow: visible !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "border-radius: 999px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "display: flex !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "display: inline-flex !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "flex-direction: row !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "flex-wrap: nowrap !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "font-size: 13px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "gap: var(--space-2) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "grid-template-columns: none !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "grid-template-columns: repeat(2, minmax(0, 1fr)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "grid-template-columns: repeat(5, minmax(0, 1fr)) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "height: auto !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "layers of !important, all of it scoped to #inventory-workspace. The queue",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "margin: 0 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "min-height: 0 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "min-width: 0 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "padding: 3px var(--space-3) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "padding: var(--space-2) var(--space-3) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "important",
+   "text": "pins that column to 380px and the table to 1280px, all !important and all",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/remediation.css",
+   "rule": "uppercase",
+   "text": "text-transform: uppercase;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "font-size-floor",
+   "text": "#inventory-workspace #inventory-context-metrics > div small { font-size: 10px; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "font-size-floor",
+   "text": "#inventory-workspace #inventory-context-metrics > div span { font-size: 10.5px; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "font-size-floor",
+   "text": "font-size: 11px;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "#inventory-workspace carries 28 rules for this row across four !important",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "#results-body tr.severity-row td:first-child::before { content: none !important; }",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "align-items: center !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "display: flex !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "gap: var(--space-2) var(--space-3) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "margin-top: 0 !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "min-height: 30px !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "no sizes off the scale, no !important. It loads after styles.css because it",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "overflow: visible !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "padding: var(--space-2) var(--space-3) !important;",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/shell.css",
+   "rule": "important",
+   "text": "these borders with !important and one of them is id-scoped, so a border",
+   "count": 1
+  },
+  {
+   "file": "frontend/styles/toast.css",
+   "rule": "important",
+   "text": "button chrome; using it is what keeps this block free of !important. */",
+   "count": 1
+  }
+ ]
+}

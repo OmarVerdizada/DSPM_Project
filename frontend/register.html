@@ -4,14 +4,12 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Register | SENTRO</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1" />
     <script src="/static/auth-boot.js?v=1"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
-    <link rel="stylesheet" href="/static/styles.css?v=215" />
+    <link rel="stylesheet" href="/static/fonts/fonts.css?v=1" />
+    <link rel="stylesheet" href="/static/styles/tokens.css?v=1" />
+    <link rel="stylesheet" href="/static/styles.css?v=217" />
+    <link rel="stylesheet" href="/static/styles/shell.css?v=1" />
   </head>
   <body class="login-page">
     <section class="login-screen standalone">
@@ -63,7 +61,7 @@
         </label>
         <label>
           Password
-          <input id="register-password" name="password" type="password" autocomplete="new-password" placeholder="At least 8 characters" required />
+          <input id="register-password" name="password" type="password" autocomplete="new-password" placeholder="At least 12 characters" required />
         </label>
         <label>
           Confirm password
@@ -75,6 +73,6 @@
         <a class="auth-link" href="/login">Already have an account? Sign in</a>
       </form>
     </section>
-    <script src="/static/register.js?v=92"></script>
+    <script src="/static/register.js?v=93"></script>
   </body>
 </html>

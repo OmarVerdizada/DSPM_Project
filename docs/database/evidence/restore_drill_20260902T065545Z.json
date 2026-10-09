@@ -1,0 +1,22 @@
+{
+  "drill_at": "2026-09-02T06:56:01.228840+00:00",
+  "backup_manifest": "sentro_20260902T065521Z.manifest.json",
+  "backup_created_at": "2026-09-02T06:55:29.344789+00:00",
+  "integrity_sha256_match": true,
+  "tables_expected": 22,
+  "rows_expected": 125478,
+  "count_mismatches": {},
+  "artifacts": {
+    "expected": 24,
+    "restored": 24,
+    "inventory_match": true
+  },
+  "timings": {
+    "decrypt_seconds": 0.588,
+    "restore_seconds": 12.918,
+    "reconcile_seconds": 0.339,
+    "artifact_restore_seconds": 0.812,
+    "total_seconds": 15.771
+  },
+  "result": "PASS"
+}

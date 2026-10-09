@@ -127,9 +127,20 @@ class InventoryStreamingExportEndpointTests(_SeededExport):
         from backend.app import app
         from backend.security import create_token
 
+        # C3: exporting is the `export` permission, which an analyst holds and a viewer
+        # does not (this suite used to run as a viewer - the S13 finding).
+        store.create_user("export-analyst", "unused", "analyst", self.tenant_id)
         store.create_user("export-viewer", "unused", "viewer", self.tenant_id)
         self.client = TestClient(app)
-        self.headers = {"Authorization": f"Bearer {create_token('export-viewer', 'viewer', self.tenant_id)}"}
+        self.headers = {"Authorization": f"Bearer {create_token('export-analyst', 'analyst', self.tenant_id)}"}
+        self.viewer = {"Authorization": f"Bearer {create_token('export-viewer', 'viewer', self.tenant_id)}"}
+
+    def test_a_viewer_may_not_export(self) -> None:
+        response = self.client.get("/api/inventory/export?format=csv", headers=self.viewer)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIn("export", response.json()["detail"])
+        actions = [event["action"] for event in store.read_audit_log(self.tenant_id)]
+        self.assertNotIn("inventory.export.started", actions, "refused before anything streamed")
 
     def test_csv_route_stream_headers_filters_and_audits(self) -> None:
         with mock.patch.dict(os.environ, {"DSPM_EXPORT_BATCH_SIZE": "10"}):

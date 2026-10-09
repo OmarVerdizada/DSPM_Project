@@ -1,0 +1,77 @@
+# C7: rules this codebase must not break, run offline (`semgrep --config security/semgrep.yml`).
+# Each targets something that is dangerous wherever it appears. A reviewed exception is
+# marked on its line with `nosemgrep: <rule-id>` and a reason - never a file-wide ignore.
+# Template-built innerHTML is checked by behaviour instead: tests/test_console_renders.py
+# runs every page's own renderer on hostile data (a regex cannot tell escaped from not).
+rules:
+  - id: js-code-from-string
+    languages: [javascript]
+    severity: ERROR
+    message: Code built from a string runs whatever the string says. Call a function instead.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: new Function(...)
+      - pattern: setTimeout("...", ...)
+      - pattern: setInterval("...", ...)
+
+  - id: js-dangerous-dom-sink
+    languages: [javascript]
+    severity: ERROR
+    message: >-
+      This sink parses its argument as HTML with no chance to escape it. Build the markup
+      with escapeHtml(...) into innerHTML, or set textContent.
+    pattern-either:
+      - pattern: $EL.insertAdjacentHTML(...)
+      - pattern: $EL.outerHTML = $VALUE
+      - pattern: document.write(...)
+      - pattern: document.writeln(...)
+      - pattern: $EL.srcdoc = $VALUE
+      - pattern: $RANGE.createContextualFragment(...)
+
+  - id: js-inline-event-handler
+    languages: [javascript]
+    severity: ERROR
+    message: An inline handler is script the CSP refuses; use addEventListener.
+    patterns:
+      - pattern: $EL.setAttribute($NAME, $VALUE)
+      - metavariable-regex:
+          metavariable: $NAME
+          regex: ^["']on\w+["']$
+
+  - id: py-shell-true
+    languages: [python]
+    severity: ERROR
+    message: shell=True hands the command line to a shell; pass an argument list.
+    pattern: subprocess.$FN(..., shell=True, ...)
+
+  - id: py-unsafe-deserialization
+    languages: [python]
+    severity: ERROR
+    message: This deserializer can run code chosen by whoever wrote the data.
+    pattern-either:
+      - pattern: pickle.loads(...)
+      - pattern: pickle.load(...)
+      - pattern: marshal.loads(...)
+      - patterns:
+          - pattern: yaml.load(...)
+          - pattern-not: yaml.load(..., Loader=yaml.SafeLoader, ...)
+
+  - id: py-code-from-string
+    languages: [python]
+    severity: ERROR
+    message: eval/exec run whatever the string says.
+    pattern-either:
+      - pattern: eval(...)
+      - pattern: exec(...)
+
+  - id: py-tls-verification-off
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Certificate verification is turned off. Only an explicit, operator-chosen insecure
+      mode that production refuses may do this, and the line must say so.
+    pattern-either:
+      - pattern: requests.$FN(..., verify=False, ...)
+      - pattern: ssl._create_unverified_context(...)
+      - pattern: $CTX.verify_mode = ssl.CERT_NONE
+      - pattern: $CTX.check_hostname = False

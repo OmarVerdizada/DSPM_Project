@@ -1,21 +1,29 @@
-"""Track S database-only 5M-row inventory acceptance harness.
+"""Track S / Phase 7 database capacity, soak and lock-contention harness.
 
 The harness writes only to a uniquely named PostgreSQL table, refuses databases
 whose name does not contain `test` or `bench`, and drops the table in
-`finally`. It never reads production assets or report evidence.
+`finally`. It never reads production assets or report evidence. Phase 7 adds
+a concurrent soak and bounded row-lock probe on that disposable table.
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
 import statistics
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+DEFAULT_CERTIFICATION_DOCUMENTS = 5_000_000
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -69,13 +77,138 @@ def _measure(operation, repeats: int) -> tuple[list[float], int]:
     return timings, rows
 
 
+def _concurrent_soak(
+    dsn: str,
+    table_name: str,
+    workers: int,
+    duration_seconds: float,
+) -> dict:
+    """Exercise the indexed tenant path concurrently for the requested window."""
+    import psycopg
+    from psycopg import sql
+
+    deadline = time.perf_counter() + duration_seconds
+
+    def worker(worker_id: int) -> tuple[list[float], int]:
+        timings: list[float] = []
+        errors = 0
+        statement = sql.SQL(
+            "SELECT id FROM {} WHERE tenant_id = %s AND risk_score <= %s "
+            "ORDER BY risk_score DESC, id DESC LIMIT 101"
+        ).format(sql.Identifier(table_name))
+        try:
+            with psycopg.connect(dsn, autocommit=True, connect_timeout=15) as conn:
+                iteration = 0
+                while time.perf_counter() < deadline or not timings:
+                    started = time.perf_counter()
+                    try:
+                        conn.execute(
+                            statement,
+                            (
+                                "bench-a" if worker_id % 2 == 0 else "bench-b",
+                                100 - iteration % 50,
+                            ),
+                        ).fetchall()
+                    except Exception:
+                        errors += 1
+                    else:
+                        timings.append((time.perf_counter() - started) * 1000)
+                    iteration += 1
+        except Exception:
+            errors += 1
+        return timings, errors
+
+    started = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        worker_results = list(executor.map(worker, range(workers)))
+    elapsed = time.perf_counter() - started
+    timings = [value for worker_times, _ in worker_results for value in worker_times]
+    errors = sum(error_count for _, error_count in worker_results)
+    return {
+        "workers": workers,
+        "requested_seconds": duration_seconds,
+        "elapsed_seconds": round(elapsed, 3),
+        "operations": len(timings),
+        "errors": errors,
+        "throughput_per_second": round(len(timings) / elapsed, 2) if elapsed else 0.0,
+        "p50_ms": round(statistics.median(timings), 3) if timings else None,
+        "p95_ms": round(_percentile(timings, 0.95), 3) if timings else None,
+        "p99_ms": round(_percentile(timings, 0.99), 3) if timings else None,
+    }
+
+
+def _lock_contention_probe(dsn: str, table_name: str, timeout_ms: int) -> dict:
+    """Prove one blocked writer times out and unrelated reads remain available."""
+    import psycopg
+    from psycopg import sql
+
+    holder = psycopg.connect(dsn, autocommit=False, connect_timeout=15)
+    waiter = psycopg.connect(dsn, autocommit=False, connect_timeout=15)
+    read_ms: float | None = None
+    wait_ms: float | None = None
+    timeout_observed = False
+    try:
+        table = sql.Identifier(table_name)
+        asset_id = holder.execute(
+            sql.SQL("SELECT id FROM {} WHERE tenant_id = %s LIMIT 1").format(table),
+            ("bench-a",),
+        ).fetchone()[0]
+        update = sql.SQL(
+            "UPDATE {} SET finding_count = finding_count "
+            "WHERE tenant_id = %s AND id = %s"
+        ).format(table)
+        holder.execute(update, ("bench-a", asset_id))
+        waiter.execute("SELECT set_config('lock_timeout', %s, true)", (f"{timeout_ms}ms",))
+        started = time.perf_counter()
+        try:
+            waiter.execute(update, ("bench-a", asset_id))
+        except Exception as exc:
+            wait_ms = (time.perf_counter() - started) * 1000
+            timeout_observed = getattr(exc, "sqlstate", None) == "55P03"
+            waiter.rollback()
+
+        with psycopg.connect(dsn, autocommit=True, connect_timeout=15) as reader:
+            started = time.perf_counter()
+            reader.execute(
+                sql.SQL("SELECT COUNT(*) FROM {} WHERE tenant_id = %s").format(table),
+                ("bench-b",),
+            ).fetchone()
+            read_ms = (time.perf_counter() - started) * 1000
+    finally:
+        holder.rollback()
+        waiter.rollback()
+        holder.close()
+        waiter.close()
+
+    return {
+        "configured_timeout_ms": timeout_ms,
+        "observed_wait_ms": round(wait_ms, 3) if wait_ms is not None else None,
+        "timeout_observed": timeout_observed,
+        "bounded": bool(
+            timeout_observed
+            and wait_ms is not None
+            and wait_ms <= timeout_ms * 2 + 500
+        ),
+        "unrelated_tenant_read_ms": round(read_ms, 3) if read_ms is not None else None,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Certify Track S PostgreSQL inventory p95"
     )
-    parser.add_argument("--documents", type=int, default=5_000_000)
+    parser.add_argument("--documents", type=int, default=None)
     parser.add_argument("--repeats", type=int, default=20)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--profile",
+        type=Path,
+        default=Path("docs/database/P7_CERTIFICATION_PROFILE.json"),
+    )
+    parser.add_argument("--workers", type=int, default=None)
+    parser.add_argument("--soak-seconds", type=float, default=None)
+    parser.add_argument("--max-p95-ms", type=float, default=None)
+    parser.add_argument("--lock-timeout-ms", type=int, default=None)
     parser.add_argument(
         "--smoke",
         action="store_true",
@@ -83,13 +216,25 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    from backend import db_certification
+
+    profile = db_certification.load_profile(args.profile)
+    projection = profile["projection"]
+    documents = args.documents or int(projection.get("documents", 5_000_000))
+    workers = args.workers or int(projection["concurrent_workers"])
+    soak_seconds = args.soak_seconds or float(projection["soak_seconds"])
+    max_p95_ms = args.max_p95_ms or float(projection["query_p95_ms"])
+    lock_timeout_ms = args.lock_timeout_ms or int(projection["lock_timeout_ms"])
+
     if os.getenv("DSPM_INVENTORY_BENCHMARK_ALLOW_WRITE") != "1":
         parser.error(
             "set DSPM_INVENTORY_BENCHMARK_ALLOW_WRITE=1; "
             "this harness creates disposable data"
         )
-    if args.documents < 10_000 or args.repeats < 3:
+    if documents < 10_000 or args.repeats < 3:
         parser.error("documents must be >= 10000 and repeats >= 3")
+    if workers < 1 or workers > 64 or soak_seconds <= 0 or lock_timeout_ms < 50:
+        parser.error("workers must be 1..64, soak-seconds positive, lock-timeout-ms >= 50")
 
     dsn = os.getenv("DSPM_DB_URL", "").strip()
     if not dsn:
@@ -126,6 +271,7 @@ def main() -> int:
 
     try:
         conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        conn.execute("CREATE EXTENSION IF NOT EXISTS btree_gin")
 
         conn.execute(
             sql.SQL(
@@ -159,11 +305,11 @@ def main() -> int:
         ).format(sql.Identifier(table_name))
 
         with conn.cursor().copy(copy_sql) as copy:
-            for index in range(args.documents):
+            for index in range(documents):
                 copy.write_row(_row(index))
                 if index and index % 1_000_000 == 0:
                     print(
-                        f"loaded {index:,}/{args.documents:,} rows",
+                        f"loaded {index:,}/{documents:,} rows",
                         flush=True,
                     )
 
@@ -201,9 +347,10 @@ def main() -> int:
         conn.execute(
             sql.SQL(
                 "CREATE INDEX {} ON {} USING GIN "
-                "((lower(COALESCE(search_text, ''))) gin_trgm_ops)"
+                "(tenant_id, risk_level, source, "
+                "(lower(COALESCE(search_text, ''))) gin_trgm_ops)"
             ).format(
-                sql.Identifier(f"{table_name}_trgm"),
+                sql.Identifier(f"{table_name}_filter_search_trgm"),
                 sql.Identifier(table_name),
             )
         )
@@ -275,7 +422,7 @@ def main() -> int:
 
             timings, row_count = _measure(operation, args.repeats)
             p95 = _percentile(timings, 0.95)
-            all_under_target = all_under_target and p95 < 300
+            all_under_target = all_under_target and p95 < max_p95_ms
 
             page_plan = conn.execute(
                 sql.SQL("EXPLAIN " + page_sql.as_string(conn)),
@@ -292,25 +439,45 @@ def main() -> int:
                 "p50_ms": round(statistics.median(timings), 3),
                 "p95_ms": round(p95, 3),
                 "max_ms": round(max(timings), 3),
-                "under_300ms": p95 < 300,
+                "under_target": p95 < max_p95_ms,
                 "plan": [str(row[0]) for row in page_plan],
                 "count_plan": [str(row[0]) for row in count_plan],
             }
 
+        soak = _concurrent_soak(dsn, table_name, workers, soak_seconds)
+        lock_contention = _lock_contention_probe(dsn, table_name, lock_timeout_ms)
+        soak_ok = (
+            soak["errors"] == 0
+            and soak["operations"] > 0
+            and soak["p95_ms"] is not None
+            and soak["p95_ms"] < max_p95_ms
+        )
+        gates = {
+            "all_inventory_p95_under_target": all_under_target,
+            "projected_rows_loaded": documents >= int(projection["documents"]),
+            "soak_duration_met": soak["elapsed_seconds"] >= float(projection["soak_seconds"]) * 0.98,
+            "concurrent_soak_clean": soak_ok,
+            "lock_wait_bounded": lock_contention["bounded"],
+        }
+        certifying_pass = all(gates.values())
+        smoke_pass = all_under_target and soak_ok and lock_contention["bounded"]
         result = {
-            "track": "S-C.1",
+            "evidence_kind": "capacity_soak",
+            "track": "P7/S-C.1",
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "profile": profile["name"],
             "database": "postgresql",
             "mode": "smoke" if args.smoke else "certification",
-            "documents": args.documents,
-            "tenant_documents": (args.documents + 1) // 2,
+            "documents": documents,
+            "tenant_documents": (documents + 1) // 2,
             "repeats": args.repeats,
+            "query_p95_target_ms": max_p95_ms,
             "ingest_and_index_seconds": round(ingest_seconds, 3),
             "scenarios": results,
-            "gates": {
-                "all_inventory_p95_under_300ms": all_under_target,
-                "five_million_rows": args.documents >= 5_000_000,
-            },
+            "concurrent_soak": soak,
+            "lock_contention": lock_contention,
+            "gates": gates,
+            "result": "PASS" if certifying_pass else ("SMOKE_PASS" if args.smoke and smoke_pass else "FAIL"),
         }
 
         rendered = json.dumps(result, ensure_ascii=False, indent=2)
@@ -322,8 +489,8 @@ def main() -> int:
 
         return (
             0
-            if all(result["gates"].values())
-            or (args.smoke and all_under_target)
+            if certifying_pass
+            or (args.smoke and smoke_pass)
             else 2
         )
 

@@ -13,6 +13,7 @@ import threading
 import zipfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -21,11 +22,15 @@ from typing import Callable
 
 from discovery.parallelism import host_admission_budget, resolve_parallelism
 
-from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_text
+from collectors import content_policy, pysmb_compat, smb_target
+from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS, extract_binary_bytes_detail
 from collectors.net_guard import TargetNotAllowed, resolve_and_pin
+from collectors.text_decode import decode_text
 from collectors import win_security
-from collectors.ocr import extract_text_from_image, is_ocr_scannable
+from collectors.smb3_transport import ACL_TRANSPORT, ACL_TRANSPORT_NOTE
+from collectors.ocr import extract_text_from_image, is_ocr_scannable, max_image_bytes
 from discovery.incremental import apply_reuse_snapshot, reuse_snapshot_from_result
+from collectors.scan_scope import ScopeTally, rules_for
 from collectors.file_scanner import (
     ARCHIVE_EXTENSIONS,
     CONTENT_EXTENSIONS,
@@ -43,6 +48,15 @@ from collectors.file_scanner import (
     scan_mode_for_extension,
 )
 from scripts.logger import get_logger
+
+# W2.3: a read-only open lets the file be deleted or renamed meanwhile, as the SMB 3
+# transport already does.
+pysmb_compat.allow_delete_while_reading()
+
+# W2.3: the credential that worked for a server is tried first next time, instead of
+# failing through the others on every session a scan opens.
+_working_credentials: dict[tuple[str, str], str] = {}
+_working_credentials_lock = threading.Lock()
 
 logger = get_logger(__name__)
 
@@ -64,6 +78,16 @@ def _format_smb_timestamp(value) -> str:
         return ""
 
 
+# Windows caps a command line at 32,767 characters; the rest of the PowerShell
+# invocation and a margin leave this much for the ACL batch's encoded command (E6).
+ACL_BATCH_COMMAND_LIMIT = 30_000
+
+
+def _in_range(key: str, low: str, high: str) -> bool:
+    """Whether a case-folded name falls in [low, high); an empty bound is open."""
+    return key >= low and (not high or key < high)
+
+
 class _SmbConnectionLost(Exception):
     """Raised when an SMB operation fails because the CONNECTION died (reset by
     the peer / broken pipe / WinError 10054) rather than a per-object
@@ -77,10 +101,43 @@ class _SmbConnectionLost(Exception):
         self.detail = detail
 
 
+def _connection_lost_types() -> tuple[type[BaseException], ...]:
+    """The exception types that mean the session is gone, whatever their message says.
+
+    The message test below knew only pysmb's reset strings. smbprotocol's
+    SMBConnectionClosed ("SMB socket was closed..." / "Connection timed out...") and
+    pysmb's SMBTimeout (no message at all) read as one file's failure: the files left in
+    the chunk went to fallback readers that failed silently on the dead socket, and a
+    listing read as access denied - no reconnect, no retry, the scan complete."""
+    types: list[type[BaseException]] = [ConnectionError, TimeoutError]
+    try:
+        from smb.base import NotConnectedError, NotReadyError, SMBTimeout
+        types += [NotConnectedError, NotReadyError, SMBTimeout]
+    except ImportError:  # pysmb is not installed where only SMB 3 is used
+        pass
+    try:
+        from smbprotocol.exceptions import SMBConnectionClosed
+        types.append(SMBConnectionClosed)
+    except ImportError:  # smbprotocol is an optional connector dependency
+        pass
+    return tuple(types)
+
+
+_CONNECTION_LOST_TYPES = _connection_lost_types()
+
+
+def _brief(exc: BaseException) -> str:
+    """An error's first line, short - or its type when it says nothing (pysmb's SMBTimeout
+    has no message). pysmb's OperationFailure embeds the whole SMB message history."""
+    text = str(exc).strip()
+    return text.splitlines()[0][:200] if text else exc.__class__.__name__
+
+
 def _is_connection_error(exc: Exception) -> bool:
-    """True for socket-level failures (connection reset/aborted/broken) as opposed
-    to a clean protocol error like ACCESS_DENIED that leaves the session usable."""
-    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+    """True for socket-level failures (connection reset/aborted/broken, the session closed
+    or timed out) as opposed to a clean protocol error like ACCESS_DENIED that leaves the
+    session usable."""
+    if isinstance(exc, _CONNECTION_LOST_TYPES):
         return True
     text = str(exc).lower()
     return any(
@@ -95,6 +152,94 @@ def _is_connection_error(exc: Exception) -> bool:
             "server disconnected",
         )
     )
+
+
+def _is_access_denied(exc: Exception) -> bool:
+    """True for a clean refusal to list a folder - the account may not read it - which
+    refuses the scan the same way; False for a dropped connection, a timeout, or anything
+    that might list fine a moment later."""
+    if _is_connection_error(exc):
+        return False
+    text = str(exc).lower()
+    return any(token in text for token in ("access denied", "access_denied", "0xc0000022", "unable to open directory"))
+
+
+# How much a ranged archive read asks for at a time.
+_RANGE_READ_BUFFER = 64 * 1024
+
+
+class _GatedConnection:
+    """A session whose reads are counted against, and held to, its server's gate (W2.3).
+    Everything else is the session's own."""
+
+    def __init__(self, connection, gate) -> None:
+        self._connection = connection
+        self._gate = gate
+
+    def retrieveFileFromOffset(self, share, path, buffer, offset=0, max_length=-1, **kwargs):
+        try:
+            before = buffer.tell()
+        except (AttributeError, OSError, ValueError):
+            before = None
+        result = self._connection.retrieveFileFromOffset(share, path, buffer, offset=offset, max_length=max_length,
+                                                         **kwargs)
+        try:
+            read = buffer.tell() - before if before is not None else 0
+        except (AttributeError, OSError, ValueError):
+            read = 0
+        self._gate.read(max(0, int(read)))
+        return result
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+class _ArchiveTooLarge(Exception):
+    """Reading an archive through _SmbRangeFile would pass its byte budget."""
+
+
+class _SmbRangeFile(io.RawIOBase):
+    """A remote file as the seekable stream zipfile reads, each read one ranged SMB read.
+
+    A ZIP's directory is at its END. A scan keeps at most MAX_ARCHIVE_TOTAL_BYTES of a
+    file, so every zip larger than that was opened from a prefix with no directory and
+    reported protected, "bad_archive", "could not be opened". Opened through this, only
+    the directory and the entries asked for are fetched - at most ``budget`` bytes."""
+
+    def __init__(self, connection, share: str, path: str, size: int, budget: int) -> None:
+        super().__init__()
+        self._connection, self._share, self._path = connection, share, path
+        self._size, self._position = max(0, int(size)), 0
+        self.transferred, self.budget = 0, max(0, int(budget))
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._position, io.SEEK_END: self._size}[whence]
+        self._position = max(0, base + int(offset))
+        return self._position
+
+    def readinto(self, buffer) -> int:
+        wanted = min(len(buffer), self._size - self._position)
+        if wanted <= 0:
+            return 0
+        if self.transferred + wanted > self.budget:
+            raise _ArchiveTooLarge(f"reading {self._path} would pass {self.budget} bytes")
+        sink = io.BytesIO()
+        self._connection.retrieveFileFromOffset(self._share, self._path, sink, offset=self._position,
+                                                max_length=wanted)
+        data = sink.getvalue()[:wanted]
+        buffer[:len(data)] = data
+        self._position += len(data)
+        self.transferred += len(data)
+        return len(data)
 
 
 @dataclass(slots=True)
@@ -118,6 +263,10 @@ class _SMBFileWork:
     reuse_key: str
     include_top: bool
     inspect_archive_entries: bool
+    # The share's id for the file, when the server lists one: part of a meta identity.
+    file_id: str = ""
+    # W2.3: reading it would recall it from tiered storage; it is not read.
+    offline: bool = False
 
 
 @dataclass(slots=True)
@@ -140,11 +289,66 @@ class _SMBFileData:
     content: str
     sha256: str
     archive_bytes: bytes | None = None
+    # Why there is no text when there is none: the document extractor's reason
+    # ("no_text_layer", "password_protected", "not_extracted"), or - read_error - the
+    # type of the error that kept the file from being read at all.
+    extraction_reason: str = ""
+    read_error: str = ""
+    # The document extractor stopped with document left or skipped a part (W2.2, E5).
+    truncated: bool = False
+    # A content type not read by policy (over its size cap): said, not an error.
+    skip_reason: str = ""
+
+
+# Bytes every SMB reader of this process holds in memory at once for content (W2.2).
+# Each read takes its share before it starts and gives it back once its text is out,
+# so io_workers x the document cap is not the bound - this is.
+_DEFAULT_CAPTURE_BUDGET_MB = 256
+
+
+class _ByteBudget:
+    def __init__(self, total: int) -> None:
+        self.total = max(1, int(total))
+        self._free = self.total
+        self._cond = threading.Condition()
+
+    @contextmanager
+    def take(self, amount: int):
+        amount = min(max(0, int(amount)), self.total)
+        with self._cond:
+            while self._free < amount:
+                self._cond.wait()
+            self._free -= amount
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._free += amount
+                self._cond.notify_all()
+
+
+_capture_budget: _ByteBudget | None = None
+_capture_budget_lock = threading.Lock()
+
+
+def capture_budget() -> _ByteBudget:
+    """``DSPM_SMB_CAPTURE_BUDGET_MB`` (256): read once per process."""
+    global _capture_budget
+    with _capture_budget_lock:
+        if _capture_budget is None:
+            try:
+                megabytes = int(os.getenv("DSPM_SMB_CAPTURE_BUDGET_MB") or _DEFAULT_CAPTURE_BUDGET_MB)
+            except ValueError:
+                megabytes = _DEFAULT_CAPTURE_BUDGET_MB
+            _capture_budget = _ByteBudget(max(16, megabytes) * 1024 * 1024)
+        return _capture_budget
 
 
 @dataclass(slots=True)
 class SMBConfig:
     server: str
+    # C5: the workspace whose scan targets decide whether `server` may be connected to.
+    tenant_id: str = ""
     username: str = ""
     password: str = ""
     domain: str = "WORKGROUP"
@@ -177,7 +381,50 @@ class SMBConfig:
     # process parallelism policy / io_workers). Each parallel worker owns an
     # isolated connection and a process-wide admission slot.
     io_workers: int = 0
+    # B2.3: the shares this scan walks, by name; None walks every share. A partitioned
+    # SMB scan gives each partition a group of shares that cannot overlap any share
+    # outside the group, so the overlapping-share collapse stays inside one partition.
+    allowed_shares: tuple[str, ...] | None = None
+    # D1: SMB 3.1.1 with the session encrypted, and required (collectors.smb3_transport).
+    # pysmb cannot encrypt; a server or share that requires encryption resets it.
+    require_encryption: bool = False
+    # W1.2: one unit of a partitioned scan inside a share - {"share", "folder", "depth",
+    # "name_from", "name_to"}. The folder's entries whose case-folded names fall in
+    # [name_from, name_to) are walked, each subfolder among them whole; "" is unbounded.
+    share_range: dict | None = None
+    # Advanced scan scope (collectors.scan_scope): the scan's canonical rules, share-relative
+    # paths. A share, folder or file out of scope is never listed, opened or read.
+    scope: dict | None = None
 
+
+
+def normalize_acl(owner, principals, permissions, types=None, *, entries=None) -> dict:
+    """One shape for every ACL path (in-process, batched and per-file PowerShell): the
+    owner, the parallel principal/permission lists reports have always carried, and -
+    D7 - whether each entry allows or denies (``types``), or the full entries when the
+    in-process read has them. A pair with an empty principal is dropped as a pair, so
+    the lists stay aligned."""
+    def listed(value) -> list:
+        if value is None:
+            return []
+        return [value] if isinstance(value, str) else list(value)
+
+    principals, permissions, types = listed(principals), listed(permissions), listed(types)
+    kept_principals: list[str] = []
+    kept_permissions: list[str] = []
+    kept_types: list[str] = []
+    for index, principal in enumerate(principals):
+        if not str(principal or "").strip():
+            continue
+        kept_principals.append(str(principal))
+        kept_permissions.append(str(permissions[index]) if index < len(permissions) else "")
+        kept_types.append(str(types[index]).lower() if index < len(types) else "allow")
+    acl = {"owner": str(owner or ""), "principals": kept_principals, "permissions": kept_permissions}
+    if types:
+        acl["types"] = kept_types
+    if entries:
+        acl["entries"] = [dict(entry) for entry in entries if isinstance(entry, dict)]
+    return acl
 
 class SMBScanner:
     def __init__(self, config: SMBConfig):
@@ -187,6 +434,8 @@ class SMBScanner:
         # and the serial path (single thread) sees exactly one, unchanged.
         self._local = threading.local()
         self.extension_filter = normalize_extension_filter(config.allowed_extensions)
+        self._scope = rules_for(config.scope)
+        self._scope_tally = ScopeTally() if self._scope.active else None
         self.credential_used = ""
         self.server_used = ""
         self._owner_cache: dict[str, str] = {}
@@ -244,10 +493,16 @@ class SMBScanner:
         return f"smb://{server}/{share_name}{remote_path}"
 
     def connect(self) -> bool:
+        encrypted = bool(self.config.require_encryption)
         try:
-            from smb.SMBConnection import SMBConnection
+            if encrypted:
+                from collectors.smb3_transport import EncryptionUnavailable, Smb3Connection
+            else:
+                from smb.SMBConnection import SMBConnection
         except ModuleNotFoundError as exc:
-            raise RuntimeError("Missing dependency 'pysmb'. Install requirements.txt before SMB scans.") from exc
+            package, needs = ("smbprotocol", "requirements-connectors.txt") if encrypted else ("pysmb", "requirements.txt")
+            raise RuntimeError(f"Missing dependency '{package}'. Install {needs} before SMB scans.") from exc
+        self._encryption_refused = ""
 
         reached_server = False
         self._target_refused = ""
@@ -258,12 +513,33 @@ class SMBScanner:
             # and connect cannot turn the scanner into an SSRF primitive. The
             # NetBIOS remote_name (for auth) stays the hostname.
             try:
-                pinned_ip = resolve_and_pin(server)
+                pinned_ip = resolve_and_pin(server, tenant_id=self.config.tenant_id)
             except TargetNotAllowed as exc:
                 logger.warning("Refusing SMB target %s: %s", server, exc)
                 self._target_refused = str(exc)
                 continue
             for username, domain, label in self._credential_candidates():
+                if encrypted:
+                    conn = Smb3Connection(username, self.config.password, self.config.client_name, remote_name,
+                                          domain=domain, shares=list(self.config.allowed_shares or ()))
+                    try:
+                        if conn.connect(pinned_ip, self.config.port, timeout=self.config.timeout):
+                            self.connection = _GatedConnection(conn, self._target_gate())
+                            self.credential_used = label
+                            self.server_used = server
+                            self._remember_credential(server, label)
+                            return True
+                        reached_server = True
+                    except (EncryptionUnavailable, PermissionError) as exc:
+                        # Said, not retried with the next credential: no account makes the
+                        # server encrypt, and the service identity was not allowed.
+                        self._encryption_refused = str(exc)
+                        conn.close()
+                        return False
+                    except Exception as exc:  # noqa: BLE001 - as the pysmb path: try the next credential
+                        logger.warning("SMB 3 connection to %s failed: %s", server, type(exc).__name__)
+                        conn.close()
+                    continue
                 conn = SMBConnection(
                     username,
                     self.config.password,
@@ -280,9 +556,10 @@ class SMBScanner:
                 )
                 try:
                     if conn.connect(pinned_ip, self.config.port, timeout=self.config.timeout):
-                        self.connection = conn
+                        self.connection = _GatedConnection(conn, self._target_gate())
                         self.credential_used = label
                         self.server_used = server
+                        self._remember_credential(server, label)
                         return True
                     # TCP + SMB negotiation succeeded but authentication was
                     # rejected (pysmb returns False rather than raising here).
@@ -359,12 +636,15 @@ class SMBScanner:
     def scan(self) -> list[dict]:
         self.last_scan_diagnostics = {}
         self._progress_counters = {"visited": 0, "matched": 0, "reused": 0}
+        self._scope_tally = ScopeTally() if self._scope.active else None
         self._consecutive_resets = 0
         self._abort_event.clear()
         self._io_parallel_active = False
         if not self.connect():
             if getattr(self, "_target_refused", ""):
                 raise ConnectionError(f"SMB target refused (network guard): {self._target_refused}")
+            if getattr(self, "_encryption_refused", ""):
+                raise ConnectionError(f"SMB 3 encryption required: {self._encryption_refused}")
             if getattr(self, "_auth_rejected", False):
                 raise ConnectionError(
                     f"SMB authentication was rejected by {self.config.server} for user "
@@ -389,12 +669,21 @@ class SMBScanner:
                 if self._skip_share(share_name):
                     skipped_shares.append(share_name)
                     continue
+                if not self._share_selected(share_name):
+                    # Another partition of the same scan walks it (B2.3): not skipped.
+                    continue
+                if self._scope_skips_folder(share_name, "/"):
+                    # Out of scope - an excluded share, or one no included folder is in:
+                    # not even listed.
+                    continue
                 scanned_shares.append(share_name)
 
             # P1: the real collector uses a metadata-first, globally bounded
             # per-file pipeline. Instance-overridden walkers (the compatibility
             # seam used by integrations/tests) retain the proven P-B.2 path.
             budget = host_admission_budget()
+            if self.config.share_range and not self._should_use_file_pipeline():
+                raise RuntimeError("an SMB range unit needs the metadata-first collector (DSPM_SMB_PARALLEL)")
             if self._should_use_file_pipeline():
                 self.close()  # the listing connection is no longer needed
                 records, reset_shares, aborted_reason = self._scan_shares_two_phase(scanned_shares, budget)
@@ -446,7 +735,14 @@ class SMBScanner:
                 "io_parallel_active": self._io_parallel_active,
                 "io_workers": self._io_worker_count(),
                 "host_admission": budget.stats(),
+                # W2.3: what this server was asked for, by every scan of it in this process.
+                "smb_target": self._target_gate().snapshot(),
                 **({"scan_aborted_reason": aborted_reason} if aborted_reason else {}),
+                # D1: the file bytes came over the encrypted session; the owners and ACLs
+                # did not (collectors.smb3_transport says why). Said with the scan.
+                **({"acl_transport": ACL_TRANSPORT, "acl_transport_note": ACL_TRANSPORT_NOTE}
+                   if self.config.require_encryption else {}),
+                **({"scope": self._scope_tally.to_dict(self.config.scope)} if self._scope_tally is not None else {}),
             }
             return records
         finally:
@@ -576,19 +872,29 @@ class SMBScanner:
             if self._abort_event.is_set() or self._cancelled():
                 return None, "skipped"
             detail = ""
-            with budget.slot():
+            gate = self._target_gate()
+            with budget.slot(), gate.session():
                 if self._abort_event.is_set() or self._cancelled():
                     return None, "skipped"
                 if not self.connect():
                     detail = "could not establish an SMB enumeration connection"
                 else:
                     try:
-                        plan = self._enumerate_share_plan(share_name, "/", depth=0)
+                        unit = self.config.share_range
+                        if unit and str(unit.get("share") or "").casefold() == share_name.casefold():
+                            plan = self._enumerate_share_plan(
+                                share_name, str(unit.get("folder") or "/"), depth=int(unit.get("depth") or 0),
+                                name_range=(str(unit.get("name_from") or ""), str(unit.get("name_to") or "")),
+                            )
+                        else:
+                            plan = self._enumerate_share_plan(share_name, "/", depth=0)
                     except _SmbConnectionLost as lost:
                         detail = lost.detail
+                        gate.lost()
                     else:
                         with self._reset_lock:
                             self._consecutive_resets = 0
+                        gate.completed()
                         return plan, "done"
                     finally:
                         self.close()
@@ -602,12 +908,15 @@ class SMBScanner:
         folder: str,
         depth: int,
         plan: _SMBSharePlan | None = None,
+        name_range: tuple[str, str] | None = None,
     ) -> _SMBSharePlan:
         if plan is None:
             plan = _SMBSharePlan(share_name=share_name, slots=[])
         if self._cancelled():
             raise RuntimeError("Scan cancelled")
         if self.connection is None or depth > self.config.max_depth or self._skip_path(folder):
+            return plan
+        if self._scope_skips_folder(share_name, folder):
             return plan
 
         try:
@@ -623,7 +932,13 @@ class SMBScanner:
                     errors.append({"share": share_name, "path": folder, "error": brief})
             return plan
 
-        for entry in entries:
+        # A folder's entries are walked in case-folded name order (W1.2): the order a
+        # partitioned scan cuts its ranges in, so its units in sequence are this walk. A
+        # range is applied before the sort, so a unit of a huge folder sorts only its own.
+        keyed = ((str(entry.filename).casefold(), entry) for entry in entries)
+        if name_range is not None:
+            keyed = ((key, entry) for key, entry in keyed if _in_range(key, *name_range))
+        for _key, entry in sorted(keyed, key=lambda pair: pair[0]):
             if self._cancelled():
                 raise RuntimeError("Scan cancelled")
             if entry.filename in {".", ".."}:
@@ -638,6 +953,8 @@ class SMBScanner:
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
                     continue
+                if self._scope_skips_folder(share_name, remote_path):
+                    continue
                 self._enumerate_share_plan(share_name, remote_path, depth + 1, plan)
                 continue
 
@@ -645,6 +962,9 @@ class SMBScanner:
             with self._walk_lock:
                 self._progress_counters["visited"] += 1
             self._emit_collection_progress()
+            if self._scope_skips_file(share_name, remote_path, extension, entry):
+                # Decided on the listing: never opened, read, hashed or stored.
+                continue
             include_top = matches_scan_filters(
                 extension,
                 is_hidden,
@@ -746,6 +1066,8 @@ class SMBScanner:
                     reuse_key=reuse_key,
                     include_top=include_top,
                     inspect_archive_entries=inspect_entries,
+                    file_id=str(getattr(entry, "file_id", "") or ""),
+                    offline=self._offline(entry),
                 )
             )
         return plan
@@ -862,7 +1184,8 @@ class SMBScanner:
         if not refs:
             return []
         share_name = refs[0][2].share_name
-        with budget.slot():
+        gate = self._target_gate()
+        with budget.slot(), gate.session():
             if self._cancelled():
                 raise RuntimeError("Scan cancelled")
             self._prefetch_acl_paths(share_name, [ref[2].remote_path for ref in refs])
@@ -871,12 +1194,15 @@ class SMBScanner:
                 if not self.connect():
                     continue
                 try:
-                    return [
+                    built = [
                         (plan_index, slot_index, self._build_work_records(work))
                         for plan_index, slot_index, work in refs
                     ]
+                    gate.completed()
+                    return built
                 except _SmbConnectionLost as lost:
                     last_detail = lost.detail
+                    gate.lost()
                 finally:
                     self.close()
             raise _SmbConnectionLost(share_name, last_detail)
@@ -890,35 +1216,77 @@ class SMBScanner:
         *,
         inspect_archive_entries: bool = False,
         chunk_size: int = 1024 * 1024,
+        modified_at: str = "",
+        file_id: str = "",
     ) -> _SMBFileData:
-        """Hash a remote file while retaining its bounded preview/archive head.
+        """Read what the scan inspects of a remote file - once - and name it (W2.2).
 
-        The legacy collector independently fetched the preview, ZIP inspection
-        buffer(s), and full hash. P2 performs one forward read and derives all of
-        them from the same byte snapshot. Any transport/short-read failure falls
-        back to the original independent readers, so optimization cannot reduce
-        content or hash coverage.
+        One forward read gives the text, the archive head and the identity. Before W2.2 it
+        read every file to its last byte for a whole-file hash; now it reads:
+
+        - a text file up to its cap (``max_read_bytes``): whole within it, identity the
+          whole-file SHA-256; past it, the first ``cap`` bytes, identity ``head:``;
+        - a document or image within its cap: whole; over it, nothing (SKIPPED_POLICY);
+        - a zip whose entries are inspected: up to MAX_ARCHIVE_TOTAL_BYTES, as before;
+        - anything else: nothing, identity by DSPM_HASH_POLICY (meta by default; a zip's
+          protection is read from its directory by range, not from a capture).
+
+        Under DSPM_HASH_POLICY=full every byte is read, as before. A transport or
+        short-read failure falls back to the independent readers.
         """
+        file_size = max(0, int(size or 0))
+        preview_requested = self._preview_requested(extension)
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        if preview_requested and document:
+            cap = max_image_bytes() if extension not in BINARY_TEXT_EXTENSIONS else content_policy.document_cap_bytes()
+            if file_size > cap:
+                cap_name = "DSPM_DOCUMENT_SCAN_MAX_BYTES" if extension in BINARY_TEXT_EXTENSIONS else "DSPM_OCR_MAX_FILE_BYTES"
+                self._bump_diag("content_skipped_over_cap")
+                return _SMBFileData(
+                    content="", extraction_reason="over_size_cap",
+                    sha256=self._identity_without_content(share_name, path, file_size, modified_at, file_id),
+                    skip_reason=f"Larger than {cap_name} ({cap // (1024 * 1024)} MiB); its content was not read")
         if not self._single_pass_enabled() or self.connection is None:
-            return _SMBFileData(
-                content=self._read_file_preview(share_name, path, extension),
-                sha256=self._hash_file(share_name, path, size),
-            )
+            return self._read_separately(share_name, path, extension, size, modified_at=modified_at, file_id=file_id,
+                                         inspect_archive_entries=inspect_archive_entries)
 
         started = time.perf_counter()
-        file_size = max(0, int(size or 0))
-        preview_requested = bool(
-            self.config.read_content
-            and (
-                extension in TEXT_EXTENSIONS
-                or extension in BINARY_TEXT_EXTENSIONS
-                or is_ocr_scannable(extension)
-            )
-        )
-        preview_limit = max(0, int(self.config.max_read_bytes or 0)) if preview_requested else 0
-        capture_archive = extension == ".zip"
+        whole_hash = content_policy.hash_policy() == "full"
+        text_cap = max(0, int(self.config.max_read_bytes or 0))
+        if preview_requested and document:
+            preview_limit = read_limit = file_size
+        elif preview_requested:
+            preview_limit = text_cap
+            read_limit = file_size if whole_hash else min(file_size, text_cap)
+        else:
+            preview_limit = 0
+            read_limit = file_size if whole_hash else 0
+        capture_archive = extension == ".zip" and inspect_archive_entries
         archive_limit = MAX_ARCHIVE_TOTAL_BYTES if capture_archive else 0
-        capture_limit = min(file_size, max(preview_limit, archive_limit))
+        if capture_archive and file_size <= archive_limit:
+            # Its entries are read from this capture: the whole archive, as before.
+            read_limit = file_size
+        capture_limit = min(read_limit, max(preview_limit, archive_limit))
+        if read_limit == 0:
+            return _SMBFileData(
+                content="", sha256=self._identity_without_content(share_name, path, file_size, modified_at, file_id))
+        with capture_budget().take(capture_limit):
+            acquired = self._single_pass(share_name, path, extension, file_size, read_limit, capture_limit,
+                                         preview_requested, preview_limit, capture_archive, archive_limit,
+                                         inspect_archive_entries, chunk_size, started, modified_at, file_id)
+        if acquired is None:
+            # Outside the budget: the fallback takes its own share, never one on top of this.
+            self._bump_diag("single_pass_fallbacks")
+            return self._read_separately(share_name, path, extension, file_size, modified_at=modified_at,
+                                         file_id=file_id, inspect_archive_entries=inspect_archive_entries)
+        return acquired
+
+    def _single_pass(self, share_name: str, path: str, extension: str, file_size: int, read_limit: int,
+                     capture_limit: int, preview_requested: bool, preview_limit: int, capture_archive: bool,
+                     archive_limit: int, inspect_archive_entries: bool, chunk_size: int, started: float,
+                     modified_at: str, file_id: str) -> _SMBFileData | None:
+        """The one forward read; None when it failed short and the independent readers
+        should try."""
         captured = bytearray()
         digest = hashlib.sha256()
         offset = 0
@@ -926,8 +1294,8 @@ class SMBScanner:
         failed = False
 
         try:
-            while offset < file_size:
-                request_size = min(max(1, int(chunk_size)), file_size - offset)
+            while offset < read_limit:
+                request_size = min(max(1, int(chunk_size)), read_limit - offset)
                 buffer = io.BytesIO()
                 self.connection.retrieveFileFromOffset(
                     share_name,
@@ -942,8 +1310,8 @@ class SMBScanner:
                     failed = True
                     break
                 # A defensive cap keeps a misbehaving transport from hashing or
-                # retaining bytes beyond the enumerated file snapshot.
-                chunk = chunk[: file_size - offset]
+                # retaining bytes beyond what this read asked for.
+                chunk = chunk[: read_limit - offset]
                 digest.update(chunk)
                 if len(captured) < capture_limit:
                     remaining = capture_limit - len(captured)
@@ -954,29 +1322,33 @@ class SMBScanner:
                 # A reset kills the stateful pysmb session. Let the existing
                 # share/chunk retry establish a fresh connection instead of
                 # attempting legacy fallbacks on a known-dead socket.
-                raise _SmbConnectionLost(share_name, str(exc).splitlines()[0][:200]) from exc
+                raise _SmbConnectionLost(share_name, _brief(exc)) from exc
             failed = True
-            logger.debug("Could not single-pass acquire %s:%s: %s", share_name, path, exc)
+            logger.debug("Could not single-pass acquire %s:%s: %s", share_name, path, _brief(exc))
         finally:
             self._bump_diag("single_pass_requests", requests)
             self._bump_diag("single_pass_transferred_bytes", offset)
             self._add_diag_ms("single_pass_elapsed_ms", (time.perf_counter() - started) * 1000)
 
-        if failed or offset != file_size:
-            self._bump_diag("single_pass_fallbacks")
-            return _SMBFileData(
-                content=self._read_file_preview(share_name, path, extension),
-                sha256=self._hash_file(share_name, path, file_size),
-            )
+        if failed or offset != read_limit:
+            return None
 
         preview_bytes = bytes(captured[:preview_limit]) if preview_requested else b""
+        truncated = False
         try:
-            content = self._preview_content_from_bytes(preview_bytes, extension)
+            content, reason, truncated = (self._extract_from_bytes(preview_bytes, extension)
+                                          if preview_requested else ("", "", False))
         except Exception as exc:
             # Extraction failure historically produced empty content while the
             # separate hash remained valid. Preserve that exact behavior.
             logger.debug("Could not extract preview for %s:%s: %s", share_name, path, exc)
-            content = ""
+            content, reason = "", "not_extracted"
+        if offset == file_size:
+            identity = digest.hexdigest()
+        elif preview_requested and offset == preview_limit:
+            identity = content_policy.head_identity(preview_limit, digest.hexdigest())
+        else:
+            identity = self._identity_without_content(share_name, path, file_size, modified_at, file_id)
 
         archive_bytes = bytes(captured[:archive_limit]) if capture_archive else None
         avoided_fetches = int(preview_requested)
@@ -991,9 +1363,121 @@ class SMBScanner:
         self._bump_diag("single_pass_avoided_transfer_bytes", avoided_bytes)
         return _SMBFileData(
             content=content,
-            sha256=digest.hexdigest(),
+            sha256=identity,
             archive_bytes=archive_bytes,
+            extraction_reason=reason,
+            truncated=truncated,
         )
+
+    def _identity_without_content(self, share_name: str, path: str, size: int, modified_at: str = "",
+                                  file_id: str = "") -> str:
+        """A file not read whole for content, by DSPM_HASH_POLICY: meta (nothing read),
+        sampled (first and last MiB), full (every byte)."""
+        policy = content_policy.hash_policy()
+        if policy == "full" or (policy == "sampled" and not content_policy.needs_sample(size)):
+            return self._hash_file(share_name, path, size)
+        if policy == "sampled" and self.connection is not None:
+            sample = content_policy.SAMPLE_BYTES
+            try:
+                head, tail = io.BytesIO(), io.BytesIO()
+                self.connection.retrieveFileFromOffset(share_name, path, head, offset=0, max_length=sample)
+                self.connection.retrieveFileFromOffset(share_name, path, tail, offset=max(0, size - sample),
+                                                       max_length=sample)
+                self._bump_diag("single_pass_transferred_bytes", len(head.getvalue()) + len(tail.getvalue()))
+                return content_policy.sampled_identity(size, head.getvalue(), tail.getvalue())
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+                return ""
+        self._bump_diag("identity_without_read")
+        return content_policy.meta_identity(size, modified_at, file_id)
+
+    def _read_separately(self, share_name: str, path: str, extension: str, size: int, *, modified_at: str = "",
+                         file_id: str = "", inspect_archive_entries: bool = False) -> _SMBFileData:
+        """The preview and the identity, each read on its own - with single pass off, or
+        after it failed. A dropped connection is the chunk's to retry on a fresh one. A read
+        this file alone refused is said on its record: it used to come back as content ''
+        and sha '', a file with nothing in it, and the scan counted as complete."""
+        content, reason, read_error, truncated = "", "", "", False
+        preview = self.connection is not None and self._preview_requested(extension)
+        if preview:
+            try:
+                content, reason, truncated = self._fetch_preview(share_name, path, extension, size)
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+                logger.debug("Could not read preview for %s:%s: %s", share_name, path, _brief(exc))
+                read_error = type(exc).__name__
+        text_cap = max(0, int(self.config.max_read_bytes or 0))
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        # A zip whose entries are read is read whole within the archive cap: named as the
+        # single pass names it.
+        whole_zip = extension == ".zip" and inspect_archive_entries and size <= MAX_ARCHIVE_TOTAL_BYTES
+        if content_policy.hash_policy() == "full" or whole_zip or (preview and (document or size <= text_cap)):
+            sha256 = self._hash_file(share_name, path, size)
+        elif preview:
+            prefix = self._hash_file(share_name, path, text_cap)
+            sha256 = content_policy.head_identity(text_cap, prefix)
+        else:
+            sha256 = self._identity_without_content(share_name, path, size, modified_at, file_id)
+        if not sha256 and self.connection is not None:
+            read_error = read_error or "IncompleteRead"
+        return _SMBFileData(content=content, sha256=sha256, extraction_reason=reason, read_error=read_error,
+                            truncated=truncated)
+
+    def _preview_requested(self, extension: str) -> bool:
+        return bool(self.config.read_content and (
+            extension in TEXT_EXTENSIONS or extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)))
+
+    def _content_fields(self, extension: str, file_size: int, acquired: _SMBFileData, protected_metadata: dict) -> dict:
+        """What a file record says about its content: its status, whether it is protected,
+        why it was not read, and how much of it was. A document is read whole within its
+        cap, so it is partial only when the extractor cut its text short (W2.2, E5)."""
+        content = acquired.content
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        max_read = file_size if document else self.config.max_read_bytes
+        cut = bool(content) and (file_size > max_read or acquired.truncated)
+        fields = {
+            "content": "" if protected_metadata else content,
+            "content_status": protected_metadata.get("content_status")
+            or content_status_for_extension(extension, content, self.config.read_content),
+            "content_scannable": bool(protected_metadata.get(
+                "content_scannable", extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension))),
+            "protected": bool(protected_metadata.get("protected", False)),
+            "protection_type": protected_metadata.get("protection_type", ""),
+            "scan_error": protected_metadata.get("scan_error", ""),
+            "scan_completeness": "PARTIAL" if cut
+            else "FULL" if content or file_size == 0 else "NONE",
+            "bytes_scanned": min(file_size, max_read) if content else 0,
+            "truncated": cut,
+            "skip_reason": "",
+        }
+        if protected_metadata or content:
+            return fields
+        if acquired.skip_reason:
+            fields.update({"content_status": acquired.extraction_reason or "over_size_cap",
+                           "scan_completeness": "NONE", "skip_reason": acquired.skip_reason})
+            return fields
+        if acquired.read_error:
+            fields.update({"content_status": "unreadable", "scan_completeness": "NONE", "bytes_scanned": 0,
+                           "scan_error": f"The file could not be read ({acquired.read_error})"})
+        elif acquired.extraction_reason == "password_protected":
+            fields.update({"content_status": "password_protected", "protected": True,
+                           "protection_type": "document_password", "scan_completeness": "NONE",
+                           "scan_error": "The document is encrypted and needs a password"})
+        elif acquired.extraction_reason:
+            fields.update({"content_status": acquired.extraction_reason, "scan_completeness": "NONE"})
+        return fields
+
+    def _note_unreadable(self, share_name: str, path: str, acquired: _SMBFileData) -> None:
+        # A file that could not be read leaves the scan incomplete, like a folder that could
+        # not be listed: what it holds was not looked at.
+        if not acquired.read_error:
+            return
+        with self._walk_lock:
+            errors = self.last_scan_diagnostics.setdefault("scan_errors", [])
+            if isinstance(errors, list) and len(errors) < 100:
+                errors.append({"share": share_name, "path": path, "error": acquired.read_error})
 
     def _build_work_records(self, work: _SMBFileWork) -> list[dict]:
         records: list[dict] = []
@@ -1005,18 +1489,25 @@ class SMBScanner:
                         work.remote_path,
                         work.is_hidden,
                         work.is_system,
+                        size=work.file_size,
                     )
                 )
             return records
 
-        acquired = self._acquire_file_data(
-            work.share_name,
-            work.remote_path,
-            work.extension,
-            work.file_size,
-            inspect_archive_entries=work.inspect_archive_entries,
-        )
-        if work.inspect_archive_entries:
+        if work.offline:
+            acquired = self._offline_data(work.share_name, work.remote_path, work.file_size, work.modified_at,
+                                          work.file_id)
+        else:
+            acquired = self._acquire_file_data(
+                work.share_name,
+                work.remote_path,
+                work.extension,
+                work.file_size,
+                inspect_archive_entries=work.inspect_archive_entries,
+                modified_at=work.modified_at,
+                file_id=work.file_id,
+            )
+        if work.inspect_archive_entries and not work.offline:
             records.extend(
                 self._read_zip_entries(
                     work.share_name,
@@ -1024,23 +1515,27 @@ class SMBScanner:
                     work.is_hidden,
                     work.is_system,
                     archive_data=acquired.archive_bytes,
+                    size=work.file_size,
                 )
             )
-        content = acquired.content
         archive_metadata = archive_protection_metadata(work.extension)
         zip_metadata = (
             self._inspect_zip_protection(
                 work.share_name,
                 work.remote_path,
                 archive_data=acquired.archive_bytes,
+                size=work.file_size,
+                directory_only=not work.inspect_archive_entries,
             )
-            if work.extension == ".zip"
+            if work.extension == ".zip" and not work.offline
             else {}
         )
         protected_metadata = zip_metadata or archive_metadata
         sha256 = acquired.sha256
+        self._note_unreadable(work.share_name, work.remote_path, acquired)
         acl = self._acl_for_path(work.share_name, work.remote_path)
         owner = str(acl.get("owner") or "")
+        fields = self._content_fields(work.extension, work.file_size, acquired, protected_metadata)
         records.append(
             {
                 "source": "smb",
@@ -1052,36 +1547,25 @@ class SMBScanner:
                 "is_dir": False,
                 "is_hidden": work.is_hidden,
                 "is_system": work.is_system,
-                "content": "" if protected_metadata else content,
+                "content": fields["content"],
                 "acl": acl,
                 "scan_mode": scan_mode_for_extension(work.extension),
-                "content_status": protected_metadata.get("content_status")
-                or content_status_for_extension(work.extension, content, self.config.read_content),
-                "content_scannable": bool(
-                    protected_metadata.get(
-                        "content_scannable",
-                        work.extension in CONTENT_EXTENSIONS or is_ocr_scannable(work.extension),
-                    )
-                ),
-                "protected": bool(protected_metadata.get("protected", False)),
-                "protection_type": protected_metadata.get("protection_type", ""),
-                "scan_error": protected_metadata.get("scan_error", ""),
+                "content_status": fields["content_status"],
+                "content_scannable": fields["content_scannable"],
+                "protected": fields["protected"],
+                "protection_type": fields["protection_type"],
+                "scan_error": fields["scan_error"],
                 "owner": owner,
                 "created_at": work.created_at,
                 "modified_at": work.modified_at,
                 "attributes": work.attributes,
                 "sha256": sha256,
                 "file_hash": sha256,
-                "scan_completeness": (
-                    "PARTIAL"
-                    if content and work.file_size > self.config.max_read_bytes
-                    else "FULL"
-                    if content or work.file_size == 0
-                    else "NONE"
-                ),
-                "bytes_scanned": min(work.file_size, self.config.max_read_bytes) if content else 0,
+                "scan_completeness": fields["scan_completeness"],
+                "bytes_scanned": fields["bytes_scanned"],
                 "total_bytes": work.file_size,
-                "truncated": bool(content and work.file_size > self.config.max_read_bytes),
+                "truncated": fields["truncated"],
+                "skip_reason": fields["skip_reason"],
                 "reuse_key": work.reuse_key,
             }
         )
@@ -1153,7 +1637,7 @@ class SMBScanner:
         holding one process-wide admission slot for the scan's duration."""
         records: list[dict] = []
         reset_shares: list[str] = []
-        with budget.slot():
+        with budget.slot(), self._target_gate().session():
             for share_name in shares:
                 if self._cancelled():
                     raise RuntimeError("Scan cancelled")
@@ -1189,7 +1673,7 @@ class SMBScanner:
         def run(share_name: str) -> tuple[str, list[dict], str]:
             if self._abort_event.is_set() or self._cancelled():
                 return share_name, [], "skipped"
-            with budget.slot():
+            with budget.slot(), self._target_gate().session():
                 if self._abort_event.is_set() or self._cancelled():
                     return share_name, [], "skipped"
                 if not self.connect():  # this worker's OWN thread-local connection
@@ -1229,6 +1713,184 @@ class SMBScanner:
     def _norm_share_path(value: str) -> str:
         return "/" + str(value or "").replace("\\", "/").strip("/")
 
+    def _share_selected(self, share_name: str) -> bool:
+        """Whether this scan walks a share: every share, unless ``allowed_shares`` names some
+        (B2.3). A person names them too (D1), and Windows share names ignore case."""
+        if self.config.allowed_shares is None:
+            return True
+        return share_name.casefold() in {name.casefold() for name in self.config.allowed_shares}
+
+    def plan_share_groups(self, stop_check: Callable[[], str | None] | None = None) -> list[list[str]] | None:
+        """The shares a scan walks, in its order, cut into groups no overlap crosses (B2.3).
+
+        The overlapping-share collapse only ever matches a file in one share with the
+        same file seen through a share whose root holds a folder named like the first.
+        So two shares can overlap only if one's root lists a folder with the other's
+        name. Groups that keep every such pair together - contiguous in the server's
+        listing order, so the groups in sequence are one scan's order - collapse
+        exactly what a scan of every share at once collapses.
+
+        This costs one root listing per share. A share whose root cannot be read yields
+        nothing through it in the scan either, so it overlaps nothing. Returns ``None``
+        when the plan cannot be trusted: the server cannot be reached, or a connection
+        dropped while a root was being listed.
+        """
+        if not self.connect():
+            return None
+        try:
+            shares = [
+                share.name
+                for share in list(self.connection.listShares())
+                if not self._skip_share(share.name) and self._share_selected(share.name)
+            ]
+            folders: dict[str, set[str]] = {}
+            for share_name in shares:
+                reason = stop_check() if stop_check is not None else None
+                if reason:
+                    raise RuntimeError(reason)
+                try:
+                    entries = self.connection.listPath(share_name, "/")
+                except Exception as exc:
+                    # Only a root this account may not read is known to yield nothing in
+                    # the scan as well. A dropped connection or a timeout might list fine a
+                    # moment later, and hide an overlap between groups (B2.3 review).
+                    if not _is_access_denied(exc):
+                        return None
+                    folders[share_name] = set()
+                    continue
+                folders[share_name] = {
+                    str(entry.filename).casefold()
+                    for entry in entries
+                    if entry.isDirectory and entry.filename not in {".", ".."}
+                }
+        finally:
+            self.close()
+        spans = sorted(
+            sorted((broad_index, narrow_index))
+            for broad_index, broad in enumerate(shares)
+            for narrow_index, narrow in enumerate(shares)
+            if narrow_index != broad_index and narrow.casefold() in folders[broad]
+        )
+        merged: list[list[int]] = []
+        for low, high in spans:
+            if merged and low <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], high)
+            else:
+                merged.append([low, high])
+        groups: list[list[str]] = []
+        position = 0
+        for low, high in merged:
+            groups.extend([name] for name in shares[position:low])
+            groups.append(shares[low:high + 1])
+            position = high + 1
+        groups.extend([name] for name in shares[position:])
+        return groups
+
+    def plan_share_ranges(
+        self,
+        share_name: str,
+        *,
+        max_files: int,
+        max_bytes: int,
+        stop_check: Callable[[], str | None] | None = None,
+    ) -> list[dict] | None:
+        """Cut one share into units of at most ``max_files`` files and ``max_bytes`` of reads (W1.2).
+
+        A share used to be the smallest unit an SMB scan had, so its memory and its time
+        followed its largest share. This walks the share's folders - names and sizes,
+        nothing read - and cuts it the way :func:`discovery.partition.plan_bounded_partitions`
+        cuts a local tree: a folder that fits stays inside its parent's unit, a larger
+        one is cut into runs of its own entries, and a subfolder too large for one run is
+        cut in place. A unit is a half-open range of case-folded names in one folder,
+        ``[name_from, name_to)``, and the ranges of a folder are contiguous, so every
+        entry it held when planned is in exactly one - and one that appears later is in
+        one too. Bytes are what the scan reads: each file's size, up to the read cap.
+
+        Returns ``None`` when the whole share fits one unit. Raises ``_SmbConnectionLost``
+        when the plan cannot be trusted: the connection dropped while a folder was listed.
+        """
+        if not self.connect():
+            raise _SmbConnectionLost(share_name, "could not establish an SMB planning connection")
+        read_cap = max(1, int(self.config.max_read_bytes or 1))
+        include_hidden_dirs = bool(self.config.include_hidden or self.config.hidden_filter_enabled)
+        files_budget = max(1, int(max_files))
+        bytes_budget = max(1, int(max_bytes))
+
+        def visit(folder: str, depth: int) -> tuple[int, int, list[dict] | None]:
+            if stop_check is not None:
+                reason = stop_check()
+                if reason:
+                    raise RuntimeError(reason)
+            if depth > self.config.max_depth or self._skip_path(folder):
+                return 0, 0, None
+            try:
+                entries = self.connection.listPath(share_name, folder)
+            except Exception as exc:
+                if _is_connection_error(exc):
+                    raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+                # Unreadable: whichever unit holds it lists it and reports the error.
+                return 0, 0, None
+            children: list[tuple[str, int, int, list[dict] | None]] = []
+            files = size = 0
+            for entry in sorted(entries, key=lambda item: str(item.filename).casefold()):
+                if entry.filename in {".", ".."}:
+                    continue
+                remote_path = str(PurePosixPath(folder) / entry.filename)
+                if self._skip_path(remote_path):
+                    continue
+                key = str(entry.filename).casefold()
+                if entry.isDirectory:
+                    if bool(getattr(entry, "isHidden", False)) and not include_hidden_dirs:
+                        continue
+                    if self._scope.active and self._scope.folder_reason(self._scope_path(share_name, remote_path)):
+                        # The walk skips it, and counts it: it weighs nothing here.
+                        continue
+                    child_files, child_bytes, child_units = visit(remote_path, depth + 1)
+                    files += child_files
+                    size += child_bytes
+                    children.append((key, child_files, child_bytes, child_units))
+                    continue
+                if self._scope.active and self._scope.file_reason(
+                        self._scope_path(share_name, remote_path), detect_extension(remote_path),
+                        int(getattr(entry, "file_size", 0) or 0), getattr(entry, "last_write_time", None)):
+                    continue  # out of scope: the walk lists it and leaves it, so it weighs nothing
+                weight = min(int(getattr(entry, "file_size", 0) or 0), read_cap)
+                files += 1
+                size += weight
+                children.append((key, 1, weight, None))
+            if files <= files_budget and size <= bytes_budget:
+                return files, size, None
+            units: list[dict] = []
+            low = ""
+            run_files = run_bytes = 0
+
+            def flush(high: str) -> None:
+                nonlocal run_files, run_bytes
+                units.append({"kind": "smb_range", "share": share_name, "folder": folder, "depth": depth,
+                              "name_from": low, "name_to": high})
+                run_files = run_bytes = 0
+
+            for key, child_files, child_bytes, child_units in children:
+                if child_units is not None:
+                    flush(key)
+                    units.extend(child_units)
+                    low = key + "\x00"
+                    continue
+                if (run_files or run_bytes) and (run_files + child_files > files_budget
+                                                  or run_bytes + child_bytes > bytes_budget):
+                    flush(key)
+                    low = key
+                run_files += child_files
+                run_bytes += child_bytes
+            flush("")
+            return files, size, units
+
+        try:
+            _files, _bytes, units = visit("/", 0)
+        finally:
+            self.close()
+        return units
+
     def _dedupe_overlapping_shares(self, records: list[dict]) -> list[dict]:
         """Collapse the SAME physical file surfaced through overlapping SMB shares.
 
@@ -1244,6 +1906,14 @@ class SMBScanner:
         different files that share the same bytes) - for a DLP tool that is real
         data proliferation and must stay visible. The kept record notes the
         redundant location in ``also_accessible_via``.
+
+        Every pair in a hash group is checked, narrowest location first, and a copy
+        found through a copy is credited to the narrowest (B2.3). Before, only the
+        single shortest path was compared: a third file with the same bytes elsewhere
+        hid a real overlap, and a share nested two deep collapsed one level. Two
+        locations in one share are never the same file. So the collapse depends only on
+        shares that can overlap, which lets a partitioned scan collapse inside a group
+        of shares and match a scan of every share at once.
         """
         by_hash: dict[str, list[dict]] = {}
         for record in records:
@@ -1256,15 +1926,22 @@ class SMBScanner:
                 continue
             # Shortest path first = the most-specific (nested) share -> the keeper.
             ordered = sorted(group, key=lambda r: len(self._norm_share_path(r.get("path"))))
-            keeper = ordered[0]
-            keep_share = str(keeper.get("share") or "").strip("/")
-            expected_broad = self._norm_share_path(keep_share + self._norm_share_path(keeper.get("path")))
-            for other in ordered[1:]:
-                if self._norm_share_path(other.get("path")) == expected_broad:
-                    drop.add((other.get("share"), other.get("path")))
-                    keeper.setdefault("also_accessible_via", []).append(
-                        {"share": other.get("share"), "path": other.get("path")}
-                    )
+            keeper_of: dict[int, dict] = {}
+            for record in ordered:
+                keeper = keeper_of.get(id(record), record)
+                share = str(record.get("share") or "").strip("/")
+                broad_path = self._norm_share_path(share + self._norm_share_path(record.get("path")))
+                for other in ordered:
+                    if other is record or other is keeper or id(other) in keeper_of:
+                        continue
+                    if other.get("share") == record.get("share"):
+                        continue
+                    if self._norm_share_path(other.get("path")) == broad_path:
+                        keeper_of[id(other)] = keeper
+                        drop.add((other.get("share"), other.get("path")))
+                        keeper.setdefault("also_accessible_via", []).append(
+                            {"share": other.get("share"), "path": other.get("path")}
+                        )
         if not drop:
             return records
         self.last_scan_diagnostics["overlapping_share_duplicates_collapsed"] = len(drop)
@@ -1280,13 +1957,19 @@ class SMBScanner:
         ]
 
     def _skip_share(self, share_name: str) -> bool:
-        if share_name in SYSTEM_SHARES:
+        """IPC$, print$ and ADMIN$ hold no data and are never walked. A drive's
+        administrative share (C$) is walked only with ``include_admin_shares``. Any other
+        hidden share - Payroll$, HR$, Finance$ - is walked with ``include_admin_shares`` or
+        when the scan names it. Every such share used to be skipped whatever the scan
+        said, named or not, and only ever showed up in shares_skipped."""
+        if share_name.casefold() in {name.casefold() for name in SYSTEM_SHARES}:
             return True
-        if share_name.endswith("$") and not self.config.include_admin_shares:
-            return True
-        if share_name.endswith("$") and not re.fullmatch(r"[A-Za-z]\$", share_name):
-            return True
-        return False
+        if not share_name.endswith("$"):
+            return False
+        if re.fullmatch(r"[A-Za-z]\$", share_name):
+            return not self.config.include_admin_shares
+        named = self.config.allowed_shares is not None and self._share_selected(share_name)
+        return not (self.config.include_admin_shares or named)
 
     def _server_candidates(self) -> list[str]:
         server = self.config.server.strip()
@@ -1319,7 +2002,39 @@ class SMBScanner:
 
         return candidates
 
+    def _target_gate(self):
+        """This server's sessions, bandwidth and backoff, shared with every scan of it (W2.3)."""
+        return smb_target.target_gate(self.config.server)
+
+    def _offline(self, entry) -> bool:
+        """Whether reading the entry would recall it from tiered storage - and it is not to be."""
+        return smb_target.needs_recall(getattr(entry, "file_attributes", 0)) and not smb_target.read_offline_files()
+
+    def _offline_data(self, share_name: str, path: str, size: int, modified_at: str, file_id: str) -> _SMBFileData:
+        """An offline file's record data: named by its metadata whatever the hash policy -
+        any byte read would recall it - and said to be not read."""
+        self._target_gate().skipped_offline()
+        self._bump_diag("content_skipped_offline")
+        return _SMBFileData(
+            content="", sha256=content_policy.meta_identity(size, modified_at, file_id),
+            extraction_reason="offline_not_recalled",
+            skip_reason="The file is offline in tiered storage; reading it would recall it, so its content "
+                        "was not read (DSPM_SMB_READ_OFFLINE=1 reads it)")
+
+    def _remember_credential(self, server: str, label: str) -> None:
+        with _working_credentials_lock:
+            _working_credentials[(str(server).lower(), self.config.username.strip().lower())] = label
+
     def _credential_candidates(self) -> list[tuple[str, str, str]]:
+        candidates = self._credential_candidates_in_order()
+        with _working_credentials_lock:
+            remembered = _working_credentials.get(
+                (str(self.config.server).lower(), self.config.username.strip().lower()))
+        if remembered:
+            candidates.sort(key=lambda candidate: candidate[2] != remembered)
+        return candidates
+
+    def _credential_candidates_in_order(self) -> list[tuple[str, str, str]]:
         username = self.config.username.strip()
         domain = (self.config.domain.strip() or "WORKGROUP").strip()
         server_name = self._server_short_name()
@@ -1349,12 +2064,39 @@ class SMBScanner:
 
         return candidates
 
+    def _scope_path(self, share_name: str, remote_path: str) -> str:
+        """A share-relative path in the scope's form: ``share/folder/file``."""
+        return self._scope.path_of(f"{share_name}/{remote_path}")
+
+    def _scope_skips_folder(self, share_name: str, folder: str) -> bool:
+        """Whether a folder - or a whole share, at ``/`` - is out of scope; counted when it is."""
+        if self._scope_tally is None:
+            return False
+        reason = self._scope.folder_reason(self._scope_path(share_name, folder))
+        if reason:
+            self._scope_tally.folder(reason)
+        return bool(reason)
+
+    def _scope_skips_file(self, share_name: str, remote_path: str, extension: str, entry) -> bool:
+        """Whether a listed file is out of scope - by its path, extension, size or time, all
+        of which the listing gives; counted when it is."""
+        if self._scope_tally is None:
+            return False
+        reason = self._scope.file_reason(self._scope_path(share_name, remote_path), extension,
+                                         int(getattr(entry, "file_size", 0) or 0),
+                                         getattr(entry, "last_write_time", None))
+        if reason:
+            self._scope_tally.file(reason)
+        return bool(reason)
+
     def _walk_share(self, share_name: str, folder: str, depth: int) -> list[dict]:
         if self._cancelled():
             raise RuntimeError("Scan cancelled")
         if self.connection is None or depth > self.config.max_depth:
             return []
         if self._skip_path(folder):
+            return []
+        if self._scope_skips_folder(share_name, folder):
             return []
 
         records: list[dict] = []
@@ -1394,6 +2136,8 @@ class SMBScanner:
             if is_dir:
                 if is_hidden and not (self.config.include_hidden or self.config.hidden_filter_enabled):
                     continue
+                if self._scope_skips_folder(share_name, remote_path):
+                    continue
                 records.extend(self._walk_share(share_name, remote_path, depth + 1))
                 continue
 
@@ -1401,6 +2145,8 @@ class SMBScanner:
             with self._walk_lock:
                 self._progress_counters["visited"] += 1
             self._emit_collection_progress()
+            if self._scope_skips_file(share_name, remote_path, extension, entry):
+                continue
             include_top = matches_scan_filters(
                 extension,
                 is_hidden,
@@ -1413,7 +2159,8 @@ class SMBScanner:
                 self.config.system_filter_enabled,
             )
             if not include_top and self.config.inspect_archives and self._should_scan_archive_entries(extension):
-                records.extend(self._read_zip_entries(share_name, remote_path, is_hidden, is_system))
+                records.extend(self._read_zip_entries(share_name, remote_path, is_hidden, is_system,
+                                                      size=int(getattr(entry, "file_size", 0) or 0)))
                 continue
             if not include_top:
                 continue
@@ -1488,16 +2235,23 @@ class SMBScanner:
                     self._emit_collection_progress()
                     continue
 
+            offline = self._offline(entry)
             inspect_archive_entries = bool(
-                self.config.inspect_archives and self._should_scan_archive_entries(extension)
+                self.config.inspect_archives and self._should_scan_archive_entries(extension) and not offline
             )
-            acquired = self._acquire_file_data(
-                share_name,
-                remote_path,
-                extension,
-                file_size,
-                inspect_archive_entries=inspect_archive_entries,
-            )
+            if offline:
+                acquired = self._offline_data(share_name, remote_path, file_size, modified_at,
+                                              str(getattr(entry, "file_id", "") or ""))
+            else:
+                acquired = self._acquire_file_data(
+                    share_name,
+                    remote_path,
+                    extension,
+                    file_size,
+                    inspect_archive_entries=inspect_archive_entries,
+                    modified_at=modified_at,
+                    file_id=str(getattr(entry, "file_id", "") or ""),
+                )
             if inspect_archive_entries:
                 records.extend(
                     self._read_zip_entries(
@@ -1506,23 +2260,27 @@ class SMBScanner:
                         is_hidden,
                         is_system,
                         archive_data=acquired.archive_bytes,
+                        size=file_size,
                     )
                 )
-            content = acquired.content
             archive_metadata = archive_protection_metadata(extension)
             zip_metadata = (
                 self._inspect_zip_protection(
                     share_name,
                     remote_path,
                     archive_data=acquired.archive_bytes,
+                    size=file_size,
+                    directory_only=not inspect_archive_entries,
                 )
-                if extension == ".zip"
+                if extension == ".zip" and not offline
                 else {}
             )
             protected_metadata = zip_metadata or archive_metadata
             sha256 = acquired.sha256
+            self._note_unreadable(share_name, remote_path, acquired)
             acl = self._acl_for_path(share_name, remote_path)
             owner = str(acl.get("owner") or "")
+            fields = self._content_fields(extension, file_size, acquired, protected_metadata)
             records.append(
                 {
                     "source": "smb",
@@ -1534,24 +2292,25 @@ class SMBScanner:
                     "is_dir": False,
                     "is_hidden": is_hidden,
                     "is_system": is_system,
-                    "content": "" if protected_metadata else content,
+                    "content": fields["content"],
                     "acl": acl,
                     "scan_mode": scan_mode_for_extension(extension),
-                    "content_status": protected_metadata.get("content_status") or content_status_for_extension(extension, content, self.config.read_content),
-                    "content_scannable": bool(protected_metadata.get("content_scannable", (extension in CONTENT_EXTENSIONS or is_ocr_scannable(extension)))),
-                    "protected": bool(protected_metadata.get("protected", False)),
-                    "protection_type": protected_metadata.get("protection_type", ""),
-                    "scan_error": protected_metadata.get("scan_error", ""),
+                    "content_status": fields["content_status"],
+                    "content_scannable": fields["content_scannable"],
+                    "protected": fields["protected"],
+                    "protection_type": fields["protection_type"],
+                    "scan_error": fields["scan_error"],
                     "owner": owner,
                     "created_at": created_at,
                     "modified_at": modified_at,
                     "attributes": attributes,
                     "sha256": sha256,
                     "file_hash": sha256,
-                    "scan_completeness": "PARTIAL" if content and file_size > self.config.max_read_bytes else "FULL" if content or file_size == 0 else "NONE",
-                    "bytes_scanned": min(file_size, self.config.max_read_bytes) if content else 0,
+                    "scan_completeness": fields["scan_completeness"],
+                    "bytes_scanned": fields["bytes_scanned"],
                     "total_bytes": file_size,
-                    "truncated": bool(content and file_size > self.config.max_read_bytes),
+                    "truncated": fields["truncated"],
+                    "skip_reason": fields["skip_reason"],
                     "reuse_key": reuse_key,
                 }
             )
@@ -1571,24 +2330,15 @@ class SMBScanner:
         is_hidden: bool,
         is_system: bool,
         archive_data: bytes | None = None,
+        size: int | None = None,
     ) -> list[dict]:
         if self.connection is None and archive_data is None:
             return []
         try:
-            from io import BytesIO
-
-            buffer = BytesIO(archive_data) if archive_data is not None else BytesIO()
-            if archive_data is None:
-                self.connection.retrieveFileFromOffset(
-                    share_name,
-                    path,
-                    buffer,
-                    offset=0,
-                    max_length=MAX_ARCHIVE_TOTAL_BYTES,
-                )
-            buffer.seek(0)
+            source = self._archive_source(share_name, path, archive_data, size)
+            ranged = getattr(source, "raw", None)
             records: list[dict] = []
-            with zipfile.ZipFile(buffer) as archive:
+            with zipfile.ZipFile(source) as archive:
                 entries = archive.infolist()[:MAX_ARCHIVE_ENTRIES]
                 for entry in entries:
                     if entry.is_dir():
@@ -1626,10 +2376,16 @@ class SMBScanner:
                         content_scannable = bool(archive_metadata.get("content_scannable", content_scannable))
                         protection_type = str(archive_metadata.get("protection_type") or "")
                         scan_error = str(archive_metadata.get("scan_error") or "")
-                    if not protected and self.config.read_content and extension in TEXT_EXTENSIONS:
+                    if (not protected and self.config.read_content and extension in TEXT_EXTENSIONS
+                            and isinstance(ranged, _SmbRangeFile)
+                            and ranged.transferred + int(entry.compress_size or 0) + _RANGE_READ_BUFFER > ranged.budget):
+                        # An archive read by range stops at the bytes a scan keeps of one
+                        # file: what is past them is listed, not read.
+                        content_status = "not_inspected"
+                    elif not protected and self.config.read_content and extension in TEXT_EXTENSIONS:
                         try:
                             with archive.open(entry) as handle:
-                                content = handle.read(min(self.config.max_read_bytes, MAX_ARCHIVE_ENTRY_BYTES)).decode("utf-8", errors="replace")
+                                content = decode_text(handle.read(min(self.config.max_read_bytes, MAX_ARCHIVE_ENTRY_BYTES)))
                                 content_status = content_status_for_extension(extension, content, self.config.read_content)
                         except (OSError, RuntimeError, zipfile.BadZipFile):
                             protected = True
@@ -1669,31 +2425,46 @@ class SMBScanner:
                     )
             return records
         except Exception as exc:
-            logger.debug("Could not inspect archive entries for %s:%s: %s", share_name, path, exc)
+            if _is_connection_error(exc):
+                raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+            logger.debug("Could not inspect archive entries for %s:%s: %s", share_name, path, _brief(exc))
             return []
+
+    def _archive_source(self, share_name: str, path: str, archive_data: bytes | None, size: int | None,
+                        directory_only: bool = False):
+        """What zipfile opens the archive from: the bytes already captured when they are the
+        whole file; the remote file read by range when it is larger than a scan keeps (its
+        directory is at the end, past any prefix) or when only its directory is wanted (W2.2:
+        a protection check reads the directory, not the archive); else the whole file."""
+        if archive_data is not None and (size is None or len(archive_data) >= size):
+            return io.BytesIO(archive_data)
+        if size is not None and (size > MAX_ARCHIVE_TOTAL_BYTES or directory_only):
+            ranged = _SmbRangeFile(self.connection, share_name, path, size, MAX_ARCHIVE_TOTAL_BYTES)
+            return io.BufferedReader(ranged, buffer_size=_RANGE_READ_BUFFER)
+        buffer = io.BytesIO()
+        self.connection.retrieveFileFromOffset(
+            share_name,
+            path,
+            buffer,
+            offset=0,
+            max_length=MAX_ARCHIVE_TOTAL_BYTES,
+        )
+        buffer.seek(0)
+        return buffer
 
     def _inspect_zip_protection(
         self,
         share_name: str,
         path: str,
         archive_data: bytes | None = None,
+        size: int | None = None,
+        directory_only: bool = False,
     ) -> dict[str, str | bool]:
         if self.connection is None and archive_data is None:
             return {}
         try:
-            from io import BytesIO
-
-            buffer = BytesIO(archive_data) if archive_data is not None else BytesIO()
-            if archive_data is None:
-                self.connection.retrieveFileFromOffset(
-                    share_name,
-                    path,
-                    buffer,
-                    offset=0,
-                    max_length=MAX_ARCHIVE_TOTAL_BYTES,
-                )
-            buffer.seek(0)
-            with zipfile.ZipFile(buffer) as archive:
+            with zipfile.ZipFile(self._archive_source(share_name, path, archive_data, size,
+                                                      directory_only)) as archive:
                 encrypted = any(bool(entry.flag_bits & 0x1) for entry in archive.infolist()[:2000])
                 if encrypted:
                     return {
@@ -1703,7 +2474,17 @@ class SMBScanner:
                         "protection_type": "zip_password",
                         "scan_error": "ZIP archive has encrypted entries and needs a password",
                     }
-        except Exception:
+        except _ArchiveTooLarge:
+            # Its directory alone is more than a scan reads of one file: not inspected,
+            # which is not the same as protected.
+            return {
+                "content_status": "not_inspected",
+                "content_scannable": False,
+                "scan_error": "ZIP archive is too large to inspect",
+            }
+        except Exception as exc:
+            if _is_connection_error(exc):
+                raise _SmbConnectionLost(share_name, _brief(exc)) from exc
             return {
                 "protected": True,
                 "content_status": "bad_archive",
@@ -1851,9 +2632,58 @@ class SMBScanner:
         Credentials remain off argv: only the non-secret path/user payload is
         encoded into the command, while the password travels in the child
         environment exactly as in the legacy implementation.
+
+        The payload rides in the command line, which Windows caps at 32,767
+        characters. Encoded twice, 32 paths of 80 characters came to 41,536: the
+        launch failed with an OSError and every path fell back to a PowerShell
+        process of its own (E6). A batch whose command would not fit is halved until
+        each half does; a single path that cannot fit falls back alone.
         """
         if not paths:
             return {}
+        encoded_script = self._acl_batch_command(share_name, paths)
+        if len(encoded_script) > ACL_BATCH_COMMAND_LIMIT:
+            if len(paths) == 1:
+                self._bump_diag("acl_batch_path_too_long")
+                return {}
+            self._bump_diag("acl_batch_splits")
+            middle = len(paths) // 2
+            merged: dict[str, dict] = {}
+            for half in (paths[:middle], paths[middle:]):
+                merged.update(self._acl_batch_for_paths(share_name, half) or {})
+            return merged
+        share_root = self._unc_path(share_name, "")
+        started = time.perf_counter()
+        self._bump_diag("acl_batch_processes")
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-EncodedCommand",
+                    encoded_script,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self._acl_batch_timeout_seconds(len(paths)),
+                env={**os.environ, "DSPM_SMB_ACL_PW": self.config.password or ""},
+            )
+        except (OSError, subprocess.SubprocessError):
+            self._bump_diag("acl_batch_failures")
+            return None
+        finally:
+            self._add_diag_ms(
+                "acl_batch_elapsed_ms",
+                (time.perf_counter() - started) * 1000,
+            )
+        return self._parse_acl_batch(share_root, completed)
+
+    def _acl_batch_command(self, share_name: str, paths: list[str]) -> str:
+        """The ``-EncodedCommand`` argument that reads these paths' ACLs."""
         username, _domain = self._windows_credential()
         share_root = self._unc_path(share_name, "")
         items = [
@@ -1915,6 +2745,9 @@ class SMBScanner:
                 permissions = @($acl.Access | ForEach-Object {
                   $_.FileSystemRights.ToString()
                 })
+                types = @($acl.Access | ForEach-Object {
+                  $_.AccessControlType.ToString()
+                })
                 error = ''
               }) | Out-Null
             } catch {
@@ -1924,6 +2757,7 @@ class SMBScanner:
                 owner = ''
                 principals = @()
                 permissions = @()
+                types = @()
                 error = [string]$_.Exception.GetType().Name
               }) | Out-Null
             }
@@ -1936,35 +2770,9 @@ class SMBScanner:
         [PSCustomObject]@{ results = @($results) } |
           ConvertTo-Json -Depth 5 -Compress
         """.replace("__DSPM_PAYLOAD__", encoded_payload)
-        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        started = time.perf_counter()
-        self._bump_diag("acl_batch_processes")
-        try:
-            completed = subprocess.run(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-EncodedCommand",
-                    encoded_script,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=self._acl_batch_timeout_seconds(len(paths)),
-                env={**os.environ, "DSPM_SMB_ACL_PW": self.config.password or ""},
-            )
-        except (OSError, subprocess.SubprocessError):
-            self._bump_diag("acl_batch_failures")
-            return None
-        finally:
-            self._add_diag_ms(
-                "acl_batch_elapsed_ms",
-                (time.perf_counter() - started) * 1000,
-            )
+        return base64.b64encode(script.encode("utf-16le")).decode("ascii")
 
+    def _parse_acl_batch(self, share_root: str, completed) -> dict[str, dict] | None:
         if completed.returncode != 0:
             self._bump_diag("acl_batch_failures")
             logger.debug(
@@ -1990,24 +2798,11 @@ class SMBScanner:
             path = str(row.get("path") or "")
             if not path:
                 continue
-            principals = row.get("principals") or []
-            permissions = row.get("permissions") or []
-            if isinstance(principals, str):
-                principals = [principals]
             if row.get("ok") is False:
                 self._bump_diag("acl_batch_item_failures")
                 continue
-            if isinstance(permissions, str):
-                permissions = [permissions]
-            normalized[path] = {
-                "owner": str(row.get("owner") or ""),
-                "principals": [
-                    str(item) for item in principals if str(item or "").strip()
-                ],
-                "permissions": [
-                    str(item) for item in permissions if str(item or "").strip()
-                ],
-            }
+            normalized[path] = normalize_acl(row.get("owner"), row.get("principals"), row.get("permissions"),
+                                             row.get("types"))
         return normalized
 
     def _acl_inproc(self, unc_path: str) -> dict | None:
@@ -2021,11 +2816,7 @@ class SMBScanner:
         owner = str(acl.get("owner") or "")
         if not owner:
             return None
-        normalized = {
-            "owner": owner,
-            "principals": [str(item) for item in (acl.get("principals") or []) if str(item or "").strip()],
-            "permissions": [str(item) for item in (acl.get("permissions") or []) if str(item or "").strip()],
-        }
+        normalized = normalize_acl(owner, acl.get("principals"), acl.get("permissions"), entries=acl.get("entries"))
         if normalized["principals"]:
             self._bump_diag("acl_read_success")
         self._bump_diag("acl_inproc_paths")
@@ -2067,6 +2858,7 @@ class SMBScanner:
               owner = [string]$directAcl.Owner
               principals = @($directAcl.Access | ForEach-Object {{ $_.IdentityReference.Value }})
               permissions = @($directAcl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+              types = @($directAcl.Access | ForEach-Object {{ $_.AccessControlType.ToString() }})
             }} | ConvertTo-Json -Compress
             exit 0
           }}
@@ -2090,6 +2882,7 @@ class SMBScanner:
             owner = [string]$acl.Owner
             principals = @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }})
             permissions = @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+            types = @($acl.Access | ForEach-Object {{ $_.AccessControlType.ToString() }})
           }} | ConvertTo-Json -Compress
         }} finally {{
           Remove-PSDrive -Name $driveName -Force -ErrorAction SilentlyContinue
@@ -2125,17 +2918,7 @@ class SMBScanner:
             acl = json.loads(completed.stdout.strip()) if completed.stdout.strip() else {}
         except json.JSONDecodeError:
             acl = {"owner": completed.stdout.strip().splitlines()[0] if completed.stdout.strip() else ""}
-        principals = acl.get("principals", [])
-        permissions = acl.get("permissions", [])
-        if isinstance(principals, str):
-            principals = [principals]
-        if isinstance(permissions, str):
-            permissions = [permissions]
-        normalized_acl = {
-            "owner": str(acl.get("owner") or ""),
-            "principals": [str(item) for item in principals if str(item or "").strip()],
-            "permissions": [str(item) for item in permissions if str(item or "").strip()],
-        }
+        normalized_acl = normalize_acl(acl.get("owner"), acl.get("principals"), acl.get("permissions"), acl.get("types"))
         if not normalized_acl["owner"]:
             self._bump_diag("owner_read_failed")
         if normalized_acl["principals"]:
@@ -2179,14 +2962,37 @@ class SMBScanner:
                 offset += len(chunk)
             return digest.hexdigest() if offset == size else ""
         except Exception as exc:
-            logger.debug("Could not hash %s:%s: %s", share_name, path, exc)
+            # A dropped session fails every later read on it too: the chunk retries on a
+            # fresh one rather than hashing the rest of its files against a dead socket.
+            if _is_connection_error(exc):
+                raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+            logger.debug("Could not hash %s:%s: %s", share_name, path, _brief(exc))
             return ""
 
     @staticmethod
     def _preview_content_from_bytes(data: bytes, extension: str) -> str:
         """Apply the existing text/document/OCR extraction to acquired bytes."""
+        return SMBScanner._preview_from_bytes(data, extension)[0]
+
+    @staticmethod
+    def _extract_from_bytes(data: bytes, extension: str) -> tuple[str, str, bool]:
+        """(text, why there is none, whether it is cut short) for acquired bytes. A
+        document is extracted from memory - its bytes no longer touch the disk."""
+        if extension in BINARY_TEXT_EXTENSIONS:
+            return extract_binary_bytes_detail(data, extension)
+        text, reason = SMBScanner._preview_from_bytes(data, extension)
+        return text, reason, False
+
+    @staticmethod
+    def _preview_from_bytes(data: bytes, extension: str) -> tuple[str, str]:
+        """(text, why there is none) for acquired bytes - the document extractor's reason,
+        or "" (collectors.binary_extractor.extract_binary_bytes_detail)."""
         if extension not in BINARY_TEXT_EXTENSIONS and not is_ocr_scannable(extension):
-            return data.decode("utf-8", errors="replace")
+            # The file's encoding, from its byte-order mark (a UTF-16 export is not UTF-8).
+            return decode_text(data), ""
+        if extension in BINARY_TEXT_EXTENSIONS:
+            text, reason, _truncated = extract_binary_bytes_detail(data, extension)
+            return text, reason
 
         temp_path = None
         try:
@@ -2201,9 +3007,7 @@ class SMBScanner:
                 temp_file.write(data)
             from pathlib import Path
 
-            if is_ocr_scannable(extension):
-                return extract_text_from_image(Path(temp_path))
-            return extract_binary_text(Path(temp_path))
+            return extract_text_from_image(Path(temp_path)), ""
         finally:
             if temp_path:
                 from pathlib import Path
@@ -2221,33 +3025,35 @@ class SMBScanner:
                     pass
                 Path(temp_path).unlink(missing_ok=True)
 
-    def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
-        if self.connection is None or not self.config.read_content:
-            return ""
-        if (
-            extension not in TEXT_EXTENSIONS
-            and extension not in BINARY_TEXT_EXTENSIONS
-            and not is_ocr_scannable(extension)
-        ):
-            return ""
+    def _fetch_preview(self, share_name: str, path: str, extension: str, size: int | None = None) -> tuple[str, str, bool]:
+        """(text, why there is none, cut short) for what the scan inspects of the file: a
+        text file's first ``max_read_bytes``, a document whole (within its cap - the caller
+        checked). Raises when the read fails."""
+        from io import BytesIO
 
-        try:
-            from io import BytesIO
-
-            buffer = BytesIO()
+        document = extension in BINARY_TEXT_EXTENSIONS or is_ocr_scannable(extension)
+        limit = int(size) if document and size is not None else self.config.max_read_bytes
+        buffer = BytesIO()
+        with capture_budget().take(limit):
             self.connection.retrieveFileFromOffset(
                 share_name,
                 path,
                 buffer,
                 offset=0,
-                max_length=self.config.max_read_bytes,
+                max_length=limit,
             )
-            data = buffer.getvalue()
-            return self._preview_content_from_bytes(data, extension)
-        except Exception as exc:
-            logger.debug("Could not read preview for %s:%s: %s", share_name, path, exc)
-            return ""
+            return self._extract_from_bytes(buffer.getvalue(), extension)
 
+    def _read_file_preview(self, share_name: str, path: str, extension: str) -> str:
+        if self.connection is None or not self._preview_requested(extension):
+            return ""
+        try:
+            return self._fetch_preview(share_name, path, extension)[0]
+        except Exception as exc:
+            if _is_connection_error(exc):
+                raise _SmbConnectionLost(share_name, _brief(exc)) from exc
+            logger.debug("Could not read preview for %s:%s: %s", share_name, path, _brief(exc))
+            return ""
 
 def scan_smb(ip: str, username: str = "", password: str = "", domain: str = "WORKGROUP") -> list[dict]:
     return SMBScanner(SMBConfig(server=ip, username=username, password=password, domain=domain)).scan()

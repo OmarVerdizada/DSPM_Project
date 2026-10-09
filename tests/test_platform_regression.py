@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from collectors.binary_extractor import extract_binary_text
 from collectors.file_scanner import scan_directory
+from discovery import scan_cache
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
 
@@ -24,7 +25,9 @@ class PlatformRegressionTests(unittest.TestCase):
         }
 
         analyzed = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["gdpr"]))._analyze_record(record)
-        email = next(item for item in analyzed["findings"] if item["type"] == "gdpr_email_address")
+        # B7: one email, one finding - the GDPR rule is named in detected_by.
+        email = next(item for item in analyzed["findings"]
+                     if "gdpr_email_address" in (item.get("detected_by") or [item.get("type")]))
 
         self.assertEqual(email["scan_completeness"], "UNKNOWN")
         self.assertFalse(email["truncated"])
@@ -43,7 +46,9 @@ class PlatformRegressionTests(unittest.TestCase):
         }
 
         analyzed = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["gdpr"]))._analyze_record(record)
-        email = next(item for item in analyzed["findings"] if item["type"] == "gdpr_email_address")
+        # B7: one email, one finding - the GDPR rule is named in detected_by.
+        email = next(item for item in analyzed["findings"]
+                     if "gdpr_email_address" in (item.get("detected_by") or [item.get("type")]))
 
         self.assertFalse(email["truncated"])
         self.assertGreater(email["occurrences"][0]["offset_start"], 10 * 1024 * 1024 - 80)
@@ -62,7 +67,9 @@ class PlatformRegressionTests(unittest.TestCase):
         }
 
         analyzed = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["gdpr"]))._analyze_record(record)
-        email = next(item for item in analyzed["findings"] if item["type"] == "gdpr_email_address")
+        # B7: one email, one finding - the GDPR rule is named in detected_by.
+        email = next(item for item in analyzed["findings"]
+                     if "gdpr_email_address" in (item.get("detected_by") or [item.get("type")]))
 
         self.assertFalse(email["truncated"])
         self.assertGreater(email["occurrences"][0]["offset_start"], 100 * 1024 * 1024 - 80)
@@ -96,7 +103,9 @@ class PlatformRegressionTests(unittest.TestCase):
 
             records = scan_directory(temp_dir, allowed_extensions=[".txt"], extension_filter_enabled=True)
             analyzed = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["gdpr"]))._analyze_record(records[0])
-            email = next(item for item in analyzed["findings"] if item["type"] == "gdpr_email_address")
+            # B7: one email, one finding - the GDPR rule is named in detected_by.
+            email = next(item for item in analyzed["findings"]
+                         if "gdpr_email_address" in (item.get("detected_by") or [item.get("type")]))
 
             self.assertEqual(records[0]["scan_completeness"], "FULL")
             self.assertFalse(records[0]["truncated"])
@@ -164,7 +173,7 @@ class PlatformRegressionTests(unittest.TestCase):
             self.assertEqual(first["incremental_scan_reason"], "cache_miss_new_or_changed_file")
             self.assertEqual(second["incremental_scan_reason"], "cache_hit_unchanged_file")
             self.assertTrue(second["detector_metrics"]["cache_hit"])
-            self.assertTrue(list(cache_dir.glob("*.json")))
+            self.assertTrue(list(scan_cache.tenant_cache_dir(cache_dir, config.tenant_id).glob(f"*{scan_cache.FINDINGS_SUFFIX}")))
 
     def test_run_uses_worker_pool_when_configured(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
@@ -209,7 +218,9 @@ class PlatformRegressionTests(unittest.TestCase):
         }
         engine = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["pci_dss"], persistent_cache_enabled=False))
 
-        with patch("discovery.discovery_engine.classify_pci_content", side_effect=ValueError("invalid literal for int() with base 16: ''")):
+        # The detectors moved into discovery.detector_stage so they can run in
+        # a worker process; this patches where they are actually called.
+        with patch("discovery.detector_stage.classify_pci_content", side_effect=ValueError("invalid literal for int() with base 16: ''")):
             analyzed = engine._analyze_record_safe(dict(record))
 
         self.assertEqual(analyzed["findings"], [])

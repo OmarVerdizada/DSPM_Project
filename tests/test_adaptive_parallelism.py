@@ -95,7 +95,7 @@ class CollectorPipelineTests(unittest.TestCase):
         records = [self._record(name) for name in ("a.txt", "b.txt", "c.txt", "d.txt")]
         engine = DSPMDiscoveryEngine(
             ScanConfig(
-                use_sample_when_empty=False,
+                walk_local_path=False,
                 max_workers=2,
                 pipeline_buffer=2,
                 persistent_cache_enabled=False,

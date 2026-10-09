@@ -25,6 +25,10 @@ def _past() -> str:
 class ApiKeyStoreTests(unittest.TestCase):
     TENANT = "t_apikey_store"
 
+    def setUp(self) -> None:
+        if not store.tenant_exists(self.TENANT):
+            store.create_tenant(self.TENANT, self.TENANT)
+
     def tearDown(self) -> None:
         with store._connect() as conn:
             conn.execute("DELETE FROM api_keys WHERE tenant_id = ?", (self.TENANT,))
@@ -44,6 +48,10 @@ class ApiKeyStoreTests(unittest.TestCase):
 
 class ApiKeyAuthTests(unittest.TestCase):
     TENANT = "t_apikey_auth"
+
+    def setUp(self) -> None:
+        if not store.tenant_exists(self.TENANT):
+            store.create_tenant(self.TENANT, self.TENANT)
 
     def tearDown(self) -> None:
         with store._connect() as conn:

@@ -81,12 +81,12 @@ class PartitionParityTests(unittest.TestCase):
             pass
 
     def _config(self) -> ScanConfig:
-        # use_sample_when_empty=True is the "scan the local filesystem" flag (a
+        # walk_local_path=True is the "scan the local filesystem" flag (a
         # misnomer - there is no fake-sample injection). Cache/incremental off so
         # the comparison isolates partitioning, not reuse behavior.
         return ScanConfig(
             tenant_id="partition-test", local_path=self.root, max_depth=4,
-            use_sample_when_empty=True, persistent_cache_enabled=False, incremental_enabled=False,
+            walk_local_path=True, persistent_cache_enabled=False, incremental_enabled=False,
         )
 
     def _single(self) -> dict:

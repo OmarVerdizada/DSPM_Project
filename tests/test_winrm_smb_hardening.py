@@ -185,12 +185,40 @@ class WinrmTransportTests(unittest.TestCase):
     def _scanner(self, use_ssl: bool = False) -> WinRMEndpointScanner:
         return WinRMEndpointScanner(WinRMEndpointConfig(host="h", username="u", password="p", domain="D", use_ssl=use_ssl))
 
-    def test_kerberos_preferred_with_ntlm_fallback_when_enabled(self) -> None:
+    def test_ntlm_is_the_default(self) -> None:
         scanner = self._scanner()
-        with mock.patch.dict(os.environ, {"DSPM_WINRM_KERBEROS": "1"}):
-            self.assertEqual(scanner._winrm_transports(), ["kerberos", "ntlm"])
         with mock.patch.dict(os.environ, {"DSPM_WINRM_KERBEROS": "0"}):
             self.assertEqual(scanner._winrm_transports(), ["ntlm"])
+
+    def test_kerberos_is_used_when_it_is_asked_for_and_available(self) -> None:
+        scanner = self._scanner()
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_KERBEROS": "1"}), \
+                mock.patch.object(winrm, "_kerberos_transport_available", return_value=True):
+            self.assertEqual(scanner._winrm_transports(), ["kerberos"])
+
+    def test_requiring_kerberos_without_it_fails_instead_of_using_ntlm(self) -> None:
+        """This used to return ["kerberos", "ntlm"].
+
+        requests-kerberos is an optional pywinrm extra and is not installed
+        here, so the Kerberos attempt failed instantly and every scan ran on
+        NTLM while the operator believed they had turned NTLM off. A security
+        control that silently does not apply is worse than one that was never
+        offered, so it now refuses and names the missing package.
+        """
+        scanner = self._scanner()
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_KERBEROS": "1"}), \
+                mock.patch.object(winrm, "_kerberos_transport_available", return_value=False):
+            with self.assertRaises(winrm.WinRMKerberosUnavailable) as raised:
+                scanner._winrm_transports()
+        self.assertIn("pywinrm[kerberos]", str(raised.exception))
+
+    def test_the_old_fallback_is_still_available_but_has_to_be_chosen(self) -> None:
+        scanner = self._scanner()
+        with mock.patch.dict(os.environ, {"DSPM_WINRM_KERBEROS": "prefer"}):
+            with mock.patch.object(winrm, "_kerberos_transport_available", return_value=False):
+                self.assertEqual(scanner._winrm_transports(), ["ntlm"])
+            with mock.patch.object(winrm, "_kerberos_transport_available", return_value=True):
+                self.assertEqual(scanner._winrm_transports(), ["kerberos", "ntlm"])
 
     def test_cert_validation_defaults_validate_opts_into_ignore(self) -> None:
         scanner = self._scanner(use_ssl=True)

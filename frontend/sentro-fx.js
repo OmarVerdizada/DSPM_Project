@@ -270,8 +270,6 @@
   /* ── Empty-state CTAs: a next step inside curated empties.
      Buttons only click the same nav tabs a user would. ───── */
   var emptyCtas = [
-    { root: "#results-body", label: "Start your first scan", tab: "file-servers" },
-    { root: "#findings-signal-summary", label: "Run a file scan", tab: "file-servers" },
     { root: "#exposure-permissions-summary", label: "Run an endpoint scan", tab: "endpoint" },
     { root: "#report-preview", label: "Start a scan", tab: "file-servers" }
   ];
@@ -446,18 +444,6 @@
       return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#4f46e5";
     }
     function sevColor(sev) { return cssVar("--status-" + sev); }
-    function token() {
-      try { return sessionStorage.getItem("dspm-access-token") || ""; }
-      catch (e) { return ""; }
-    }
-    function apiGet(path) {
-      var t = token();
-      if (!t) return Promise.reject(new Error("no session"));
-      return fetch(path, { headers: { Authorization: "Bearer " + t } }).then(function (res) {
-        if (!res.ok) throw new Error(String(res.status));
-        return res.json();
-      });
-    }
     function esc(value) {
       return String(value == null ? "" : value).replace(/[&<>"']/g, function (c) {
         return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -615,7 +601,7 @@
       }
       var legend = SEVS.map(function (sev) {
         var pct = total ? Math.round((values[sev] / total) * 100) : 0;
-        return '<div data-sev="' + sev + '"><i style="background:' + sevColor(sev) + '"></i>' +
+        return '<div data-sev="' + sev + '"><i data-style="background:' + sevColor(sev) + '"></i>' +
           sev.charAt(0).toUpperCase() + sev.slice(1) + "<b>" + (total ? values[sev] + " · " + pct + "%" : "0") + "</b></div>";
       }).join("");
       donutHost.innerHTML =
@@ -670,30 +656,23 @@
       }).join("") + "</div>";
     }
 
-    function refresh() {
-      apiGet("/api/history").then(function (data) {
-        historyItems = (data && data.history) || [];
-        renderSparks();
-        renderPosture();
-        renderScans();
-      }).catch(function () {
-        historyItems = [];
-        renderSparks();
-        renderPosture();
-        renderScans();
-      });
-      apiGet("/api/audit").then(function (data) {
-        renderFeed((data && (data.events || data.audit)) || [], false);
-      }).catch(function (err) {
-        renderFeed([], String(err && err.message).indexOf("403") !== -1);
-      });
+    function renderSnapshot(snapshot) {
+      if (!snapshot || !Array.isArray(snapshot.history)) return;
+      var selectedTenant = "";
+      try { selectedTenant = sessionStorage.getItem("dspm-tenant-id") || ""; }
+      catch (e) { /* storage unavailable */ }
+      if (selectedTenant && snapshot.tenantId !== selectedTenant) return;
+      historyItems = snapshot.history;
+      var activity = snapshot.auditAvailable && Array.isArray(snapshot.audit) && snapshot.audit.length
+        ? snapshot.audit
+        : historyItems.map(function (scan) {
+          return { action: "scan.completed", actor: scan.scan_label || scan.source || scan.scan_id, timestamp: itemTime(scan) };
+        });
+      renderSparks();
+      renderPosture();
+      renderScans();
+      renderFeed(activity, false);
       renderDonut();
-    }
-
-    var debounceTimer = 0;
-    function refreshSoon() {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(refresh, 500);
     }
 
     /* Skeletons paint instantly on load; the first fetch (or its empty
@@ -701,27 +680,23 @@
     (function paintSkeletons() {
       function sklRows(n, h) {
         var rows = "";
-        for (var i = 0; i < n; i++) rows += '<div class="skl" style="height:' + h + 'px;margin:10px 0;width:' + (92 - i * 9) + '%"></div>';
+        for (var i = 0; i < n; i++) rows += '<div class="skl" data-style="height:' + h + 'px;margin:10px 0;width:' + (92 - i * 9) + '%"></div>';
         return rows;
       }
       if (scansHost) scansHost.innerHTML = sklRows(4, 16);
       if (feedHost) feedHost.innerHTML = sklRows(4, 16);
-      if (postureHost) postureHost.innerHTML = '<div class="skl" style="height:150px"></div>';
+      if (postureHost) postureHost.innerHTML = '<div class="skl" data-style="height:150px"></div>';
       if (donutHost) donutHost.innerHTML = '<div class="skl skl-circle"></div>';
     })();
 
     renderPills();
-    refresh();
+    window.addEventListener("sentro:tenant-dashboard", function (event) { renderSnapshot(event.detail); });
+    renderSnapshot(window.__sentroTenantDashboard);
     /* re-render when app.js updates the KPI numbers */
     SEVS.forEach(function (sev) {
       var el = document.getElementById(sev + "-count");
       if (el) new MutationObserver(function () { renderDonut(); }).observe(el, { childList: true, characterData: true, subtree: true });
     });
-    /* refresh on tenant switch, scan completion, tab return, theme flip */
-    document.getElementById("tenant-switcher")?.addEventListener("change", refreshSoon);
-    var scanMeta = document.getElementById("scan-meta");
-    if (scanMeta) new MutationObserver(refreshSoon).observe(scanMeta, { childList: true, characterData: true, subtree: true });
-    document.querySelector('.side-nav .tab[data-tab="overview"]')?.addEventListener("click", refreshSoon);
     document.getElementById("theme-toggle")?.addEventListener("click", function () {
       setTimeout(function () { renderSparks(); renderPosture(); renderDonut(); }, 80);
     });

@@ -17,7 +17,13 @@ from classification.compliance.validators import is_luhn_valid
 
 
 PAN_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9])(?:\d[\s\u00a0-]?){11,18}\d(?![A-Za-z0-9])")
-MASKED_PAN_RE = re.compile(r"(?<!\w)(?:\d{0,6}[\s-]?)?(?:\*{2,}|x{2,}|X{2,})[\s*-]*(?:\*{2,}|x{2,}|X{2,})?[\s-]*\d{4}(?!\w)")
+# The same matches as the plain pattern, in time linear in the text. The masks and the
+# separators are possessive: a run of x, X or * is taken whole, never split every possible
+# way between the two mask groups - which took four minutes on 64 KB of "x" and never
+# finished on "*". A start inside a run of * that its first * already tried is skipped.
+MASKED_PAN_RE = re.compile(
+    r"(?<!\w)(?!(?<=(?<!\w)\*)\*)(?:\d{0,6}[\s-]?)?(?:\*{2,}+|x{2,}+|X{2,}+)[\s*-]*+(?:\*{2,}+|x{2,}+|X{2,}+)?[\s-]*+\d{4}(?!\w)"
+)
 HASH_RE = re.compile(r"\b[A-Fa-f0-9]{32,128}\b")
 CIPHERTEXT_RE = re.compile(r"\b[A-Za-z0-9+/]{32,}={0,2}\b")
 CARDHOLDER_NAME_VALUE_RE = re.compile(r"[^\r\n;,|]{2,120}")

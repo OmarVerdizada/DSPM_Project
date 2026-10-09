@@ -1,0 +1,10 @@
+# C7: Semgrep for scripts/static_gate.py, in a virtualenv of its own (its pins collide
+# with requirements.lock):
+#
+#   python -m venv .semgrep-venv
+#   .semgrep-venv/bin/pip install -r requirements-semgrep.txt     (Scripts\pip on Windows)
+#   SEMGREP_BIN=.semgrep-venv/bin/semgrep python scripts/static_gate.py
+#
+# The rules are local (security/semgrep.yml) and the gate runs with --metrics=off, so
+# nothing is fetched from or sent to the Semgrep registry.
+semgrep==1.178.0

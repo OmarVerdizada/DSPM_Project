@@ -1,0 +1,25 @@
+{
+  "what": "C14: why the partitioned scan's peak grew with the corpus at a fixed partition size, and what the fix changed",
+  "host": "Windows Server 2019, 6 CPUs, Python 3.14, SQLite (the bounded runs)",
+  "method": "scratch diagnostics around backend.partitioned_scan.run_partitioned_scan: tracemalloc per phase (plan, each partition, finalize), gc referrer tracing, the process working set sampled every 50 ms per phase; corpora written by scripts/c14_scale_harness.write_corpus",
+  "before_fix": {
+    "harness_partitioned_scan_tree_peak_mib": {"3000_files": 155.0, "6500_files": 280.9},
+    "slope_kib_per_file": 36.9,
+    "python_heap_retained_after_the_scan_mib": {"2000_files_500_per_partition": 17.5, "4000_files_500_per_partition": 51.2},
+    "cause": "each partition's engine left its records, findings, previews and worker futures in reference cycles; no engine or future was reachable after gc.collect(), so the growth was uncollected cyclic garbage that full collections - rarer as the heap grows - left behind"
+  },
+  "fix": "backend/partitioned_scan._run_unit runs gc.collect() after every partition (tests/test_c14_scale_harness.py::APartitionIsReleasedWhenItIsWrittenTest; the mutation removing it is caught)",
+  "after_fix": {
+    "python_heap_retained_after_the_scan_mib": {"2000_files_500_per_partition": 8.1, "4000_files_500_per_partition": 8.1},
+    "working_set_after_each_partition_mib": {"2000_files_500_per_partition": [102.4, 103.3, 104.9, 105.2, 104.6],
+                                             "5000_files_500_per_partition": [102.6, 106.4, 105.0, 105.8, 105.0, 106.5, 104.8, 107.1, 107.2, 105.4]},
+    "finalize_heap_at_its_peak_mib": {"6500_files_2000_per_partition": 32.2, "held_by": "one partition's decoded records (store.iter_partition_records) - the design: one partition in memory at a time"},
+    "planned_partition_sizes": {"3000_files": [1980, 1020], "6500_files": [1950, 1950, 1950, 650]},
+    "harness_partitioned_scan_tree_peak_mib": {"3000_files": 137.0, "6500_files": 235.0},
+    "residual_slope_kib_per_file": {"2000_per_partition": 28.0, "500_per_partition": 7.5},
+    "sqlite_memory_map_and_page_cache_ruled_out": {"3000_files": {"defaults": 149.7, "mmap_off_cache_2mb": 149.6},
+                                                   "6500_files": {"defaults": 236.5, "mmap_off_cache_2mb": 235.8}},
+    "residual": "the live Python heap is flat; the remaining working-set growth is memory the allocators keep after it is freed (not attributed further on this host). A linear projection of it is not a claim: whether it plateaus is what the 200,000-file run on a scale host measures, at DSPM_PARTITION_MAX_FILES 2000 and 500."
+  },
+  "gate_status": "HELD FOR SCALE HOST - partitioning stays off by default (DSPM_PARTITIONED_SCANS=0) until the 200,000-file run passes"
+}

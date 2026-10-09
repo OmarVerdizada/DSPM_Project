@@ -53,7 +53,9 @@ class BackupCryptoTests(unittest.TestCase):
         clipped = self.dir / "p.enc.cut"
         clipped.write_bytes(encrypted.read_bytes()[:-20])
 
-        with self.assertRaisesRegex(ValueError, "Truncated backup"):
+        # The chunk framing is shared with the artifact store, so the
+        # message says "payload" rather than "backup".
+        with self.assertRaisesRegex(ValueError, "Truncated payload"):
             backup.decrypt_file(clipped, self.dir / "p.out")
 
     def test_manifest_age_and_prune(self) -> None:
@@ -61,8 +63,10 @@ class BackupCryptoTests(unittest.TestCase):
             created = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
             payload = self.dir / f"{name}.dump.enc"
             payload.write_bytes(b"x")
+            # Verified: --keep is retention, which keeps the newest N VERIFIED sets.
             (self.dir / f"{name}{backup.MANIFEST_SUFFIX}").write_text(json.dumps({
                 "created_at": created.isoformat(), "file": payload.name, "table_counts": {},
+                "verified_at": created.isoformat(),
             }))
 
         manifest("sentro_a", 300)

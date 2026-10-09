@@ -110,7 +110,7 @@ class P2SmbSinglePassTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.env.stop()
 
-    def test_text_preview_and_full_hash_have_exact_legacy_parity_with_one_less_fetch(self) -> None:
+    def _text_over_the_cap(self):
         # The preview ends inside a UTF-8 sequence. P2 must decode the accumulated
         # byte prefix once, exactly like the old preview reader, not per chunk.
         data = b"A" * (_MIB - 1) + "€".encode("utf-8") + b"tail-data"
@@ -126,13 +126,30 @@ class P2SmbSinglePassTests(unittest.TestCase):
         self.assertEqual(optimized_records, legacy_records)
         row = optimized_records[0]
         self.assertEqual(row["content"], data[:_MIB].decode("utf-8", errors="replace"))
+        self.assertEqual(optimized.last_scan_diagnostics["single_pass_avoided_fetches"], 1)
+        self.assertEqual(optimized.last_scan_diagnostics["single_pass_avoided_transfer_bytes"], _MIB)
+        return data, row, optimized_conn, legacy_conn
+
+    def test_a_text_past_its_cap_is_read_to_the_cap_and_named_by_those_bytes(self) -> None:
+        # W2.2: nothing past the cap is read; the identity is the digest of the bytes the
+        # findings came from, which the evidence reveal reads again.
+        data, row, optimized_conn, legacy_conn = self._text_over_the_cap()
+        self.assertEqual(row["sha256"], f"head:{_MIB}:" + hashlib.sha256(data[:_MIB]).hexdigest())
+        self.assertEqual((row["scan_completeness"], row["truncated"]), ("PARTIAL", True))
+        self.assertEqual(len(optimized_conn.calls), 1)  # the cap, one 1 MiB chunk
+        self.assertEqual(len(legacy_conn.calls), 2)  # preview + the same prefix, hashed
+        self.assertEqual(optimized_conn.bytes_returned, _MIB)
+        self.assertEqual(legacy_conn.bytes_returned, 2 * _MIB)
+
+    def test_text_preview_and_full_hash_have_exact_legacy_parity_with_one_less_fetch(self) -> None:
+        # DSPM_HASH_POLICY=full keeps the whole-file hash of before W2.2.
+        with mock.patch.dict(os.environ, {"DSPM_HASH_POLICY": "full"}):
+            data, row, optimized_conn, legacy_conn = self._text_over_the_cap()
         self.assertEqual(row["sha256"], hashlib.sha256(data).hexdigest())
         self.assertEqual(len(optimized_conn.calls), 2)  # two 1 MiB hash chunks
         self.assertEqual(len(legacy_conn.calls), 3)  # preview + the same two chunks
         self.assertEqual(optimized_conn.bytes_returned, len(data))
         self.assertEqual(legacy_conn.bytes_returned, len(data) + _MIB)
-        self.assertEqual(optimized.last_scan_diagnostics["single_pass_avoided_fetches"], 1)
-        self.assertEqual(optimized.last_scan_diagnostics["single_pass_avoided_transfer_bytes"], _MIB)
 
     def test_zip_entries_protection_and_hash_reuse_one_captured_stream(self) -> None:
         buffer = io.BytesIO()
@@ -158,6 +175,8 @@ class P2SmbSinglePassTests(unittest.TestCase):
         self.assertEqual(optimized_records[-1]["sha256"], hashlib.sha256(data).hexdigest())
         self.assertEqual(len(optimized_conn.calls), 1)
         self.assertEqual(len(legacy_conn.calls), 3)  # hash + entry read + protection read
+        # The captured stream serves the entries; the protection check reads the
+        # directory from it too, so neither fetches again.
         self.assertEqual(optimized.last_scan_diagnostics["single_pass_avoided_fetches"], 2)
         self.assertEqual(
             optimized.last_scan_diagnostics["single_pass_avoided_transfer_bytes"],
@@ -166,7 +185,9 @@ class P2SmbSinglePassTests(unittest.TestCase):
 
     def test_transport_failure_retries_with_original_preview_and_hash_readers(self) -> None:
         data = b"sensitive@example.com\n" * 100
-        scanner, connection = _scanner(data, "/retry.txt", failures=1)
+        # A failure of this one read - not a ConnectionError, which is a lost session and
+        # is retried on a fresh connection instead (backend audit 2026-10).
+        scanner, connection = _scanner(data, "/retry.txt", failures=1, failure_type=OSError)
 
         acquired = scanner._acquire_file_data("Docs", "/retry.txt", ".txt", len(data))
 
@@ -189,11 +210,38 @@ class P2SmbSinglePassTests(unittest.TestCase):
 
         self.assertNotIn("single_pass_fallbacks", scanner.last_scan_diagnostics)
 
-    def test_metadata_only_file_is_hashed_once_without_allocating_a_preview(self) -> None:
+    def test_metadata_only_file_is_not_read_to_name_it(self) -> None:
+        # W2.2: a file whose content is not inspected is named by its metadata - no byte
+        # of it is read.
         data = os.urandom(_MIB + 17)
         scanner, connection = _scanner(data, "/blob.dat")
 
-        acquired = scanner._acquire_file_data("Docs", "/blob.dat", ".dat", len(data))
+        acquired = scanner._acquire_file_data("Docs", "/blob.dat", ".dat", len(data),
+                                              modified_at="2026-10-01T00:00:00+00:00", file_id="42")
+
+        self.assertEqual(acquired.content, "")
+        self.assertTrue(acquired.sha256.startswith("meta:"))
+        self.assertIsNone(acquired.archive_bytes)
+        self.assertEqual(connection.calls, [])
+        changed = scanner._acquire_file_data("Docs", "/blob.dat", ".dat", len(data),
+                                             modified_at="2026-10-02T00:00:00+00:00", file_id="42")
+        self.assertNotEqual(changed.sha256, acquired.sha256, "a new mtime is a new identity")
+
+    def test_sampled_policy_reads_the_first_and_last_mib(self) -> None:
+        data = os.urandom(3 * _MIB)
+        scanner, connection = _scanner(data, "/blob.dat")
+        with mock.patch.dict(os.environ, {"DSPM_HASH_POLICY": "sampled"}):
+            acquired = scanner._acquire_file_data("Docs", "/blob.dat", ".dat", len(data))
+        self.assertTrue(acquired.sha256.startswith("sampled:"))
+        self.assertEqual(connection.bytes_returned, 2 * _MIB)
+
+    def test_metadata_only_file_is_hashed_once_without_allocating_a_preview(self) -> None:
+        # DSPM_HASH_POLICY=full: hashed whole, once, as before W2.2.
+        data = os.urandom(_MIB + 17)
+        scanner, connection = _scanner(data, "/blob.dat")
+
+        with mock.patch.dict(os.environ, {"DSPM_HASH_POLICY": "full"}):
+            acquired = scanner._acquire_file_data("Docs", "/blob.dat", ".dat", len(data))
 
         self.assertEqual(acquired.content, "")
         self.assertEqual(acquired.sha256, hashlib.sha256(data).hexdigest())

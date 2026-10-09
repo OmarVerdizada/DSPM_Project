@@ -4,6 +4,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 
 from backend.finding_contracts import get_finding_display_name, normalize_framework_id
+from classification.compliance.canonical_entities import canonical_entity_type_for_finding
 
 
 SEVERITY_SCORE = {"CRITICAL": 95, "HIGH": 80, "MEDIUM": 55, "LOW": 20}
@@ -60,7 +61,10 @@ def apply_canonical_finding_model(finding: dict, file_obj: dict, *, seen_at: str
             "retention_state": _retention_state(finding, file_obj),
             "first_seen": str(finding.get("first_seen") or timestamp),
             "last_seen": str(finding.get("last_seen") or timestamp),
-            "status": str(finding.get("status") or finding.get("review_status") or "OPEN").upper(),
+            # A detector's review_status ("unreviewed", NIST's "CONFIRMED") says how sure the
+            # detector is, not what an analyst decided: read as lifecycle, it filed every PCI
+            # finding as NEW beside OPEN GDPR ones, and a high-scoring NIST match as CONFIRMED.
+            "status": str(finding.get("status") or "OPEN").upper(),
             "owner": str(finding.get("owner") or finding.get("data_owner") or file_obj.get("owner") or file_obj.get("department") or "unknown"),
             "sla_due": str(finding.get("sla_due") or _sla_due(timestamp, severity)),
             "parent_finding_id": finding.get("parent_finding_id"),
@@ -108,21 +112,31 @@ def _canonical_occurrences(finding: dict, file_obj: dict, finding_id: str, locat
             redacted_sample,
             str(item.get("occurrence_index") or index + 1),
         )
-        rows.append(
-            {
-                "occurrence_id": occurrence_id,
-                "finding_id": finding_id,
-                "file_id": file_id,
-                "location_id": item.get("location_id") or location_id,
-                "page": item.get("page"),
-                "row": item.get("row"),
-                "column": item.get("column") or item.get("JSONPath") or item.get("XPath") or "",
-                "offset_start": int(item.get("offset_start") or 0),
-                "offset_end": int(item.get("offset_end") or 0),
-                "secure_fingerprint": secure_fingerprint,
-                "redacted_sample": redacted_sample,
-            }
-        )
+        # B1.4 diet: an occurrence used to repeat its parent's finding_id, file_id and
+        # location_id on every row, and to carry page/row/column as nulls for every text
+        # file - eleven keys of which five said nothing. It now carries what is true of
+        # THIS occurrence; the finding above it carries the rest.
+        row: dict = {"occurrence_id": occurrence_id}
+        if secure_fingerprint:
+            row["secure_fingerprint"] = secure_fingerprint
+        if redacted_sample:
+            row["redacted_sample"] = redacted_sample
+        start = int(item.get("offset_start") or 0)
+        end = int(item.get("offset_end") or 0)
+        if start or end:
+            row["offset_start"] = start
+            row["offset_end"] = end
+        for positional in ("page", "row"):
+            if item.get(positional) not in (None, "", 0):
+                row[positional] = item[positional]
+        column = item.get("column") or item.get("JSONPath") or item.get("XPath") or ""
+        if column:
+            row["column"] = column
+        location = item.get("location_id")
+        if location and location != location_id:
+            # Only when this occurrence is somewhere else than the finding says.
+            row["location_id"] = location
+        rows.append(row)
     return rows
 
 
@@ -140,6 +154,11 @@ def _framework_mappings(finding: dict) -> list[str]:
 
 
 def _entity_type(finding: dict) -> str:
+    # B7: one vocabulary. The registry decides what a value is called, so the id a
+    # finding gets and the entity it points at cannot disagree.
+    canonical = canonical_entity_type_for_finding(finding)
+    if canonical:
+        return canonical
     if finding.get("data_element"):
         return str(finding["data_element"]).upper().replace(" ", "_")
     if finding.get("pci_category") == "SAD":
@@ -178,19 +197,11 @@ def _logical_boundary_id(finding: dict, file_obj: dict) -> str:
 
 
 def _confidence(finding: dict) -> int:
-    value = finding.get("confidence")
-    if value is None:
-        value = finding.get("detection_confidence")
-    if isinstance(value, (int, float)):
-        return max(0, min(100, int(value)))
-    normalized = str(value or "").lower()
-    if normalized in {"high", "confirmed", "verified"}:
-        return 90
-    if normalized in {"medium", "review", "needs_review", "probable"}:
-        return 70
-    if normalized:
-        return 40
-    return 50
+    # D2: one reading everywhere (classification.confidence) - this one used to answer 50
+    # for a finding that stated none, where the compliance service answered 70.
+    from classification.confidence import confidence_score
+
+    return confidence_score(finding)
 
 
 def _unique_value_count(finding: dict) -> int:

@@ -301,9 +301,15 @@ def import_keyword_groups(tenant_id: str, payload: dict) -> dict:
 def export_keyword_groups(tenant_id: str, framework: str = "gdpr", language: str = "", source: str = "all", fmt: str = "json") -> tuple[str, str, str]:
     library = list_keyword_groups(tenant_id, framework, language=language, source=source)
     fmt = (fmt or "json").strip().lower()
+    if fmt not in {"json", "csv", "txt"}:
+        raise ValueError("Unsupported export format: use json, csv or txt.")
     export_library = _keyword_library_export_view(library)
     export_framework = str(export_library["framework"]).replace(" ", "_")
-    filename = f"{export_framework}_keywords_{language or source or 'all'}.{fmt}"
+    # The name goes into a Content-Disposition header, so every part is one the library
+    # has cleaned: a raw language or source could close the quoted name and add its own
+    # filename* (found by the M2 polish DAST review).
+    suffix = _clean_language(language) or _clean_token(source) or "all"
+    filename = re.sub(r"[^A-Za-z0-9_.-]", "_", f"{export_framework}_keywords_{suffix}.{fmt}")
     if fmt == "csv":
         output = io.StringIO()
         writer = csv.writer(output)

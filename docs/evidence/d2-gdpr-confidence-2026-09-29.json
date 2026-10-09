@@ -1,0 +1,75 @@
+{
+  "documents": 26,
+  "positive_documents": 16,
+  "labelled_types": 35,
+  "thresholds": {
+    "all": {
+      "threshold": 0,
+      "true_positives": 21,
+      "false_positives": 31,
+      "false_negatives": 14,
+      "precision": 0.404,
+      "recall": 0.6,
+      "false_positives_by_type": {
+        "gdpr_org_chart_directory": 4,
+        "gdpr_benefits_insurance_enrollment": 2,
+        "gdpr_disability_status": 2,
+        "gdpr_hr_employee_file": 2,
+        "gdpr_invoice_billing_transaction_log": 2,
+        "gdpr_password_secret": 2,
+        "gdpr_salary_compensation": 2,
+        "gdpr_timesheet_attendance": 2,
+        "gdpr_background_check_drug_test": 1,
+        "gdpr_database_connection_string": 1,
+        "gdpr_disaster_recovery_bcp_plan": 1,
+        "gdpr_email_address": 1,
+        "gdpr_full_name": 1,
+        "gdpr_health_medical_record": 1,
+        "gdpr_immigration_citizenship_status": 1,
+        "gdpr_incident_access_audit_log": 1,
+        "gdpr_national_id": 1,
+        "gdpr_payment_card_data": 1,
+        "gdpr_physical_security_badge_cctv": 1,
+        "gdpr_race_ethnicity": 1,
+        "gdpr_trade_union_membership": 1
+      }
+    },
+    "medium_and_above": {
+      "threshold": 60,
+      "true_positives": 20,
+      "false_positives": 17,
+      "false_negatives": 15,
+      "precision": 0.541,
+      "recall": 0.571,
+      "false_positives_by_type": {
+        "gdpr_benefits_insurance_enrollment": 2,
+        "gdpr_disability_status": 2,
+        "gdpr_salary_compensation": 2,
+        "gdpr_timesheet_attendance": 2,
+        "gdpr_background_check_drug_test": 1,
+        "gdpr_email_address": 1,
+        "gdpr_full_name": 1,
+        "gdpr_hr_employee_file": 1,
+        "gdpr_immigration_citizenship_status": 1,
+        "gdpr_national_id": 1,
+        "gdpr_org_chart_directory": 1,
+        "gdpr_payment_card_data": 1,
+        "gdpr_physical_security_badge_cctv": 1
+      }
+    },
+    "high_and_above": {
+      "threshold": 85,
+      "true_positives": 8,
+      "false_positives": 2,
+      "false_negatives": 27,
+      "precision": 0.8,
+      "recall": 0.229,
+      "false_positives_by_type": {
+        "gdpr_background_check_drug_test": 1,
+        "gdpr_timesheet_attendance": 1
+      }
+    }
+  },
+  "false_positive_delta_at_medium": 14,
+  "true_positives_lost_at_medium": 1
+}

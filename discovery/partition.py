@@ -31,6 +31,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from collectors import file_scanner
 from collectors.file_scanner import is_hidden_path, is_skipped_scan_path
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
@@ -39,7 +40,7 @@ def _partition_config(config: ScanConfig, *, local_path: str, max_depth: int) ->
     """A partition's config: the SAME detection policy as the parent, but an
     isolated unit — no callbacks (it must pickle to a worker process), no
     incremental/cache state (a clean process boundary; the caller owns persistence
-    via the merged report), and its own subtree + depth budget. ``use_sample_when_empty``
+    via the merged report), and its own subtree + depth budget. ``walk_local_path``
     is inherited unchanged: for a local scan it is the "scan the filesystem" flag,
     so a partition must keep it on to actually scan its subtree."""
     return replace(
@@ -58,9 +59,9 @@ def _partition_config(config: ScanConfig, *, local_path: str, max_depth: int) ->
 def plan_partitions(config: ScanConfig) -> list[ScanConfig] | None:
     """Split a LOCAL scan into per-top-level-subtree units + a root-files unit.
 
-    Returns ``None`` when the target is not a partitionable local directory (SMB
-    per-share and endpoint per-host partitioning reuse :func:`merge_reports` but
-    need their own planners + an SMB ``allowed_shares`` knob — not built here).
+    Returns ``None`` when the target is not a partitionable local directory. SMB
+    scans are partitioned per group of shares by :func:`plan_share_partitions`
+    (B2.3); endpoint per-host partitioning is not built.
 
     Parity rules, mirroring ``file_scanner.walk``:
     - a top-level subdir becomes a unit only if the single scan would descend into
@@ -110,6 +111,262 @@ def plan_partitions(config: ScanConfig) -> list[ScanConfig] | None:
         return None  # not enough fan-out to be worth the process overhead
     subtrees.append(_partition_config(config, local_path=str(root), max_depth=0))
     return subtrees
+
+
+# The collector's own rules, looked up on its module at call time, so the planner
+# can never disagree with a walk - including one whose rules a test has replaced.
+def _skipped(path: Path) -> bool:
+    return file_scanner.is_skipped_scan_path(path)
+
+
+def _hidden(path: Path) -> bool:
+    return file_scanner.is_hidden_path(path)
+
+
+def plan_bounded_partitions(
+    config: ScanConfig,
+    *,
+    max_files: int,
+    max_units: int | None = None,
+    stop_check=None,
+) -> dict | None:
+    """Cut a local scan into runs that together are exactly one walk, in its order (B2.2b).
+
+    A scan's file order is its walk's: each folder's entries in the order the folder
+    lists them, descending into a subfolder the moment it is met. Several report
+    sections keep the first 25 items or break ties by arrival, so a partitioned scan
+    has to reproduce that order exactly.
+
+    Every unit is a **run**: consecutive entries of one folder - files and whole
+    subfolders alike - walked with the depth that folder has left. A folder whose walk
+    holds at most ``max_files`` files stays inside its parent's run; a larger one is
+    split into runs of its own entries, packed in order up to the budget, with any
+    subfolder that is itself too large split in place. So a wide tree of small folders
+    packs into few units and a deep one splits where it is heavy, and every unit holds
+    at most ``max_files`` files - counting a zip's entries when archives are inspected -
+    unless a single file alone is larger.
+
+    Nothing a walk would observe is dropped: a folder that holds no files is left out
+    only if its walk would report nothing either, so an unreadable or skipped folder
+    always stays in some run and its scan still reports it (B2.2b review: dropping one
+    let finalize prune what was under it). Containment is judged against the whole
+    scan's root by each entry's real path, exactly as a walk judges it, so junctions
+    need no special case.
+
+    ``stop_check`` is called for every folder and, if it returns a reason, planning
+    stops with that reason - the planning walk visits the whole estate.
+
+    Returns ``None`` when the target should simply be scanned whole: a remote target,
+    a single file, a folder that fits the budget, or one that cannot be read.
+    Otherwise ``{"units", "files", "sample_paths"}``.
+    """
+    from backend.store import MAX_SCAN_PARTITIONS, is_sample_data_path
+
+    if config.server:
+        return None
+    try:
+        root = Path(config.local_path).expanduser().resolve()
+    except OSError:
+        return None
+    if not root.is_dir() or _skipped(root):
+        return None
+    excluded: list[Path] = []
+    if config.persistent_cache_enabled and config.cache_dir:
+        try:
+            excluded.append(Path(config.cache_dir).expanduser().resolve())
+        except OSError:
+            pass
+    limit = max_units or MAX_SCAN_PARTITIONS
+    budget = max(1, int(max_files))
+    while True:
+        plan = _plan_runs(config, root, excluded, budget, is_sample_data_path, stop_check)
+        if plan is None or len(plan["units"]) <= limit:
+            return plan
+        # More units than one scan can order - reachable only at millions of files.
+        budget *= 2
+
+
+def plan_share_partitions(
+    config: ScanConfig, *, stop_check=None, max_files: int | None = None, max_bytes: int | None = None,
+    max_units: int | None = None,
+) -> dict | None:
+    """Cut an SMB scan into units that together are exactly one scan (B2.3, W1.2).
+
+    The shares are first grouped, in the order the server lists them, so that every pair
+    that can overlap is in one group and the overlapping-share collapse happens inside one
+    partition (see ``SMBScanner.plan_share_groups``). A group of several shares is one
+    unit. A share alone is cut, with ``max_files`` and ``max_bytes``, into ranges of its
+    folders (see ``SMBScanner.plan_share_ranges``) - so a partitioned SMB scan's memory
+    follows the unit, not its largest share - or kept whole when it fits one unit.
+
+    Returns ``None`` when the scan should run whole: a local target, a server that comes
+    to a single unit, or a plan that cannot be trusted. Otherwise ``{"units", "files",
+    "sample_paths"}``, like :func:`plan_bounded_partitions`.
+    """
+    from backend.store import MAX_SCAN_PARTITIONS
+    from collectors.smb_scanner import SMBConfig, SMBScanner, _SmbConnectionLost
+
+    if not config.server:
+        return None
+    scanner = SMBScanner(SMBConfig(
+        server=config.server,
+        tenant_id=config.tenant_id,
+        username=config.username,
+        password=config.password,
+        domain=config.domain,
+        max_depth=config.max_depth,
+        include_hidden=config.include_hidden,
+        hidden_filter_enabled=config.hidden_filter_enabled,
+        include_admin_shares=config.include_admin_shares,
+        allowed_shares=config.smb_shares,
+        require_encryption=config.smb_require_encryption,
+        scope=getattr(config, "scope", None),
+    ))
+    groups = scanner.plan_share_groups(stop_check)
+    if not groups:
+        return None
+    # A range is walked by the metadata-first collector only; its legacy walker cannot.
+    ranges = bool(max_files) and scanner._should_use_file_pipeline()
+    files_budget = max(1, int(max_files or 1))
+    bytes_budget = max(1, int(max_bytes or 1))
+    limit = max_units or MAX_SCAN_PARTITIONS
+    while True:
+        units: list[dict] = []
+        for group in groups:
+            cut = None
+            if ranges and len(group) == 1:
+                try:
+                    cut = scanner.plan_share_ranges(group[0], max_files=files_budget, max_bytes=bytes_budget,
+                                                    stop_check=stop_check)
+                except _SmbConnectionLost:
+                    return None
+            units.extend(cut if cut is not None else [{"kind": "shares", "shares": group}])
+        if len(units) <= limit:
+            break
+        # More units than one scan can order - reachable only at millions of files.
+        files_budget *= 2
+        bytes_budget *= 2
+    if len(units) < 2:
+        return None
+    return {"units": units, "files": 0, "sample_paths": []}
+
+
+def _archive_weight(path: Path) -> int:
+    """How many records a zip becomes when archives are inspected."""
+    import zipfile
+
+    from collectors.file_scanner import MAX_ARCHIVE_ENTRIES
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return 1 + min(len(archive.infolist()), MAX_ARCHIVE_ENTRIES)
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        return 1
+
+
+def _plan_runs(config: ScanConfig, root: Path, excluded: list[Path], budget: int, is_sample, stop_check) -> dict | None:
+    from collectors.scan_scope import rules_for
+
+    include_hidden_dirs = bool(config.include_hidden or config.hidden_filter_enabled)
+    inspect_archives = bool(config.inspect_archives)
+    sample = {"seen": False}
+    scope = rules_for(getattr(config, "scope", None))
+
+    def scope_path(resolved: Path) -> str:
+        if scope.absolute:
+            return scope.path_of(str(resolved))
+        try:
+            return scope.path_of(str(resolved.relative_to(root)))
+        except ValueError:
+            return scope.path_of(resolved.name)
+
+    def is_excluded(resolved: Path) -> bool:
+        return any(resolved == item or item in resolved.parents for item in excluded)
+
+    def visit(folder: Path, depth: int):
+        """(files, units or None when the folder fits a run, whether its walk observes anything)."""
+        if stop_check is not None:
+            reason = stop_check()
+            if reason:
+                raise RuntimeError(reason)
+        try:
+            real_folder = folder.resolve()
+            entries = list(folder.iterdir())
+        except OSError:
+            # Unreadable: its walk reports it, so it must be walked.
+            return 0, None, True
+        children: list[tuple[str, int, list | None]] = []
+        weight = 0
+        for item in entries:
+            resolved_item = real_folder / item.name
+            try:
+                if item.is_symlink() or not resolved_item.is_relative_to(root):
+                    continue
+                is_dir = item.is_dir()
+                is_file = item.is_file()
+            except OSError:
+                continue
+            if is_dir:
+                if _skipped(item) or (_hidden(item) and not include_hidden_dirs):
+                    children.append((item.name, 0, None))  # the walk counts it as skipped
+                    continue
+                if depth + 1 > config.max_depth:
+                    continue  # the walk returns at once and reports nothing
+                if is_excluded(resolved_item):
+                    children.append((item.name, 0, None))
+                    continue
+                if scope.active and scope.folder_reason(scope_path(resolved_item)):
+                    # Out of scope: not listed here either; the walk meets it, skips it
+                    # and counts it, so it stays in a run and weighs nothing.
+                    children.append((item.name, 0, None))
+                    continue
+                child_weight, child_units, child_observed = visit(item, depth + 1)
+                weight += child_weight
+                if child_units is not None or child_observed:
+                    children.append((item.name, child_weight, child_units))
+                continue
+            if not is_file:
+                continue
+            if scope.active and scope.file_name_reason(scope_path(resolved_item), file_scanner.detect_extension(item)):
+                # Out of scope by its name: the walk lists it and leaves it - no weight.
+                children.append((item.name, 0, None))
+                continue
+            entry_weight = _archive_weight(item) if inspect_archives and item.suffix.lower() == ".zip" else 1
+            weight += entry_weight
+            if not sample["seen"] and is_sample({"path": str(resolved_item)}):
+                sample["seen"] = True
+            children.append((item.name, entry_weight, None))
+        if weight <= budget:
+            return weight, None, bool(children)
+        units: list[dict] = []
+        run: list[str] = []
+        run_weight = 0
+
+        def flush() -> None:
+            nonlocal run, run_weight
+            if run:
+                units.append({
+                    "kind": "run", "local_path": str(folder), "names": run,
+                    "max_depth": int(config.max_depth) - depth,
+                })
+                run, run_weight = [], 0
+
+        for name, entry_weight, child_units in children:
+            if child_units is not None:
+                flush()
+                units.extend(child_units)
+                continue
+            if run and run_weight + entry_weight > budget:
+                flush()
+            run.append(name)
+            run_weight += entry_weight
+        flush()
+        return weight, units, True
+
+    total, units, _observed = visit(root, 0)
+    if units is None:
+        return None
+    return {"units": units, "files": total, "sample_paths": sample["seen"]}
 
 
 def _merge_diagnostics(diags: list[dict], *, partitions: int, workers: int) -> dict:
@@ -180,6 +437,11 @@ def _partition_worker(config: ScanConfig) -> dict:
     handle = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
     handle.close()
     os.environ["DSPM_DB_PATH"] = handle.name
+    # The throwaway file has to be the database this process uses. With DSPM_DB_URL
+    # inherited, init_db() converged the SHARED PostgreSQL schema from every worker at
+    # once, outside the migration lock - they deadlocked on its backfill (C0.5) - and
+    # created tenants there. The backend is chosen per call, so this is enough.
+    os.environ.pop("DSPM_DB_URL", None)
     from backend import store
 
     store.DB_PATH = Path(handle.name)

@@ -52,7 +52,7 @@ def main() -> int:
 
         config = ScanConfig(
             tenant_id="pe-benchmark", local_path=str(estate), max_depth=args.max_depth,
-            use_sample_when_empty=True, persistent_cache_enabled=False, incremental_enabled=False,
+            walk_local_path=True, persistent_cache_enabled=False, incremental_enabled=False,
         )
         parts = plan_partitions(config)
         if not parts:

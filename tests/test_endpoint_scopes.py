@@ -75,11 +75,15 @@ class EndpointScopeTests(unittest.TestCase):
             self.assertFalse(entry["truncated"])
 
     def test_remote_scanner_defaults_match_local_full_scan_limit(self):
-        self.assertEqual(SMBConfig(server="fileserver").max_read_bytes, 100 * 1024 * 1024)
+        # One text cap for every collector: 16 MiB since W2.2 (it was 100 MiB).
+        from collectors import content_policy
+
+        self.assertEqual(SMBConfig(server="fileserver").max_read_bytes, content_policy.DEFAULT_TEXT_CAP_BYTES)
         self.assertEqual(
             WinRMEndpointConfig(host="endpoint-01", username="admin", password="secret").max_read_bytes,
-            100 * 1024 * 1024,
+            content_policy.DEFAULT_TEXT_CAP_BYTES,
         )
+        self.assertEqual(content_policy.text_cap_bytes(), content_policy.DEFAULT_TEXT_CAP_BYTES)
 
     def test_endpoint_aliases_expand_to_bounded_data_scopes(self):
         scanner = WinRMEndpointScanner(

@@ -4,11 +4,15 @@ Turns the per-track benchmarks (P-A incremental, P-B parallelism, P-C triage, P-
 detector) into ONE gate that CI/nightly can run to keep "fastest" measured and
 defend it against regressions. It fails on a PARITY break or a REGRESSION.
 
-The regression checks are RELATIVE RATIOS (host-independent) so the gate is stable
-across CI runners and dev hosts — an absolute files/sec threshold would flake
-between a 6-core Windows box and a 2-core CI VM. Absolute throughput and latency
-are reported for tracking (and compared to an optional per-host baseline with a
-loose tolerance), not hard-gated across hosts.
+The regression checks are RELATIVE RATIOS rather than absolute files/sec, which would
+flake between a 6-core Windows box and a 2-core CI VM. Two of them — the incremental
+and prefilter speedups — still compare two wall-clock measurements, so a loaded
+machine can fail them with nothing regressed: those are gated HERE, in the nightly
+job that owns its runner, and reported but not gated in the per-PR suite that runs
+alongside everything else. Parity and the delta-ratio are counted rather than timed
+and are gated in both. Absolute throughput and latency are reported for tracking (and
+compared to an optional per-host baseline with a loose tolerance), not hard-gated
+across hosts.
 
 Hard gates (exit 1 on failure):
   * PARITY   — an unchanged incremental re-scan yields identical findings to the
@@ -43,7 +47,7 @@ from discovery.parity import accuracy_projection  # noqa: E402
 
 _BASELINE_PATH = ROOT / "docs" / "perf_gate_baseline.json"
 
-# Gate thresholds (host-independent ratios).
+# Gate thresholds. The delta ratio is counted; the two speedups are timed (see _evaluate).
 _MAX_DELTA_RATIO = 0.05      # unchanged re-scan must reuse >= 95% from the baseline
 _MIN_INCREMENTAL_SPEEDUP = 1.5
 _MIN_PREFILTER_SPEEDUP = 1.3
@@ -97,7 +101,7 @@ def _scan_metrics(root: Path) -> dict:
     tenant = "perf-gate"
     store.create_tenant(tenant, tenant)
     scope = incremental_scope_key("local", str(root), {"max_depth": 6})
-    common = dict(tenant_id=tenant, local_path=str(root), max_depth=6, use_sample_when_empty=True,
+    common = dict(tenant_id=tenant, local_path=str(root), max_depth=6, walk_local_path=True,
                   persistent_cache_enabled=False, incremental_scope=scope)
 
     full, full_s, ttff = _timed_run(ScanConfig(**common, incremental_enabled=False), capture_ttff=True)
@@ -141,24 +145,33 @@ def _detector_metrics() -> dict:
     }
 
 
-def _evaluate(metrics: dict) -> list[str]:
-    failures = []
+def _evaluate(metrics: dict) -> tuple[list[str], list[str]]:
+    """Split the gate's verdicts into what a loaded machine cannot change and what it can.
+
+    Parity and the delta-ratio are counted, not timed: they hold on an idle laptop and
+    on a CI runner with sixteen other jobs on it. The two speedups are wall-clock
+    ratios of two runs of the same work, and a machine under load does not slow both
+    halves equally - measured here at 1.31x against a 1.5x bound while passing at
+    8.95s vs 8.97s when run alone (roadmap M0/Q3). Those belong to the nightly job,
+    which owns a runner; a flaky red in the per-PR suite teaches people to re-run it.
+    """
+    correctness, timing = [], []
     s = metrics["scan"]
     d = metrics["detector"]
     if not s["_incremental_parity"]:
-        failures.append("PARITY: incremental re-scan findings differ from the full scan")
+        correctness.append("PARITY: incremental re-scan findings differ from the full scan")
     if not d["_prefilter_parity"]:
-        failures.append("PARITY: detector prefilter findings differ from the full catalog")
+        correctness.append("PARITY: detector prefilter findings differ from the full catalog")
     if s["delta_ratio"] is None or s["delta_ratio"] > _MAX_DELTA_RATIO:
-        failures.append(f"INCREMENTAL: delta_ratio {s['delta_ratio']} > {_MAX_DELTA_RATIO} (unchanged re-scan re-read too much)")
+        correctness.append(f"INCREMENTAL: delta_ratio {s['delta_ratio']} > {_MAX_DELTA_RATIO} (unchanged re-scan re-read too much)")
     if s["incremental_speedup"] < _MIN_INCREMENTAL_SPEEDUP:
-        failures.append(f"INCREMENTAL: speedup {s['incremental_speedup']}x < {_MIN_INCREMENTAL_SPEEDUP}x")
+        timing.append(f"INCREMENTAL: speedup {s['incremental_speedup']}x < {_MIN_INCREMENTAL_SPEEDUP}x")
     if d["prefilter_speedup"] < _MIN_PREFILTER_SPEEDUP:
-        failures.append(f"DETECTOR: prefilter speedup {d['prefilter_speedup']}x < {_MIN_PREFILTER_SPEEDUP}x")
-    return failures
+        timing.append(f"DETECTOR: prefilter speedup {d['prefilter_speedup']}x < {_MIN_PREFILTER_SPEEDUP}x")
+    return correctness, timing
 
 
-def run_gate() -> dict:
+def run_gate(*, enforce_timing: bool = True) -> dict:
     root = _corpus_root()
     _build_corpus(root)
     with tempfile.TemporaryDirectory(prefix="perf-gate-db-") as tmp:
@@ -173,7 +186,10 @@ def run_gate() -> dict:
         finally:
             shutil.rmtree(root, ignore_errors=True)
     metrics = {"scan": scan, "detector": detector}
-    metrics["failures"] = _evaluate(metrics)
+    correctness, timing = _evaluate(metrics)
+    metrics["correctness_failures"] = correctness
+    metrics["timing_failures"] = timing
+    metrics["failures"] = correctness + timing if enforce_timing else correctness
     return metrics
 
 

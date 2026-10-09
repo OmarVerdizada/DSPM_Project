@@ -1,0 +1,14 @@
+{
+  "migrated_at": "2026-09-02T06:51:06.342304+00:00",
+  "rows_considered": 24,
+  "bodies_moved": 24,
+  "bytes_moved": 263778086,
+  "failures": [],
+  "artifact_store": {
+    "objects": 537,
+    "ciphertext_bytes": 355613828,
+    "tenants": 278,
+    "root": "C:\\Users\\Administrator\\Desktop\\Sentro-IronHack-main2\\data\\artifacts"
+  },
+  "result": "PASS"
+}

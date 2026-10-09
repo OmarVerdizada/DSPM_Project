@@ -9,6 +9,7 @@
     async: "async_scan",
     zip: "inspect_archives",
     admin: "include_admin_shares",
+    smb3: "smb_encryption",
     compliance: "compliance-enabled",
   };
   function fieldValue(id, fallback) {
@@ -21,6 +22,8 @@
     if (el && el.textContent !== value) el.textContent = value;
   }
   function policyLabel() {
+    // The Configuration step says it itself (console/scan-setup.js).
+    if (typeof scanTypesLabel === "function") return scanTypesLabel();
     var advanced = document.getElementById("ext-advanced-mode");
     if (advanced && !advanced.classList.contains("hidden")) {
       var count = document.querySelectorAll("#allowed_extensions input:checked").length;
@@ -31,13 +34,30 @@
     var title = card && card.querySelector(".ext-preset-title");
     return title ? title.textContent.trim() : "—";
   }
+  // W2.6: what each scan level costs and covers, said where it is chosen.
+  var levelHints = {
+    inventory: "Lists files, owners and access without reading any content. Fastest; every file shows as not read by policy.",
+    standard: "Reads text up to 16 MiB and documents up to 64 MiB, once each. Larger files and other types are named by their metadata.",
+    full: "Standard, with every compliance framework applied and ZIP archives opened. The slowest and most thorough.",
+  };
+  function levelLabel() {
+    var checked = document.querySelector("input[name='scan_level']:checked");
+    var name = checked && checked.parentElement && checked.parentElement.querySelector("b");
+    return name ? name.textContent.trim() : "Standard";
+  }
   function render() {
     var server = fieldValue("server", "");
+    var levelInput = document.querySelector("input[name='scan_level']:checked");
+    var level = levelInput ? levelInput.value : "standard";
+    setText("scan-level-hint", levelHints[level] || levelHints.standard);
+    setText("scan-summary-level", levelLabel());
     setText("scan-summary-target", server || "Local dataset");
     setText("scan-summary-domain", fieldValue("domain", "—"));
-    setText("scan-summary-path", server ? "\\\\" + server + "\\*" : fieldValue("local_path", "—"));
+    setText("scan-summary-path", server ? "\\\\" + server + "\\" + fieldValue("smb_shares", "*") : fieldValue("local_path", "—"));
     setText("scan-summary-depth", fieldValue("max_depth", "—"));
     setText("scan-summary-policy", policyLabel());
+    // Advanced scan scope (console/scan-scope.js): how many rules, and what they leave out.
+    if (typeof scanScopeReviewText === "function") setText("scan-summary-scope", scanScopeReviewText("file-server"));
     Object.keys(optionInputs).forEach(function (key) {
       var input = document.getElementById(optionInputs[key]);
       var chip = panel.querySelector('[data-summary-option="' + key + '"]');
@@ -56,5 +76,8 @@
   form.addEventListener("input", schedule);
   form.addEventListener("change", schedule);
   form.addEventListener("click", schedule);
+  // A restored scan, or the review step opening: rendered now, not on the next frame,
+  // which a page in the background never paints.
+  document.addEventListener("scan-form-updated", render);
   render();
 })();

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import re
 import zipfile
 from pathlib import Path
@@ -37,21 +39,51 @@ MAX_DOC_PARTS = 4096                         # cap the number of parts processed
 
 
 def extract_binary_text(path: Path, max_chars: int = 120_000) -> str:
-    suffix = path.suffix.lower()
+    return extract_binary_text_with_status(path, max_chars)[0]
+
+
+def extract_binary_text_with_status(path: Path, max_chars: int = 120_000) -> tuple[str, str]:
+    """(text, why there is none). The reason is "" when text came out (or the document
+    holds none), "no_text_layer" for a PDF with no text to extract - a scan, images only -
+    "password_protected" for one that does not open without a password, and
+    "not_extracted" when the document could not be parsed at all."""
+    text, reason, _truncated = extract_binary_text_detail(path, max_chars)
+    return text, reason
+
+
+def extract_binary_text_detail(path: Path, max_chars: int = 120_000) -> tuple[str, str, bool]:
+    """(text, why there is none, whether the text is cut short). Cut short: the character
+    budget ran out with document left, or a part was skipped or cut at a bound (too large,
+    inflating like a bomb, past the parts or total-bytes cap). Such a document was not read
+    whole, and its record must not say FULL (W2.2)."""
+    return _extract_detail(path, path.suffix.lower(), max_chars)
+
+
+def extract_binary_bytes_detail(data: bytes, extension: str, max_chars: int = 120_000) -> tuple[str, str, bool]:
+    """As extract_binary_text_detail, for a document already read into memory: one read
+    gives a scan both its text and its whole-file hash (W2.2)."""
+    return _extract_detail(io.BytesIO(data), str(extension or "").lower(), max_chars)
+
+
+def _extract_detail(source, suffix: str, max_chars: int) -> tuple[str, str, bool]:
+    notes: dict = {}
     try:
         if suffix in {".docm", ".docx", ".dotm", ".dotx"}:
-            return _extract_docx(path, max_chars)
-        if suffix in {".xlsm", ".xlsx"}:
-            return _extract_xlsx(path, max_chars)
-        if suffix in {".pptm", ".pptx"}:
-            return _extract_pptx(path, max_chars)
-        if suffix in {".odp", ".ods", ".odt", ".otp"}:
-            return _extract_odt(path, max_chars)
-        if suffix == ".pdf":
-            return _extract_pdf_light(path, max_chars)
+            text = _extract_docx(source, max_chars, notes)
+        elif suffix in {".xlsm", ".xlsx"}:
+            text = _extract_xlsx(source, max_chars, notes)
+        elif suffix in {".pptm", ".pptx"}:
+            text = _extract_pptx(source, max_chars, notes)
+        elif suffix in {".odp", ".ods", ".odt", ".otp"}:
+            text = _extract_odt(source, max_chars, notes)
+        elif suffix == ".pdf":
+            text, reason = _extract_pdf(source, max_chars, notes)
+            return text, reason, bool(notes.get("truncated"))
+        else:
+            return "", "", False
     except Exception:
-        return ""
-    return ""
+        return "", "not_extracted", False
+    return text, "", bool(notes.get("truncated"))
 
 
 def _parse_xml(data: bytes):
@@ -65,23 +97,33 @@ def _parse_xml(data: bytes):
         return None
 
 
-def _read_zip_member(archive: zipfile.ZipFile, name: str, max_bytes: int = MAX_DOC_ENTRY_BYTES) -> bytes:
+def _read_zip_member(archive: zipfile.ZipFile, name: str, max_bytes: int | None = None,
+                     notes: dict | None = None) -> bytes:
     """Read a zip member under a hard DECOMPRESSED byte cap plus a compression-ratio
     guard, so a zip-bomb / multi-GB-inflating part cannot exhaust memory. Returns the
-    (possibly truncated) bytes, or b"" if the member is missing or looks like a bomb."""
+    (possibly truncated) bytes, or b"" if the member is missing or looks like a bomb.
+    A part skipped or cut short is noted in ``notes["truncated"]``."""
+    notes = notes if notes is not None else {}
+    # Read at call time, not bound at definition: the cap a caller (or a test) set holds.
+    max_bytes = MAX_DOC_ENTRY_BYTES if max_bytes is None else max_bytes
     try:
         info = archive.getinfo(name)
     except KeyError:
         return b""
     # Reject a part that declares implausible inflation, before reading anything.
     if info.compress_size > 0 and (info.file_size / info.compress_size) > MAX_DOC_COMPRESSION_RATIO:
+        notes["truncated"] = True
         return b""
     # Read at most max_bytes DECOMPRESSED, so a lying header cannot OOM us either.
     try:
         with archive.open(name) as handle:
             data = handle.read(max_bytes + 1)
     except Exception:
+        notes["truncated"] = True
         return b""
+    if len(data) > max_bytes:
+        # Cut at the bound, the part's XML does not parse: its text is not in the result.
+        notes["truncated"] = True
     return data[:max_bytes]
 
 
@@ -92,98 +134,122 @@ def _xml_text(data: bytes) -> str:
     return " ".join(node.text or "" for node in root.iter() if node.text)
 
 
-def _join_xml_parts(archive: zipfile.ZipFile, parts: list[str], max_chars: int) -> str:
+def _join_xml_parts(archive: zipfile.ZipFile, parts: list[str], max_chars: int, notes: dict | None = None) -> str:
     """Text-extract each XML part under total-bytes / parts / char budgets, stopping
-    early so a document made of many (or bomb) parts stays bounded."""
+    early so a document made of many (or bomb) parts stays bounded. Stopping with parts
+    left, or cutting the text, is noted in ``notes["truncated"]``."""
+    notes = notes if notes is not None else {}
     out: list[str] = []
     total_bytes = 0
     chars = 0
-    for name in parts[:MAX_DOC_PARTS]:
-        data = _read_zip_member(archive, name)
+    if len(parts) > MAX_DOC_PARTS:
+        notes["truncated"] = True
+    selected = parts[:MAX_DOC_PARTS]
+    for index, name in enumerate(selected):
+        data = _read_zip_member(archive, name, notes=notes)
         total_bytes += len(data)
         text = _xml_text(data)
         if text:
             out.append(text)
             chars += len(text) + 1
         if chars >= max_chars or total_bytes >= MAX_DOC_TOTAL_BYTES:
+            if index + 1 < len(selected) or chars > max_chars:
+                notes["truncated"] = True
             break
     return "\n".join(out)[:max_chars]
 
 
-def _extract_docx(path: Path, max_chars: int) -> str:
-    with zipfile.ZipFile(path) as archive:
+def _extract_docx(source, max_chars: int, notes: dict | None = None) -> str:
+    with zipfile.ZipFile(source) as archive:
         parts = [name for name in archive.namelist() if name.startswith("word/") and name.endswith(".xml")]
-        return _join_xml_parts(archive, parts, max_chars)
+        return _join_xml_parts(archive, parts, max_chars, notes)
 
 
-def _extract_xlsx(path: Path, max_chars: int) -> str:
-    with zipfile.ZipFile(path) as archive:
-        shared_strings = _xlsx_shared_strings(archive)
+def _extract_xlsx(source, max_chars: int, notes: dict | None = None) -> str:
+    notes = notes if notes is not None else {}
+    with zipfile.ZipFile(source) as archive:
+        shared_strings = _xlsx_shared_strings(archive, notes)
         sheet_names = _xlsx_sheet_names(archive)
         sheet_parts = [
             name
             for name in archive.namelist()
             if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
         ]
+        if len(sheet_parts) > MAX_DOC_PARTS:
+            notes["truncated"] = True
+        selected = sorted(sheet_parts)[:MAX_DOC_PARTS]
         lines: list[str] = []
         total_bytes = 0
-        for index, name in enumerate(sorted(sheet_parts)[:MAX_DOC_PARTS], start=1):
+        for index, name in enumerate(selected, start=1):
             sheet_name = sheet_names.get(name, f"Sheet{index}")
-            data = _read_zip_member(archive, name)
+            data = _read_zip_member(archive, name, notes=notes)
             total_bytes += len(data)
             lines.extend(_xlsx_sheet_text(data, sheet_name, shared_strings))
-            if len("\n".join(lines)) >= max_chars or total_bytes >= MAX_DOC_TOTAL_BYTES:
+            joined = len("\n".join(lines))
+            if joined >= max_chars or total_bytes >= MAX_DOC_TOTAL_BYTES:
+                if index < len(selected) or joined > max_chars:
+                    notes["truncated"] = True
                 break
         return "\n".join(lines)[:max_chars]
 
 
-def _extract_pptx(path: Path, max_chars: int) -> str:
-    with zipfile.ZipFile(path) as archive:
+def _extract_pptx(source, max_chars: int, notes: dict | None = None) -> str:
+    with zipfile.ZipFile(source) as archive:
         parts = [name for name in archive.namelist() if name.startswith("ppt/slides/") and name.endswith(".xml")]
-        return _join_xml_parts(archive, parts, max_chars)
+        return _join_xml_parts(archive, parts, max_chars, notes)
 
 
-def _extract_odt(path: Path, max_chars: int) -> str:
-    with zipfile.ZipFile(path) as archive:
+def _extract_odt(source, max_chars: int, notes: dict | None = None) -> str:
+    with zipfile.ZipFile(source) as archive:
         parts = [name for name in archive.namelist() if name.endswith(".xml")]
-        return _join_xml_parts(archive, parts, max_chars)
+        return _join_xml_parts(archive, parts, max_chars, notes)
 
 
-def _extract_pdf_light(path: Path, max_chars: int) -> str:
-    parsed = _extract_pdf_with_pypdf(path, max_chars)
-    if parsed:
-        return parsed[:max_chars]
-    data = path.read_bytes()[: max_chars * 4]
-    chunks = re.findall(rb"\(([^()]*)\)", data)
-    return "\n".join(chunk.decode("latin-1", errors="ignore") for chunk in chunks)[:max_chars]
+def _extract_pdf(source, max_chars: int, notes: dict | None = None) -> tuple[str, str]:
+    """The text of a PDF's pages, and why there is none when there is none.
 
-
-def _extract_pdf_with_pypdf(path: Path, max_chars: int) -> str:
+    There used to be a fallback when pypdf found no text: a regex over the raw bytes for
+    every "(...)" literal. What that finds is the uncompressed metadata - Title, Producer -
+    never page text, which is compressed: a blank scan titled "Scanned passport" came out
+    as "pypdf / Scanned passport", scanned and FULL, and an encrypted PDF took the same
+    path and came back "scanned" instead of protected. A PDF without a text layer is now
+    said to be one, and the file is read from its handle - not loaded whole - so its size
+    does not decide the memory a scan takes."""
     try:
-        from pypdf import PdfReader
+        from pypdf import PasswordType, PdfReader
     except ModuleNotFoundError:
-        return ""
+        return "", "not_extracted"
     try:
-        reader = PdfReader(str(path))
-        if reader.is_encrypted:
-            try:
-                reader.decrypt("")
-            except Exception:
-                return ""
-        parts: list[str] = []
-        for page_number, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
-            if text.strip():
-                parts.append(f"[pdf page={page_number}]\n{text}")
-            if len("\n".join(parts)) >= max_chars:
-                break
-        return "\n".join(parts)
+        opened = source.open("rb") if isinstance(source, Path) else contextlib.nullcontext(source)
+        with opened as handle:
+            reader = PdfReader(handle)
+            if reader.is_encrypted:
+                # An empty user password opens a PDF that is only restricted, not sealed.
+                try:
+                    opened = reader.decrypt("") != PasswordType.NOT_DECRYPTED
+                except Exception:
+                    opened = False
+                if not opened:
+                    return "", "password_protected"
+            parts: list[str] = []
+            pages = len(reader.pages)
+            for page_number, page in enumerate(reader.pages, start=1):
+                text = page.extract_text() or ""
+                if text.strip():
+                    parts.append(f"[pdf page={page_number}]\n{text}")
+                joined = len("\n".join(parts))
+                if joined >= max_chars:
+                    if notes is not None and (page_number < pages or joined > max_chars):
+                        notes["truncated"] = True
+                    break
     except Exception:
-        return ""
+        return "", "not_extracted"
+    text = "\n".join(parts)[:max_chars]
+    return text, "" if text else "no_text_layer"
 
 
-def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
-    root = _parse_xml(_read_zip_member(archive, "xl/sharedStrings.xml"))
+def _xlsx_shared_strings(archive: zipfile.ZipFile, notes: dict | None = None) -> list[str]:
+    root = _parse_xml(_read_zip_member(archive, "xl/sharedStrings.xml", notes=notes))
     if root is None:
         return []
     values: list[str] = []

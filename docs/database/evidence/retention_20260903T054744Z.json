@@ -1,0 +1,27 @@
+{
+  "artifacts": {
+    "eligible_objects": 124,
+    "objects": 148,
+    "removed_objects": 0
+  },
+  "data_classes": [
+    {
+      "data_class": "alert_events",
+      "eligible_rows": 0,
+      "removed_rows": 0,
+      "retention_days": 365
+    },
+    {
+      "data_class": "audit_events",
+      "eligible_rows": 0,
+      "removed_rows": 0,
+      "retention_days": 730
+    }
+  ],
+  "evidence_kind": "retention_run",
+  "generated_at": "2026-09-03T05:47:44.766857+00:00",
+  "legal_hold_tenants_preserved": 0,
+  "mode": "dry_run",
+  "result": "PASS",
+  "run_at": "2026-09-03T05:47:44.766857+00:00"
+}

@@ -46,7 +46,8 @@ import os
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
@@ -176,9 +177,24 @@ _PK: dict[str, tuple[str, ...]] = {
     "scan_object_baselines": ("tenant_id", "scope_key", "object_key"),
     "findings": ("tenant_id", "id"),
     "scan_jobs": ("id",),
+    "scan_partitions": ("tenant_id", "scan_id", "partition_id"),
+    "partitioned_scans": ("tenant_id", "scan_id"),
+    "scan_schedules": ("tenant_id", "schedule_id"),
+    "suppression_rules": ("tenant_id", "rule_id"),
+    "derived_cache": ("tenant_id", "cache_key"),
     "secrets": ("tenant_id", "secret_id"),
     "revoked_tokens": ("jti",),
     "tenants": ("tenant_id",),
+    # C1's two tables. Missing until the C0.5 run on PostgreSQL (2026-09-25): every
+    # sign-in and every session renewal raised here, because nothing checked that a
+    # table written with INSERT OR REPLACE had an entry - tests/test_db_dialect.py
+    # now does, against the real schema.
+    "user_sessions": ("jti",),
+    "refresh_tokens": ("token_hash",),
+    # C2: one directory configuration per workspace.
+    "directory_settings": ("tenant_id",),
+    # C13: one record per scan of how it reached its files.
+    "scan_sources": ("tenant_id", "scan_id"),
 }
 
 
@@ -375,6 +391,32 @@ class _PgConn:
         self._raw.close()
 
 
+# W1.4: every application session is bounded. Without these a statement whose plan went
+# wrong ran for as long as it liked - a 20,000-file first save was still pruning after
+# 634 s, holding its locks - and a transaction a crashed caller left open held its locks
+# until the connection was closed. The defaults are generous: they bound the hung, not the
+# slow. 0 turns one off; the migration runner turns all three off for its own transaction.
+_SESSION_TIMEOUTS = (
+    ("statement_timeout", "DSPM_PG_STATEMENT_TIMEOUT_SECONDS", 900),
+    ("lock_timeout", "DSPM_PG_LOCK_TIMEOUT_SECONDS", 900),
+    ("idle_in_transaction_session_timeout", "DSPM_PG_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS", 1800),
+)
+
+
+def session_options() -> str:
+    """The libpq ``options`` every application connection opens with: any the DSN
+    already carries, then the timeouts (a later ``-c`` wins, so these hold)."""
+    own = ""
+    if psycopg is not None:
+        with suppress(Exception):
+            own = str(psycopg.conninfo.conninfo_to_dict(db_url()).get("options") or "")
+    timeouts = " ".join(
+        f"-c {parameter}={_env_number(name, default, 0, 86_400, int) * 1000}"
+        for parameter, name, default in _SESSION_TIMEOUTS
+    )
+    return f"{own} {timeouts}".strip()
+
+
 def _pg_connect() -> _PgConn:
     if psycopg is None:  # pragma: no cover - exercised only in a misconfigured env
         raise RuntimeError(
@@ -387,6 +429,7 @@ def _pg_connect() -> _PgConn:
         autocommit=False,
         row_factory=_pg_row_factory,
         connect_timeout=timeout,
+        options=session_options(),
     )
     return _PgConn(raw)
 
@@ -434,7 +477,7 @@ def _get_pool():
             timeout=_env_number("DSPM_DB_CONNECT_TIMEOUT", 10.0, 0.2, 120.0, float),
             max_idle=_env_number("DSPM_DB_POOL_MAX_IDLE", 300.0, 1.0, 86_400.0, float),
             check=check,
-            kwargs={"row_factory": _pg_row_factory},
+            kwargs={"row_factory": _pg_row_factory, "options": session_options()},
             open=True,
             name="sentro-dspm",
         )
@@ -467,6 +510,215 @@ def close_pool() -> None:
 # Public connect() - the seam store._connect() delegates to
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Who a transaction is for (Phase 4c, DB-03; C10). Every PostgreSQL transaction
+# opened through connect() carries one of three answers, and the row-level-security
+# policies (store.add_tenant_rls) read it:
+#
+# * a tenant (tenant_scope) - that tenant's rows, and nothing else;
+# * a platform purpose (platform_scope) - work that is for no single tenant, such as
+#   claiming due schedules or draining the SIEM queue. Each purpose is named, and each
+#   tenant table admits only the purposes that need it (store.PLATFORM_ACCESS);
+# * neither - no rows of any tenant table. Until C10 an unset scope saw everything;
+#   '*' no longer means "all" anywhere, so a role default of '*' grants nothing.
+#
+# A tenant scope inside a platform scope wins: work for one tenant started by a
+# background job is confined to that tenant. No-op on SQLite.
+# ---------------------------------------------------------------------------
+
+_tenant_scope_var: ContextVar[str | None] = ContextVar("dspm_tenant_scope", default=None)
+_platform_scope_var: ContextVar[str | None] = ContextVar("dspm_platform_scope", default=None)
+
+# The purposes a transaction may name. Adding one is a decision about which tenant
+# tables it may read and write across tenants - see store.PLATFORM_ACCESS.
+PLATFORM_PURPOSES = {
+    "auth": "sign-in, sessions and API keys: an account is found before its tenant is known",
+    "platform-admin": "the installation administrator's cross-tenant views",
+    "scheduler": "claiming the scan schedules that are due, in every tenant",
+    "siem": "draining the audit outbox to the SIEM",
+    "housekeeping": "retention and pruning across tenants",
+    "resume": "finding interrupted scans and partitions to resume or fail",
+    "search-indexer": "keeping the optional search index in step with the inventory",
+    "migration": "schema revisions and operator data migrations",
+    "vault": "re-sealing every tenant's saved credentials when the vault key rotates (C12)",
+    "backup": "a whole-database backup (pg_dump) and its restore, run by an operator from the host (C11)",
+    "delivery": "delivering every workspace's alerts and creating and following its tickets (D3)",
+    "metrics": "counting queued scans and waiting deliveries across workspaces for /metrics (D11)",
+}
+
+
+@contextmanager
+def tenant_scope(tenant_id: str):
+    """Confine PostgreSQL transactions opened inside this block to one tenant. No-op on SQLite."""
+    token = _tenant_scope_var.set(str(tenant_id))
+    try:
+        yield
+    finally:
+        _tenant_scope_var.reset(token)
+
+
+@contextmanager
+def platform_scope(purpose: str):
+    """Name the cross-tenant work this block does (C10). The policies admit a purpose only
+    on the tables it needs; an unknown purpose is refused here. No-op on SQLite."""
+    if purpose not in PLATFORM_PURPOSES:
+        raise ValueError(f"Unknown platform purpose {purpose!r}")
+    platform = _platform_scope_var.set(purpose)
+    tenant = _tenant_scope_var.set(None)
+    try:
+        yield
+    finally:
+        _tenant_scope_var.reset(tenant)
+        _platform_scope_var.reset(platform)
+
+
+def current_tenant_scope() -> str | None:
+    return _tenant_scope_var.get()
+
+
+def current_platform_scope() -> str | None:
+    return _platform_scope_var.get()
+
+
+# ``journal_mode`` is a property of the FILE, not of a connection, so it is set
+# once per path rather than on every open. The set is bounded because tests and
+# benchmarks each create their own database.
+_SQLITE_TUNED: set[str] = set()
+_SQLITE_TUNED_MAX = 64
+_sqlite_tune_lock = threading.Lock()
+
+
+def _sqlite_journal_mode() -> str:
+    """WAL by default. Readers no longer wait for a writer's commit, and a
+    commit writes each page once instead of twice.
+
+    Two operational consequences, both acceptable for an on-prem single-node
+    install and both reversible by setting this to ``delete``:
+      * the database is three files - ``x``, ``x-wal``, ``x-shm``. A manual copy
+        of ``data/`` must take all three, or take none and use the product's own
+        backup. They live in the same 0700 directory the hardening already
+        covers.
+      * WAL needs real file locking, so a database on an SMB/NFS share must stay
+        on ``delete``.
+    """
+    mode = os.getenv("DSPM_SQLITE_JOURNAL_MODE", "wal").strip().lower()
+    return mode if mode in {"wal", "delete", "truncate", "persist", "memory", "off"} else "wal"
+
+
+def _tune_sqlite_file(conn, path: str) -> None:
+    if path in _SQLITE_TUNED:
+        return
+    with _sqlite_tune_lock:
+        if path in _SQLITE_TUNED:
+            return
+        try:
+            conn.execute(f"PRAGMA journal_mode = {_sqlite_journal_mode()}")
+        except sqlite3.DatabaseError:
+            # A locked or read-only file keeps whatever mode it has; every other
+            # pragma below is per-connection and still applies.
+            pass
+        if len(_SQLITE_TUNED) >= _SQLITE_TUNED_MAX:
+            _SQLITE_TUNED.clear()
+        _SQLITE_TUNED.add(path)
+
+
+def _apply_sqlite_pragmas(conn) -> None:
+    """Per-connection settings. The defaults are sized for one 500MB database
+    read by one process: a 2MB page cache against that file evicts the working
+    set between requests, which is why a cold query paid disk on every page."""
+    conn.execute("PRAGMA foreign_keys = ON")
+    # NORMAL is the documented companion to WAL: a power loss can cost the last
+    # transaction, never the file. Under a rollback journal it would also risk
+    # the file, so it is only relaxed where WAL makes it safe.
+    if _sqlite_journal_mode() == "wal":
+        conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute(f"PRAGMA cache_size = -{int(_env_number('DSPM_SQLITE_CACHE_KB', 65536, 2048, 1048576, int))}")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    mmap_bytes = int(_env_number("DSPM_SQLITE_MMAP_MB", 256, 0, 4096, int)) * 1024 * 1024
+    if mmap_bytes:
+        conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+    # The WAL is no longer deleted between requests while a server holds the file open
+    # (hold_sqlite_open), so a checkpoint that resets it truncates it back to this -
+    # otherwise it would stay at the size of the largest transaction since startup.
+    wal_limit = int(_env_number("DSPM_SQLITE_WAL_LIMIT_MB", 64, 1, 4096, int)) * 1024 * 1024
+    conn.execute(f"PRAGMA journal_size_limit = {wal_limit}")
+
+
+# One idle connection a server process holds for its whole life (P4, 2026-09-24).
+# Every store call opens its own connection, so without it every close is the LAST
+# connection to a WAL database - and SQLite then checkpoints the WAL and deletes it,
+# and the next open builds the WAL index again. Measured on this host: 10 of the 17 ms
+# an audit write cost was that close, and verify_token went from 3.3 to 1.75 ms with
+# one connection held. The held connection runs no transaction, so it blocks no
+# checkpoint and no writer; it only keeps the file's shared lock, which is what tells
+# a closing connection it is not the last.
+_sqlite_anchor: tuple[str, sqlite3.Connection] | None = None
+_sqlite_anchor_lock = threading.Lock()
+
+
+def _hold_open_enabled() -> bool:
+    return os.getenv("DSPM_SQLITE_HOLD_OPEN", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def hold_sqlite_open(sqlite_path: Path) -> bool:
+    """Hold `sqlite_path` open until release_sqlite_anchor(); True when it is held.
+
+    For a server's lifespan - not at import, so tools and tests that import the store
+    hold nothing. WAL only: under a rollback journal a close does no checkpoint to save.
+    A second call for another path releases the first; the process holds at most one.
+    """
+    global _sqlite_anchor
+    if is_postgres() or not _hold_open_enabled() or _sqlite_journal_mode() != "wal":
+        return False
+    path = str(sqlite_path)
+    with _sqlite_anchor_lock:
+        if _sqlite_anchor is not None and _sqlite_anchor[0] == path:
+            return True
+        _release_sqlite_anchor_locked()
+        try:
+            conn = sqlite3.connect(path, check_same_thread=False)
+            # A connection that has never read the file holds no lock on it.
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+        except sqlite3.DatabaseError:
+            return False
+        _sqlite_anchor = (path, conn)
+        return True
+
+
+def held_sqlite_path() -> str | None:
+    return _sqlite_anchor[0] if _sqlite_anchor is not None else None
+
+
+def release_sqlite_anchor() -> None:
+    with _sqlite_anchor_lock:
+        _release_sqlite_anchor_locked()
+
+
+def _release_sqlite_anchor_locked() -> None:
+    global _sqlite_anchor
+    if _sqlite_anchor is not None:
+        _, conn = _sqlite_anchor
+        _sqlite_anchor = None
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+
+def optimize_sqlite(sqlite_path: Path) -> None:
+    """Refresh the planner's statistics. SQLite ships with none until ANALYZE
+    runs, and ``PRAGMA optimize`` re-analyses only what has drifted, so this is
+    cheap enough to call after a scan save and at shutdown."""
+    if is_postgres():
+        return
+    try:
+        with connect(sqlite_path) as conn:
+            conn.execute("PRAGMA analysis_limit = 400")
+            conn.execute("PRAGMA optimize")
+    except sqlite3.DatabaseError:
+        pass
+
+
 @contextmanager
 def connect(sqlite_path: Path):
     """Yield a connection for the active backend, commit on clean exit, always close.
@@ -482,11 +734,13 @@ def connect(sqlite_path: Path):
             # resets it; we commit explicitly on clean exit (matching the
             # connect-per-op semantics) and rely on its rollback-on-exception.
             with pool.connection() as raw:
+                _apply_tenant_scope(raw)
                 yield _PgConn(raw)
                 raw.commit()
         else:  # no psycopg_pool -> connect-per-op
             conn = _pg_connect()
             try:
+                _apply_tenant_scope(conn._raw)
                 yield conn
                 conn.commit()
             finally:
@@ -496,11 +750,26 @@ def connect(sqlite_path: Path):
         conn = sqlite3.connect(sqlite_path)
         try:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
+            _tune_sqlite_file(conn, str(sqlite_path))
+            _apply_sqlite_pragmas(conn)
             yield conn
             conn.commit()
         finally:
             conn.close()
+
+
+def _apply_tenant_scope(raw) -> None:
+    """One statement per transaction, and none when there is no scope: a session's own
+    values (a role default of '*', or nothing) admit no tenant rows."""
+    scope = _tenant_scope_var.get()
+    if scope is not None:
+        raw.execute("SELECT set_config('app.tenant_id', %s, true), set_config('app.platform', '', true)",
+                    (str(scope),))
+        return
+    purpose = _platform_scope_var.get()
+    if purpose is not None:
+        raw.execute("SELECT set_config('app.tenant_id', '', true), set_config('app.platform', %s, true)",
+                    (str(purpose),))
 
 
 def collate_c(sql_expr: str) -> str:

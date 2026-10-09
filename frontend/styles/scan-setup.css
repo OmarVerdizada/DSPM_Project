@@ -1,0 +1,580 @@
+/* ============================================================
+   File-server scan · Configuration step (console/scan-setup.js)
+
+   One card, "Scan settings", with the same head as Basics and Review. Two
+   columns under it - What to scan, How to scan - hold the choices every scan
+   makes; Advanced options, folded below them, holds the ones most never
+   change, and says in its closed header whether it holds anything at all.
+
+   Every choice is a card - the type set, the level, the options, the
+   frameworks - with its control in view and a line on what it does.
+   Type scale: card title as Basics; group heading 14/600; field label 13/500;
+   hint 12. Controls are Basics' own. The page is the only scroller.
+
+   New class names throughout, so the wizard's legacy rules (styles.css, "Scan
+   setup v4" to "v9", most of them !important) do not match what is here.
+   ============================================================ */
+
+/* ── The page head ─────────────────────────────────────────────
+   The console header sits in each page's first row (shell.css). The wizard
+   hid that row, so its own head - back, title, steps - lay under the header.
+   The row stays while the wizard is open; it is the header's place. */
+#tab-file-servers:has(#fs-wizard:not(.hidden)) > .section-header {
+  display: block;
+}
+
+/* ── Two columns, a rule between them ─────────────────────────── */
+.cfg-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
+  gap: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+.cfg-columns::before {
+  content: "";
+  grid-column: 2;
+  grid-row: 1;
+  background: var(--line);
+}
+.cfg-group {
+  display: grid;
+  gap: var(--space-4);
+  align-content: start;
+  min-width: 0;
+}
+.cfg-group:first-child {
+  grid-column: 1;
+}
+.cfg-group:last-child {
+  grid-column: 3;
+}
+.cfg-group h5 {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-text);
+  color: var(--ink);
+}
+
+/* ── Fields: label, control, hint ─────────────────────────────── */
+.cfg-fieldset {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.cfg-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  min-width: 0;
+}
+.cfg-field[hidden],
+.cfg-advanced-row[hidden] {
+  display: none;
+}
+.cfg-fieldset > legend,
+.cfg-field > label,
+.cfg-field-label {
+  margin: 0 0 var(--space-1);
+  padding: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-text);
+  color: var(--ink);
+}
+.cfg-field > label {
+  margin: 0;
+}
+.cfg-field > label small {
+  margin-left: var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+  color: var(--ink-muted);
+}
+.cfg-fieldset > .field-hint,
+.cfg-field > .field-hint {
+  margin: 0;
+}
+
+/* Controls: size, height and corners are Basics' own rule (styles.css, "Scan
+   setup v6": 13.5px at 40px), which lists this step's controls beside its own.
+   Weighed as #id .class here, so a rule below for one kind of control outranks
+   it; the width is the console's own (100%). */
+#fs-wizard .cfg-box :where(input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+}
+#fs-wizard .cfg-box textarea {
+  padding: var(--space-2) var(--space-3);
+  resize: vertical;
+  line-height: var(--leading-text);
+}
+/* What the scan acts on character for character - paths and types - in the data face */
+#fs-wizard .cfg-box :is(textarea, #file-server-scope-exclude_extensions) {
+  font-family: var(--font-data);
+}
+#fs-wizard .cfg-box input[type="checkbox"],
+#fs-wizard .cfg-box input[type="radio"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--indigo);
+}
+#fs-wizard .cfg-hidden-toggle {
+  display: none;
+}
+
+/* Target: the shares (or folder) beside the depth */
+.cfg-target {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+/* ── File types ───────────────────────────────────────────────── */
+.cfg-types-all {
+  margin-top: var(--space-1);
+}
+
+/* Quick groups: small, secondary, dashed until hovered */
+.cfg-quick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.cfg-quick-btn {
+  margin: 0;
+  min-height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  background: none;
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.cfg-quick-btn:hover {
+  border-style: solid;
+  border-color: var(--indigo);
+  color: var(--indigo-ink);
+}
+
+/* ── Custom types: search, one group at a time, chosen chips ──── */
+/* The legacy panel announced itself with a badge drawn in ::before. */
+#fs-wizard #ext-advanced-mode::before {
+  content: none;
+  display: none;
+}
+#fs-wizard #ext-advanced-mode {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+}
+#fs-wizard #ext-advanced-mode.hidden {
+  display: none;
+}
+#fs-wizard .cfg-picker-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+#fs-wizard .cfg-picker-bar input[type="search"] {
+  flex: 1 1 220px;
+  width: auto;
+}
+.cfg-picker-actions {
+  display: inline-flex;
+  gap: var(--space-3);
+}
+.cfg-link-btn {
+  margin: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--indigo-ink);
+  cursor: pointer;
+}
+.cfg-link-btn:hover {
+  text-decoration: underline;
+}
+.cfg-picker-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+.cfg-group-pill {
+  margin: 0;
+  min-height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+.cfg-group-pill:hover {
+  color: var(--ink);
+}
+.cfg-group-pill span {
+  color: var(--indigo-ink);
+}
+.cfg-group-pill[aria-pressed="true"] {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+/* The list: a group's types in even columns; only the active group shows, every
+   group only while a search filters them. */
+#fs-wizard #allowed_extensions {
+  display: grid;
+  gap: var(--space-2);
+}
+#fs-wizard #allowed_extensions .extension-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-1);
+  align-items: center;
+}
+#fs-wizard #allowed_extensions .extension-group.hidden,
+#fs-wizard #allowed_extensions .extension-option.hidden,
+#fs-wizard #allowed_extensions [data-extension-group-wrap="scope"] {
+  display: none;
+}
+#fs-wizard #allowed_extensions:not([data-active-group="all"]) .extension-group {
+  display: none;
+}
+#fs-wizard #allowed_extensions[data-active-group="secrets & config"] [data-extension-group-wrap="secrets & config"],
+#fs-wizard #allowed_extensions[data-active-group="documents"] [data-extension-group-wrap="documents"],
+#fs-wizard #allowed_extensions[data-active-group="data & exports"] [data-extension-group-wrap="data & exports"],
+#fs-wizard #allowed_extensions[data-active-group="source code"] [data-extension-group-wrap="source code"],
+#fs-wizard #allowed_extensions[data-active-group="archives"] [data-extension-group-wrap="archives"],
+#fs-wizard #allowed_extensions[data-active-group="system & binaries"] [data-extension-group-wrap="system & binaries"],
+#fs-wizard #allowed_extensions[data-active-group="media"] [data-extension-group-wrap="media"],
+#fs-wizard #allowed_extensions[data-active-group="custom"] [data-extension-group-wrap="custom"],
+#fs-wizard #allowed_extensions[data-active-group="other"] [data-extension-group-wrap="other"] {
+  display: grid;
+}
+#fs-wizard #allowed_extensions .extension-group-heading {
+  grid-column: 1 / -1;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-muted);
+}
+#fs-wizard #allowed_extensions:not([data-active-group="all"]) .extension-group-heading {
+  display: none;
+}
+#fs-wizard #allowed_extensions .extension-option::before,
+#fs-wizard #allowed_extensions .extension-option::after {
+  content: none;
+  display: none;
+}
+#fs-wizard #allowed_extensions .extension-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 30px;
+  box-shadow: none;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font-size: var(--text-xs);
+  line-height: var(--leading-text);
+  color: var(--ink);
+  cursor: pointer;
+}
+#fs-wizard #allowed_extensions .extension-option input {
+  width: 14px;
+  height: 14px;
+}
+#fs-wizard #allowed_extensions .extension-option:has(input:checked) {
+  border-color: var(--indigo);
+  background: var(--indigo-wash);
+  color: var(--indigo-ink);
+}
+#fs-wizard #allowed_extensions .extension-option:has(input:focus-visible) {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+#fs-wizard .cfg-picker-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+#fs-wizard .cfg-selected {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1 1 280px;
+}
+#fs-wizard .cfg-selected .extension-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  min-height: 0;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  color: var(--ink);
+  cursor: pointer;
+}
+#fs-wizard .cfg-selected .extension-chip:hover {
+  border-color: var(--sev-critical);
+}
+#fs-wizard .cfg-selected .extension-selected-empty {
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+.cfg-custom-add {
+  display: inline-flex;
+  gap: var(--space-2);
+}
+#fs-wizard .cfg-custom-add input {
+  width: 120px;
+}
+
+/* ── Cards: the scan level, the options, the frameworks ────────────
+   Each a choice with its control in view: the radio or checkbox and the name
+   on one line, what it does under them. */
+.cfg-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.cfg-card {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 2px var(--space-2);
+  align-items: center;
+  align-content: start;
+  min-width: 0;
+  padding: 10px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+.cfg-card > span {
+  display: contents;
+}
+.cfg-card b {
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-text);
+  color: var(--ink);
+}
+.cfg-card small {
+  grid-column: 1 / -1;
+  font-size: var(--text-xs);
+  line-height: var(--leading-text);
+  color: var(--ink-muted);
+}
+.cfg-card:hover {
+  border-color: color-mix(in srgb, var(--indigo) 45%, var(--line));
+}
+.cfg-card:has(input:checked) {
+  border-color: var(--indigo);
+  background: var(--indigo-wash);
+  box-shadow: inset 0 0 0 1px var(--indigo);
+}
+.cfg-card:has(input:focus-visible) {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+
+/* ── Advanced options: folded, and says what it holds ─────────── */
+.cfg-advanced {
+  border-top: 1px solid var(--line);
+}
+.cfg-advanced > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-3) 0 var(--space-1);
+  list-style: none;
+  cursor: pointer;
+}
+.cfg-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+.cfg-advanced > summary:focus-visible {
+  border-radius: var(--radius-control);
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+.cfg-chevron {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--ink-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.cfg-advanced[open] .cfg-chevron {
+  transform: rotate(90deg);
+}
+.cfg-advanced-title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--ink);
+}
+.cfg-advanced > summary:hover .cfg-advanced-title {
+  color: var(--indigo-ink);
+}
+.cfg-advanced-hint {
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+.cfg-advanced-state {
+  margin-left: auto;
+  padding: 2px var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--ink-muted);
+}
+.cfg-advanced-state.is-changed {
+  border-color: color-mix(in srgb, var(--indigo) 35%, var(--line));
+  background: var(--indigo-wash);
+  color: var(--indigo-ink);
+}
+.cfg-advanced-body {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-3) 0 var(--space-2);
+}
+/* The folders line up with the columns above: the same split, the rule's width
+   and both gaps between them. */
+.cfg-advanced-folders {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) calc(var(--space-5) * 2 + 1px);
+}
+.cfg-advanced-files {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: var(--space-3);
+}
+.cfg-size {
+  display: flex;
+  gap: 6px;
+}
+#fs-wizard .cfg-size input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#fs-wizard .cfg-size select {
+  flex: none;
+  width: 76px;
+}
+.cfg-smb-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
+}
+.cfg-smb-options > .cfg-field-label,
+.cfg-smb-options > .field-hint {
+  flex: 0 0 100%;
+  margin: 0;
+}
+.cfg-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 28px;
+  font-size: var(--text-sm);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+/* ── The footer stays in reach ─────────────────────────────────────
+   The page scrolls (one scrollbar, "Scan setup v8"); Back and Next stay on
+   screen at its bottom edge however long the step is. */
+#fs-wizard .scan-wizard-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-raised);
+  box-shadow: 0 -6px 16px color-mix(in srgb, var(--paper) 90%, transparent);
+}
+
+/* ── Narrower windows ───────────────────────────────────────────── */
+@media (max-width: 1199px) {
+  .cfg-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cfg-columns::before {
+    content: none;
+  }
+  .cfg-group:first-child,
+  .cfg-group:last-child {
+    grid-column: 1;
+  }
+  .cfg-group + .cfg-group {
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--line);
+  }
+  .cfg-advanced-folders {
+    column-gap: var(--space-3);
+  }
+}
+@media (max-width: 760px) {
+  .cfg-target,
+  .cfg-cards,
+  .cfg-advanced-folders {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cfg-advanced-state {
+    margin-left: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cfg-card,
+  .cfg-chevron {
+    transition: none;
+  }
+}

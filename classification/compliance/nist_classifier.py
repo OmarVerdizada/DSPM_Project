@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import os
+import threading
 import re
 import time
 import unicodedata
 from typing import Any
 
+from classification import masking
 from classification.compliance.canonical_entities import canonical_entity_fingerprint
 from classification.compliance.evidence_keys import evidence_hmac_key
-from classification.compliance.nist_catalog import load_nist_catalog, nist_catalog_status
+from classification.compliance.nist_catalog import load_nist_catalog, nist_catalog_readonly, nist_catalog_status
 from classification.compliance.nist_mappings import nist_data_categories_for_finding
 from classification.compliance.nist_models import NIST_DETECTOR_VERSION, NIST_FRAMEWORK_ID
 from classification.compliance.validators import redact
@@ -18,7 +21,6 @@ from backend.finding_contracts import get_finding_display_name
 
 
 NIST_DETECTOR_TIMEOUT_SECONDS = float(os.getenv("DSPM_NIST_DETECTOR_TIMEOUT_SECONDS", "8"))
-SENSITIVE_TYPE_MARKERS = ("secret", "token", "password", "key", "passport", "ssn", "account", "credential")
 
 
 def classify_nist_content(
@@ -34,7 +36,8 @@ def classify_nist_content(
 
     metadata = metadata or {}
     tenant_id = str(metadata.get("tenant_id") or metadata.get("tenant") or "default")
-    catalog = load_nist_catalog()
+    # Only an overlay writes into the catalog, and only then is a copy needed.
+    catalog = load_nist_catalog() if custom_rule_overlays else nist_catalog_readonly()
     catalog_version = str((catalog.get("catalog") or {}).get("catalog_version") or "")
     catalog_hash = str(status.get("catalog_hash") or "")
     rules = _apply_overlays(catalog.get("rules") or [], custom_rule_overlays or [])
@@ -121,7 +124,7 @@ def _score_rule(rule: dict[str, Any], content: str, evidence_blob: str, path_blo
         positive.append({"group": "path_context", "signals": path_hits[:10], "score": delta})
         matched_groups.add("path_context")
 
-    regex_hits = _regex_hits(content, detection.get("regex_patterns") or [])
+    regex_hits = _regex_hits(content, detection.get("regex_patterns") or [], _value_data_class(rule))
     if regex_hits:
         delta = int(weights.get("regex", 25))
         score += delta
@@ -184,6 +187,9 @@ def _finding_from_score(rule: dict[str, Any], score_row: dict[str, Any], metadat
     confidence_score = int(score_row["score"])
     review_status = "CONFIRMED" if score_row["status"] == "confirmed" else "NEEDS_REVIEW"
     sample_seed = _sample_seed(rule, score_row)
+    # A regex hit is a value and is masked for its class; without one the sample is a
+    # catalog keyword, which is not.
+    sample_class = _value_data_class(rule) if score_row.get("regex_hits") else masking.GENERIC
     secure_fp = _secure_fingerprint(sample_seed, tenant_id) if sample_seed else _secure_fingerprint(rule.get("rule_id", ""), tenant_id)
     canonical_entity_type = _canonical_type(rule)
     canonical_fingerprints = [canonical_entity_fingerprint(canonical_entity_type, secure_fp, tenant_id)] if canonical_entity_type else []
@@ -244,8 +250,8 @@ def _finding_from_score(rule: dict[str, Any], score_row: dict[str, Any], metadat
         "source_object": metadata.get("object_name") or "",
         "source_table": metadata.get("table") or "",
         "source_column": metadata.get("column") or "",
-        "samples": [_masked_preview(sample_seed)] if sample_seed else [],
-        "masked_preview": _masked_preview(sample_seed),
+        "samples": [_masked_preview(sample_seed, sample_class)] if sample_seed else [],
+        "masked_preview": _masked_preview(sample_seed, sample_class),
         "secure_value_fingerprints": [secure_fp],
         "canonical_entity_type": canonical_entity_type,
         "canonical_entity_fingerprints": canonical_fingerprints,
@@ -325,49 +331,90 @@ def _apply_overlays(rules: list[dict[str, Any]], overlays: list[dict[str, Any]])
     return rules
 
 
+_LOWERED_TEXT = threading.local()
+
+
+def _lowered_once(text: str) -> str:
+    """`text.lower()` for a string this scan keeps asking about.
+
+    _keyword_hits is called 984 times for one file and every call lowered the
+    same evidence blob - 12MB of case-folding per file. The blob is one object
+    for the length of a classify call, so it is folded once and held against
+    its identity; the slot is replaced as soon as a different string arrives.
+    """
+    slot = getattr(_LOWERED_TEXT, "slot", None)
+    if slot is not None and slot[0] is text:
+        return slot[1]
+    lowered = text.lower()
+    _LOWERED_TEXT.slot = (text, lowered)
+    return lowered
+
+
 def _keyword_hits(text: str, terms: list[Any]) -> list[str]:
     hits = []
-    # Lower the text ONCE and use it as a cheap substring prefilter. A word-boundary
-    # match requires the term to be present at all, so this correctly skips the
-    # expensive per-term regex (re.escape + compile + search) for the ~99% of a large
-    # catalog (thousands of terms) that never appear in a given file - the dominant
-    # NIST scan cost before this guard.
-    text_lower = text.lower()
+    # A word-boundary match requires the term to be present at all, so this
+    # substring test correctly skips the expensive per-term regex for the ~99%
+    # of a catalog that never appears in a given file.
+    text_lower = _lowered_once(text)
     for term in terms:
-        normalized = _normalize_text(str(term or ""))
+        normalized = _normalize_term(str(term or ""))
         if not normalized:
             continue
-        if normalized.lower() not in text_lower:
+        # _normalize_term casefolds, so the term is already lower - this used
+        # to call .lower() on it 1.1 million times over one corpus.
+        if normalized not in text_lower:
             continue
         if _term_matches(text, normalized):
             hits.append(str(term))
     return list(dict.fromkeys(hits))
 
 
-def _regex_hits(content: str, patterns: list[dict[str, Any]]) -> list[dict[str, str]]:
+@functools.lru_cache(maxsize=2048)
+def _compiled_rule_pattern(raw: str, ignore_case: bool):
+    try:
+        return re.compile(raw, re.IGNORECASE if ignore_case else 0)
+    except re.error:
+        return None
+
+
+def _regex_hits(content: str, patterns: list[dict[str, Any]], data_class: str = masking.GENERIC) -> list[dict[str, str]]:
     hits = []
+    # `content[:250_000]` is the same slice for every pattern of every rule, and
+    # taking it inside the loop copied the file's text 154 times - the single
+    # largest cost of a NIST pass over a file with nothing in it.
+    scanned = content[:250_000]
     for pattern in patterns[:10]:
         raw = str(pattern.get("pattern") or "")
         if not raw or len(raw) > 500:
             continue
-        try:
-            flags = re.IGNORECASE if "i" in str(pattern.get("flags") or "").lower() else 0
-            compiled = re.compile(raw, flags)
-        except re.error:
+        compiled = _compiled_rule_pattern(raw, "i" in str(pattern.get("flags") or "").lower())
+        if compiled is None:
             continue
-        for match in compiled.finditer(content[:250_000]):
+        for match in compiled.finditer(scanned):
             value = match.group(0)
-            hits.append({"pattern_id": str(pattern.get("id") or ""), "masked_preview": _masked_preview(value), "fingerprint_seed": value})
+            hits.append({"pattern_id": str(pattern.get("id") or ""), "masked_preview": _masked_preview(value, data_class),
+                         "fingerprint_seed": value})
             if len(hits) >= 10:
                 return hits
     return hits
+
+
+@functools.lru_cache(maxsize=16384)
+def _term_boundary_pattern(term: str):
+    """A term's word-boundary matcher, built once.
+
+    This was re.escape plus a pattern string plus a module-cache lookup on
+    every term of every rule of every file - 115,000 compiles and 66,000
+    escapes over one corpus, all of them arriving at the same few thousand
+    patterns."""
+    return re.compile(rf"(?<![\w]){re.escape(term)}(?![\w])", re.IGNORECASE)
 
 
 def _term_matches(text: str, term: str) -> bool:
     if not term:
         return False
     if term[0].isalnum() and term[-1].isalnum():
-        return re.search(rf"(?<![\w]){re.escape(term)}(?![\w])", text, flags=re.IGNORECASE) is not None
+        return _term_boundary_pattern(term).search(text) is not None
     return term in text
 
 
@@ -395,15 +442,24 @@ def _sample_seed(rule: dict[str, Any], score_row: dict[str, Any]) -> str:
     return keywords[0] if keywords else str(rule.get("rule_id") or "")
 
 
-def _masked_preview(value: str) -> str:
+def _masked_preview(value: str, data_class: str = masking.GENERIC) -> str:
+    """The value masked for its class. It used to keep the first three and last two
+    characters of anything - an SSN read "123...89" - and that text reaches reports."""
     text = str(value or "")
     if not text:
         return ""
-    if any(marker in text.casefold() for marker in SENSITIVE_TYPE_MARKERS):
-        return redact(text)
-    if len(text) <= 6:
-        return redact(text)
-    return f"{text[:3]}...{text[-2:]}"
+    return redact(text, data_class)
+
+
+def _value_data_class(rule: dict[str, Any]) -> str:
+    """What a rule's regex values are. Every NIST value pattern is an identifier (an id,
+    token, account or passport number); a credential rule's is a secret."""
+    canonical = _canonical_type(rule)
+    if canonical == "SECRET":
+        return masking.SECRET
+    if canonical == "PASSPORT_NUMBER":
+        return masking.PASSPORT
+    return masking.GOVERNMENT_ID
 
 
 def _secure_fingerprint(value: str, tenant_id: str) -> str:
@@ -441,6 +497,16 @@ def _normalize_text(value: str) -> str:
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
     text = re.sub(r"[_/\\.\-]+", " ", text)
     return " ".join(text.split())
+
+
+@functools.lru_cache(maxsize=16384)
+def _normalize_term(value: str) -> str:
+    """The same normalization, for catalog TERMS rather than file content.
+
+    _keyword_hits normalized every term of every rule on every file - 4,828
+    NFKC-and-regex passes for one file - to arrive at the same string each
+    time. Content is never cached here: it is unbounded and never repeats."""
+    return _normalize_text(value)
 
 
 def _stable_id(prefix: str, *parts: Any) -> str:

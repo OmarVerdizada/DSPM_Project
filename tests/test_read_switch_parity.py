@@ -32,10 +32,17 @@ class ReadSwitchParityTests(unittest.TestCase):
             {"finding_id": "f1", "type": "password", "risk": "HIGH", "status": "OPEN", "occurrence_count": 3},
             {"finding_id": "f2", "type": "email", "risk": "LOW", "status": "RESOLVED"},
         ]))
-        # newer scan: f1 re-detected, now CONFIRMED (newest wins on dedup)
+        # newer scan: f1 re-detected, and worse than before (newest wins on dedup)
         store.save_scan_history(self.tenant, _report(f"{self.tenant}-s2", [
-            {"finding_id": "f1", "type": "password", "risk": "CRITICAL", "status": "CONFIRMED", "occurrence_count": 5},
+            {"finding_id": "f1", "type": "password", "risk": "CRITICAL", "occurrence_count": 5},
         ]))
+        # ...and then an analyst confirms it. The status arrives this way and no
+        # other: a scan reports what it found, never what someone decided about
+        # it, and a scan that claimed a status would now be ignored anyway - the
+        # row owns the lifecycle, so that nightly re-detection cannot undo triage.
+        store.update_finding_lifecycle(
+            self.tenant, "f1", "status", {"status": "CONFIRMED"}, "analyst@example.com",
+        )
 
     def tearDown(self) -> None:
         if self._saved is None:

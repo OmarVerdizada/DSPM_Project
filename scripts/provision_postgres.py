@@ -92,6 +92,9 @@ def provision(admin_url: str, db: str, role: str, password: str) -> None:
         # the runtime app role intentionally has no extension-management power.
         conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
         print("= pg_trgm extension ready (Track S-D inventory search)")
+        # Phase 7 combines equality filters and trigrams in one access path.
+        conn.execute("CREATE EXTENSION IF NOT EXISTS btree_gin")
+        print("= btree_gin extension ready (Phase 7 filtered search)")
 
         conn.execute(f"GRANT USAGE, CREATE ON SCHEMA public TO {role}")
         print(f"= granted USAGE, CREATE ON SCHEMA public to {role}")

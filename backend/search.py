@@ -152,18 +152,39 @@ def _filter_value(value) -> str:
     return json.dumps(str(value or ""), ensure_ascii=False)
 
 
+def can_express(filt: dict) -> bool:
+    """Whether the engine can answer these filters exactly as the database does.
+
+    The inventory filters became multi-select: a source also matches a scan's name, a
+    finding type stands for every stored spelling of itself, and "Protected",
+    "Classified" and "Clear" are pseudo-values that join their facet's OR group. The
+    engine was handed the old single-value fields - empty for all of these - so a text
+    search with them ticked came back unfiltered, its items and total disagreeing with
+    the filters. Those searches stay on the database, which answers them correctly."""
+    return not (filt.get("sources") or filt.get("source") or filt.get("finding_types") or filt.get("finding_type")
+                or filt.get("protected_risk") or filt.get("protected_type") or filt.get("classified_type")
+                or filt.get("clear_type"))
+
+
 def build_filter(tenant_id: str, filt: dict) -> str:
-    """Build a tenant-mandatory Meilisearch filter expression."""
+    """Build a tenant-mandatory Meilisearch filter expression (see `can_express`)."""
     clauses = [
         f"tenant_id = {_filter_value(tenant_id)}",
         f"index_version = {_filter_value(INDEX_VERSION)}",
     ]
-    if filt.get("risk"):
-        clauses.append(f"risk_level = {_filter_value(filt['risk'])}")
-    if filt.get("source"):
+    risks = [value for value in filt.get("risks") or ([filt["risk"]] if filt.get("risk") else []) if value]
+    if risks:
+        clauses.append("(" + " OR ".join(f"risk_level = {_filter_value(value)}" for value in risks) + ")")
+    if filt.get("source_group"):
+        clauses.append(
+            "(" + " OR ".join(f"source = {_filter_value(source)}" for source in filt["source_group"]) + ")"
+        )
+    elif filt.get("source"):
         clauses.append(f"source = {_filter_value(filt['source'])}")
-    if filt.get("extension"):
-        clauses.append(f"extension = {_filter_value(filt['extension'])}")
+    extensions = [value for value in filt.get("extensions") or ([filt["extension"]] if filt.get("extension") else [])
+                  if value]
+    if extensions:
+        clauses.append("(" + " OR ".join(f"extension = {_filter_value(value)}" for value in extensions) + ")")
     if filt.get("protected") is not None:
         clauses.append(f"is_protected = {_filter_value(bool(filt['protected']))}")
     if filt.get("finding_type"):
@@ -370,6 +391,19 @@ class MeilisearchClient:
             self.wait_task(task_uid)
         return task_uid
 
+    def delete_tenant(self, tenant_id: str, *, wait: bool = True) -> int | None:
+        """Every document of one tenant, by filter - erasure's part in the index (C10).
+        An index that was never created holds nothing to delete."""
+        task = self.request(
+            "POST", f"{self.index_path}/documents/delete",
+            json_body={"filter": f"tenant_id = {_filter_value(tenant_id)}"},
+            allowed=(202, 404),
+        )
+        task_uid = int(task["taskUid"]) if task.get("taskUid") is not None else None
+        if wait and task_uid is not None:
+            self.wait_task(task_uid)
+        return task_uid
+
     def delete_index(self, *, wait: bool = True) -> None:
         deleted = self.request("DELETE", self.index_path, allowed=(202, 404))
         if wait and deleted.get("taskUid") is not None:
@@ -477,6 +511,18 @@ def close_search_clients() -> None:
         client.close()
 
 
+def erase_tenant(tenant_id: str) -> str:
+    """Remove a tenant's documents from the optional index when the tenant is erased (C10).
+    Returns "removed", or "not configured" when there is no index. Raises SearchUnavailable
+    if the index cannot be reached; the caller reports that, and reconciliation removes
+    the documents once it can."""
+    config = config_from_env()
+    if not config.enabled:
+        return "not configured"
+    _client(config).delete_tenant(tenant_id, wait=True)
+    return "removed"
+
+
 def search_inventory(tenant_id: str, filt: dict, sort: str, direction: str, cursor: str, limit: int) -> dict:
     return _client().search(tenant_id, filt, sort, direction, cursor, limit)
 
@@ -507,9 +553,9 @@ def index_scan_report(tenant_id: str, report: dict) -> int:
     config = config_from_env()
     if not config.enabled or not config.dual_write:
         return 0
-    from backend.domain import normalize_scan_report
+    from backend.domain import iter_normalized_assets
 
-    assets = (asset.to_dict() | {"tenant_id": tenant_id} for asset in normalize_scan_report(tenant_id, report).assets)
+    assets = (asset.to_dict() | {"tenant_id": tenant_id} for asset in iter_normalized_assets(tenant_id, report))
     return index_assets(assets, wait=False)
 
 
@@ -637,11 +683,21 @@ _reconciler_thread: threading.Thread | None = None
 _reconciler_thread_lock = threading.Lock()
 
 
+def reconcile_pass() -> dict | None:
+    """One pass of the automated reconciler; ``None`` - nothing compared, repaired or
+    recorded - on a database a newer release has upgraded (C0.4)."""
+    from backend import schema_guard
+
+    if schema_guard.stand_down("search reconciler"):
+        return None
+    return run_search_reconciliation(repair=config_from_env().reconcile_repair)
+
+
 def _reconciler_loop() -> None:
     while not _reconciler_stop.is_set():
         config = config_from_env()
         try:
-            run_search_reconciliation(repair=config.reconcile_repair)
+            reconcile_pass()
         except Exception as exc:  # pragma: no cover - live optional service guard
             logger.warning("Automated search reconciliation failed: %s", type(exc).__name__)
         if _reconciler_stop.wait(max(1, config.reconcile_interval_seconds)):

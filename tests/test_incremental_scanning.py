@@ -55,7 +55,7 @@ class IncrementalScanningTests(unittest.TestCase):
         return ScanConfig(
             tenant_id=self.tenant,
             local_path=str(self.data),
-            use_sample_when_empty=True,
+            walk_local_path=True,
             persistent_cache_enabled=False,
             max_workers=1,
             incremental_enabled=enabled,

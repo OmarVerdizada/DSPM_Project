@@ -1,0 +1,186 @@
+/* ============================================================
+   SENTRO — notifications
+   ------------------------------------------------------------
+   The console's notifications are called `.notice`, not `.toast`.
+   While daisyui.css was loaded (until D4) it defined `.toast` as a
+   fixed-position CONTAINER component, so every notification this
+   console raised inherited `position: fixed`, `width: max-content`,
+   `bottom: 1rem` and `inset-inline: auto 1rem` from a vendor sheet
+   it was never meant to touch. The stack came out ragged, floating
+   away from its corner, and four generations of overrides in
+   styles.css had been added on top trying to argue it back.
+
+   Renaming the element ends the argument instead of out-specifying
+   it, and this sheet is the only place notifications are styled.
+   ============================================================ */
+
+/* The layer spans a corner and must not swallow clicks meant for
+   the page behind it - so the HOST is transparent to the pointer
+   and each notice turns it back on for itself. Missing that second
+   half is why the dismiss button could not be clicked. */
+.notice-host {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: var(--z-toast);
+  display: grid;
+  gap: 10px;
+  width: min(380px, calc(100vw - 40px));
+  pointer-events: none;
+}
+
+.notice {
+  position: relative;
+  width: 100%;
+  padding: 12px 46px 13px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--indigo);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--elev-overlay);
+  color: var(--ink);
+  overflow: hidden;
+  pointer-events: auto;
+  /* No fill mode: if the frames never run - a hidden tab, a throttled
+     renderer - the notice must still be readable at its base opacity. */
+  animation: notice-in var(--motion-base) var(--ease-out);
+}
+
+.notice.success { border-left-color: var(--sev-low); }
+.notice.warning { border-left-color: var(--sev-medium); }
+.notice.danger { border-left-color: var(--sev-critical); }
+
+.notice-title {
+  display: block;
+  font-size: 13px;
+  font-weight: var(--weight-semibold);
+  line-height: 1.35;
+}
+
+.notice-body {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* `plain-btn` is this codebase's existing opt-out from the app-wide
+   button chrome; using it is what keeps this block free of !important. */
+.notice button.notice-close {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+
+/* A 30px control is a comfortable 44px target. */
+.notice button.notice-close::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+}
+
+.notice button.notice-close:hover {
+  background: var(--hover-wash);
+  color: var(--ink);
+  transform: none;
+  box-shadow: none;
+}
+
+.notice button.notice-close:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+
+.notice button.notice-close svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The countdown a notice is running, drawn as a hairline so the
+   dismissal is something you can see coming rather than a surprise.
+   It pauses with the timer whenever the pointer or focus is inside. */
+.notice-life {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 0 0 var(--radius-card) var(--radius-card);
+  background: color-mix(in srgb, var(--indigo) 34%, transparent);
+  transform-origin: left center;
+  /* The lifetime is a JS decision - an error is readable for longer than a
+     confirmation - so the bar reads it from the element rather than
+     hard-coding a second copy of the same number. */
+  animation: notice-life var(--notice-life, 5000ms) linear forwards;
+}
+
+.notice.success .notice-life { background: color-mix(in srgb, var(--sev-low) 34%, transparent); }
+.notice.warning .notice-life { background: color-mix(in srgb, var(--sev-medium) 40%, transparent); }
+.notice.danger .notice-life { background: color-mix(in srgb, var(--sev-critical) 34%, transparent); }
+
+.notice[data-paused="1"] .notice-life { animation-play-state: paused; }
+
+.notice.leaving {
+  animation: notice-out var(--motion-fast) var(--ease-out) forwards;
+  pointer-events: none;
+}
+
+@keyframes notice-in {
+  from { opacity: 0; transform: translateY(10px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes notice-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(6px) scale(.98); }
+}
+
+@keyframes notice-life {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
+@media (max-width: 640px) {
+  .notice-host {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notice,
+  .notice.leaving {
+    animation: none;
+  }
+
+  /* A countdown that cannot count down is a full bar that never moves - it
+     would read as a progress bar stuck at zero. Drop it rather than freeze
+     it; the notice still dismisses on the same timer. */
+  .notice-life {
+    display: none;
+  }
+}

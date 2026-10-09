@@ -16,7 +16,10 @@ class NISTDiscoveryIntegrationTests(unittest.TestCase):
         record = {"source": "local", "path": "identity.txt", "name": "identity.txt", "extension": ".txt", "content": "CUI NIST SP 800-60 Identity Management Type 1 user id", "acl": {}}
         engine = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["gdpr"], persistent_cache_enabled=False))
 
-        with patch("discovery.discovery_engine.classify_nist_content") as detector:
+        # Patched where the stage calls it. Against the engine's own module
+        # this assertion passed without testing anything, because the engine
+        # stopped calling the detectors directly.
+        with patch("discovery.detector_stage.classify_nist_content") as detector:
             engine._analyze_record(record)
 
         detector.assert_not_called()

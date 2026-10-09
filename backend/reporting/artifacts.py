@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from backend.reporting.report_model import build_report_model
+from backend.reporting.report_model import build_report_model, report_title
 from backend.reporting.report_pdf import REPORT_TEMPLATE_ID, render_visual_report_pdf
 from backend.security import Principal, create_artifact_download_token
 from backend.store import DATA_DIR, read_scan_history, read_scan_report
+from classification.masking import mask_in_text
 
 
 ARTIFACT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -19,6 +20,9 @@ ARTIFACT_ROOT = DATA_DIR / "reports_artifacts"
 
 class ArtifactError(Exception):
     """Raised when a report artifact cannot be created or served safely."""
+
+    # C8: its message is written for the operator; backend.errors may show it.
+    client_safe = True
 
 
 def _safe(value: str) -> str:
@@ -53,7 +57,11 @@ def _scope_line(scope: dict) -> str:
 
 def _render_report_html(model: dict) -> str:
     """Accessible HTML companion for the shared visual PDF report."""
-    e = html.escape
+
+    def e(value: object, quote: bool = True) -> str:
+        # C9: the same export masking the PDF and the Office files apply, then escaped.
+        return html.escape(mask_in_text(value)[0], quote=quote)
+
     scope = model.get("scope") or {}
     posture = model.get("posture") or {}
     full = model.get("full_summary") or {}
@@ -225,27 +233,39 @@ def create_report_artifact(
     pdf_path = root / f"{artifact_id}.pdf"
     html_path = root / f"{artifact_id}.html"
     metadata_path = root / f"{artifact_id}.json"
-    title = f"DSPM Assessment Report — {normalized_scope.get('label', 'Full scan')}"
+    # The model composes the title from the same normalized scope, so the name in
+    # the metadata, in the HTML head and in the PDF is one string, not three.
+    title = str(model.get("title") or report_title(normalized_scope))
     html_path.write_text(_render_report_html(model), encoding="utf-8")
     pdf_info = render_visual_report_pdf(pdf_path, model)
     if not pdf_path.exists():
         raise ArtifactError("Report generation failed. The file could not be written.")
-    dl_token = create_artifact_download_token(artifact_id, principal.tenant_id, principal.subject, principal.role)
+    # C8: one fetch, by the session that asked for the report. The token is bound to
+    # that session and spent on first use; the console presents it in a header.
+    dl_token = create_artifact_download_token(
+        artifact_id, principal.tenant_id, principal.subject, principal.role,
+        session_id=principal.session_id,
+    )
     filter_severity_meta = (
         normalized_scope.get("label") if normalized_scope.get("kind") == "severity" else None
     )
+    artifact_path = f"/api/v1/reports/artifacts/{artifact_id}"
     metadata = {
         "artifact_id": artifact_id,
         "type": "pdf",
         "filename": safe_filename,
-        "download_url": f"/api/v1/reports/artifacts/{artifact_id}?dl_token={dl_token}",
-        "preview_url": f"/api/v1/reports/artifacts/{artifact_id}?dl_token={dl_token}&inline=1",
-        "html_download_url": f"/api/v1/reports/artifacts/{artifact_id}?format=html&dl_token={dl_token}",
+        # C8: no URL carries the token any more. A query string is written to every
+        # proxy and access log on the path; these are the plain addresses, fetched with
+        # the token in X-Artifact-Token or with the caller's own session.
+        "download_url": artifact_path,
+        "preview_url": f"{artifact_path}?inline=1",
+        "html_download_url": f"{artifact_path}?format=html",
         "created_at": created_at,
         "source_scan_id": source_scan_id,
         "filter_severity": filter_severity_meta,
         "scope": normalized_scope,
         "scope_label": normalized_scope.get("label", "Full scan"),
+        "title": title,
         "media_type": "application/pdf",
         "storage_filename": pdf_path.name,
         "html_storage_filename": html_path.name,
@@ -255,9 +275,22 @@ def create_report_artifact(
         "render_style": pdf_info["render_style"],
         "template_id": pdf_info["template_id"],
         "page_count": pdf_info["page_count"],
+        "font": pdf_info["font"],
     }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {key: value for key, value in metadata.items() if key not in {"storage_filename", "html_storage_filename", "media_type"}}
+    # The signed download token is a CREDENTIAL with a five-minute life. It is
+    # handed to the caller that just authenticated and is not written beside the
+    # artifact, where it would outlive its purpose in a file anyone with the
+    # data directory can read.
+    persisted = {key: value for key, value in metadata.items() if not key.endswith("_url")}
+    persisted["artifact_path"] = f"/api/v1/reports/artifacts/{artifact_id}"
+    metadata_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        **{key: value for key, value in metadata.items() if key not in {"storage_filename", "html_storage_filename", "media_type"}},
+        # Preferred delivery: the caller fetches with this in a header, so the
+        # token never enters a proxy or web-server access log.
+        "artifact_path": f"/api/v1/reports/artifacts/{artifact_id}",
+        "download_token": dl_token,
+    }
 
 
 def load_artifact_metadata(principal: Principal, artifact_id: str) -> dict | None:

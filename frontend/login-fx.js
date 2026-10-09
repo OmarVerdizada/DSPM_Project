@@ -11,8 +11,10 @@ function sentroEyeToggle() {
   if (!input || !eyeA || !eyeB) return;
   var nowVisible = input.type === 'text';
   input.type         = nowVisible ? 'password' : 'text';
-  eyeA.style.display = nowVisible ? ''         : 'none';
-  eyeB.style.display = nowVisible ? 'none'     : '';
+  // A class, not style.display: login.css hides the second icon until it is wanted (C6).
+  // Revealed: the slashed eye offers to hide it again; hidden: the open eye offers to show it.
+  eyeA.classList.toggle('is-hidden', !nowVisible);
+  eyeB.classList.toggle('is-hidden', nowVisible);
 }
 
 /* ── Theme toggle ── */

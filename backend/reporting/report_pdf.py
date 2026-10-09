@@ -1,17 +1,38 @@
-"""Shared dependency-free visual renderer for every SENTRO DSPM PDF report."""
+"""Shared dependency-free visual renderer for every SENTRO DSPM PDF report.
+
+C9: text is drawn in Inter, embedded as a Unicode CID font (pdf_font.py), so a file name
+in Azerbaijani, Russian or Greek prints as itself. Every string passes the shared export
+masking (classification.masking.mask_in_text) on its way onto a page, the same pass the
+Word and Excel exports use. Without the font files the renderer falls back to Helvetica
+and the old Latin-1 transliteration, and the artifact metadata says which it used.
+"""
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
+
+from backend.reporting import pdf_font
+from classification.masking import mask_in_text
 
 
 PAGE_WIDTH = 842.0
 PAGE_HEIGHT = 595.0
 MARGIN = 32.0
 CONTENT_WIDTH = PAGE_WIDTH - (MARGIN * 2)
+# The cover headline's band: the scan id and generation stamp start 290pt from the
+# right edge, and the title must stop before them.
+HEADLINE_WIDTH = PAGE_WIDTH - 290 - MARGIN - 14
 
 REPORT_TEMPLATE_ID = "sentro-dspm-unified-v1"
+
+# The model composes the document title (it knows the scope); this stands in only
+# when a caller builds a model without one. This module stays dependency-free, so it
+# does not import the model to borrow the constant.
+FALLBACK_TITLE = "DSPM Assessment Report"
 
 INK = (0.059, 0.090, 0.165)
 MUTED = (0.392, 0.455, 0.545)
@@ -38,6 +59,8 @@ RISK_SOFT = {
     "LOW": (0.941, 0.992, 0.957),
 }
 
+# Only for the fallback: without the embedded font the page is drawn in Helvetica,
+# which is Latin-1, and these letters are mapped to their nearest ASCII form.
 _TRANSLITERATION = str.maketrans(
     {
         "\u0259": "e", "\u018f": "E", "\u0131": "i", "\u0130": "I",
@@ -49,8 +72,29 @@ _TRANSLITERATION = str.maketrans(
 )
 
 
+class _Fonts:
+    """The two embedded faces of one document, and the glyphs it used from each."""
+
+    def __init__(self, regular: pdf_font.TrueTypeFont, bold: pdf_font.TrueTypeFont) -> None:
+        self.faces = {False: regular, True: bold}
+
+    def resource(self, bold: bool) -> str:
+        return "/U1" if bold else "/U0"
+
+
+# The document being rendered. A context variable rather than an argument, so the page
+# builders keep their shape and two reports rendered at once never share a glyph set.
+_DOCUMENT_FONTS: ContextVar[_Fonts | None] = ContextVar("report_pdf_fonts", default=None)
+
+
 def _clean(value: Any, limit: int = 500) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip().translate(_TRANSLITERATION)
+    # None is nothing to print; 0 is a count. `value or ""` printed every zero as a blank.
+    text = re.sub(r"\s+", " ", "" if value is None else str(value)).strip()
+    # Masked before it is cut, so a card number at the limit is not half-kept.
+    text, _masked = mask_in_text(text)
+    if _DOCUMENT_FONTS.get() is not None:
+        return text[:limit]
+    text = text.translate(_TRANSLITERATION)
     return text.encode("latin-1", "replace").decode("latin-1")[:limit]
 
 
@@ -62,23 +106,53 @@ def _rgb(color: tuple[float, float, float]) -> str:
     return " ".join(f"{component:.3f}" for component in color)
 
 
-def _wrap(value: Any, width: float, size: float, max_lines: int | None = None) -> list[str]:
+def text_width(value: Any, size: float, bold: bool = False) -> float:
+    """How wide `value` is drawn at `size` points: measured with the embedded font's own
+    advance widths, or estimated at 0.52 em a character in the Helvetica fallback."""
+    text = _clean(value)
+    fonts = _DOCUMENT_FONTS.get()
+    if fonts is None:
+        return len(text) * size * 0.52
+    return fonts.faces[bold].width(text, size)
+
+
+def _wrap(value: Any, width: float, size: float, max_lines: int | None = None, *, bold: bool = False) -> list[str]:
     text = _clean(value)
     if not text:
         return [""]
-    max_chars = max(8, int(width / max(size * 0.52, 1)))
+    fonts = _DOCUMENT_FONTS.get()
+    if fonts is None:
+        max_chars = max(8, int(width / max(size * 0.52, 1)))
+
+        def fits(candidate: str) -> bool:
+            return len(candidate) <= max_chars
+    else:
+        face = fonts.faces[bold]
+
+        def fits(candidate: str) -> bool:
+            # `text` is already clean; measuring the pieces must not mask them again.
+            return face.width(candidate, size) <= width
+
+    def longest_prefix(word: str) -> int:
+        # At least one character per line, so a word wider than the column still ends.
+        cut = 1
+        while cut < len(word) and fits(word[:cut + 1]):
+            cut += 1
+        return cut
+
     words = text.split()
     lines: list[str] = []
     current = ""
     for word in words:
-        while len(word) > max_chars:
+        while not fits(word) and len(word) > 1:
             if current:
                 lines.append(current)
                 current = ""
-            lines.append(word[:max_chars])
-            word = word[max_chars:]
+            cut = longest_prefix(word)
+            lines.append(word[:cut])
+            word = word[cut:]
         candidate = f"{current} {word}".strip()
-        if current and len(candidate) > max_chars:
+        if current and not fits(candidate):
             lines.append(current)
             current = word
         else:
@@ -87,7 +161,10 @@ def _wrap(value: Any, width: float, size: float, max_lines: int | None = None) -
         lines.append(current)
     if max_lines and len(lines) > max_lines:
         lines = lines[:max_lines]
-        lines[-1] = (lines[-1][:-3] + "...") if len(lines[-1]) > 3 else "..."
+        last = lines[-1]
+        while last and not fits(last + "..."):
+            last = last[:-1]
+        lines[-1] = (last + "...") if last else "..."
     return lines or [""]
 
 
@@ -122,21 +199,25 @@ class _Page:
         if not clean:
             return
         baseline = PAGE_HEIGHT - top - size
-        font = "/F2" if bold else "/F1"
+        fonts = _DOCUMENT_FONTS.get()
+        if fonts is not None:
+            font, shown = fonts.resource(bold), fonts.faces[bold].encode(clean)
+        else:
+            font, shown = ("/F2" if bold else "/F1"), f"({_pdf_escape(clean)})"
         self.commands.extend(
             [
                 "BT",
                 f"{font} {size:.2f} Tf",
                 f"{_rgb(color)} rg",
                 f"{x:.2f} {baseline:.2f} Td",
-                f"({_pdf_escape(clean)}) Tj",
+                f"{shown} Tj",
                 "ET",
             ]
         )
 
     def wrapped_text(self, x: float, top: float, value: Any, width: float, size: float = 9.0, *, bold: bool = False, color: tuple[float, float, float] = INK, leading: float | None = None, max_lines: int | None = None) -> float:
         line_height = leading or size * 1.32
-        lines = _wrap(value, width, size, max_lines)
+        lines = _wrap(value, width, size, max_lines, bold=bold)
         for index, line in enumerate(lines):
             self.text(x, top + (index * line_height), line, size, bold=bold, color=color)
         return len(lines) * line_height
@@ -145,6 +226,24 @@ class _Page:
 def _scope_label(model: dict) -> str:
     scope = model.get("scope") or {}
     return _clean(scope.get("label") or "Full scan", 120)
+
+
+def _document_title(model: dict) -> str:
+    return _clean(model.get("title") or FALLBACK_TITLE, 120)
+
+
+def _fitted_headline(text: str, available: float, largest: float, smallest: float) -> tuple[str, float]:
+    """One line of ``text`` that fits ``available``, with the size it fits at.
+
+    The cover headline sits in a fixed band beside the scan id, so a scoped title
+    shrinks rather than wrapping into the line below it; a title too long even at
+    the smallest size is then truncated, because running into the neighbouring
+    block is worse than an ellipsis. Width is measured as _wrap measures it.
+    """
+    size = largest
+    while size > smallest and text_width(text, size, bold=True) > available:
+        size -= 0.5
+    return _wrap(text, available, size, max_lines=1, bold=True)[0], size
 
 
 def _page_header(page: _Page, model: dict, section: str, page_number: int) -> None:
@@ -180,7 +279,8 @@ def _bar(page: _Page, x: float, top: float, width: float, label: str, count: int
 def _summary_page(model: dict, page_number: int) -> _Page:
     page = _Page()
     page.rect(0, 0, PAGE_WIDTH, 92, SENTRO_NAVY)
-    page.text(MARGIN, 20, "DSPM Assessment Report", 25, bold=True, color=WHITE)
+    headline, headline_size = _fitted_headline(_document_title(model), HEADLINE_WIDTH, 25, 14)
+    page.text(MARGIN, 20, headline, headline_size, bold=True, color=WHITE)
     page.text(MARGIN, 55, f"Scope: {_scope_label(model)}", 10, bold=True, color=(0.820, 0.875, 1.000))
     page.text(PAGE_WIDTH - 290, 24, f"Scan {_clean(model.get('scan_id'), 90)}", 9, color=(0.820, 0.875, 1.000))
     page.text(PAGE_WIDTH - 290, 44, f"Generated {_clean(model.get('timestamp'), 90)}", 8, color=(0.820, 0.875, 1.000))
@@ -326,9 +426,47 @@ def _evidence_pages(model: dict, first_page_number: int) -> list[_Page]:
     return pages
 
 
-def _build_pdf(pages: Iterable[_Page]) -> bytes:
+def _pdf_text_object(value: str) -> bytes:
+    text = _clean(value, 240)
+    try:
+        return b"(" + _pdf_escape(text).encode("latin-1") + b")"
+    except UnicodeEncodeError:
+        # A title in another script is written as UTF-16 with its byte-order mark,
+        # the form a PDF text string takes when Latin-1 cannot hold it.
+        return b"<FEFF" + text.encode("utf-16-be").hex().upper().encode("ascii") + b">"
+
+
+def _info_object(model: dict) -> bytes:
+    """The document information dictionary.
+
+    Without it a reader has no name for the file and shows the storage filename -
+    a 32-character hex id. This is where a report's title actually reaches the
+    document: the window title, the properties pane, and what a print-to-file or
+    a document management system indexes.
+    """
+    stamp = datetime.now(timezone.utc).strftime("D:%Y%m%d%H%M%SZ")
+    fields = [
+        (b"/Title", _pdf_text_object(_document_title(model))),
+        (b"/Author", _pdf_text_object("SENTRO DSPM")),
+        (b"/Subject", _pdf_text_object(f"Scan {model.get('scan_id', '')} - scope: {_scope_label(model)}")),
+        (b"/Creator", _pdf_text_object(f"SENTRO DSPM ({REPORT_TEMPLATE_ID})")),
+        (b"/Producer", _pdf_text_object("SENTRO DSPM report renderer")),
+        (b"/CreationDate", b"(" + stamp.encode("ascii") + b")"),
+        (b"/ModDate", b"(" + stamp.encode("ascii") + b")"),
+    ]
+    return b"<< " + b" ".join(key + b" " + value for key, value in fields) + b" >>"
+
+
+def _build_pdf(pages: Iterable[_Page], model: dict | None = None) -> bytes:
     page_list = list(pages)
     page_numbers = [5 + (index * 2) for index in range(len(page_list))]
+    # The embedded faces follow the pages and the information dictionary, five objects
+    # each; their numbers are known before the pages that name them are written.
+    fonts = _DOCUMENT_FONTS.get()
+    first_font = 5 + (len(page_list) * 2) + 1
+    font_resources = ""
+    if fonts is not None:
+        font_resources = f" /U0 {first_font} 0 R /U1 {first_font + 5} 0 R"
     objects: list[bytes] = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         f"<< /Type /Pages /Kids [{' '.join(f'{number} 0 R' for number in page_numbers)}] /Count {len(page_list)} >>".encode("ascii"),
@@ -340,9 +478,17 @@ def _build_pdf(pages: Iterable[_Page]) -> bytes:
         content_number = page_number + 1
         stream = "\n".join(page.commands).encode("latin-1", "replace")
         objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_WIDTH:.0f} {PAGE_HEIGHT:.0f}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_number} 0 R >>".encode("ascii")
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_WIDTH:.0f} {PAGE_HEIGHT:.0f}] /Resources << /Font << /F1 3 0 R /F2 4 0 R{font_resources} >> >> /Contents {content_number} 0 R >>".encode("ascii")
         )
         objects.append(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
+
+    # Appended last so the fixed object numbers above (and the page arithmetic
+    # that depends on them) stay exactly where they are.
+    objects.append(_info_object(model or {}))
+    info_number = len(objects)
+    if fonts is not None:
+        objects.extend(fonts.faces[False].pdf_objects(first_font))
+        objects.extend(fonts.faces[True].pdf_objects(first_font + 5))
 
     payload = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     offsets: list[int] = [0]
@@ -357,16 +503,31 @@ def _build_pdf(pages: Iterable[_Page]) -> bytes:
     for offset in offsets[1:]:
         payload.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
     payload.extend(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R /Info {info_number} 0 R >>\n"
+        f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
     )
     return bytes(payload)
 
 
-def render_visual_report_pdf(path: Path, model: dict) -> dict:
+@contextmanager
+def rendering(font_dir: Path | None = None) -> Iterator[_Fonts | None]:
+    """The fonts one document is drawn and measured with, for the duration of the block:
+    the embedded faces, or None (the Helvetica fallback) when either file is missing."""
+    regular, bold = pdf_font.load(False, font_dir), pdf_font.load(True, font_dir)
+    fonts = _Fonts(regular, bold) if regular is not None and bold is not None else None
+    token = _DOCUMENT_FONTS.set(fonts)
+    try:
+        yield fonts
+    finally:
+        _DOCUMENT_FONTS.reset(token)
+
+
+def render_visual_report_pdf(path: Path, model: dict, *, font_dir: Path | None = None) -> dict:
     """Render a Composer-aligned, scoped report and return artifact metadata."""
-    pages: list[_Page] = [_summary_page(model, 1), _operations_page(model, 2)]
-    pages.extend(_evidence_pages(model, 3))
-    path.write_bytes(_build_pdf(pages))
+    with rendering(font_dir) as fonts:
+        pages: list[_Page] = [_summary_page(model, 1), _operations_page(model, 2)]
+        pages.extend(_evidence_pages(model, 3))
+        path.write_bytes(_build_pdf(pages, model))
     evidence_count = len(model.get("evidence_register") or [])
     return {
         "render_style": "visual_composer",
@@ -375,4 +536,7 @@ def render_visual_report_pdf(path: Path, model: dict) -> dict:
         "truncated": False,
         "original_line_count": evidence_count,
         "included_line_count": evidence_count,
+        # Which face drew it: the embedded Unicode font, or the Latin-1 fallback that
+        # transliterates when the font files are missing from the install.
+        "font": "Inter (embedded, Unicode)" if fonts is not None else "Helvetica (Latin-1 fallback)",
     }

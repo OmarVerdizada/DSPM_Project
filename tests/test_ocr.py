@@ -3,7 +3,12 @@ and no-regression when disabled.
 
 The engine is mocked (a fake callable) so these tests are fast and run whether or
 not rapidocr-onnxruntime is installed. The image-bomb / size / corrupt caps run
-against the REAL Pillow-based loader (which never reaches the engine)."""
+against the REAL Pillow-based loader (which never reaches the engine).
+
+They do need Pillow itself, which ships with the same optional extra
+(`requirements-ocr.txt`). An install from the lock alone - which is what CI's test legs
+and any offline package build have - does not have it, and a module-level import failed
+the whole run rather than this file. Without Pillow the module skips and says why."""
 
 from __future__ import annotations
 
@@ -14,7 +19,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-from PIL import Image, ImageDraw
+try:
+    from PIL import Image, ImageDraw
+except ModuleNotFoundError:  # the OCR extra is optional; see the docstring
+    Image = ImageDraw = None
 
 import collectors.file_scanner as fs
 import collectors.ocr as ocr
@@ -46,6 +54,7 @@ def _enabled():
     return mock.patch.dict(os.environ, {"DSPM_OCR_ENABLED": "1"})
 
 
+@unittest.skipUnless(Image is not None, "Pillow is not installed (pip install -r requirements-ocr.txt)")
 class _OcrBase(unittest.TestCase):
     """Isolate the process-wide OCR result cache between tests (else one test's
     cached text would be returned for another test's same-content image)."""

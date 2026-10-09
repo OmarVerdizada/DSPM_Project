@@ -3,8 +3,14 @@
 Replaces anonymous startup DDL with a recorded, ordered revision history:
 
 - ``schema_migrations`` records every applied revision (number, name, source
-  checksum, applied_at). The checksum makes silent edits to an already-applied
-  revision detectable instead of quietly divergent.
+  checksum, applied_at). The checksum is a forensic record of *which source*
+  built this database, comparable via ``checksum_drift()``. It is reported,
+  not enforced: every revision here is idempotent DDL (``IF NOT EXISTS`` and
+  catalog checks) over a deliberately convergent baseline, so its source is
+  expected to evolve - revision 0001 gains the columns that later revisions
+  ALTER in, and 0006 re-runs 0004 on purpose. Drift means "this database was
+  built by an older source", which is normal for convergent revisions and
+  worth investigating for a revision that performs a one-way data change.
 - Revisions are Python callables applied in order inside the standard
   transaction-per-connection seam. PostgreSQL applications serialize on an
   advisory lock so concurrent starters cannot race the same revision.
@@ -21,11 +27,14 @@ contract in a later release).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
 import os
 import sys
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 # One stable, project-specific advisory lock key (PostgreSQL only).
 _ADVISORY_LOCK_KEY = 0x53454E54  # "SENT"
@@ -38,6 +47,48 @@ def _revisions() -> list[tuple[int, str, object]]:
 
     return [
         (1, "baseline_convergent_schema", store.apply_baseline_schema),
+        (2, "saved_scan_labels", store.add_scan_report_labels),
+        (3, "tenant_referential_integrity", store.add_tenant_integrity),
+        (4, "tenant_row_level_security", store.add_tenant_rls),
+        (5, "report_artifact_references", store.add_report_artifact_refs),
+        (6, "tenant_rls_unscoped_guard", store.repair_tenant_rls_predicate),
+        (7, "tenant_legal_hold", store.add_legal_hold),
+        (8, "inventory_filtered_search_scale_index", store.add_inventory_filtered_search_index),
+        (9, "remediation_operational_index", store.add_remediation_operational_index),
+        (10, "remediation_filter_indexes", store.add_remediation_filter_indexes),
+        (11, "scan_partition_ledger", store.add_scan_partition_ledger),
+        (12, "scan_partition_records", store.add_scan_partition_records),
+        (13, "partition_write_indexes", store.add_partition_write_indexes),
+        (14, "partitioned_scan_ledger", store.add_partitioned_scan_ledger),
+        (15, "scan_schedules", store.add_scan_schedules),
+        (16, "finding_suppression_rules", store.add_suppression_rules),
+        (17, "derived_cache", store.add_derived_cache),
+        (18, "durable_user_sessions", store.add_user_sessions),
+        (19, "rotating_refresh_tokens", store.add_refresh_tokens),
+        (20, "open_role_catalogue", store.open_role_catalogue),
+        (21, "custom_roles", store.add_custom_roles),
+        (22, "audit_chain", store.add_audit_chain),
+        (23, "audit_outbox", store.add_audit_outbox),
+        (24, "scan_targets", store.add_scan_targets),
+        (25, "deny_unscoped_tenant_access", store.deny_unscoped_tenant_access),
+        (26, "tenant_scoped_identities", store.add_tenant_scoped_identities),
+    (27, "vault_key_lifecycle", store.add_vault_key_lifecycle),
+    (28, "scan_sources", store.add_scan_sources),
+    (29, "classify_directory_secrets", store.classify_directory_secrets),
+    (30, "admit_whole_database_backup", store.admit_whole_database_backup),
+    (31, "asset_access", store.add_asset_access),
+    (32, "exact_data_match", store.add_exact_data_match),
+    (33, "alert_delivery", store.add_alert_delivery),
+    (34, "metrics_purpose", store.add_metrics_purpose),
+    (35, "source_checkpoints", store.add_source_checkpoints),
+    (36, "widen_byte_counts", store.widen_byte_counts),
+    (37, "admit_portfolio_baseline_count", store.admit_portfolio_baseline_count),
+    (38, "remove_two_step_sign_in", store.remove_two_step_sign_in),
+    (39, "asset_prune_index", store.add_asset_prune_index),
+    (40, "finding_lifecycle_detail", store.add_finding_lifecycle_detail),
+    (41, "job_ownership", store.add_job_ownership),
+    (42, "delta_persistence", store.add_delta_persistence),
+    (43, "drop_unusable_search_indexes", store.drop_unusable_search_indexes),
     ]
 
 
@@ -88,11 +139,68 @@ def current_revision(conn) -> int:
     return int(row["r"] or 0) if row and row["r"] is not None else 0
 
 
+def installed_at(conn) -> str | None:
+    """When the first revision was recorded - how old this database is. Readiness reads it
+    to tell a fresh install that has not had its first backup yet from one whose backups
+    stopped (C0.3). Pure read, like current_revision."""
+    if not _table_exists(conn):
+        return None
+    row = conn.execute("SELECT MIN(applied_at) AS first_applied FROM schema_migrations").fetchone()
+    return str(row["first_applied"]) if row and row["first_applied"] else None
+
+
+def checksum_drift(conn) -> list[dict]:
+    """Applied revisions whose source no longer matches what was recorded.
+
+    Answers "was this database built by the source that is here now?" - a
+    question worth being able to ask when diagnosing an install, and one the
+    recorded checksum could not previously answer because nothing compared it.
+
+    **Informational, not an alarm.** Every revision in this project is
+    idempotent DDL layered on a convergent baseline, so drift is the normal
+    result of a later revision adding columns that revision 0001 now creates
+    directly. It is a signal to read, not a fault: `python -m backend.migrations
+    status --strict` exits non-zero on drift for anyone who wants it enforced,
+    and the metrics payload reports it as data rather than as a warning.
+
+    A revision that performs a **one-way data change** is the case where drift
+    does matter, because that step cannot re-converge. Such a revision should
+    say so in its docstring.
+    """
+    if not _table_exists(conn):
+        return []
+    recorded = {
+        int(row["revision"]): (str(row["name"]), str(row["checksum"]))
+        for row in conn.execute(
+            "SELECT revision, name, checksum FROM schema_migrations"
+        ).fetchall()
+    }
+    drift: list[dict] = []
+    for number, name, func in _revisions():
+        if number not in recorded:
+            continue
+        applied_name, applied_checksum = recorded[number]
+        # A stamped revision was never executed, so its source was never the
+        # thing that built the schema; comparing it would be meaningless.
+        if applied_name.endswith("(stamped)"):
+            continue
+        current = _checksum(func)
+        if current != applied_checksum:
+            drift.append({
+                "revision": number,
+                "name": name,
+                "applied_checksum": applied_checksum[:12],
+                "current_checksum": current[:12],
+            })
+    return drift
+
+
 def status() -> dict:
     from backend import store, db
 
     with store._connect() as conn:
         applied = current_revision(conn)
+        drift = checksum_drift(conn)
     return {
         "backend": db.backend_name(),
         "applied_revision": applied,
@@ -101,35 +209,99 @@ def status() -> dict:
             {"revision": number, "name": name}
             for number, name, _ in _revisions() if number > applied
         ],
+        "checksum_drift": drift,
     }
+
+
+SQLITE_LOCK_WAIT_SECONDS = 120.0
+
+
+@contextlib.contextmanager
+def _sqlite_upgrade_lock(database: Path):
+    """One upgrader per SQLite file across processes - PostgreSQL's advisory lock, here.
+
+    `store._lock` orders threads only. The server and `python main.py worker` starting
+    together with a revision pending both read the old revision and both applied it; the
+    second insert into schema_migrations failed its primary key (or waited out "database
+    is locked"), and that process's import of backend.store failed with it. The revision
+    is read again once the lock is held, so the second starter finds nothing to do."""
+    path = Path(str(database) + ".upgrade.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + SQLITE_LOCK_WAIT_SECONDS
+    with open(path, "a+b") as handle:
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Another process has been upgrading this database for two minutes; "
+                                       "wait for it to finish and start again.") from None
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                with contextlib.suppress(OSError):
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def upgrade() -> int:
     """Apply pending revisions in order. Returns the resulting revision."""
     from backend import store, db
 
-    with store._lock:
+    # C10: revisions span tenants (backfills, re-sealing, policy rebuilds), so the
+    # runner names its purpose; an unscoped transaction would see no tenant rows.
+    process_lock = contextlib.nullcontext() if db.is_postgres() else _sqlite_upgrade_lock(store.DB_PATH)
+    with store._lock, process_lock, db.platform_scope("migration"):
         with store._connect() as conn:
             if db.is_postgres():
-                # Serialize concurrent starters/deployers cluster-wide.
-                conn.execute("SELECT pg_advisory_lock(?)", (_ADVISORY_LOCK_KEY,))
-            try:
-                _ensure_table(conn)
-                applied = current_revision(conn)
-                for number, name, func in _revisions():
-                    if number <= applied:
-                        continue
-                    func(conn)
-                    conn.execute(
-                        "INSERT INTO schema_migrations (revision, name, checksum, applied_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (number, name, _checksum(func), datetime.now(timezone.utc).isoformat()),
-                    )
-                    applied = number
-                return applied
-            finally:
-                if db.is_postgres():
-                    conn.execute("SELECT pg_advisory_unlock(?)", (_ADVISORY_LOCK_KEY,))
+                # Serialize concurrent starters/deployers cluster-wide - for exactly the
+                # length of this transaction. C0.5 (2026-09-25): this was a SESSION lock
+                # released in a `finally`. When a revision failed, that unlock ran inside
+                # the aborted transaction and raised "current transaction is aborted",
+                # which replaced the real error; and the lock stayed held by the pooled
+                # connection, so the next upgrade from any other connection waited on it
+                # forever. A transaction lock ends with the commit or the rollback.
+                #
+                # W1.4: application sessions open with statement, lock and idle timeouts.
+                # The runner is the one place a statement may rightly run long - an index
+                # built over every asset, a backfill - and a second starter should wait for
+                # the first rather than fail, so it lifts them for its own transaction.
+                for parameter in ("statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"):
+                    conn.execute(f"SET LOCAL {parameter} = 0")
+                conn.execute("SELECT pg_advisory_xact_lock(?)", (_ADVISORY_LOCK_KEY,))
+            _ensure_table(conn)
+            applied = current_revision(conn)
+            for number, name, func in _revisions():
+                if number <= applied:
+                    continue
+                if not db.is_postgres() and not conn.in_transaction:
+                    # Python's sqlite3 runs DDL outside any transaction unless one is open,
+                    # so revision 38 dropped the MFA tables for good while a later revision's
+                    # failure rolled back only the history rows - the database then said 37.
+                    # Opened here, a revision and its history row land together, and a run
+                    # of them as one (an executescript revision commits what came before it).
+                    conn.execute("BEGIN IMMEDIATE")
+                func(conn)
+                conn.execute(
+                    "INSERT INTO schema_migrations (revision, name, checksum, applied_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (number, name, _checksum(func), datetime.now(timezone.utc).isoformat()),
+                )
+                applied = number
+            return applied
 
 
 def verify_or_raise() -> None:
@@ -179,6 +351,12 @@ def main(argv: list[str]) -> int:
         print(f"expected: {info['expected_revision']}")
         for item in info["pending"]:
             print(f"pending:  {item['revision']:04d} {item['name']}")
+        for item in info["checksum_drift"]:
+            print(f"drift:    {item['revision']:04d} {item['name']} "
+                  f"(applied {item['applied_checksum']}, source now "
+                  f"{item['current_checksum']}) - expected for convergent revisions")
+        if info["checksum_drift"] and "--strict" in argv:
+            return 1
         return 0
     if command == "upgrade":
         final = upgrade()
@@ -189,7 +367,8 @@ def main(argv: list[str]) -> int:
         stamp(target)
         print(f"stamped through revision {target}")
         return 0
-    print("usage: python -m backend.migrations [status|upgrade|stamp [N]]", file=sys.stderr)
+    print("usage: python -m backend.migrations [status [--strict]|upgrade|stamp [N]]",
+          file=sys.stderr)
     return 2
 
 

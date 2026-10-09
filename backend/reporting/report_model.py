@@ -66,10 +66,18 @@ def _severity_counts(files: list[dict]) -> dict[str, int]:
 
 
 def _file_risk_types(file_obj: Mapping[str, Any]) -> list[str]:
+    """Every rule name the file's findings stand for.
+
+    B7 merges a card found by three detectors into one finding that keeps the strongest
+    one's type, so reading `type` alone would have lost `credit_card` - and with it the
+    financial remediation steps this file needs.
+    """
+    from backend.finding_contracts import finding_detected_types
+
     types: list[str] = []
     for finding in file_obj.get("findings") or []:
-        if isinstance(finding, dict) and finding.get("type"):
-            types.append(str(finding.get("type")))
+        if isinstance(finding, dict):
+            types.extend(finding_detected_types(finding))
     return types
 
 
@@ -245,6 +253,22 @@ def _status_text(score: int, critical_high: int) -> str:
     return "Immediate remediation recommended."
 
 
+REPORT_TITLE = "DSPM Assessment Report"
+
+
+def report_title(scope: Mapping[str, Any] | None = None) -> str:
+    """The document's name, composed once and used everywhere it appears.
+
+    A scoped export is a different document from the full one - it was built to be
+    sent to someone about that scope - so the scope belongs in the title, which is
+    what a browser tab, a saved file and a PDF reader's properties pane all show.
+    """
+    label = str((scope or {}).get("label") or "").strip()
+    if not label or label.lower() in {"full scan", "full"}:
+        return REPORT_TITLE
+    return f"{REPORT_TITLE} - {label}"
+
+
 def build_report_model(
     report: Mapping[str, Any],
     scope: Mapping[str, Any] | None = None,
@@ -282,7 +306,7 @@ def build_report_model(
     remediation_steps = build_remediation_steps_for_types(risk_types, "en") if scoped else []
 
     return {
-        "title": "DSPM Assessment Report",
+        "title": report_title(norm_scope),
         "scan_id": str(report.get("scan_id") or "latest"),
         "timestamp": str(report.get("timestamp") or ""),
         "source": str(report.get("source") or ""),

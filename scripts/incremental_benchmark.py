@@ -111,7 +111,7 @@ def main() -> None:
             tenant_id=tenant,
             local_path=str(estate),
             max_depth=args.max_depth,
-            use_sample_when_empty=True,
+            walk_local_path=True,
             persistent_cache_enabled=True,
             cache_dir=str(cache_dir),
             incremental_scope=scope,
@@ -130,7 +130,8 @@ def main() -> None:
         # The next pass must recover from the durable baseline.
         cache_root = cache_dir.resolve()
         if cache_root.is_relative_to(temp_root.resolve()):
-            for cache_file in cache_root.glob("*"):
+            # Entries live in a workspace subdirectory since C0.2.
+            for cache_file in cache_root.rglob("*"):
                 if cache_file.is_file():
                     cache_file.unlink()
         durable, durable_seconds = _timed_run(warm_config)

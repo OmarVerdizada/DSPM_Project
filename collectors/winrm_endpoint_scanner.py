@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import gzip
 import io
 import ipaddress
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from uuid import uuid4
@@ -20,6 +22,8 @@ from uuid import uuid4
 from collectors.binary_extractor import BINARY_TEXT_EXTENSIONS
 from collectors.net_guard import resolve_and_pin
 from discovery.parallelism import host_admission_budget, resolve_parallelism
+from collectors import content_policy
+from collectors.scan_scope import ScopeTally
 from collectors.file_scanner import (
     CONTENT_EXTENSIONS,
     DEFAULT_TEXT_SCAN_MAX_BYTES,
@@ -100,6 +104,53 @@ def _is_stdin_capability_error(exc: BaseException) -> bool:
     if isinstance(exc, (OSError, TimeoutError)):
         return False
     return True
+
+
+def _listed(value) -> list:
+    # ConvertTo-Json sends a one-element list as the element itself, and none as null.
+    if value is None:
+        return []
+    return list(value) if isinstance(value, list) else [value]
+
+
+def _endpoint_identity(item: dict) -> str:
+    """The endpoint file's identity: the SHA-256 the endpoint took, or - for a file the
+    policy did not read whole (W2.2) - a meta identity of its size and modified time."""
+    digest = str(item.get("sha256") or "")
+    if digest or not item.get("hash_skipped"):
+        return digest
+    return content_policy.meta_identity(int(item.get("size") or 0), str(item.get("modified_at") or ""))
+
+
+def _endpoint_skip_reason(item: dict) -> str:
+    if str(item.get("content_status") or "") != "over_size_cap":
+        return ""
+    cap = content_policy.document_cap_bytes()
+    return f"Larger than DSPM_DOCUMENT_SCAN_MAX_BYTES ({cap // (1024 * 1024)} MiB); its content was not read"
+
+
+def _endpoint_acl(item: dict) -> dict:
+    """A file's ACL as the endpoint sent it, in the shape the D7 analysis reads: the owner,
+    the parallel principal/rights lists reports carry and - when the endpoint sent them -
+    an entry per ACE with its SID, allow or deny, and whether it was inherited. Names and
+    rights alone read every entry as an explicit Allow: "Everyone: Deny Read" was broad
+    read access, and a broad group was recognised only by its English name."""
+    principals, permissions = _listed(item.get("principals")), _listed(item.get("permissions"))
+    types, sids, inherited = _listed(item.get("types")), _listed(item.get("sids")), _listed(item.get("inherited"))
+    acl: dict = {"owner": str(item.get("owner") or ""), "principals": [str(name) for name in principals],
+                 "permissions": [str(rights) for rights in permissions]}
+    if not types:
+        return acl  # an older script's answer: names and rights only
+    acl["types"] = [str(kind).lower() for kind in types]
+    acl["entries"] = [
+        {"principal": str(principal or ""),
+         "sid": str(sids[index] or "") if index < len(sids) else "",
+         "rights": str(permissions[index]) if index < len(permissions) else "",
+         "type": str(types[index]).lower() if index < len(types) else "allow",
+         "inherited": bool(inherited[index]) if index < len(inherited) else False}
+        for index, principal in enumerate(principals)
+    ]
+    return acl
 
 
 def _winrm_response_max_bytes() -> int:
@@ -582,11 +633,111 @@ def _format_windows_username(username: str, domain: str) -> str:
     return username
 
 
+class WinRMCommandTimedOut(RuntimeError):
+    """A remote command ran past its wall clock; its shell was closed, which stops it (W1.3)."""
+
+
+def winrm_command_timeout_seconds() -> int:
+    """How long one WinRM command may run (``DSPM_WINRM_COMMAND_TIMEOUT_SECONDS``; 0 = no limit).
+
+    The output loop retried the WS-Man operation timeout for ever, so a remote command
+    that hung held its scan for ever too. Past this the command is abandoned and its shell
+    closed, which ends the process on the endpoint. Fifteen minutes by default: a page or
+    a content batch takes seconds.
+    """
+    try:
+        return max(0, min(int(os.getenv("DSPM_WINRM_COMMAND_TIMEOUT_SECONDS") or "900"), 86_400))
+    except ValueError:
+        return 900
+
+
+class WinRMKerberosUnavailable(RuntimeError):
+    """Kerberos was required and this install cannot provide it."""
+
+
+class WinRMTransportRefused(RuntimeError):
+    """The transport this scan asked for is one this install does not permit.
+
+    Separate from a connection failure on purpose: nothing was attempted, and the
+    message says which choice to change (C0.1).
+    """
+
+
+@functools.lru_cache(maxsize=1)
+def _kerberos_transport_available() -> bool:
+    """Whether pywinrm can actually negotiate Kerberos here.
+
+    pywinrm imports requests_kerberos lazily inside build_session, so an absent
+    dependency surfaces as a failed connection attempt rather than as anything
+    that names the cause.
+    """
+
+    try:
+        import requests_kerberos  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def normalize_certificate_thumbprint(value: str) -> str:
+    """A certificate thumbprint as the operator will paste it, in one shape.
+
+    Windows shows a thumbprint spaced (`certutil`), coloured (`Get-ChildItem
+    Cert:\\`) or run together, and an operator will paste any of them. SHA-1 (40
+    hex) is what the Windows certificate tools print; SHA-256 (64 hex) is what a
+    modern tool prints. Anything else is rejected here rather than becoming a pin
+    that silently never matches.
+    """
+
+    cleaned = re.sub(r"[\s:]+", "", str(value or "")).upper()
+    if not cleaned:
+        return ""
+    if not re.fullmatch(r"[0-9A-F]{40}|[0-9A-F]{64}", cleaned):
+        raise ValueError(
+            "A certificate thumbprint must be 40 hex characters (SHA-1) or 64 (SHA-256); "
+            "spaces and colons are ignored."
+        )
+    return cleaned
+
+
+def _fingerprint_for_urllib3(thumbprint: str) -> str:
+    """urllib3 takes the fingerprint as hex, and sizes the algorithm from its length."""
+    return thumbprint.lower()
+
+
+def _pinned_adapter(thumbprint: str):
+    """A requests adapter that trusts exactly one certificate.
+
+    The certificate an HTTPS activation creates is self-signed, so there is no CA
+    to trust and `validate` can only fail. The choices are to stop checking
+    (DSPM_WINRM_SSL_SKIP_CA_CHECK, which drops MITM protection entirely) or to pin
+    the one certificate the operator has seen on the endpoint - which is what this
+    does. urllib3 checks the fingerprint of the presented certificate and refuses
+    the connection when it differs, so a swapped certificate fails closed.
+    """
+
+    from requests.adapters import HTTPAdapter
+
+    fingerprint = _fingerprint_for_urllib3(thumbprint)
+
+    class _PinnedCertificateAdapter(HTTPAdapter):
+        def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+            pool_kwargs["assert_fingerprint"] = fingerprint
+            # The pin replaces chain and hostname validation; urllib3 refuses to do
+            # both, and a self-signed certificate has no chain to validate anyway.
+            pool_kwargs["cert_reqs"] = "CERT_NONE"
+            return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    return _PinnedCertificateAdapter()
+
+
 @dataclass(slots=True)
 class WinRMEndpointConfig:
     host: str
     username: str
     password: str
+    # C5: the workspace whose scan targets decide whether `host` may be connected to.
+    tenant_id: str = ""
     domain: str = "WORKGROUP"
     target_username: str = ""
     paths: list[str] = field(default_factory=lambda: ["desktop", "documents", "downloads"])
@@ -605,6 +756,16 @@ class WinRMEndpointConfig:
     inspect_archives: bool = False
     hash_files: bool = True
     read_owner: bool = True
+    # C0.1 - how this scan trusts the endpoint's certificate, per scan rather than
+    # per install. Empty means the install default (the system trust store, or the
+    # DSPM_WINRM_* environment settings). See _winrm_cert_validation.
+    ca_bundle: str = ""
+    cert_thumbprint: str = ""
+    kerberos_mode: str = ""
+    insecure_tls: bool = False
+    # Advanced scan scope (collectors.scan_scope), canonical, absolute paths: applied on
+    # the endpoint by the collector script, before a file's work is queued.
+    scope: dict | None = None
 
 
 @dataclass(slots=True)
@@ -637,6 +798,12 @@ class WinRMEndpointScanner:
         # deliberately not process-global: credentials and sessions do not
         # outlive the operation that supplied them.
         self._session_binding: _WinRMSessionBinding | None = None
+        # W1.3: one WinRS shell for a block of commands (reusing_shell), and what a page left.
+        self._shell_reuse = False
+        self._reused_shell: tuple | None = None
+        self._shells_opened = 0
+        self._shells_reused = 0
+        self.last_page: dict = {"folders": [], "continuation": []}
         self._session_creations = 0
         self._session_negotiations = 0
         self._session_reuse_count = 0
@@ -763,6 +930,126 @@ class WinRMEndpointScanner:
         except Exception as exc:
             return {"connected": False, "host": self.config.host, "message": "WinRM connection test failed"}
 
+    def check_access(self) -> dict:
+        """What this credential can actually reach on this target.
+
+        Scanning an endpoint does NOT require administrator: nothing in the scan
+        path tests for it, the scripts only read, and the one thing they write
+        is a base64 staging file under the connecting user's own $env:TEMP. Two
+        Windows defaults are what make a domain admin the path of least
+        resistance, and both are grantable without one:
+
+          * only local Administrators may open a WinRM session, until the
+            account is put in Remote Management Users. That group - not a
+            PowerShell session configuration - is the grant that matters here,
+            because pywinrm opens the WinRS `cmd` shell resource rather than
+            Microsoft.PowerShell, so the WinRM service RootSDDL governs and
+            Set-PSSessionConfiguration would not help;
+          * another account's folder under the Users directory denies everyone
+            but that account, SYSTEM and Administrators, so a non-admin reads
+            its OWN profile and no more.
+
+        Which means the answer to "will a low-privilege account do?" depends
+        entirely on the scope, and an operator cannot see that until a scan has
+        already half-failed. This asks the target instead, before anything is
+        committed: who am I, am I an admin, which profiles can I list, and can I
+        stage a file. It reads nothing but directory entries.
+        """
+
+        try:
+            result = self._run_ps(
+                r"""
+                $ErrorActionPreference = "Stop"
+                $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+                $isAdmin = ([Security.Principal.WindowsPrincipal]$identity).IsInRole(
+                  [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+                $temp = $env:TEMP
+                $tempWritable = $false
+                try {
+                  $probe = Join-Path $temp ("dspm-preflight-" + [guid]::NewGuid().ToString("N") + ".tmp")
+                  [IO.File]::WriteAllBytes($probe, [byte[]]@())
+                  Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+                  $tempWritable = $true
+                } catch { $tempWritable = $false }
+
+                $profiles = @()
+                try {
+                  foreach ($dir in (Get-ChildItem -LiteralPath "C:\Users" -Directory -Force -ErrorAction SilentlyContinue)) {
+                    $readable = $false
+                    $denied = ""
+                    try {
+                      Get-ChildItem -LiteralPath $dir.FullName -Force -ErrorAction Stop | Out-Null
+                      $readable = $true
+                    } catch { $denied = $_.Exception.GetType().Name }
+                    $profiles += [PSCustomObject]@{
+                      name = $dir.Name
+                      path = $dir.FullName
+                      readable = $readable
+                      denied = $denied
+                    }
+                  }
+                } catch { }
+
+                [PSCustomObject]@{
+                  computer = $env:COMPUTERNAME
+                  user = $identity.Name
+                  isAdmin = $isAdmin
+                  tempWritable = $tempWritable
+                  temp = $temp
+                  profiles = $profiles
+                } | ConvertTo-Json -Compress -Depth 4
+                """
+            )
+        except WinRMKerberosUnavailable:
+            # Not a target problem and not something a retry fixes: the install
+            # was told to require Kerberos and cannot. Reporting that as a
+            # generic access failure is the exact silence this preflight exists
+            # to remove, so it travels up to the API and gets its own hint.
+            raise
+        except Exception as exc:
+            return {
+                "ok": False,
+                "host": self.config.host,
+                "message": _clean_error(str(exc)) or "WinRM access check failed",
+            }
+
+        if result.status_code != 0:
+            return {
+                "ok": False,
+                "host": self.config.host,
+                "message": _clean_error(result.std_err) or "WinRM access check failed",
+            }
+
+        info = _read_json(result.std_out) or {}
+        raw_profiles = info.get("profiles") or []
+        if isinstance(raw_profiles, dict):
+            raw_profiles = [raw_profiles]
+        profiles = [
+            {
+                "name": str(item.get("name", "")),
+                "path": str(item.get("path", "")),
+                "readable": bool(item.get("readable")),
+            }
+            for item in raw_profiles
+        ]
+        readable = [item for item in profiles if item["readable"]]
+        is_admin = bool(info.get("isAdmin"))
+        return {
+            "ok": True,
+            "host": self.config.host,
+            "computer": str(info.get("computer", "")),
+            "user": str(info.get("user", "")),
+            "is_admin": is_admin,
+            "temp_writable": bool(info.get("tempWritable")),
+            "channel_encrypted": True,
+            "profiles": profiles,
+            "profiles_readable": len(readable),
+            "profiles_total": len(profiles),
+            "verdict": _access_verdict(is_admin, len(readable), len(profiles), bool(info.get("tempWritable"))),
+            **self._session_diagnostics(),
+        }
+
     def _winrm_worker_count(self) -> int:
         """Runspace-pool worker count for the remote per-file work (content +
         SHA256 + ACL). ON by default; ``DSPM_WINRM_PARALLEL=0`` forces the serial
@@ -776,8 +1063,12 @@ class WinRMEndpointScanner:
             return min(int(override), 16)
         return max(1, min(int(resolve_parallelism().io_workers), 8))
 
-    def scan(self) -> list[dict]:
-        target_paths = self._target_paths()
+    def scan(self, page: dict | None = None) -> list[dict]:
+        """The collector's records. With ``page`` (W1.3), one level of the page's folders;
+        the subfolders it met and where the next command takes over are left in
+        ``last_page`` as ``{"folders": [...], "continuation": [...]}``."""
+        self.last_page = {"folders": [], "continuation": []}
+        target_paths = [] if page else self._target_paths()
         ps_script = _scan_script(
             target_paths,
             max_depth=self.config.max_depth,
@@ -794,6 +1085,8 @@ class WinRMEndpointScanner:
             hash_files=self.config.hash_files,
             read_owner=self.config.read_owner,
             parallel_workers=self._winrm_worker_count(),
+            page=page,
+            scope=self.config.scope,
         )
         # P-B.2: the WinRM collector runs its whole walk as ONE remote PowerShell
         # session, but that session now parallelizes the expensive per-file work
@@ -824,8 +1117,16 @@ class WinRMEndpointScanner:
             }
             self.last_scan_diagnostics.update(self._session_diagnostics())
             return []
-        if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), list):
+        if isinstance(raw_records, dict) and isinstance(raw_records.get("records"), (list, dict)):
+            if page:
+                self.last_page = {
+                    "folders": [item for item in _listed(raw_records.get("folders")) if isinstance(item, dict)],
+                    "continuation": [item for item in _listed(raw_records.get("continuation")) if isinstance(item, dict)],
+                }
+            if isinstance(raw_records.get("records"), dict):
+                raw_records["records"] = [raw_records["records"]]
             self.last_scan_diagnostics = raw_records.get("diagnostics") if isinstance(raw_records.get("diagnostics"), dict) else {}
+            self._scope_diagnostics()
             self.last_scan_diagnostics["connection_host"] = self.last_connection_host or self._connection_host()
             self.last_scan_diagnostics["connection_candidates"] = self._connection_hosts()
             raw_records = raw_records["records"]
@@ -859,11 +1160,7 @@ class WinRMEndpointScanner:
                     "is_hidden": bool(item.get("is_hidden", False)),
                     "is_system": bool(item.get("is_system", False)),
                     "content": "" if archive_metadata else content,
-                    "acl": {
-                        "owner": item.get("owner", ""),
-                        "principals": item.get("principals", []),
-                        "permissions": item.get("permissions", []),
-                    },
+                    "acl": _endpoint_acl(item),
                     "owner": item.get("owner", ""),
                     "scan_mode": item.get("scan_mode") or scan_mode_for_extension(extension),
                     "content_status": item.get("content_status")
@@ -877,8 +1174,9 @@ class WinRMEndpointScanner:
                     "modified_at": item.get("modified_at", ""),
                     "accessed_at": item.get("accessed_at", ""),
                     "attributes": item.get("attributes", ""),
-                    "sha256": item.get("sha256", ""),
-                    "file_hash": item.get("sha256", ""),
+                    "sha256": _endpoint_identity(item),
+                    "file_hash": _endpoint_identity(item),
+                    "skip_reason": _endpoint_skip_reason(item),
                     "scan_completeness": item.get("scan_completeness", "UNKNOWN"),
                     "bytes_scanned": int(item.get("bytes_scanned") or 0),
                     "total_bytes": int(item.get("total_bytes") or item.get("size") or 0),
@@ -892,6 +1190,16 @@ class WinRMEndpointScanner:
         self.last_scan_diagnostics["host_admission"] = admission_stats
         self.last_scan_diagnostics.update(self._session_diagnostics())
         return normalize_records(records)
+
+    def _scope_diagnostics(self) -> None:
+        """The script's per-reason counts as the scan's ``scope`` block (collectors.scan_scope)."""
+        files = self.last_scan_diagnostics.pop("scope_excluded_by", None)
+        folders = self.last_scan_diagnostics.pop("scope_skipped_folders_by", None)
+        if not self.config.scope:
+            return
+        tally = ScopeTally()
+        tally.merge_counts(files if isinstance(files, dict) else {}, folders if isinstance(folders, dict) else {})
+        self.last_scan_diagnostics["scope"] = tally.to_dict(self.config.scope)
 
     def _is_profile_scoped_request(self) -> bool:
         if not self.config.target_username.strip():
@@ -943,38 +1251,198 @@ class WinRMEndpointScanner:
         # address is the dialed address; over HTTPS we keep the hostname in the URL
         # so certificate validation still applies (a rebind to loopback then fails
         # the cert), while still refusing a disallowed resolved address.
-        pinned = resolve_and_pin(connection_host)
+        pinned = resolve_and_pin(connection_host, tenant_id=self.config.tenant_id)
         host_for_url = connection_host if self.config.use_ssl else pinned
         if ":" in host_for_url and not host_for_url.startswith("["):
             host_for_url = f"[{host_for_url}]"  # bracket IPv6 literals for the URL
         return f"http{'s' if self.config.use_ssl else ''}://{host_for_url}:{port}/wsman"
 
     def _winrm_transports(self) -> list[str]:
-        # M11 (0.3): prefer Kerberos (mutual auth, not NTLM-relayable) for domain
-        # targets when enabled, always with an NTLM fallback. Kerberos needs
-        # requests-kerberos + a usable ticket; if unavailable the attempt fails
-        # and the loop falls through to NTLM. Read-only scan scripts are
-        # idempotent, so a re-run after a failed transport is safe.
-        if os.getenv("DSPM_WINRM_KERBEROS", "0") == "1":
-            return ["kerberos", "ntlm"]
-        return ["ntlm"]
+        """Which authentication to offer, and in what order.
+
+        Kerberos is preferred where it is asked for because it authenticates the
+        SERVER as well as the client and cannot be relayed the way NTLM can.
+
+        The subtlety is what to do when it was asked for and cannot be had. The
+        old answer was to list it first and let the attempt fail into the NTLM
+        entry behind it - which meant that with requests-kerberos absent (it is
+        an optional pywinrm extra, and is not installed here) the flag did
+        nothing at all, quietly, while the operator believed they had turned
+        NTLM off. A security control that silently does not apply is worse than
+        one that was never offered, so an unavailable Kerberos is now a
+        configuration error and says how to fix itself.
+
+        `DSPM_WINRM_KERBEROS=prefer` keeps the old behaviour for anyone who
+        wants Kerberos where possible and NTLM where not - but it has to be
+        chosen, and the transport actually used is reported either way in
+        `connection_transport`.
+        """
+
+        # C0.1: a scan may choose its own policy; the install-wide variable is the
+        # default for scans that do not. A pilot has one domain-joined host that
+        # must use Kerberos and a workgroup laptop that cannot.
+        mode = (self.config.kerberos_mode or os.getenv("DSPM_WINRM_KERBEROS", "0")).strip().lower()
+        if mode in {"", "0", "false", "no", "off"}:
+            return ["ntlm"]
+        if not _kerberos_transport_available():
+            if mode == "prefer":
+                return ["ntlm"]
+            raise WinRMKerberosUnavailable(
+                "DSPM_WINRM_KERBEROS is set, but this install cannot speak Kerberos: "
+                "pywinrm's kerberos transport needs requests-kerberos, which is not "
+                "installed. Install it with `pip install pywinrm[kerberos]`, or set "
+                "DSPM_WINRM_KERBEROS=prefer to allow NTLM where Kerberos is unavailable. "
+                "Leaving it set without the dependency does not fall back safely - it "
+                "would use NTLM while reporting nothing."
+            )
+        return ["kerberos"] if mode in {"1", "true", "yes", "on", "require", "strict"} else ["kerberos", "ntlm"]
 
     def _winrm_cert_validation(self) -> str:
-        # Default 'validate' - no cert-validation bypass. 'ignore' is an explicit,
-        # documented opt-in (DSPM_WINRM_SSL_SKIP_CA_CHECK=1) for the self-signed
-        # cert an HTTPS activation creates on a trusted internal network: it still
-        # encrypts the channel but drops MITM protection, so prefer pinning/CA
-        # trust in production (see the 0.3 runbook).
-        if self.config.use_ssl and os.getenv("DSPM_WINRM_SSL_SKIP_CA_CHECK", "0") == "1":
+        """Whether this connection checks the endpoint's certificate, and how.
+
+        These are pywinrm's own two words, and they do not line up with what an
+        operator chose. 'validate' is the default and covers both the system trust
+        store and a CA bundle. A PINNED thumbprint also returns 'ignore', because
+        urllib3 asserts the fingerprint itself and will not also walk a chain - the
+        certificate is still checked, and transport_summary() reports that as
+        'pinned' so a saved scan never reads as though nothing was checked. The one
+        case where nothing is checked is the explicit opt-in
+        (DSPM_WINRM_SSL_SKIP_CA_CHECK=1, or cert_trust='insecure') for the
+        self-signed certificate an HTTPS activation creates on a trusted internal
+        network: it still encrypts the channel but drops MITM protection entirely.
+
+        C0.1: production refuses that opt-in. An install that has declared itself
+        production has a certificate story - a CA bundle or a pinned thumbprint,
+        both offered per scan - and 'trust anything' is not one of them. Refusing
+        it here rather than at startup catches the operator who exports it later.
+        """
+
+        if not self.config.use_ssl:
+            return "validate"
+        if self.config.cert_thumbprint:
+            # The pin IS the validation; urllib3 checks the fingerprint itself.
+            return "ignore"
+        if self.config.insecure_tls or os.getenv("DSPM_WINRM_SSL_SKIP_CA_CHECK", "0") == "1":
+            if _in_production():
+                raise WinRMTransportRefused(
+                    "Scanning without checking the endpoint's certificate is refused when "
+                    "DSPM_ENV=production (whether asked for by the scan or by "
+                    "DSPM_WINRM_SSL_SKIP_CA_CHECK=1). Pin the endpoint's certificate "
+                    "thumbprint, or point the scan at a CA bundle that signs it."
+                )
             return "ignore"
         return "validate"
 
+    def _winrm_ca_trust_path(self) -> str:
+        """A CA bundle for this scan, if one was chosen.
+
+        pywinrm hands this to requests as `session.verify`, so it replaces the
+        system trust store for this connection only - which is what an internal PKI
+        whose root the scanning host does not trust needs.
+        """
+
+        bundle = str(self.config.ca_bundle or "").strip()
+        if not bundle or not self.config.use_ssl:
+            return ""
+        if not Path(bundle).is_file():
+            raise WinRMTransportRefused(
+                f"The CA bundle for this scan does not exist on the scanning host: {bundle}"
+            )
+        return bundle
+
+    def transport_summary(self) -> dict:
+        """How this scan reaches the endpoint, in the words an operator chose.
+
+        C0.1: preflight and the saved scan both carry it, so 'it scanned' and 'it
+        scanned over TLS with a validated certificate' stop being the same sentence.
+        Never carries a credential - only the transport decisions.
+        """
+
+        try:
+            pywinrm_validation = self._winrm_cert_validation()
+            refused = ""
+        except WinRMTransportRefused as exc:
+            pywinrm_validation, refused = "refused", str(exc)
+        if self.config.cert_thumbprint:
+            trust, validation = "thumbprint", "pinned"
+        elif str(self.config.ca_bundle or "").strip():
+            trust, validation = "ca_bundle", "validate"
+        elif pywinrm_validation == "ignore":
+            # The one case where nothing about the certificate is checked.
+            trust, validation = "insecure", "none"
+        elif pywinrm_validation == "refused":
+            trust, validation = "refused", "refused"
+        else:
+            trust, validation = "system", "validate"
+        summary = {
+            "ssl": bool(self.config.use_ssl),
+            "port": self.config.port or (5986 if self.config.use_ssl else 5985),
+            "scheme": "https" if self.config.use_ssl else "http",
+            "certificate_trust": trust if self.config.use_ssl else "not_applicable",
+            "certificate_validation": validation if self.config.use_ssl else "not_applicable",
+            "certificate_thumbprint": self.config.cert_thumbprint or "",
+            "message_encryption": self._winrm_message_encryption(),
+            "authentication": self._authentication_policy(),
+            "ssl_required": _winrm_ssl_required(),
+        }
+        if refused:
+            summary["refused"] = refused
+        return summary
+
+    def _authentication_policy(self) -> str:
+        """What this scan will accept, before anything is negotiated."""
+        try:
+            offered = self._winrm_transports()
+        except WinRMKerberosUnavailable as exc:
+            return f"unavailable: {exc}"[:200]
+        if offered == ["kerberos"]:
+            return "kerberos_only"
+        if offered[:1] == ["kerberos"]:
+            return "kerberos_preferred"
+        return "ntlm"
+
+    def _winrm_message_encryption(self) -> str:
+        """Never carry a scan over an unencrypted channel.
+
+        pywinrm's default is 'auto', which wraps the payload in NTLM/Kerberos
+        message encryption only when the auth object happens to expose a
+        session key - for NTLM that is `hasattr(session.auth,
+        "session_security")` in winrm/transport.py. When it does not, 'auto'
+        does not fail: it sends the request PLAINTEXT over http://...:5985 and
+        says nothing. On this collector that payload is the customer's file
+        content, which is the one thing a DSPM must never put on the wire in
+        the clear.
+
+        It happens to encrypt today because requests-ntlm 1.3.0 exposes that
+        attribute - which is a property of the lockfile, not of the design. On
+        HTTP the requirement is stated instead, so a transport that cannot
+        encrypt raises WinRMError rather than quietly succeeding. Over HTTPS
+        the channel is already encrypted and 'auto' leaves it to TLS rather
+        than paying for a second wrapping.
+        """
+
+        return "auto" if self.config.use_ssl else "always"
+
     def _winrm_session(self, connection_host: str, transport: str):
         import winrm
-        kwargs = {"auth": (self._username(), self.config.password), "transport": transport}
+        kwargs = {
+            "auth": (self._username(), self.config.password),
+            "transport": transport,
+            "message_encryption": self._winrm_message_encryption(),
+        }
         if self.config.use_ssl:
             kwargs["server_cert_validation"] = self._winrm_cert_validation()
-        return winrm.Session(self._endpoint_url(connection_host), **kwargs)
+            ca_trust_path = self._winrm_ca_trust_path()
+            if ca_trust_path:
+                kwargs["ca_trust_path"] = ca_trust_path
+        session = winrm.Session(self._endpoint_url(connection_host), **kwargs)
+        if self.config.use_ssl and self.config.cert_thumbprint:
+            # pywinrm has no pinning option, so the pin is mounted on the requests
+            # session underneath it. build_session() is what pywinrm itself calls
+            # before the first request and returns the same session afterwards.
+            underlying = session.protocol.transport.build_session()
+            underlying.mount("https://", _pinned_adapter(self.config.cert_thumbprint))
+        return session
 
     def _session_identity(self) -> tuple[object, ...]:
         """Network/auth fields that determine whether a session is reusable.
@@ -992,6 +1460,10 @@ class WinRMEndpointScanner:
             bool(self.config.use_ssl),
             self.config.port or (5986 if self.config.use_ssl else 5985),
             self._winrm_cert_validation(),
+            str(self.config.ca_bundle or "").strip(),
+            self.config.cert_thumbprint or "",
+            bool(self.config.insecure_tls),
+            self._winrm_message_encryption(),
             tuple(self._winrm_transports()),
         )
 
@@ -1002,7 +1474,12 @@ class WinRMEndpointScanner:
             "session_creations": int(self._session_creations),
             "session_negotiations": int(self._session_negotiations),
             "session_failovers": int(self._session_failovers),
+            "shells_opened": int(self._shells_opened),
+            "shells_reused": int(self._shells_reused),
             "connection_transport": self.last_connection_transport,
+            # C0.1: what was asked for, beside what was negotiated. A saved scan can
+            # then answer "was this carried over TLS, and was the certificate checked".
+            "transport": self.transport_summary(),
         }
 
     def _run_with_session(self, operation):
@@ -1016,6 +1493,10 @@ class WinRMEndpointScanner:
         if binding is not None and binding.identity == identity:
             try:
                 result = operation(binding.session)
+            except WinRMCommandTimedOut:
+                # The command reached the endpoint and ran too long. Another host or
+                # transport would only run it again for as long.
+                raise
             except Exception as exc:
                 # A once-good connection can expire during a long scan. Drop it
                 # and use the normal candidate/transport failover below. Scan
@@ -1050,6 +1531,8 @@ class WinRMEndpointScanner:
                     self.last_connection_host = connection_host
                     self.last_connection_transport = transport
                     return result
+                except WinRMCommandTimedOut:
+                    raise
                 except Exception as exc:
                     last_error = exc
                     continue
@@ -1057,14 +1540,31 @@ class WinRMEndpointScanner:
             raise last_error
         raise RuntimeError("No endpoint host candidate was available for WinRM connection.")
 
+    def _refuse_a_transport_this_install_forbids(self) -> None:
+        """Check the transport rules once, before the connect loop.
+
+        The loop treats an exception as a failed candidate and tries the next host and
+        transport, so a refusal raised from inside it became one failure per candidate
+        and the operator waited through all of them for a verdict that could not change.
+        """
+
+        if not self.config.use_ssl and _winrm_ssl_required():
+            raise WinRMTransportRefused(
+                "This install requires WinRM over TLS and this scan asked for cleartext HTTP. "
+                "Turn on TLS for the scan (port 5986 by default) and choose how its certificate "
+                "is trusted, or set DSPM_REQUIRE_WINRM_SSL=0 to allow HTTP on a trusted network."
+            )
+        # Raises when the trust choice is not allowed here, or the bundle is gone.
+        self._winrm_cert_validation()
+        self._winrm_ca_trust_path()
+
     def _run_ps(self, script: str):
         try:
             import winrm  # noqa: F401 - dependency presence check
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        if not self.config.use_ssl and _winrm_ssl_required():
-            raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
+        self._refuse_a_transport_this_install_forbids()
         return self._run_with_session(lambda session: session.run_ps(script))
 
     def _run_ps_file(self, script: str):
@@ -1073,8 +1573,7 @@ class WinRMEndpointScanner:
         except ModuleNotFoundError as exc:
             raise RuntimeError("Missing dependency 'pywinrm'. Install requirements.txt before WinRM endpoint scans.") from exc
 
-        if not self.config.use_ssl and _winrm_ssl_required():
-            raise RuntimeError("WinRM over cleartext HTTP is disabled (SSL required). Use an SSL endpoint, or set DSPM_REQUIRE_WINRM_SSL=0 to explicitly allow HTTP.")
+        self._refuse_a_transport_this_install_forbids()
         return self._run_with_session(
             lambda session: self._run_ps_file_with_session(session, script)
         )
@@ -1178,8 +1677,10 @@ class WinRMEndpointScanner:
         protocol = session.protocol
         shell_id = ""
         command_id = ""
+        keep_shell = False
         try:
-            shell_id = protocol.open_shell(codepage=65001)
+            shell_id = self._shell_for(protocol)
+            keep_shell = self._shell_reuse
             command_id = protocol.run_command(
                 shell_id,
                 "powershell.exe",
@@ -1199,6 +1700,10 @@ class WinRMEndpointScanner:
                     end=index + _WINRM_STDIN_CHUNK_BYTES >= len(payload),
                 )
             return Response(self._get_command_output(protocol, shell_id, command_id))
+        except BaseException:
+            # A shell a command failed or timed out in is not trusted with the next one.
+            keep_shell = False
+            raise
         finally:
             # Preserve the delivery/output exception if cleanup also fails; the
             # caller then takes the compatible disk-based path on this session.
@@ -1207,11 +1712,50 @@ class WinRMEndpointScanner:
                     protocol.cleanup_command(shell_id, command_id)
                 except Exception:
                     pass
-            if shell_id:
+            if shell_id and not keep_shell:
+                if self._reused_shell is not None and self._reused_shell[1] == shell_id:
+                    self._reused_shell = None
                 try:
                     protocol.close_shell(shell_id)
                 except Exception:
                     pass
+
+    @contextmanager
+    def reusing_shell(self):
+        """Run every command of the block in one WinRS shell (W1.3).
+
+        Each command opened and closed a shell of its own: a page, then every content
+        batch, each paid for a shell. Inside this block the first command opens one and
+        the rest use it; a command that fails or times out closes it, and the next opens
+        another. The shell is closed when the block ends.
+        """
+        previous = self._shell_reuse
+        self._shell_reuse = True
+        try:
+            yield self
+        finally:
+            self._shell_reuse = previous
+            if not previous:
+                self._close_reused_shell()
+
+    def _shell_for(self, protocol) -> str:
+        if self._shell_reuse and self._reused_shell is not None and self._reused_shell[0] is protocol:
+            self._shells_reused += 1
+            return self._reused_shell[1]
+        self._close_reused_shell()
+        shell_id = protocol.open_shell(codepage=65001)
+        self._shells_opened += 1
+        if self._shell_reuse:
+            self._reused_shell = (protocol, shell_id)
+        return shell_id
+
+    def _close_reused_shell(self) -> None:
+        held, self._reused_shell = self._reused_shell, None
+        if held is not None:
+            try:
+                held[0].close_shell(held[1])
+            except Exception:
+                pass
 
     def _get_command_output(self, protocol, shell_id: str, command_id: str):
         """Collect output while counting the actual WS-Man Receive envelopes.
@@ -1235,7 +1779,13 @@ class WinRMEndpointScanner:
         stderr_buffer: list[bytes] = []
         return_code = -1
         command_done = False
+        limit = winrm_command_timeout_seconds()
+        deadline = time.monotonic() + limit if limit else None
         while not command_done:
+            if deadline is not None and time.monotonic() > deadline:
+                raise WinRMCommandTimedOut(
+                    f"a WinRM command on {self.config.host} ran past its {limit} s wall clock and was stopped"
+                )
             self._response_envelopes_current += 1
             try:
                 stdout, stderr, return_code, command_done = get_raw(shell_id, command_id)
@@ -1390,8 +1940,22 @@ def _scan_script(
     hash_files: bool = True,
     read_owner: bool = True,
     parallel_workers: int = 1,
+    page: dict | None = None,
+    scope: dict | None = None,
 ) -> str:
+    """The collector script. With ``page`` (W1.3) it lists one level of the folders the page
+    names - ``{"folders": [{"path", "depth", "after", "root"}], "page_size", "max_folders"}`` -
+    instead of walking ``paths``: at most ``page_size`` file records and ``max_folders``
+    folders, in ordinal case-insensitive name order, and returns the subfolders it met and
+    where the next command takes over. Without it, the whole walk (capped at 5,000 records)."""
     encoded_paths = base64.b64encode(json.dumps(paths).encode("utf-8")).decode("ascii")
+    encoded_page = base64.b64encode(json.dumps(page or {}).encode("utf-8")).decode("ascii")
+    # Advanced scan scope (collectors.scan_scope): canonical rules, absolute paths in "/" form.
+    encoded_scope = base64.b64encode(json.dumps(scope or {}).encode("utf-8")).decode("ascii")
+    scope_active_value = "$true" if scope else "$false"
+    page_mode_value = "$true" if page else "$false"
+    # A page is bounded by page_size; the whole-walk cap is for the walk alone.
+    max_records_value = 2147483647 if page else 5000
     encoded_extensions = base64.b64encode(json.dumps(allowed_extensions).encode("utf-8")).decode("ascii")
     read_content_value = "$true" if read_content else "$false"
     extension_filter_value = "$true" if extension_filter_enabled else "$false"
@@ -1402,6 +1966,12 @@ def _scan_script(
     read_acl_value = "$true" if read_acl else "$false"
     inspect_archives_value = "$true" if inspect_archives else "$false"
     hash_files_value = "$true" if hash_files else "$false"
+    # W2.2 on the endpoint: the whole-file SHA-256 is taken of a file read whole for its
+    # content - a text file within its cap, a document within the document cap - and of
+    # every file only under DSPM_HASH_POLICY=full. Any other file is not read to name
+    # it: the collector gives it a meta identity (sampled falls back to meta here).
+    whole_hash_value = "$true" if content_policy.hash_policy() == "full" else "$false"
+    document_cap = int(content_policy.document_cap_bytes())
     read_owner_value = "$true" if read_owner else "$false"
     text_extensions = ",".join(f'"{item}"' for item in sorted(TEXT_EXTENSIONS))
     binary_extensions = ",".join(f'"{item}"' for item in sorted(BINARY_TEXT_EXTENSIONS))
@@ -1435,7 +2005,21 @@ def _scan_script(
     $binaryExtensions = @({binary_extensions})
     $archiveExtensions = @(".7z", ".bz2", ".cab", ".gz", ".jar", ".rar", ".tar", ".tgz", ".xz", ".zip")
     $scanArchiveEntries = {inspect_archives_value}
-    $maxRecords = 5000
+    $scopeActive = {scope_active_value}
+    $scopeJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_scope}"))
+    $dspmScope = ConvertFrom-Json $scopeJson
+    $scopeExcludeExtensions = @{{}}
+    foreach ($scopeItem in @($dspmScope.exclude_extensions)) {{
+      if ($scopeItem) {{ $scopeExcludeExtensions[([string]$scopeItem).ToLowerInvariant()] = $true }}
+    }}
+    $scopeExcludePaths = @(@($dspmScope.exclude_paths) | Where-Object {{ $_ }} | ForEach-Object {{ ([string]$_).ToLowerInvariant().TrimEnd('/') }})
+    $scopeMinSize = if ($null -ne $dspmScope.min_size_bytes) {{ [int64]$dspmScope.min_size_bytes }} else {{ [int64]-1 }}
+    $scopeMaxSize = if ($null -ne $dspmScope.max_size_bytes) {{ [int64]$dspmScope.max_size_bytes }} else {{ [int64]-1 }}
+    $scopeModifiedAfter = $null
+    if ($dspmScope.modified_after) {{
+      $scopeModifiedAfter = [datetime]::SpecifyKind([datetime]::ParseExact([string]$dspmScope.modified_after, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture), [DateTimeKind]::Utc)
+    }}
+    $maxRecords = {max_records_value}
     $maxArchiveEntriesPerFile = 200
     $maxArchiveEntryBytes = 26214400
     $maxArchiveTotalBytes = 209715200
@@ -1463,6 +2047,8 @@ def _scan_script(
       extension_filter_enabled = {extension_filter_value}
       hidden_filter_enabled = {hidden_filter_value}
       system_filter_enabled = {system_filter_value}
+      scope_excluded_by = @{{}}
+      scope_skipped_folders_by = @{{}}
     }}
 
     function Get-RelativeDepth($root, $path) {{
@@ -1504,6 +2090,38 @@ def _scan_script(
           $diagnostics.selected_extension_counts[$selectedKey] = 1
         }}
       }}
+    }}
+
+    function Add-DspmScopeCount($table, $reason) {{
+      if ($table.ContainsKey($reason)) {{ $table[$reason] += 1 }} else {{ $table[$reason] = 1 }}
+    }}
+
+    function Test-DspmScopeExcludedPath($normalized) {{
+      foreach ($excluded in $scopeExcludePaths) {{
+        if ($normalized -eq $excluded -or $normalized.StartsWith($excluded + '/')) {{ return $true }}
+      }}
+      return $false
+    }}
+
+    # Advanced scope: why a folder is not listed ("" when it is).
+    function Get-DspmScopeFolderReason($fullName) {{
+      if (-not $scopeActive) {{ return "" }}
+      $normalized = ([string]$fullName).ToLowerInvariant().Replace([string][char]92, '/').TrimEnd('/')
+      if (Test-DspmScopeExcludedPath $normalized) {{ return "excluded_folder" }}
+      return ""
+    }}
+
+    # Advanced scope: why a listed file is left before any work is queued for it - by its
+    # path and extension, then by the size and time the listing already gives.
+    function Get-DspmScopeFileReason($file, $extension) {{
+      if (-not $scopeActive) {{ return "" }}
+      $normalized = ([string]$file.FullName).ToLowerInvariant().Replace([string][char]92, '/')
+      if (Test-DspmScopeExcludedPath $normalized) {{ return "excluded_folder" }}
+      if ($extension -and $scopeExcludeExtensions.ContainsKey(([string]$extension).ToLowerInvariant())) {{ return "extension" }}
+      if ($scopeMinSize -ge 0 -and [int64]$file.Length -lt $scopeMinSize) {{ return "smaller_than_minimum" }}
+      if ($scopeMaxSize -ge 0 -and [int64]$file.Length -gt $scopeMaxSize) {{ return "larger_than_maximum" }}
+      if ($scopeModifiedAfter -and $file.LastWriteTimeUtc -lt $scopeModifiedAfter) {{ return "modified_before_date" }}
+      return ""
     }}
 
     function Test-DspmRecordIncluded($extension, $isHidden, $isSystem) {{
@@ -1850,13 +2468,63 @@ def _scan_script(
       return @($roots.ToArray())
     }}
 
+    # A file's bytes as text, in the file's own encoding - the rules of
+    # collectors.text_decode: a byte-order mark (UTF-8, UTF-16 or UTF-32), else UTF-16
+    # when the first 4 KB has a NUL in every other byte, else UTF-8. Read as UTF-8
+    # whatever it was, a UTF-16 file (a regedit export, a PowerShell 5.1 log) came back
+    # with a NUL between every character and was skipped as binary.
+    function ConvertFrom-DspmTextBytes($buffer, $count) {{
+      $start = 0
+      $encoding = New-Object System.Text.UTF8Encoding($false)
+      if ($count -ge 4 -and $buffer[0] -eq 0xFF -and $buffer[1] -eq 0xFE -and $buffer[2] -eq 0 -and $buffer[3] -eq 0) {{
+        $encoding = New-Object System.Text.UTF32Encoding($false, $false); $start = 4
+      }} elseif ($count -ge 4 -and $buffer[0] -eq 0 -and $buffer[1] -eq 0 -and $buffer[2] -eq 0xFE -and $buffer[3] -eq 0xFF) {{
+        $encoding = New-Object System.Text.UTF32Encoding($true, $false); $start = 4
+      }} elseif ($count -ge 3 -and $buffer[0] -eq 0xEF -and $buffer[1] -eq 0xBB -and $buffer[2] -eq 0xBF) {{
+        $start = 3
+      }} elseif ($count -ge 2 -and $buffer[0] -eq 0xFF -and $buffer[1] -eq 0xFE) {{
+        $encoding = New-Object System.Text.UnicodeEncoding($false, $false); $start = 2
+      }} elseif ($count -ge 2 -and $buffer[0] -eq 0xFE -and $buffer[1] -eq 0xFF) {{
+        $encoding = New-Object System.Text.UnicodeEncoding($true, $false); $start = 2
+      }} else {{
+        $sniff = [Math]::Min($count, 4096)
+        $units = [Math]::Floor($sniff / 2)
+        # Counted only when there is a NUL at all: a UTF-8 text has none.
+        if ($units -ge 4 -and [Array]::IndexOf($buffer, [byte]0, 0, $sniff) -ge 0) {{
+          $evenNuls = 0
+          $oddNuls = 0
+          for ($index = 0; $index -lt $units; $index++) {{
+            if ($buffer[2 * $index] -eq 0) {{ $evenNuls++ }}
+            if ($buffer[2 * $index + 1] -eq 0) {{ $oddNuls++ }}
+          }}
+          if ($oddNuls -ge $units * 0.5 -and $evenNuls -le $units * 0.1) {{
+            $encoding = New-Object System.Text.UnicodeEncoding($false, $false)
+          }} elseif ($evenNuls -ge $units * 0.5 -and $oddNuls -le $units * 0.1) {{
+            $encoding = New-Object System.Text.UnicodeEncoding($true, $false)
+          }}
+        }}
+      }}
+      return $encoding.GetString($buffer, $start, $count - $start)
+    }}
+
+    # Up to $limit bytes of a stream, as text. Read until the limit or the end: a zip
+    # entry's stream returns a block at a time, not everything asked for.
+    function Read-DspmStreamText($stream, $limit) {{
+      $buffer = New-Object byte[] ([int]$limit)
+      $read = 0
+      while ($read -lt $buffer.Length) {{
+        $got = $stream.Read($buffer, $read, $buffer.Length - $read)
+        if ($got -le 0) {{ break }}
+        $read += $got
+      }}
+      return (ConvertFrom-DspmTextBytes $buffer $read)
+    }}
+
     function Read-PlainText($path, $maxBytes) {{
       try {{
         $stream = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try {{
-          $buffer = New-Object byte[] $maxBytes
-          $read = $stream.Read($buffer, 0, $buffer.Length)
-          return [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+          return (Read-DspmStreamText $stream ([Math]::Min([int64]$maxBytes, [int64]$stream.Length)))
         }} finally {{
           $stream.Close()
         }}
@@ -1876,12 +2544,23 @@ def _scan_script(
         $maxRatio = 200
         $archive = [System.IO.Compression.ZipFile]::OpenRead($path)
         try {{
+          # The parts that hold the text, the shared strings first: a worksheet holds only
+          # indices into sharedStrings.xml, and Excel writes the worksheets (and theme and
+          # styles) before it, so a workbook of some 20,000 cells used every character of
+          # the cap before its first text cell. Theme and styles hold no content.
+          $selected = @($archive.Entries | Where-Object {{
+            $_.FullName.StartsWith($prefix) -and $_.FullName.EndsWith(".xml") -and
+            -not ($_.FullName -like "*/theme/*" -or ($prefix -and $_.FullName -eq ($prefix + "styles.xml")))
+          }})
+          $entries = @($selected | Where-Object {{ $_.FullName -eq "xl/sharedStrings.xml" }}) +
+            @($selected | Where-Object {{ $_.FullName -ne "xl/sharedStrings.xml" }})
           $parts = New-Object System.Collections.Generic.List[string]
           $total = 0
-          foreach ($entry in $archive.Entries) {{
-            if (-not ($entry.FullName.StartsWith($prefix) -and $entry.FullName.EndsWith(".xml"))) {{ continue }}
-            if ($entry.Length -gt $maxEntryBytes) {{ continue }}
-            if ($entry.CompressedLength -gt 0 -and ($entry.Length / $entry.CompressedLength) -gt $maxRatio) {{ continue }}
+          $truncated = $false
+          for ($index = 0; $index -lt $entries.Count; $index++) {{
+            $entry = $entries[$index]
+            if ($entry.Length -gt $maxEntryBytes) {{ $truncated = $true; continue }}
+            if ($entry.CompressedLength -gt 0 -and ($entry.Length / $entry.CompressedLength) -gt $maxRatio) {{ $truncated = $true; continue }}
             $reader = New-Object System.IO.StreamReader($entry.Open())
             try {{
               $xml = $reader.ReadToEnd()
@@ -1892,15 +2571,20 @@ def _scan_script(
               $reader.Close()
             }}
             $total += $entry.Length
-            if ($total -ge $maxTotalBytes) {{ break }}
+            if ($total -ge $maxTotalBytes) {{
+              if ($index -lt $entries.Count - 1) {{ $truncated = $true }}
+              break
+            }}
           }}
           $joined = $parts -join "`n"
-          return $joined.Substring(0, [Math]::Min(120000, $joined.Length))
+          if ($joined.Length -gt 120000) {{ $truncated = $true }}
+          # Cut short is said: the record is PARTIAL, not FULL.
+          return [PSCustomObject]@{{ text = $joined.Substring(0, [Math]::Min(120000, $joined.Length)); truncated = $truncated; status = "" }}
         }} finally {{
           $archive.Dispose()
         }}
       }} catch {{
-        return ""
+        return [PSCustomObject]@{{ text = ""; truncated = $false; status = "not_extracted" }}
       }}
     }}
 
@@ -1909,17 +2593,10 @@ def _scan_script(
       if (@(".xlsm", ".xlsx") -contains $extension) {{ return Read-ZipXmlText $path "xl/" }}
       if (@(".pptm", ".pptx") -contains $extension) {{ return Read-ZipXmlText $path "ppt/slides/" }}
       if (@(".odp", ".ods", ".odt", ".otp") -contains $extension) {{ return Read-ZipXmlText $path "" }}
-      if ($extension -eq ".pdf") {{
-        try {{
-          $bytes = [System.IO.File]::ReadAllBytes($path)
-          $limit = [Math]::Min($bytes.Length, $maxBytes * 4)
-          $text = [Text.Encoding]::GetEncoding("iso-8859-1").GetString($bytes, 0, $limit)
-          return (($text | Select-String -Pattern "\\(([^()]*)\\)" -AllMatches).Matches | ForEach-Object {{ $_.Groups[1].Value }}) -join "`n"
-        }} catch {{
-          return ""
-        }}
-      }}
-      return ""
+      # A PDF's page text is compressed; there is no parser on the endpoint. A regex over
+      # the raw bytes found only the uncompressed metadata (Title, Producer) and called
+      # every PDF scanned and FULL. It is said to be not extracted until one runs here.
+      return [PSCustomObject]@{{ text = ""; truncated = $false; status = "not_extracted" }}
     }}
 
     function Read-ZipEntryText($entry, $extension, $maxBytes) {{
@@ -1927,9 +2604,7 @@ def _scan_script(
       try {{
         $stream = $entry.Open()
         try {{
-          $buffer = New-Object byte[] $maxBytes
-          $read = $stream.Read($buffer, 0, $buffer.Length)
-          return [Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+          return (Read-DspmStreamText $stream ([Math]::Min([int64]$maxBytes, [int64]$entry.Length)))
         }} finally {{
           $stream.Close()
         }}
@@ -2090,6 +2765,11 @@ def _scan_script(
     function Add-DspmFileRecord($file, $root) {{
       $diagnostics.visited_files += 1
       $extension = Get-DspmExtension $file
+      $scopeReason = Get-DspmScopeFileReason $file $extension
+      if ($scopeReason) {{
+        Add-DspmScopeCount $diagnostics.scope_excluded_by $scopeReason
+        return
+      }}
       $isHidden = [bool]($file.Attributes -band [IO.FileAttributes]::Hidden)
       $isSystem = [bool]($file.Attributes -band [IO.FileAttributes]::System)
       Add-DspmExtensionStat $extension
@@ -2122,18 +2802,49 @@ def _scan_script(
       $zipProtection = if ($extension -eq ".zip") {{ Test-DspmZipProtection $file.FullName }} else {{ [PSCustomObject]@{{ protected = $false; content_status = ""; protection_type = ""; scan_error = "" }} }}
       $ownerAcl = if ({read_owner_value} -or {read_acl_value}) {{ Get-Acl -LiteralPath $file.FullName -ErrorAction SilentlyContinue }} else {{ $null }}
       $acl = if ({read_acl_value}) {{ $ownerAcl }} else {{ $null }}
+      # Each entry's allow or deny, whether it was inherited, and its SID - not only the
+      # account name and rights: without them a Deny read as an Allow, and a broad group
+      # was known only by its English name ("Everyone", never "Jeder").
+      $rules = if ($acl) {{ @($acl.Access) }} else {{ @() }}
+      $ruleSids = @()
+      if ($acl) {{
+        try {{
+          $ruleSids = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {{ $_.IdentityReference.Value }})
+        }} catch {{
+          $ruleSids = @()
+        }}
+      }}
+      if ($ruleSids.Count -ne $rules.Count) {{ $ruleSids = @($rules | ForEach-Object {{ "" }}) }}
       $content = ""
+      $contentStatus = ""
+      $contentTruncated = $false
       if ({read_content_value} -and ($textExtensions -contains $extension)) {{
         $content = Read-PlainText $file.FullName {int(max_read_bytes)}
       }} elseif ({read_content_value} -and ($binaryExtensions -contains $extension)) {{
-        $content = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
+        if ($file.Length -gt {document_cap}) {{
+          # Over the document cap: not read at all (W2.2) - said, not an error.
+          $contentStatus = "over_size_cap"
+        }} else {{
+          $extracted = Read-BinaryText $file.FullName $extension {int(max_read_bytes)}
+          $content = [string]$extracted.text
+          $contentStatus = [string]$extracted.status
+          $contentTruncated = [bool]$extracted.truncated
+        }}
       }}
       $sha256 = ""
+      $hashSkipped = $false
       if ({hash_files_value}) {{
-        try {{
-          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
-        }} catch {{
-          $sha256 = ""
+        $readWhole = ({read_content_value}) -and (
+          (($textExtensions -contains $extension) -and $file.Length -le {int(max_read_bytes)}) -or
+          (($binaryExtensions -contains $extension) -and $file.Length -le {document_cap}))
+        if ({whole_hash_value} -or $readWhole) {{
+          try {{
+            $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName -ErrorAction Stop).Hash.ToLowerInvariant()
+          }} catch {{
+            $sha256 = ""
+          }}
+        }} else {{
+          $hashSkipped = $true
         }}
       }}
       return [PSCustomObject]@{{
@@ -2148,19 +2859,23 @@ def _scan_script(
         accessed_at = $file.LastAccessTimeUtc.ToString("o")
         attributes = $file.Attributes.ToString()
         sha256 = $sha256
+        hash_skipped = $hashSkipped
         protected = [bool]$zipProtection.protected
-        content_status = if ($zipProtection.content_status) {{ $zipProtection.content_status }} else {{ "" }}
+        content_status = if ($zipProtection.content_status) {{ $zipProtection.content_status }} elseif ($contentStatus) {{ $contentStatus }} else {{ "" }}
         content_scannable = if ($zipProtection.protected) {{ $false }} else {{ $null }}
         protection_type = if ($zipProtection.protection_type) {{ $zipProtection.protection_type }} else {{ "" }}
         scan_error = if ($zipProtection.scan_error) {{ $zipProtection.scan_error }} else {{ "" }}
         owner = if ($ownerAcl) {{ $ownerAcl.Owner }} else {{ "" }}
-        principals = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.IdentityReference.Value }}) }} else {{ @() }}
-        permissions = if ($acl) {{ @($acl.Access | ForEach-Object {{ $_.FileSystemRights.ToString() }}) }} else {{ @() }}
+        principals = @($rules | ForEach-Object {{ $_.IdentityReference.Value }})
+        permissions = @($rules | ForEach-Object {{ $_.FileSystemRights.ToString() }})
+        types = @($rules | ForEach-Object {{ $_.AccessControlType.ToString() }})
+        inherited = @($rules | ForEach-Object {{ [bool]$_.IsInherited }})
+        sids = $ruleSids
         content = $content
-        scan_completeness = if (($textExtensions -contains $extension) -and $content -and $file.Length -gt {int(max_read_bytes)}) {{ "PARTIAL" }} elseif ($content -or $file.Length -eq 0) {{ "FULL" }} else {{ "NONE" }}
+        scan_completeness = if ((($textExtensions -contains $extension) -and $content -and $file.Length -gt {int(max_read_bytes)}) -or ($content -and $contentTruncated)) {{ "PARTIAL" }} elseif ($content -or $file.Length -eq 0) {{ "FULL" }} else {{ "NONE" }}
         bytes_scanned = if ($content) {{ [Math]::Min([int64]$file.Length, [int64]{int(max_read_bytes)}) }} else {{ 0 }}
         total_bytes = $file.Length
-        truncated = ($content -and ($file.Length -gt {int(max_read_bytes)}))
+        truncated = [bool](($content -and ($file.Length -gt {int(max_read_bytes)})) -or ($content -and $contentTruncated))
       }}
     }}
 
@@ -2169,6 +2884,13 @@ def _scan_script(
       if (Test-DspmSkippedPath $current) {{
         $diagnostics.skipped_dirs += 1
         return
+      }}
+      if ($depth -eq 0) {{
+        $scopeReason = Get-DspmScopeFolderReason $current
+        if ($scopeReason) {{
+          Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
+          return
+        }}
       }}
       $dspmChildErrors = @()
       $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue -ErrorVariable dspmChildErrors)
@@ -2193,6 +2915,11 @@ def _scan_script(
             $diagnostics.skipped_dirs += 1
             continue
           }}
+          $scopeReason = Get-DspmScopeFolderReason $entry.FullName
+          if ($scopeReason) {{
+            Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
+            continue
+          }}
           Walk-DspmDirectory $root $entry.FullName ($depth + 1)
           continue
         }}
@@ -2202,6 +2929,111 @@ def _scan_script(
 
     }}
     . $dspmEngine
+
+    # ---- W1.3 page mode: one level of the page's folders, in ordinal case-insensitive
+    # name order, at most page_size file records and max_folders folders. A folder cut
+    # short is handed on with the last name listed ("after"); the folders not reached are
+    # handed on as they came. Subfolders met are returned for the backend's frontier. ----
+    $dspmPageFolders = New-Object System.Collections.Generic.List[object]
+    $dspmPageRest = New-Object System.Collections.Generic.List[object]
+    function Read-DspmPageFolder($spec, $pageSize) {{
+      $current = [string]$spec.path
+      $depth = [int]$spec.depth
+      $after = [string]$spec.after
+      if ($depth -gt {int(max_depth)}) {{ return $null }}
+      if (Test-DspmSkippedPath $current) {{
+        $diagnostics.skipped_dirs += 1
+        return $null
+      }}
+      if ($depth -eq 0 -and -not $after) {{
+        $scopeReason = Get-DspmScopeFolderReason $current
+        if ($scopeReason) {{
+          Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
+          return $null
+        }}
+      }}
+      $dspmChildErrors = @()
+      $entries = @(Get-ChildItem -LiteralPath $current -Force -ErrorAction SilentlyContinue -ErrorVariable dspmChildErrors)
+      foreach ($dspmError in @($dspmChildErrors)) {{
+        if ($diagnostics.unreadable_dirs.Count -lt 20) {{
+          $diagnostics.unreadable_dirs += "$($current): $($dspmError.Exception.Message)"
+        }}
+      }}
+      if ($entries.Count -eq 0) {{ return $null }}
+      $dspmKeys = [string[]]@($entries | ForEach-Object {{ [string]$_.Name }})
+      $dspmSorted = [object[]]$entries
+      [Array]::Sort($dspmKeys, $dspmSorted, [StringComparer]::OrdinalIgnoreCase)
+      foreach ($entry in $dspmSorted) {{
+        if ($after -and [StringComparer]::OrdinalIgnoreCase.Compare([string]$entry.Name, $after) -le 0) {{ continue }}
+        if ($entry.PSIsContainer) {{
+          $dirHidden = [bool]($entry.Attributes -band [IO.FileAttributes]::Hidden)
+          $dirReparse = [bool]($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)
+          if ($dirReparse -or (Test-DspmSkippedPath $entry.FullName) -or ($dirHidden -and -not ({include_hidden_value} -or {hidden_filter_value}))) {{
+            $diagnostics.skipped_dirs += 1
+            continue
+          }}
+          $scopeReason = Get-DspmScopeFolderReason $entry.FullName
+          if ($scopeReason) {{
+            Add-DspmScopeCount $diagnostics.scope_skipped_folders_by $scopeReason
+            continue
+          }}
+          if (($depth + 1) -le {int(max_depth)}) {{
+            $dspmPageFolders.Add([PSCustomObject]@{{ path = $entry.FullName; depth = ($depth + 1); after = ""; root = $false }}) | Out-Null
+          }}
+          continue
+        }}
+        Add-DspmFileRecord $entry $current
+        if ($records.Count -ge $pageSize) {{
+          return [PSCustomObject]@{{ path = $current; depth = $depth; after = [string]$entry.Name; root = $false }}
+        }}
+      }}
+      return $null
+    }}
+    if ({page_mode_value}) {{
+      $dspmPage = ConvertFrom-Json ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{encoded_page}")))
+      $dspmPageSize = [Math]::Max(1, [int]$dspmPage.page_size)
+      $dspmMaxFolders = [Math]::Max(1, [int]$dspmPage.max_folders)
+      $dspmListed = 0
+      $dspmStopped = $false
+      foreach ($spec in @($dspmPage.folders)) {{
+        if ($dspmStopped -or $dspmListed -ge $dspmMaxFolders) {{
+          $dspmPageRest.Add($spec) | Out-Null
+          continue
+        }}
+        $dspmFolders = @()
+        if ([bool]$spec.root) {{
+          $resolvedRoots = @(Resolve-DspmRoot ([string]$spec.path))
+          if (-not $resolvedRoots -or $resolvedRoots.Count -eq 0) {{
+            $diagnostics.missing_roots += [string]$spec.path
+            continue
+          }}
+          foreach ($root in $resolvedRoots) {{
+            $diagnostics.resolved_roots += $root
+            $rootItem = Get-Item -LiteralPath $root -ErrorAction SilentlyContinue
+            if ($rootItem -and -not $rootItem.PSIsContainer) {{
+              Add-DspmFileRecord $rootItem $root
+            }} elseif ($rootItem) {{
+              $dspmFolders += [PSCustomObject]@{{ path = $root; depth = 0; after = ""; root = $false }}
+            }}
+          }}
+        }} else {{
+          $dspmFolders = @($spec)
+        }}
+        foreach ($folder in $dspmFolders) {{
+          if ($dspmStopped -or $dspmListed -ge $dspmMaxFolders) {{
+            $dspmPageRest.Add($folder) | Out-Null
+            continue
+          }}
+          $dspmListed += 1
+          $handOn = Read-DspmPageFolder $folder $dspmPageSize
+          if ($handOn) {{
+            $dspmPageRest.Add($handOn) | Out-Null
+            $dspmStopped = $true
+          }}
+        }}
+      }}
+      $targetPaths = @()
+    }}
 
     # ---- Phase 1: serial enumeration walk (metadata only) - deterministic order,
     # filters, and the record cap. Populates $records with archive-entry records +
@@ -2227,7 +3059,7 @@ def _scan_script(
     # Parallel across a runspace pool on real fan-out (the engine is dot-sourced
     # once per pooled runspace, then reused); results are written back by their
     # reserved index, so output order is identical to the serial path. ----
-    $dspmMaxWorkers = {parallel_workers_value}
+    $dspmMaxWorkers = if ({page_mode_value}) {{ 1 }} else {{ {parallel_workers_value} }}
     if ($dspmMaxWorkers -gt 1 -and $workItems.Count -gt 1) {{
       $engineSrc = $dspmEngine.ToString()
       # Worker params are dspm-namespaced: dot-sourcing the engine runs its
@@ -2274,6 +3106,8 @@ if (-not (Test-Path Function:\\Build-DspmFileRecord)) {{ . ([scriptblock]::Creat
     $dspmJson = [PSCustomObject]@{{
       records = @($records.ToArray() | Where-Object {{ $null -ne $_ }})
       diagnostics = $diagnostics
+      folders = @($dspmPageFolders.ToArray())
+      continuation = @($dspmPageRest.ToArray())
     }} | ConvertTo-Json -Depth 6 -Compress
     $dspmResponse = $dspmJson
     $dspmResponseStream = $null
@@ -2473,6 +3307,23 @@ def _decode_scan_response(output: bytes | str) -> tuple[bytes, dict]:
         "response_compressed_bytes": len(compressed),
         "response_compression_ratio": round(len(decoded) / max(wire_bytes, 1), 3),
     }
+
+
+def _access_verdict(is_admin: bool, readable: int, total: int, temp_writable: bool) -> str:
+    if not temp_writable:
+        return ("This account cannot write to its own temp directory on the target, which the "
+                "scan needs to stage file content. Check the profile is not mandatory or roaming-blocked.")
+    if is_admin:
+        return (f"This account is a local administrator, so it can read all {total} profiles. "
+                "A scan does not need administrator: an account in Remote Management Users with "
+                "read access to the folders you scan is enough.")
+    if total and readable == total:
+        return f"This account is not an administrator and can already read all {total} profiles."
+    if readable:
+        return (f"This account is not an administrator and can read {readable} of {total} profiles. "
+                "That is enough to scan those; the rest need a read grant on their folders.")
+    return ("This account is not an administrator and cannot read any user profile. It can still scan "
+            "paths you grant it read access to.")
 
 
 def _read_json(output: bytes | str) -> object | None:

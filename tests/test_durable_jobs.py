@@ -24,6 +24,7 @@ def _job(tenant_id: str, job_id: str, status: str, **extra) -> dict:
 class DurableJobTests(unittest.TestCase):
     def test_record_and_read_roundtrip(self) -> None:
         tid, jid = f"jt-{uuid4().hex[:8]}", f"j-{uuid4().hex[:8]}"
+        store.create_tenant(tid, tid)
         store.record_job(_job(tid, jid, "running", progress=55))
         rec = store.read_job(tid, jid)
         self.assertIsNotNone(rec)
@@ -37,11 +38,13 @@ class DurableJobTests(unittest.TestCase):
 
     def test_read_is_tenant_scoped(self) -> None:
         tid, jid = f"jt-{uuid4().hex[:8]}", f"j-{uuid4().hex[:8]}"
+        store.create_tenant(tid, tid)
         store.record_job(_job(tid, jid, "completed", finished_at="2026-07-23T00:01:00Z"))
         self.assertIsNone(store.read_job("other-tenant", jid))
 
     def test_recover_marks_orphan_running_as_failed(self) -> None:
         tid, jid = f"jt-{uuid4().hex[:8]}", f"j-{uuid4().hex[:8]}"
+        store.create_tenant(tid, tid)
         store.record_job(_job(tid, jid, "running"))
         store.recover_interrupted_jobs()
         rec = store.read_job(tid, jid)
@@ -50,6 +53,7 @@ class DurableJobTests(unittest.TestCase):
 
     def test_recover_leaves_terminal_jobs_untouched(self) -> None:
         tid, jid = f"jt-{uuid4().hex[:8]}", f"j-{uuid4().hex[:8]}"
+        store.create_tenant(tid, tid)
         store.record_job(_job(tid, jid, "completed", finished_at="2026-07-23T00:01:00Z"))
         store.recover_interrupted_jobs()
         self.assertEqual(store.read_job(tid, jid)["status"], "completed")

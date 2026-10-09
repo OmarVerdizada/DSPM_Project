@@ -118,7 +118,7 @@ class InventoryDetailCountsTests(unittest.TestCase):
         self.assertIn(denied.status_code, (401, 403))
         ok = self.client.get("/api/inventory-detail-counts?ids=", headers=_headers())
         self.assertEqual(ok.status_code, 200)
-        self.assertEqual(ok.json(), {"counts": {}})
+        self.assertEqual(ok.json(), {"tenant_id": "default", "counts": {}})
         unknown = self.client.get("/api/inventory-detail-counts?ids=deadbeef", headers=_headers())
         self.assertEqual(unknown.status_code, 200)
         self.assertEqual(unknown.json()["counts"], {})

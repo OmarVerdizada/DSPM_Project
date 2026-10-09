@@ -86,13 +86,19 @@ class PCIClassifierTests(unittest.TestCase):
         self.assertEqual(pan["protection_state"], "READABLE_FULL")
         self.assertIn("first_seen", pan)
         self.assertIn("last_seen", pan)
-        self.assertEqual(pan["status"], "UNREVIEWED")
+        # The lifecycle starts OPEN; the detector's own "unreviewed" stays its review_status.
+        self.assertEqual(pan["status"], "OPEN")
+        self.assertEqual(pan["review_status"], "unreviewed")
         self.assertTrue(pan["evidence_ids"])
         occurrence = pan["occurrences"][0]
         self.assertTrue(occurrence["occurrence_id"].startswith("occurrence_"))
-        self.assertEqual(occurrence["finding_id"], pan["finding_id"])
-        self.assertIn("file_id", occurrence)
+        # B1.4: an occurrence no longer repeats its parent's ids - the finding above
+        # it carries them, and every row that said them again was one row of waste.
+        self.assertNotIn("finding_id", occurrence)
+        self.assertNotIn("file_id", occurrence)
         self.assertEqual(occurrence["redacted_sample"], "411111******1111")
+        self.assertEqual(pan["evidence_ids"], [occurrence["occurrence_id"]],
+                         "the finding is still the way back from an occurrence to its file")
 
     def test_full_pan_is_not_downgraded_by_protection_labels(self):
         for label in ("encrypted pan", "tokenized pan", "pan last four"):
@@ -591,7 +597,11 @@ class PCIClassifierTests(unittest.TestCase):
         enabled = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["pci_dss"]))._analyze_record(dict(record))
         enabled_types = {finding["type"] for finding in enabled["findings"]}
         self.assertIn("pci_chd_pan", enabled_types)
-        self.assertIn("credit_card", enabled_types)
+        # B7: one card is one finding. The generic rule found it too, and says so,
+        # rather than standing beside the PCI one as a second card.
+        pan = next(finding for finding in enabled["findings"] if finding["type"] == "pci_chd_pan")
+        self.assertIn("credit_card", pan["detected_by"])
+        self.assertNotIn("credit_card", enabled_types)
         self.assertIn("411111******1111", "\n".join(enabled["preview"]["lines"]))
         self.assertNotIn("4111 1111 1111 1111", "\n".join(enabled["preview"]["lines"]))
 

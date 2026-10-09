@@ -25,6 +25,12 @@ from classification.compliance.pci_keywords import (
     TRACK_DATA_NEGATIVE_CONTEXT_KEYWORDS,
 )
 from classification.compliance.pci_models import PCIFinding
+from classification.pan_validator import (
+    cap_severity,
+    card_issuer,
+    pan_hits,
+    validate_pan,
+)
 from classification.compliance.pci_validators import (
     CIPHERTEXT_RE,
     EXPIRY_COMPACT_RE,
@@ -80,13 +86,14 @@ def classify_pci_content(content: str, metadata: dict | None = None, custom_keyw
     )
     _detect_track_data(content or "", evidence_blob, findings)
 
-    for match in PAN_CANDIDATE_RE.finditer(content or ""):
-        raw_value = match.group(0)
-        normalized = normalize_pan_candidate(raw_value)
-        if not normalized:
-            continue
-        context = local_context(content or "", match.start(), 150)
-        finding = _build_pan_finding(raw_value, context, evidence_blob, metadata)
+    # One validator decides what a card is, for this detector and the two
+    # others. It also counts the file's DISTINCT cards, which is what lets a
+    # payments export of bare numbers - no prose anywhere near them - be
+    # confirmed rather than guessed at.
+    for hit in pan_hits(content or "", path_hint=_pan_path_hint(metadata)):
+        raw_value = hit.raw
+        context = local_context(content or "", hit.start, 150)
+        finding = _build_pan_finding(raw_value, context, evidence_blob, metadata, verdict=hit.verdict)
         if not finding:
             continue
         _merge_finding(findings, finding)
@@ -142,45 +149,52 @@ def classify_pci_content(content: str, metadata: dict | None = None, custom_keyw
     return list(findings.values())
 
 
-def _build_pan_finding(raw_value: str, context: str, evidence_blob: str, metadata: dict) -> PCIFinding | None:
-    normalized = normalize_pan_candidate(raw_value)
-    luhn_pass = _luhn_pass(normalized)
-    if not luhn_pass:
-        return None
+# What each confidence tier is worth as this classifier's 0-100 number.
+_PAN_CONFIDENCE_SCORE = {"HIGH": 92, "MEDIUM": 72, "LOW": 48}
+
+
+def _pan_path_hint(metadata: dict) -> str:
+    return " ".join(str(metadata.get(key) or "") for key in ("path", "name", "share"))
+
+
+def _build_pan_finding(
+    raw_value: str,
+    context: str,
+    evidence_blob: str,
+    metadata: dict,
+    verdict=None,
+) -> PCIFinding | None:
+    """One card, or None.
+
+    The score this used to compute started at 20 and added 40 for a Luhn
+    checksum against a threshold of 55 - so a digit run with NO payment context
+    of any kind scored 60 and shipped as a CRITICAL readable Primary Account
+    Number. That is the arithmetic that made every IMEI in an asset register a
+    PCI finding.
+    """
+
     context_blob = f"{context} {evidence_blob}"
+    if verdict is None:
+        verdict = validate_pan(raw_value, context=context, path_hint=_pan_path_hint(metadata))
+    if verdict is None:
+        return None
+    normalized = verdict.digits
+    luhn_pass = verdict.luhn_valid
     schema_hits = keyword_hits(context_blob, PAN_KEYWORDS)
     payment_hits = keyword_hits(context_blob, PAYMENT_CONTEXT_KEYWORDS)
     protection_hits = keyword_hits(context_blob, PAN_PROTECTION_KEYWORDS)
-    negative_hits = keyword_hits(context_blob, PAN_NEGATIVE_CONTEXT_KEYWORDS)
-
-    score = 20
-    if schema_hits:
-        score += 25
-    if payment_hits:
-        score += 20
-    if luhn_pass:
-        score += 40
-    if protection_hits:
-        score += 8
-    if _path_has_payment_context(metadata):
-        score += 5
-    if negative_hits and not (schema_hits or payment_hits):
-        score -= 35
-    elif negative_hits:
-        score -= 12
-    if not luhn_pass and not schema_hits:
-        score -= 25
-    score = max(0, min(100, score))
-    if score < 55:
-        return None
+    score = _PAN_CONFIDENCE_SCORE.get(verdict.confidence, 48)
 
     tenant_id = _tenant_id(metadata)
     brand = card_brand_info(raw_value)
     claimed_state = claimed_protection_state(context_blob, raw_value)
     protection_state = classify_protection_state(context_blob, raw_value)
-    validation_status = "CONFIRMED" if luhn_pass and (schema_hits or payment_hits or _path_has_payment_context(metadata)) else "NEEDS_REVIEW"
+    validation_status = "CONFIRMED" if verdict.confidence == "HIGH" else "NEEDS_REVIEW"
     finding_type = _finding_type_for_state(protection_state)
-    risk = _risk_for_state(protection_state, score)
+    # Confidence caps severity. A number we are only guessing at can be worth
+    # reviewing; it can never be the thing that pages someone at 2am.
+    risk = cap_severity(_risk_for_state(protection_state, score), verdict.confidence)
+    impact_severity = cap_severity("CRITICAL", verdict.confidence)
     label = "Primary Account Number" if finding_type == "pci_chd_pan" else "Protected or transformed Primary Account Number"
     description = _description_for_state(protection_state)
     return PCIFinding(
@@ -200,10 +214,16 @@ def _build_pan_finding(raw_value: str, context: str, evidence_blob: str, metadat
         canonical_entity_fingerprints=[canonical_entity_fingerprint("PAN", normalized, tenant_id)],
         claimed_protection_state=claimed_state,
         verified_protection_state=protection_state,
-        impact_severity="CRITICAL",
+        impact_severity=impact_severity,
         detection_confidence=score,
         validation_status=validation_status,
-        operational_risk_score=_operational_risk_score("CRITICAL", score, protection_state),
+        operational_risk_score=_operational_risk_score(impact_severity, score, protection_state),
+        pan_confidence=verdict.confidence,
+        pan_issuer=verdict.issuer,
+        pan_context_terms=list(verdict.context_terms),
+        pan_density=verdict.density,
+        pan_validator_version=verdict.validator_version,
+        confidence_basis=verdict.basis,
         tenant_id=tenant_id,
         card_brand=str(brand.get("card_brand") or "unknown"),
         pan_length_valid_for_brand=bool(brand.get("pan_length_valid_for_brand")),
@@ -696,10 +716,11 @@ def _detect_structured_payment_rows(content: str, evidence_blob: str, metadata: 
             continue
         row_context = f"{row_text} {evidence_blob}"
         pan_values: list[str] = []
-        for match in PAN_CANDIDATE_RE.finditer(row_text):
-            normalized = normalize_pan_candidate(match.group(0))
-            if normalized and _luhn_pass(normalized) and normalized not in pan_values:
-                pan_values.append(normalized)
+        # The same gate as the document path, so a spreadsheet cell and a
+        # paragraph cannot disagree about the same number.
+        for hit in pan_hits(row_text, path_hint=_pan_path_hint(metadata)):
+            if hit.verdict.digits not in pan_values:
+                pan_values.append(hit.verdict.digits)
         if not pan_values:
             continue
         pan_context = {
@@ -809,7 +830,9 @@ def _detect_pan_reconstruction_risk(content: str, evidence_blob: str, metadata: 
         if match:
             pieces[name] = match.group(1)
     candidate = f"{pieces.get('first', '')}{pieces.get('middle', '')}{pieces.get('last', '')}"
-    if not (12 <= len(candidate) <= 19 and _luhn_pass(candidate)):
+    # Reassembling split fragments into a number that no issuer could have
+    # issued is not a reconstruction risk; it is arithmetic.
+    if not (12 <= len(candidate) <= 19 and _luhn_pass(candidate) and card_issuer(candidate)[1]):
         return
     tenant_id = _tenant_id(metadata)
     data = {
@@ -1363,6 +1386,16 @@ def _merge_finding_dict(findings: dict[tuple[str, str], dict], data: dict) -> No
     if not existing:
         findings[key] = data
         return
+    # A file's cards collapse into one row per (type, protection state). The
+    # row has to describe the STRONGEST of them: taking max(confidence) while
+    # leaving the FIRST candidate's risk in place meant a file whose first card
+    # was a guess and whose second was confirmed reported the guess.
+    if int(data.get("confidence") or 0) > int(existing.get("confidence") or 0):
+        for field_name in ("risk", "impact_severity", "validation_status", "operational_risk_score",
+                           "pan_confidence", "pan_issuer", "pan_density", "confidence_basis",
+                           "detection_confidence", "severity_rationale"):
+            if field_name in data:
+                existing[field_name] = data[field_name]
     existing["count"] = int(existing.get("count") or 0) + data["count"]
     existing["confidence"] = max(int(existing.get("confidence") or 0), data["confidence"])
     for field in ("samples", "matched_keywords", "secure_fingerprints", "correlated_elements", "pci_requirements", "requirement_mappings", "child_finding_types", "suppressed_by"):

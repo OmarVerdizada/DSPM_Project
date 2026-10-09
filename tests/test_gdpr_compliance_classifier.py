@@ -1,7 +1,7 @@
 import unittest
 
 from classification.compliance import keywords, raw_gdpr_keywords
-from classification.compliance.gdpr_classifier import classify_gdpr_content
+from classification.compliance.gdpr_classifier import GDPR_DETECTOR_VERSION, classify_gdpr_content
 from discovery.discovery_engine import DSPMDiscoveryEngine, ScanConfig
 
 
@@ -272,7 +272,10 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
 
         self.assertIn("gdpr_full_name", finding_types)
         self.assertIn("gdpr_fin_pin", finding_types)
-        self.assertEqual(full_name["samples"], ["Ömə***də"])
+        # A name masks like any value with no class of its own: two characters each end
+        # (masking.GENERIC). It was first-three-last-two for every GDPR value, which is
+        # how a seven-character FIN showed five of them.
+        self.assertEqual(full_name["samples"], ["Öm**********də"])
 
     def test_unicode_homoglyph_email_does_not_create_false_positive(self):
         findings = classify_gdpr_content(
@@ -634,7 +637,10 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
         }
 
         analyzed = DSPMDiscoveryEngine(ScanConfig(compliance_enabled=True, compliance_frameworks=["gdpr"]))._analyze_record(record)
-        email = next(item for item in analyzed["findings"] if item["type"] == "gdpr_email_address")
+        # B7: the generic rule and the GDPR rule found one email, so there is one
+        # finding - it names both rules and still carries GDPR's occurrence.
+        email = next(item for item in analyzed["findings"]
+                     if "gdpr_email_address" in (item.get("detected_by") or [item.get("type")]))
 
         self.assertTrue(email["finding_id"].startswith("finding_"))
         self.assertEqual(email["entity_type"], "EMAIL_ADDRESS")
@@ -643,9 +649,12 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
         self.assertEqual(email["unique_value_count"], 1)
         occurrence = email["occurrences"][0]
         self.assertTrue(occurrence["occurrence_id"].startswith("occurrence_"))
-        self.assertEqual(occurrence["finding_id"], email["finding_id"])
+        # B1.4: an occurrence no longer repeats its parent's ids - the finding above
+        # it carries them, and every row that said them again was one row of waste.
+        self.assertNotIn("finding_id", occurrence)
         self.assertEqual(occurrence["offset_start"], 16)
-        self.assertEqual(occurrence["redacted_sample"], "oma***om")
+        # The email mask every detector uses (masking.EMAIL), not first-three-last-two.
+        self.assertEqual(occurrence["redacted_sample"], "o***@example.com")
 
     def test_discovery_engine_marks_incremental_cache_hits(self):
         record = {
@@ -666,8 +675,9 @@ class GDPRComplianceClassifierTests(unittest.TestCase):
 
         self.assertEqual(first["incremental_scan_reason"], "cache_miss_new_or_changed_file")
         self.assertEqual(second["incremental_scan_reason"], "cache_hit_unchanged_file")
-        email = next(item for item in second["findings"] if item["type"] == "gdpr_email_address")
-        self.assertEqual(email["detector_version"], "gdpr-detector-v2")
+        email = next(item for item in second["findings"]
+                     if "gdpr_email_address" in (item.get("detected_by") or [item.get("type")]))
+        self.assertEqual(email["detector_version"], GDPR_DETECTOR_VERSION)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,10 @@ def _expires(hours: float) -> str:
 class InviteStoreLifecycleTests(unittest.TestCase):
     TENANT = "t_invite_store_test"
 
+    def setUp(self) -> None:
+        if not store.tenant_exists(self.TENANT):
+            store.create_tenant(self.TENANT, self.TENANT)
+
     def tearDown(self) -> None:
         with store._connect() as conn:
             conn.execute("DELETE FROM registration_invites WHERE tenant_id = ?", (self.TENANT,))

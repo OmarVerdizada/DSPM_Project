@@ -61,11 +61,45 @@ def reuse_snapshot_from_result(result: dict[str, Any]) -> dict[str, Any]:
         "bytes_scanned": int(result.get("bytes_scanned") or 0),
         "total_bytes": int(result.get("total_bytes") or result.get("size") or 0),
         "truncated": bool(result.get("truncated", False)),
+        "skip_reason": result.get("skip_reason", ""),
         "preview": preview,
         # Internal only. The discovery engine removes this before returning or
         # persisting the current file record.
         "baseline_result": result,
     }
+
+
+def snapshot_is_failed_read(snapshot: dict[str, Any] | None) -> bool:
+    """True when a cached result records a read that failed, not the file's content.
+
+    A remote collector reuses an unchanged file by its size and modified time. Neither
+    changes when the account is granted read access, nor when a download link that had
+    expired is replaced, so a cached failure would be replayed for as long as the file
+    stays unchanged. Such a result is read again instead.
+    """
+
+    return isinstance(snapshot, dict) and str(snapshot.get("content_status") or "") == "unreadable"
+
+
+def record_analysis_failed(record: dict[str, Any] | None) -> bool:
+    """True when an analyzed record says the file was never actually analyzed.
+
+    A record whose analysis raised carries ``detector_metrics.record_failed`` and no
+    findings. A failed read carries a ``scan_error`` without being protected content -
+    a sealed or encrypted file's ``scan_error`` describes the file, and stays true until
+    the file changes. Reused on an unchanged size and mtime, a failure would be replayed
+    as "nothing found" until someone edited the file, so such a record is never offered
+    for reuse.
+    """
+
+    if not isinstance(record, dict):
+        return False
+    metrics = record.get("detector_metrics")
+    if isinstance(metrics, dict) and metrics.get("record_failed"):
+        return True
+    if snapshot_is_failed_read(record):
+        return True
+    return bool(str(record.get("scan_error") or "").strip()) and not record.get("protected")
 
 
 def apply_reuse_snapshot(record: dict[str, Any], snapshot: dict[str, Any], object_key: str) -> dict[str, Any]:
@@ -89,6 +123,7 @@ def apply_reuse_snapshot(record: dict[str, Any], snapshot: dict[str, Any], objec
             "bytes_scanned": int(snapshot.get("bytes_scanned") or 0),
             "total_bytes": int(snapshot.get("total_bytes") or reused.get("size") or 0),
             "truncated": bool(snapshot.get("truncated", False)),
+            "skip_reason": str(snapshot.get("skip_reason") or ""),
             "cache_reused": True,
             "incremental_reused": True,
             "reused_preview": snapshot.get("preview") if isinstance(snapshot.get("preview"), dict) else None,

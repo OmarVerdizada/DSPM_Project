@@ -1,0 +1,528 @@
+"""Operational metrics for the database tier (roadmap Phase 6, DB-09/DB-12).
+
+``/api/health`` says the process is up and ``/api/ready`` says it can serve.
+Neither answers the operator's next question: *is this installation heading for
+trouble?* That needs the signals below, and each one is here because its
+absence is a way this product fails silently:
+
+- **Pool saturation** — requests queuing for a connection is the first symptom
+  of a scale problem, and it is invisible from response codes until it is not.
+- **Database and artifact size, plus disk headroom** — the estate grows with
+  every scan; running the volume out of space corrupts nothing but stops
+  everything.
+- **Backup age** — a backup that quietly stopped is only discovered during a
+  recovery, which is the worst possible time.
+- **WAL archive lag and failures** — point-in-time recovery is a promise made
+  by a background process nobody watches.
+- **Long-running transactions and lock waits** — the usual cause of a "the app
+  is hung" report, and the thing a migration blocks behind.
+- **Replication lag** — reports as absent (rather than zero) while this host
+  has no standby, so the gap stays visible instead of looking healthy.
+
+Every collector is individually guarded: a metrics endpoint that fails because
+one optional signal is unavailable is worse than one that reports the rest and
+names what it could not read. Nothing here is tenant data, and nothing here is
+a credential.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import time
+from pathlib import Path
+
+# A statement running longer than this is worth an operator's attention. It is
+# not an error - long analytical reads exist - but it is the shape of a problem.
+LONG_TRANSACTION_SECONDS = 60.0
+
+
+def _safe(collector, name: str, into: dict, unavailable: list[str]) -> None:
+    try:
+        into[name] = collector()
+    except Exception as exc:  # pragma: no cover - optional signal guard
+        unavailable.append(f"{name}: {type(exc).__name__}")
+
+
+def pool_metrics() -> dict:
+    """Connection pool saturation (PostgreSQL only; SQLite does not pool)."""
+    from backend import db
+
+    if not db.is_postgres():
+        return {"backend": "sqlite", "pooled": False}
+    pool = db._get_pool()
+    if pool is None:
+        return {"backend": "postgres", "pooled": False, "reason": "psycopg_pool absent"}
+    stats = pool.get_stats()
+    # pool_size is how many connections currently EXIST, not the ceiling. The
+    # pool opens lazily, so a one-connection pool serving one caller is 100%
+    # of its current size and ~10% of its capacity - measuring against
+    # max_size is what makes saturation mean "close to refusing work".
+    size = int(stats.get("pool_size", 0) or 0)
+    available = int(stats.get("pool_available", 0) or 0)
+    capacity = int(getattr(pool, "max_size", 0) or size or 1)
+    in_use = max(0, size - available)
+    return {
+        "backend": "postgres",
+        "pooled": True,
+        "capacity": capacity,
+        "size": size,
+        "available": available,
+        "in_use": in_use,
+        "waiting": int(stats.get("requests_waiting", 0) or 0),
+        "requests_queued": int(stats.get("requests_queued", 0) or 0),
+        "requests_errors": int(stats.get("connections_errors", 0) or 0),
+        # Saturation is the number operators should alert on, not raw counts.
+        "utilization": round(in_use / capacity, 3) if capacity else 0.0,
+    }
+
+
+def storage_metrics() -> dict:
+    """Database size, artifact store size, and headroom on their volume."""
+    from backend import artifacts, db
+
+    result: dict = {}
+    if db.is_postgres():
+        with db.connect(Path("unused")) as conn:
+            row = conn.execute(
+                "SELECT pg_database_size(current_database()) AS bytes"
+            ).fetchone()
+        result["database_bytes"] = int(row["bytes"])
+    else:
+        from backend.store import DB_PATH
+
+        path = Path(DB_PATH)
+        result["database_bytes"] = path.stat().st_size if path.exists() else 0
+
+    stats = artifacts.store_stats()
+    result["artifact_objects"] = stats["objects"]
+    result["artifact_bytes"] = stats["ciphertext_bytes"]
+
+    # Headroom on the volume that actually holds the data directory.
+    target = Path(os.getenv("DSPM_DATA_DIR", "data")).resolve()
+    probe = target if target.exists() else Path.cwd()
+    usage = shutil.disk_usage(probe)
+    result["disk_total_bytes"] = usage.total
+    result["disk_free_bytes"] = usage.free
+    result["disk_free_ratio"] = round(usage.free / usage.total, 4) if usage.total else 0.0
+    return result
+
+
+def backup_metrics() -> dict:
+    from backend import backup
+
+    age = backup.latest_backup_age_seconds()
+    verified_age = backup.latest_backup_age_seconds(verified=True)
+    manifests = backup.list_manifests()
+    return {
+        "sets_retained": len(manifests),
+        "age_seconds": round(age, 1) if age is not None else None,
+        "verified_age_seconds": round(verified_age, 1) if verified_age is not None else None,
+        "max_age_hours": float(os.getenv("DSPM_BACKUP_MAX_AGE_HOURS", "26")),
+    }
+
+
+def wal_metrics() -> dict:
+    """WAL archiving health - the mechanism point-in-time recovery rests on."""
+    from backend import db
+
+    if not db.is_postgres():
+        return {"applicable": False}
+    with db.connect(Path("unused")) as conn:
+        row = conn.execute(
+            "SELECT archived_count, failed_count, "
+            "EXTRACT(EPOCH FROM (now() - last_archived_time)) AS since_archive, "
+            "EXTRACT(EPOCH FROM (now() - last_failed_time)) AS since_failure "
+            "FROM pg_stat_archiver"
+        ).fetchone()
+        mode = conn.execute("SHOW archive_mode").fetchone()
+    since = row["since_archive"]
+    return {
+        "applicable": True,
+        "archive_mode": str(mode["archive_mode"]),
+        "archived_count": int(row["archived_count"] or 0),
+        "failed_count": int(row["failed_count"] or 0),
+        "seconds_since_last_archive": round(float(since), 1) if since is not None else None,
+        "seconds_since_last_failure": (
+            round(float(row["since_failure"]), 1) if row["since_failure"] is not None else None
+        ),
+    }
+
+
+_WAL_SEGMENT_NAME_LENGTH = 24
+
+
+def wal_archive_dir_metrics() -> dict:
+    """The WAL archive directory itself, when it is on this host (``DSPM_WAL_ARCHIVE_DIR``).
+
+    pg_stat_archiver says whether segments are being copied. It does not say whether
+    anything can use them, or whether anything ever removes them. Point-in-time recovery
+    replays archived WAL onto a physical base backup; without one the archive cannot
+    restore anything, and with no retention it only grows. On this project's test cluster
+    it reached 30 GB of 1,884 segments with no base backup at all (2026-10).
+    """
+    raw = os.getenv("DSPM_WAL_ARCHIVE_DIR") or ""
+    if not raw.strip():
+        return {"configured": False}
+    root = Path(raw)
+    if not root.is_dir():
+        return {"configured": True, "exists": False, "path": str(root)}
+    segments = 0
+    total = 0
+    oldest = newest = None
+    base_backups: list[float] = []
+    now = time.time()
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            stat = entry.stat()
+            total += stat.st_size
+            if entry.name.endswith(".backup"):
+                base_backups.append(stat.st_mtime)
+            elif len(entry.name) == _WAL_SEGMENT_NAME_LENGTH:
+                segments += 1
+                oldest = stat.st_mtime if oldest is None else min(oldest, stat.st_mtime)
+                newest = stat.st_mtime if newest is None else max(newest, stat.st_mtime)
+    usage = shutil.disk_usage(root)
+    return {
+        "configured": True,
+        "exists": True,
+        "path": str(root),
+        "segments": segments,
+        "bytes": total,
+        "oldest_segment_age_seconds": round(now - oldest, 1) if oldest is not None else None,
+        "newest_segment_age_seconds": round(now - newest, 1) if newest is not None else None,
+        "base_backups": len(base_backups),
+        "newest_base_backup_age_seconds": round(now - max(base_backups), 1) if base_backups else None,
+        "volume_free_bytes": usage.free,
+        "volume_free_ratio": round(usage.free / usage.total, 4) if usage.total else 0.0,
+    }
+
+
+def wal_archive_warn_bytes() -> int:
+    """``DSPM_WAL_ARCHIVE_WARN_GB``: an archive larger than this is reported (20 GB)."""
+    try:
+        return max(1, int(os.getenv("DSPM_WAL_ARCHIVE_WARN_GB") or "20")) * 1024 ** 3
+    except ValueError:
+        return 20 * 1024 ** 3
+
+
+def replication_metrics() -> dict:
+    """Standby lag. Reported as configured=False rather than as zero lag while
+    no standby exists, so an absent standby cannot read as a healthy one."""
+    from backend import db
+
+    if not db.is_postgres():
+        return {"applicable": False}
+    with db.connect(Path("unused")) as conn:
+        rows = conn.execute(
+            "SELECT application_name, state, sync_state, "
+            "EXTRACT(EPOCH FROM COALESCE(replay_lag, '0 seconds'::interval)) AS lag "
+            "FROM pg_stat_replication"
+        ).fetchall()
+    return {
+        "applicable": True,
+        "configured": bool(rows),
+        "standbys": [
+            {
+                "name": str(r["application_name"] or ""),
+                "state": str(r["state"] or ""),
+                "sync_state": str(r["sync_state"] or ""),
+                "replay_lag_seconds": round(float(r["lag"] or 0), 3),
+            }
+            for r in rows
+        ],
+    }
+
+
+def database_activity_monitoring() -> dict:
+    """Aggregate database activity for regulated deployments (Phase 7).
+
+    This collector deliberately omits query text, role names, client addresses,
+    application names and tenant identifiers.  Those values can expose the
+    estate.  The counters are enough for a SIEM/monitor to detect unusual
+    connection, rollback, temporary-file and deadlock activity without turning
+    the monitoring feed into a second sensitive-data store.
+
+    The feature is opt-in because the roadmap requires it only where a customer
+    contract does.  Disabled is reported explicitly rather than looking like an
+    empty, healthy activity stream.
+    """
+    enabled = os.getenv("DSPM_DB_ACTIVITY_MONITORING", "0").strip() == "1"
+    if not enabled:
+        return {"applicable": db_is_postgres(), "enabled": False}
+
+    from backend import db
+
+    if not db.is_postgres():
+        return {
+            "applicable": False,
+            "enabled": True,
+            "reason": "PostgreSQL only",
+        }
+    with db.connect(Path("unused")) as conn:
+        counters = conn.execute(
+            "SELECT numbackends, xact_commit, xact_rollback, blks_read, blks_hit, "
+            "temp_files, temp_bytes, deadlocks, conflicts, stats_reset "
+            "FROM pg_stat_database WHERE datname = current_database()"
+        ).fetchone()
+        session_rows = conn.execute(
+            "SELECT COALESCE(state, 'unknown') AS state, COUNT(*) AS n "
+            "FROM pg_stat_activity WHERE datname = current_database() "
+            "GROUP BY COALESCE(state, 'unknown') ORDER BY 1"
+        ).fetchall()
+        wait_rows = conn.execute(
+            "SELECT COALESCE(wait_event_type, 'none') AS wait_type, COUNT(*) AS n "
+            "FROM pg_stat_activity WHERE datname = current_database() "
+            "GROUP BY COALESCE(wait_event_type, 'none') ORDER BY 1"
+        ).fetchall()
+    return {
+        "applicable": True,
+        "enabled": True,
+        "privacy": "aggregate-only; query/client/role/tenant fields omitted",
+        "counters": {
+            key: int(counters[key] or 0)
+            for key in (
+                "numbackends", "xact_commit", "xact_rollback", "blks_read",
+                "blks_hit", "temp_files", "temp_bytes", "deadlocks", "conflicts",
+            )
+        },
+        "stats_reset": str(counters["stats_reset"] or ""),
+        "sessions_by_state": {str(row["state"]): int(row["n"]) for row in session_rows},
+        "sessions_by_wait_type": {
+            str(row["wait_type"]): int(row["n"]) for row in wait_rows
+        },
+    }
+
+
+def db_is_postgres() -> bool:
+    """Tiny import-safe seam used by the disabled activity-monitoring path."""
+    from backend import db
+
+    return db.is_postgres()
+
+
+def activity_metrics() -> dict:
+    """Long-running transactions and lock waits."""
+    from backend import db
+
+    if not db.is_postgres():
+        return {"applicable": False}
+    with db.connect(Path("unused")) as conn:
+        long_running = conn.execute(
+            "SELECT COUNT(*) AS n FROM pg_stat_activity "
+            "WHERE state <> 'idle' AND xact_start IS NOT NULL "
+            "AND now() - xact_start > make_interval(secs => ?)",
+            (LONG_TRANSACTION_SECONDS,),
+        ).fetchone()
+        blocked = conn.execute(
+            "SELECT COUNT(*) AS n FROM pg_locks WHERE NOT granted"
+        ).fetchone()
+        connections = conn.execute(
+            "SELECT COUNT(*) AS n FROM pg_stat_activity WHERE datname = current_database()"
+        ).fetchone()
+    return {
+        "applicable": True,
+        "connections": int(connections["n"]),
+        "long_running_transactions": int(long_running["n"]),
+        "long_transaction_threshold_seconds": LONG_TRANSACTION_SECONDS,
+        "waiting_locks": int(blocked["n"]),
+    }
+
+
+def schema_metrics() -> dict:
+    from backend import migrations, store
+
+    with store._connect() as conn:
+        applied = migrations.current_revision(conn)
+        drift = migrations.checksum_drift(conn)
+    return {
+        "applied": applied,
+        "expected": migrations.expected_revision(),
+        "checksum_drift": [item["revision"] for item in drift],
+    }
+
+
+def tenant_isolation_metrics() -> dict:
+    """Whether every tenant-scoped table still carries its FK and RLS."""
+    from backend import store
+
+    return store.tenant_isolation_coverage()
+
+
+def collect() -> dict:
+    """Gather every metric family. Individually guarded; never raises."""
+    started = time.perf_counter()
+    metrics: dict = {}
+    unavailable: list[str] = []
+    for name, collector in (
+        ("pool", pool_metrics),
+        ("storage", storage_metrics),
+        ("backup", backup_metrics),
+        ("wal_archive", wal_metrics),
+        ("wal_archive_dir", wal_archive_dir_metrics),
+        ("replication", replication_metrics),
+        ("activity", activity_metrics),
+        ("database_activity_monitoring", database_activity_monitoring),
+        ("schema_revision", schema_metrics),
+        ("tenant_isolation", tenant_isolation_metrics),
+    ):
+        _safe(collector, name, metrics, unavailable)
+    metrics["unavailable"] = unavailable
+    metrics["collection_seconds"] = round(time.perf_counter() - started, 3)
+    metrics["warnings"] = _warnings(metrics)
+    return metrics
+
+
+def _warnings(metrics: dict) -> list[str]:
+    """Turn raw numbers into the handful of statements worth acting on."""
+    out: list[str] = []
+
+    # Only judge a signal that was actually collected. A family missing from
+    # the payload means its collector failed - which `unavailable` already
+    # reports - and "no backup manifest found" would be a different, false
+    # claim about the installation.
+    if "backup" in metrics:
+        backup_block = metrics["backup"] or {}
+        age = backup_block.get("age_seconds")
+        max_age = float(backup_block.get("max_age_hours") or 26) * 3600
+        # Judged on the newest VERIFIED set when it is reported: a set that did not verify
+        # restores nothing, however new it is.
+        verified_age = backup_block.get("verified_age_seconds", age)
+        if age is None:
+            out.append("no backup manifest found")
+        elif verified_age is None:
+            out.append("no verified backup")
+        elif verified_age > max_age:
+            out.append(f"newest {'verified ' if 'verified_age_seconds' in backup_block else ''}backup is "
+                       f"{verified_age / 3600:.1f}h old")
+
+    storage = metrics.get("storage") or {}
+    free_ratio = storage.get("disk_free_ratio")
+    if free_ratio is not None and free_ratio < 0.10:
+        out.append(f"disk free is {free_ratio * 100:.1f}% of the volume")
+
+    pool = metrics.get("pool") or {}
+    if pool.get("pooled") and float(pool.get("utilization") or 0) >= 0.9:
+        out.append(f"connection pool {float(pool['utilization']) * 100:.0f}% utilized")
+    if int(pool.get("waiting") or 0) > 0:
+        out.append(f"{pool['waiting']} request(s) waiting for a connection")
+
+    wal = metrics.get("wal_archive") or {}
+    if wal.get("applicable"):
+        if str(wal.get("archive_mode")) != "on":
+            out.append("WAL archiving is off - point-in-time recovery is not available")
+        if int(wal.get("failed_count") or 0) > 0:
+            out.append(f"WAL archiver has {wal['failed_count']} failure(s)")
+
+    activity = metrics.get("activity") or {}
+    if int(activity.get("long_running_transactions") or 0) > 0:
+        out.append(f"{activity['long_running_transactions']} transaction(s) running over "
+                   f"{activity.get('long_transaction_threshold_seconds')}s")
+    if int(activity.get("waiting_locks") or 0) > 0:
+        out.append(f"{activity['waiting_locks']} lock request(s) waiting")
+
+    monitored = metrics.get("database_activity_monitoring") or {}
+    if os.getenv("DSPM_DB_ACTIVITY_MONITORING_REQUIRED", "0").strip() == "1" and not monitored.get("enabled"):
+        out.append("required database activity monitoring is disabled")
+
+    archive = metrics.get("wal_archive_dir") or {}
+    if archive.get("configured") and not archive.get("exists"):
+        out.append(f"WAL archive directory {archive.get('path')} does not exist")
+    elif archive.get("exists"):
+        if int(archive.get("segments") or 0) and not int(archive.get("base_backups") or 0):
+            out.append(f"WAL archive holds {archive['segments']} segment(s) and no base backup: point-in-time "
+                       "recovery cannot start from it - take a base backup, then prune older WAL")
+        if int(archive.get("bytes") or 0) > wal_archive_warn_bytes():
+            out.append(f"WAL archive is {int(archive['bytes']) / 1024 ** 3:.1f} GB - check retention")
+        free_ratio = archive.get("volume_free_ratio")
+        if free_ratio is not None and float(free_ratio) < 0.10:
+            out.append(f"the WAL archive volume is {float(free_ratio) * 100:.1f}% free")
+
+    replication = metrics.get("replication") or {}
+    if replication.get("applicable") and not replication.get("configured"):
+        out.append("no streaming standby is connected (single-host deployment)")
+
+    revision = metrics.get("schema_revision") or {}
+    if revision.get("applied") != revision.get("expected"):
+        out.append(f"schema revision {revision.get('applied')} != expected {revision.get('expected')}")
+    isolation = metrics.get("tenant_isolation") or {}
+    if isolation.get("applicable"):
+        for label, key in (("tenant foreign key", "missing_foreign_key"), ("row-level security", "missing_rls")):
+            missing = isolation.get(key) or []
+            if missing:
+                out.append(f"{len(missing)} tenant-scoped table(s) without {label}: "
+                           + ", ".join(missing[:5]))
+    return out
+
+
+def slow_queries(limit: int = 20) -> dict:
+    """Top statements by total execution time, from pg_stat_statements.
+
+    Query text is treated as sensitive: pg_stat_statements normalizes literals
+    into placeholders, but identifiers and structure still describe the estate,
+    so this is admin-only and never enters logs or health payloads.
+    """
+    from backend import db
+
+    if not db.is_postgres():
+        return {"available": False, "reason": "PostgreSQL only"}
+    limit = max(1, min(int(limit or 20), 100))
+    with db.connect(Path("unused")) as conn:
+        installed = conn.execute(
+            "SELECT COUNT(*) AS n FROM pg_extension WHERE extname = 'pg_stat_statements'"
+        ).fetchone()
+        if not int(installed["n"]):
+            return {
+                "available": False,
+                "reason": "pg_stat_statements is not installed on this database",
+            }
+        rows = conn.execute(
+            "SELECT query, calls, "
+            "round(total_exec_time::numeric, 1) AS total_ms, "
+            "round(mean_exec_time::numeric, 2) AS mean_ms, "
+            "round(max_exec_time::numeric, 2) AS max_ms, rows "
+            "FROM pg_stat_statements "
+            "WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+            "ORDER BY total_exec_time DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    threshold = float(os.getenv("DSPM_SLOW_QUERY_MEAN_MS", "250"))
+    statements = []
+    redacted = 0
+    for row in rows:
+        text = " ".join(str(row["query"] or "").split())
+        # PostgreSQL replaces the text with this marker for roles that lack
+        # pg_read_all_stats. The timings are still true and still actionable,
+        # so report them and say the text is redacted rather than surfacing a
+        # column full of "<insufficient privilege>".
+        if text == "<insufficient privilege>":
+            redacted += 1
+            text = ""
+        statements.append({
+            "query": text[:400],
+            "calls": int(row["calls"] or 0),
+            "total_ms": float(row["total_ms"] or 0),
+            "mean_ms": float(row["mean_ms"] or 0),
+            "max_ms": float(row["max_ms"] or 0),
+            "rows": int(row["rows"] or 0),
+        })
+    result = {
+        "available": True,
+        "review_threshold_mean_ms": threshold,
+        "over_threshold": sum(1 for s in statements if s["mean_ms"] > threshold),
+        "query_text_visible": redacted == 0,
+        "statements": statements,
+    }
+    if redacted:
+        # Deliberately not fixed by granting the runtime role pg_read_all_stats:
+        # that would let the application role read every other role's activity,
+        # which is a real privilege increase for a cosmetic gain.
+        result["note"] = (
+            f"{redacted} statement text(s) redacted by PostgreSQL: the runtime role "
+            "lacks pg_read_all_stats. Timings above are accurate. To see query text, "
+            "connect as sentro_readonly (which holds pg_read_all_stats) rather than "
+            "widening the application role."
+        )
+    return result

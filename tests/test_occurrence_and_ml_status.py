@@ -38,7 +38,7 @@ class MlStatusTests(unittest.TestCase):
     def test_unavailable_status_carries_a_reason(self) -> None:
         status = ml_classifier.ml_classifier_status()
         if not status["available"]:
-            self.assertIn(status["reason"], {"spacy_not_installed", "model_not_downloaded"})
+            self.assertIn(status["reason"], {"ml_ner_disabled", "spacy_not_installed", "model_not_downloaded"})
 
 
 if __name__ == "__main__":

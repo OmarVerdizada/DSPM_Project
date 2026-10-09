@@ -8,6 +8,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from classification.ml_classifier import classify_with_ml
+from classification import masking
+from classification.masking import data_class_for_rule, mask
+from classification.pan_validator import cap_severity, pan_hits
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,22 +30,22 @@ class DetectionRule:
     # alone (e.g. the BIC after a "SWIFT:" label) so the validator, redaction,
     # and unique-value fingerprint all operate on the value, not the label.
     value_group: int = 0
+    # A rule whose decision needs more than the matched value - the words around
+    # it, or how many times it occurs in the file - supplies a finder instead of
+    # a validator. It returns (value, extra_fields) pairs and OWNS the match
+    # loop; `pattern` stays in place because evidence masking redacts from it.
+    finder: Callable[[str], list[tuple[str, dict]]] | None = None
 
 
-def _luhn_ok(value: str) -> bool:
-    """Payment card: 13-19 digits AND a valid Luhn checksum (rejects arbitrary
-    long digit runs such as phone numbers, order ids, timestamps)."""
-    digits = [int(ch) for ch in value if ch.isdigit()]
-    if not 13 <= len(digits) <= 19:
-        return False
-    checksum = 0
-    for index, digit in enumerate(reversed(digits)):
-        if index % 2 == 1:
-            digit *= 2
-            if digit > 9:
-                digit -= 9
-        checksum += digit
-    return checksum % 10 == 0
+def _card_finder(content: str) -> list[tuple[str, dict]]:
+    """Payment cards, decided by the shared validator.
+
+    This rule used to ask for a Luhn checksum and nothing else. Luhn accepts one
+    in ten random digit strings and is the checksum IMEI numbers use, so
+    `Device IMEI: 490154203237518` was reported as a payment card - measured, on
+    this tree, at HIGH.
+    """
+    return [(hit.raw, hit.verdict.to_fields()) for hit in pan_hits(content)]
 
 
 def _iban_ok(value: str) -> bool:
@@ -124,7 +127,12 @@ RULES = [
     DetectionRule(
         name="connection_string",
         pattern=re.compile(
-            r"\b(?:server|host|data source)\s*=\s*[^;\n]{2,};(?:[^;\n=]+\s*=\s*[^;\n]+;?){2,}",
+            # Every further pair ends at its ';', a line end or the end of the text, and no
+            # part runs further than a connection string's does. With the ';' optional the
+            # pairs had no boundary, and with unbounded values every "server=" on a long line
+            # scanned to its end: a line that failed to match backtracked quadratically
+            # (16 KB took 4.5 s - a crafted file stalled a detector worker).
+            r"\b(?:server|host|data source)\s*=\s*[^;\n]{2,256};(?:[^;\n=]{1,128}=[^;\n]{0,512}(?:;|(?=\n)|\Z)){2,}",
             re.IGNORECASE,
         ),
         risk="HIGH",
@@ -240,7 +248,10 @@ RULES = [
     ),
     DetectionRule(
         name="email",
-        pattern=re.compile(r"\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b"),
+        # The local part starts where its run of characters starts, with a letter, digit or
+        # "_" after any leading ".+-", and is taken whole: a \b start re-read the rest of
+        # the run from every boundary in it ("x-x-x...").
+        pattern=re.compile(r"(?<![a-zA-Z0-9_.+-])[.+-]*+(?=[a-zA-Z0-9_])[a-zA-Z0-9_.+-]++@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+\b"),
         risk="MEDIUM",
         description="Email address detected",
     ),
@@ -320,8 +331,8 @@ RULES = [
         name="credit_card",
         pattern=re.compile(r"\b(?:\d[ -]*?){13,19}\b"),
         risk="HIGH",
-        description="Payment card number detected (Luhn-valid)",
-        validator=_luhn_ok,
+        description="Payment card number detected",
+        finder=_card_finder,
     ),
     DetectionRule(
         name="swift_bic",
@@ -346,35 +357,52 @@ RULES = [
         description="IBAN bank account identifier detected (mod-97 valid)",
         validator=_iban_ok,
     ),
+    # The identifier rules below match their LABEL case-insensitively and their VALUE
+    # case-sensitively, as uppercase letters and digits with at least one digit. With
+    # the whole pattern case-insensitive any next word was the value: "Please bring your
+    # passport photos" and "passthrough mode" were HIGH passport numbers, "National ID
+    # required" a national ID. The value is its own group (value_group=1), so it - not
+    # the label with it - is what is masked, counted and fingerprinted, and a passport
+    # found here and by GDPR is one entity.
     DetectionRule(
         name="passport_number",
-        pattern=re.compile(r"\b(?:passport|pass\.?|pasport)\s*(?:no\.?|number|#)?\s*[:=]?\s*[A-Z0-9]{6,12}\b", re.IGNORECASE),
+        pattern=re.compile(
+            r"\b(?i:passport|pass\.|pasport)(?i:\s*(?:no\.?|number|#))?\s*[:=]?\s*((?=[A-Z]*\d)[A-Z0-9]{6,12})\b"),
         risk="HIGH",
         description="Passport identifier context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="national_id",
-        pattern=re.compile(r"\b(?:national id|tax id|tin|ssn|social security)\s*[:=]?\s*[A-Z0-9\-]{6,18}\b", re.IGNORECASE),
+        # An SSN written as one (123-45-6789) is the ssn rule's; reporting it here too
+        # made one value two findings under two names.
+        pattern=re.compile(
+            r"\b(?:(?i:national id|tax id|tin)|(?i:ssn|social security(?: number| no\.?)?)(?![\s:=]*\d{3}-\d{2}-\d{4}\b))"
+            r"\s*[:=]?\s*((?=[A-Z-]*\d)[A-Z0-9-]{6,18})\b"),
         risk="HIGH",
         description="Government identifier context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="ssn",
-        pattern=re.compile(r"\b(?:ssn|social security(?: number)?)\s*[:=]?\s*\d{3}-\d{2}-\d{4}\b", re.IGNORECASE),
+        pattern=re.compile(r"\b(?:ssn|social security(?: number)?)\s*[:=]?\s*(\d{3}-\d{2}-\d{4})\b", re.IGNORECASE),
         risk="HIGH",
         description="US social security number context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="routing_account",
-        pattern=re.compile(r"\b(?:routing|aba|account(?: number)?)\s*[:=]?\s*\d{8,17}\b", re.IGNORECASE),
+        pattern=re.compile(r"\b(?:routing|aba|account(?: number)?)\s*[:=]?\s*(\d{8,17})\b", re.IGNORECASE),
         risk="HIGH",
         description="Bank routing or account number context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="employee_id",
-        pattern=re.compile(r"\b(?:employee id|emp id|personnel no\.?)\s*[:=]?\s*[A-Z0-9\-]{4,16}\b", re.IGNORECASE),
+        pattern=re.compile(r"\b(?i:employee id|emp id|personnel no\.?)\s*[:=]?\s*((?=[A-Z-]*\d)[A-Z0-9-]{4,16})\b"),
         risk="MEDIUM",
         description="Employee identifier context detected",
+        value_group=1,
     ),
     DetectionRule(
         name="phone_number",
@@ -475,12 +503,61 @@ RULES = [
 ]
 
 
-def _redact(value: str) -> str:
-    # SC-3: non-reversible, keyed fingerprint of the matched value. Reveals
-    # neither the value nor its edges (the old first3***last2 form leaked up to
-    # 5 chars), while staying distinct per distinct value so unique-value counts
-    # (canonical_model._unique_value_count, which falls back to len(set(samples))
-    # for generic findings that carry no secure fingerprints) stay accurate.
+def _entity_type_for_rule(rule_name: str, data_class: str) -> str:
+    """What this rule's values are, in the canonical vocabulary - "" when nothing names it."""
+    from classification.compliance.canonical_entities import canonical_entity_type_for_finding
+
+    return canonical_entity_type_for_finding({"type": rule_name, "data_class": data_class})
+
+
+def _add_entity_fingerprint(prints: list[str], entity_type: str, value: str, redact: bool, tenant_id: str) -> None:
+    """The same value's canonical fingerprint, computed the way every detector computes it.
+
+    Without this the generic detector's email and the GDPR detector's email were two
+    entities: the registry falls back to hashing whatever fingerprint a finding carries,
+    and those were a masked token here and a digest of the raw value there (B7).
+    """
+    if not redact or not entity_type or not value:
+        return
+    from classification.compliance.canonical_entities import canonical_entity_fingerprint
+
+    fingerprint = canonical_entity_fingerprint(entity_type, value, tenant_id)
+    if fingerprint not in prints:
+        prints.append(fingerprint)
+
+
+def _add_fingerprint(fingerprints: list[str], value: str, redact: bool) -> None:
+    """Context rules match a KEYWORD, not a value, so they have nothing to
+    fingerprint - their sample is the keyword and it is shown as it was."""
+
+    if redact:
+        fingerprints.append(_fingerprint(value))
+
+
+_CONFIDENCE_STRENGTH = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+
+
+def _merge_rule_extra(current: dict, incoming: dict) -> dict:
+    """One finding covers every match of its rule, so the fields it carries have
+    to describe the STRONGEST match - otherwise a file whose first card is a
+    guess and whose second is confirmed reports the guess."""
+
+    if not current:
+        return dict(incoming)
+    here = _CONFIDENCE_STRENGTH.get(str(current.get("pan_confidence") or "LOW").upper(), 0)
+    there = _CONFIDENCE_STRENGTH.get(str(incoming.get("pan_confidence") or "LOW").upper(), 0)
+    return dict(incoming) if there > here else current
+
+
+def _fingerprint(value: str) -> str:
+    """A keyed, non-reversible fingerprint of a matched value.
+
+    SC-3. This is how distinct values are COUNTED without any being stored, and
+    it is what `canonical_model._unique_value_count` and its two siblings read.
+    It used to be the displayed sample as well, which is why an analyst saw
+    `[redacted:30840604a1b4]` and had to open the file to learn anything.
+    """
+
     from classification.compliance.evidence_keys import evidence_hmac_key
 
     digest = hmac.new(
@@ -489,6 +566,12 @@ def _redact(value: str) -> str:
         hashlib.sha256,
     ).hexdigest()[:12]
     return f"[redacted:{digest}]"
+
+
+def _redact(value: str, data_class: str = masking.GENERIC) -> str:
+    """What a person is shown: a partial value, masked for its class."""
+
+    return mask(value, data_class)
 
 
 # SC/SCAN-003: samples are capped for evidence hygiene, but the occurrence
@@ -569,7 +652,13 @@ def _prefilter_active() -> bool:
     return os.getenv("DSPM_DETECTOR_PREFILTER", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
-def classify_content(content: str, *, _prefilter: bool | None = None) -> list[dict]:
+def classify_content(content: str, *, tenant_id: str = "default", _prefilter: bool | None = None) -> list[dict]:
+    """Every generic rule over one file's text.
+
+    ``tenant_id`` salts the canonical entity fingerprints (B7) exactly as the
+    compliance detectors salt theirs, which is what lets one value found by two
+    detectors register as one entity rather than two.
+    """
     if not content:
         return []
 
@@ -589,6 +678,40 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
         total = 0
         examined = 0
         count_capped = False
+        extra_fields: dict = {}
+        data_class = data_class_for_rule(rule.name)
+        fingerprints: list[str] = []
+        entity_prints: list[str] = []
+        entity_type = _entity_type_for_rule(rule.name, data_class)
+        if rule.finder is not None:
+            produced = rule.finder(content)
+            for value, extra in produced[:COUNT_CAP]:
+                if len(samples) < SAMPLE_CAP:
+                    samples.append(_redact(value, data_class) if rule.redact else value)
+                    _add_fingerprint(fingerprints, value, rule.redact)
+                    _add_entity_fingerprint(entity_prints, entity_type, value, rule.redact, tenant_id)
+                total += 1
+                extra_fields = _merge_rule_extra(extra_fields, extra)
+            count_capped = len(produced) > COUNT_CAP
+            if total:
+                findings.append({
+                    "type": rule.name,
+                    "risk": cap_severity(rule.risk, str(extra_fields.get("pan_confidence") or "LOW")),
+                    "description": rule.description,
+                    "count": total,
+                    "occurrence_count": total,
+                    "sample_count": len(samples),
+                    "occurrence_truncated": total > len(samples),
+                    "count_capped": count_capped,
+                    "samples": samples,
+                    "data_class": data_class,
+                    "secure_value_fingerprints": fingerprints,
+                    "canonical_entity_type": entity_type,
+                    "canonical_entity_fingerprints": entity_prints,
+                    "unique_value_count": len(set(fingerprints)) or len(set(samples)),
+                    **extra_fields,
+                })
+            continue
         for match in rule.pattern.finditer(content):
             examined += 1
             # value_group isolates the sensitive value from any anchoring label,
@@ -598,7 +721,9 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
                 value = match.group(0)
             if rule.validator is None or rule.validator(value):
                 if len(samples) < SAMPLE_CAP:
-                    samples.append(_redact(value) if rule.redact else value)
+                    samples.append(_redact(value, data_class) if rule.redact else value)
+                    _add_fingerprint(fingerprints, value, rule.redact)
+                    _add_entity_fingerprint(entity_prints, entity_type, value, rule.redact, tenant_id)
                 total += 1
             if total >= COUNT_CAP or examined >= MATCH_SCAN_CAP:
                 count_capped = True
@@ -618,6 +743,14 @@ def classify_content(content: str, *, _prefilter: bool | None = None) -> list[di
                 "occurrence_truncated": total > len(samples),
                 "count_capped": count_capped,
                 "samples": samples,
+                "data_class": data_class,
+                # The masked sample is for READING. Distinct-value counting keys
+                # off these instead, so two different cards that mask to the
+                # same first-six/last-four are still two values.
+                "secure_value_fingerprints": fingerprints,
+                "canonical_entity_type": entity_type,
+                "canonical_entity_fingerprints": entity_prints,
+                "unique_value_count": len(set(fingerprints)) or len(set(samples)),
             }
         )
 

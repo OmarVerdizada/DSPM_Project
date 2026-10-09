@@ -1,0 +1,22 @@
+# Sentro DSPM - a Prometheus scrape configuration (D11).
+# /metrics is served by the backend on 127.0.0.1:<port>; scrape it through the HTTPS
+# reverse proxy (deploy/reverse-proxy) or from the host itself. The bearer token is the
+# value of DSPM_METRICS_TOKEN (set as DSPM_METRICS_TOKEN_FILE in sentro.toml), kept in a
+# file only Prometheus can read.
+global:
+  scrape_interval: 30s
+
+rule_files:
+  - sentro-alerts.yml
+
+scrape_configs:
+  - job_name: sentro
+    scheme: https
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/sentro-metrics-token
+    tls_config:
+      ca_file: /etc/prometheus/secrets/corp-ca.pem
+    static_configs:
+      - targets: ["sentro.corp.example:443"]
