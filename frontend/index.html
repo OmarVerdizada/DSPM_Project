@@ -1,0 +1,2134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SENTRO — DSPM Command Center</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1" />
+    <link rel="stylesheet" href="/static/fonts/fonts.css?v=1" />
+    <link rel="stylesheet" href="/static/styles/tokens.css?v=11" />
+    <link rel="stylesheet" href="/static/styles/components.css?v=1" />
+    <link rel="stylesheet" href="/static/styles.css?v=272" />
+    <link rel="stylesheet" href="/static/styles/shell.css?v=17" />
+    <link rel="stylesheet" href="/static/styles/pages.css?v=22" />
+    <link rel="stylesheet" href="/static/styles/remediation.css?v=13" />
+    <link rel="stylesheet" href="/static/styles/reports.css?v=6" />
+    <link rel="stylesheet" href="/static/styles/history.css?v=2" />
+    <link rel="stylesheet" href="/static/styles/scan-setup.css?v=18" />
+    <link rel="stylesheet" href="/static/styles/toast.css?v=2" />
+  </head>
+  <body class="auth-locked">
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand logo-lockup">
+          <span class="brand-mark brand-official" aria-hidden="true">
+            <svg viewBox="0 0 100 100" role="img" aria-label="SENTRO logo">
+              <defs>
+                <linearGradient id="dashboard-logo-blue" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#bcd4ff" />
+                  <stop offset="42%" stop-color="#5b8cff" />
+                  <stop offset="78%" stop-color="#2f5ad6" />
+                  <stop offset="100%" stop-color="#1d3a96" />
+                </linearGradient>
+                <linearGradient id="dashboard-logo-blade" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#eaf3ff" />
+                  <stop offset="100%" stop-color="#9fc2ff" />
+                </linearGradient>
+                <linearGradient id="dashboard-logo-blade-indigo" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#2D4CC8" />
+                  <stop offset="55%" stop-color="#2440A6" />
+                  <stop offset="100%" stop-color="#1E3A8A" />
+                </linearGradient>
+              </defs>
+              <circle class="sentro-ring-track" cx="50" cy="50" r="45" />
+              <circle class="sentro-ring" cx="50" cy="50" r="45" />
+              <g class="sentro-blades">
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" />
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(120 50 50)" />
+                <path d="M58 16 A36 36 0 0 1 85 60 A30 30 0 0 0 58 23 Z" transform="rotate(240 50 50)" />
+              </g>
+              <circle class="sentro-core" cx="50" cy="50" r="10" />
+              <circle class="sentro-highlight" cx="47" cy="47" r="3" />
+            </svg>
+          </span>
+          <div class="brand-copy">
+            <h1>SENTRO</h1>
+          </div>
+          <button type="button" id="sidebar-toggle" data-sidebar-toggle class="nav-burger" aria-label="Toggle navigation" aria-expanded="true" title="Collapse navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <button type="button" data-sidebar-toggle class="rail-expand" aria-label="Expand navigation" title="Expand navigation">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+        </div>
+
+        <nav class="side-nav" aria-label="Product navigation">
+          <!-- Redesign P3: 6 destinations. Merged destinations (Scan, Evidence,
+               Administration) expand their member pages as sidebar sub-links;
+               the old tab names stay valid deep links. -->
+          <button type="button" class="tab active" data-tab="overview" aria-current="page" title="Posture, inventory, latest scan">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h8v8H3zM13 3h8v5h-8zM13 12h8v9h-8zM3 15h8v6H3z"/></svg>
+            <span>Dashboard</span>
+          </button>
+          <button type="button" class="tab" data-tab="findings" title="Secrets, PII, regulated data">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4M11 8v3M11 14h.01"/></svg>
+            <span>Findings</span>
+          </button>
+          <button type="button" class="tab" data-tab="risk" title="Risk score, SLA, owners">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>
+            <span>Remediation</span>
+          </button>
+          <button type="button" class="tab" data-tab="file-servers" title="File server and endpoint scans" data-requires="scan.run">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
+            <span>Scan</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-sub" data-nav-sub="file-servers" aria-hidden="true" data-requires="scan.run">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="file-servers">File server</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="endpoint">Endpoint</button>
+            </div>
+          </div>
+          <button type="button" class="tab" data-tab="reports" title="Reports, scan history, audit trail">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 13h6M9 17h6"/></svg>
+            <span>Evidence</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-sub" data-nav-sub="reports" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="reports">Reports</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="history">History &amp; audit</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="alerts">Alerts <span class="nav-badge" id="alerts-nav-badge" hidden></span></button>
+              <button type="button" class="nav-sub-link" data-tab-jump="access" data-requires="inventory.view">Who can read</button>
+            </div>
+          </div>
+          <button type="button" class="tab" data-tab="security" title="Users, tenants, asset rules, risk logic">
+            <svg class="nav-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            <span>Administration</span>
+            <svg class="nav-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+          <div class="nav-sub" data-nav-sub="security" aria-hidden="true">
+            <div class="nav-sub-inner">
+              <button type="button" class="nav-sub-link" data-tab-jump="security" data-admin-only>Security ops</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="admin" data-admin-only>Tenants</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="settings">Asset rules</button>
+              <button type="button" class="nav-sub-link" data-tab-jump="logic">Risk logic</button>
+            </div>
+          </div>
+        </nav>
+
+        <section class="profile-menu side-profile" aria-label="Account">
+          <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+              <symbol id="li-log-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
+            </defs>
+          </svg>
+          <div class="profile-panel" id="profile-panel">
+            <div class="profile-panel-actions">
+              <a class="profile-action" href="/static/profile.html"><svg class="p-ico" aria-hidden="true"><use href="#li-settings"/></svg>Settings</a>
+              <button type="button" id="logout-btn" class="profile-action danger"><svg class="p-ico" aria-hidden="true"><use href="#li-log-out"/></svg>Sign out</button>
+            </div>
+          </div>
+          <button type="button" id="profile-toggle" class="profile-toggle" aria-expanded="false" aria-controls="profile-panel">
+            <span class="profile-avatar">A</span>
+            <span class="side-profile-copy">
+              <strong id="profile-name">MSSP Admin</strong>
+              <small id="profile-tenant">default tenant</small>
+            </span>
+          </button>
+        </section>
+      </aside>
+
+      <main>
+        <section class="topbar">
+          <!-- The page's title, shown in the header; the page's own h2 stays for assistive technology. -->
+          <div class="page-title tb-title" id="tb-title" aria-hidden="true">Dashboard</div>
+          <div class="topbar-left">
+            <div class="tb-search" role="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <input id="fx-search" type="search" placeholder="Search files, findings, sources..." aria-label="Search data inventory" autocomplete="off" />
+              <span class="tb-kbd" aria-hidden="true"><kbd>Ctrl</kbd><kbd>K</kbd></span>
+            </div>
+          </div>
+          <div class="topbar-actions">
+            <div class="tb-newscan" id="fx-newscan">
+              <button type="button" id="fx-newscan-btn" class="tb-primary" aria-haspopup="true" aria-expanded="false" data-requires="scan.run">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                <span class="tb-primary-label">New Scan</span>
+              </button>
+              <div class="tb-newscan-menu" role="menu">
+                <button type="button" role="menuitem" data-tab-jump="file-servers">
+                  <b>Start file scan</b><small><abbr title="Windows file share">SMB</abbr> or local dataset</small>
+                </button>
+                <button type="button" role="menuitem" data-tab-jump="endpoint">
+                  <b>Start endpoint scan</b><small><abbr title="Windows Remote Management">WinRM</abbr> workstation</small>
+                </button>
+                <button type="button" role="menuitem" data-tab-jump="reports">
+                  <b>Open reports</b><small>PDF, Word or Excel evidence</small>
+                </button>
+              </div>
+            </div>
+            <button type="button" id="theme-toggle" class="theme-toggle tb-icon-btn" aria-label="Switch to dark mode" title="Switch theme">
+              <span class="theme-icon" aria-hidden="true">&#9790;</span>
+            </button>
+            <div class="health" id="health">Checking…</div>
+            <select id="tenant-switcher" class="tenant-switcher" title="Switch MSSP customer">
+              <option value="default">default</option>
+            </select>
+          </div>
+        </section>
+
+                <section id="tab-file-servers" class="tab-panel" data-requires="scan.run">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">File server scan</h2>
+            </div>
+          </div>
+
+          <div id="fs-scan-deck" class="scan-deck">
+            <div id="fs-profile-grid" class="scan-profile-grid" aria-label="Saved file server scans">
+              <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="file-server">
+                <span class="socket-plus" aria-hidden="true">+</span>
+                <strong>Set up your first file server scan</strong>
+                <small>Define the connection once. Run it whenever you need to.</small>
+              </button>
+            </div>
+            <div id="fs-deck-live" class="scan-deck-live">
+              <div id="connection-status" class="status muted">Ready</div>
+              <div id="scan-progress" class="scan-progress hidden" aria-live="polite">
+                <div class="scan-pulse" aria-hidden="true"></div>
+                <div>
+                  <div class="scan-progress-header">
+                    <strong id="scan-progress-label">Scanning...</strong>
+                    <span id="scan-progress-percent">0%</span>
+                  </div>
+                  <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="scan-progress-bar"></span></div>
+                </div>
+              </div>
+              <button type="button" id="scan-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
+            </div>
+<section class="demo-data-card deck-demo-utility" aria-label="Demo data generator">
+                <span class="scan-card-ico demo-data-ico" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="7" ry="2.5"/><path d="M5 5v14c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V5"/><path d="M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/></svg>
+                </span>
+                <div>
+                  <span>Demo dataset</span>
+                  <strong id="demo-data-title">Enterprise test data</strong>
+                  <small id="demo-data-status">Generate local sample files for scans.</small>
+                </div>
+                <button type="button" id="generate-demo-data-btn" class="secondary-btn">Generate</button>
+              </section>
+          </div>
+
+          <div id="fs-wizard" class="scan-wizard hidden">
+            <div class="scan-layout">
+            <header class="scan-wizard-head">
+              <button type="button" id="fs-wizard-close" class="secondary-btn mini-btn wizard-back-link" title="Back to scans" aria-label="Back to scans"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg></button>
+              <div class="scan-wizard-title">
+                <h4 id="fs-wizard-heading">New file server scan</h4>
+                <span id="fs-wizard-current-step" class="wizard-current-step" aria-live="polite">Step 1: Scan identity</span>
+              </div>
+              <ol class="scan-stepper" data-stepper="file-server">
+                <li class="stepper-node is-current" data-step-node="1"><span class="stepper-dot">1</span><span class="stepper-label">Basics</span></li>
+                <li class="stepper-node" data-step-node="2"><span class="stepper-dot">2</span><span class="stepper-label">Configuration</span></li>
+                <li class="stepper-node" data-step-node="3"><span class="stepper-dot">3</span><span class="stepper-label">Review &amp; launch</span></li>
+              </ol>
+            </header>
+
+            <form id="connection-form" class="scan-form-column" novalidate>
+              <div class="wizard-step" data-wizard-step="1">
+                <p class="wizard-step-eyebrow">Step 1 — Scan identity</p>
+                <section class="scan-card" aria-label="Scan identity">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <h4>Basics</h4>
+                      <span>Name this scan and enter the connection it uses</span>
+                    </div>
+                  </div>
+                  <div class="scan-form-grid">
+                    <label class="scan-form-wide">
+                      Scan name
+                      <input id="fs-profile-name" maxlength="80" placeholder="HR file share, Finance archive..." />
+                    </label>
+                    <label>
+                      File server / IP
+                      <input id="server" name="server" placeholder="10.10.10.20 or filesrv01" />
+                    </label>
+                    <label>
+                      Domain
+                      <input id="domain" name="domain" value="WORKGROUP" placeholder="Domain, WORKGROUP, or server name" />
+                    </label>
+                    <label>
+                      Username
+                      <input id="username" name="username" autocomplete="username" placeholder="Domain or local admin user" />
+                    </label>
+                    <label>
+                      Password
+                      <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Stored as a vault reference on save" />
+                    </label>
+                    <label class="scan-form-wide">
+                      Credential ref
+                      <input id="credential_ref" name="credential_ref" placeholder="Stored automatically after first credential save" />
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="2">
+                <p class="wizard-step-eyebrow">Step 2 — Configuration</p>
+                <section class="scan-card cfg-box" aria-labelledby="cfg-title" data-scan-scope="file-server">
+                  <div class="scan-card-head">
+                    <span class="scan-card-ico" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="M3 6h11M18 6h3M3 12h5M12 12h9M3 18h13M20 18h1"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>
+                    </span>
+                    <div class="scan-card-heading">
+                      <h4 id="cfg-title">Scan settings</h4>
+                      <span>What this scan reads and how. The defaults suit most file servers.</span>
+                    </div>
+                  </div>
+
+                  <div class="cfg-columns">
+                    <section class="cfg-group" aria-labelledby="cfg-what-title">
+                      <h5 id="cfg-what-title">What to scan</h5>
+
+                      <div class="cfg-target">
+                        <div class="cfg-field" data-cfg-target="smb">
+                          <label for="smb_shares">Shares</label>
+                          <input id="smb_shares" name="smb_shares" autocomplete="off" spellcheck="false" placeholder="All shares on the server" aria-describedby="smb-shares-hint" />
+                          <small id="smb-shares-hint" class="field-hint">Separate several with commas. Leave empty to scan every share.</small>
+                        </div>
+                        <div class="cfg-field" data-cfg-target="local">
+                          <label for="local_path">Folder</label>
+                          <input id="local_path" name="local_path" value="enterprise_test_data" spellcheck="false" aria-describedby="local-path-hint" />
+                          <small id="local-path-hint" class="field-hint">A folder inside the Sentro installation.</small>
+                        </div>
+                        <div class="cfg-field">
+                          <label for="max_depth">Depth limit</label>
+                          <input id="max_depth" name="max_depth" type="number" min="1" max="12" placeholder="No limit" aria-describedby="max-depth-hint" />
+                          <small id="max-depth-hint" class="field-hint">Leave empty to enter every folder. A limit of 1 to 12 levels is shown with the results.</small>
+                        </div>
+                      </div>
+
+                      <fieldset class="cfg-fieldset">
+                        <legend>File types</legend>
+                        <div id="ext-simple-mode" class="cfg-cards" role="radiogroup" aria-describedby="ext-preset-desc">
+                          <label class="cfg-card"><input type="radio" name="ext-preset" value="all" /><span><b>All file types</b><small>Every file, whatever its type</small></span></label>
+                          <label class="cfg-card"><input type="radio" name="ext-preset" value="recommended" checked /><span><b>Recommended</b><small>Documents, data, mail and secrets</small></span></label>
+                          <label class="cfg-card"><input type="radio" name="ext-preset" value="secrets" /><span><b>Secrets</b><small>Keys, certificates and configuration</small></span></label>
+                          <label class="cfg-card"><input type="radio" name="ext-preset" value="broad" /><span><b>Broad</b><small>Every listed type except media</small></span></label>
+                          <label class="cfg-card"><input type="radio" name="ext-preset" value="custom" /><span><b>Custom</b><small>Choose the types yourself</small></span></label>
+                        </div>
+                        <p class="field-hint" id="ext-preset-desc" aria-live="polite"></p>
+
+                        <div class="cfg-field cfg-types-all" data-types-mode="all">
+                          <label for="file-server-scope-exclude_extensions">Skip these types <small>Optional</small></label>
+                          <input id="file-server-scope-exclude_extensions" data-scope-field="exclude_extensions" autocomplete="off" spellcheck="false" placeholder=".iso, .vhdx, .mp4" />
+                          <div class="cfg-quick" role="group" aria-label="Add a group of types to skip">
+                            <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".iso .img .vhd .vhdx .vmdk .ova .qcow2">+ Disk images &amp; VMs</button>
+                            <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".exe .dll .msi .sys .cab">+ Installers</button>
+                            <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".mp4 .mkv .avi .mov .wmv .mp3 .wav .flac">+ Video &amp; audio</button>
+                            <button type="button" class="cfg-quick-btn plain-btn" data-scope-add="exclude_extensions" data-scope-items=".zip .7z .rar .tar .gz .tgz">+ Archives</button>
+                          </div>
+                        </div>
+
+                        <div id="ext-advanced-mode" class="hidden">
+                          <div class="cfg-picker-bar">
+                            <input id="extension-search" type="search" placeholder="Find a type, e.g. docx" aria-label="Find a file type" />
+                            <span class="cfg-picker-actions">
+                              <button type="button" class="cfg-link-btn plain-btn" data-extension-preset="all">Select all</button>
+                              <button type="button" class="cfg-link-btn plain-btn" data-extension-preset="clear">Clear</button>
+                            </span>
+                          </div>
+                          <div class="cfg-picker-groups" role="group" aria-label="Show one group of types" data-picker-groups></div>
+                          <div id="allowed_extensions" role="group" aria-label="File types to scan"></div>
+                          <div class="cfg-picker-foot">
+                            <div class="extension-selected cfg-selected" data-extension-selected-for="file-server"></div>
+                            <span class="cfg-custom-add">
+                              <input id="custom-extension-input" type="text" placeholder=".custom" aria-label="Add another file type" spellcheck="false" />
+                              <button type="button" class="secondary-btn" id="add-custom-extension-btn">Add type</button>
+                            </span>
+                          </div>
+                        </div>
+                      </fieldset>
+                    </section>
+
+                    <section class="cfg-group" aria-labelledby="cfg-how-title">
+                      <h5 id="cfg-how-title">How to scan</h5>
+
+                      <fieldset class="cfg-fieldset">
+                        <legend>Scan level</legend>
+                        <div class="cfg-cards" role="radiogroup">
+                          <label class="cfg-card"><input type="radio" name="scan_level" value="inventory" /><span><b>Inventory</b><small>Names, sizes, owners and access. No content.</small></span></label>
+                          <label class="cfg-card"><input type="radio" name="scan_level" value="standard" checked /><span><b>Standard</b><small>Reads text and documents within the size caps.</small></span></label>
+                          <label class="cfg-card"><input type="radio" name="scan_level" value="full" /><span><b>Full compliance</b><small>Archives opened, findings mapped to frameworks. Slowest.</small></span></label>
+                        </div>
+                      </fieldset>
+
+                      <fieldset class="cfg-fieldset">
+                        <legend>Options</legend>
+                        <div class="cfg-cards">
+                          <label class="cfg-card"><input id="incremental_enabled" name="incremental_enabled" type="checkbox" checked /><span><b>Incremental</b><small>Reuse results for unchanged files</small></span></label>
+                          <label class="cfg-card"><input id="async_scan" name="async_scan" type="checkbox" checked /><span><b>Run in background</b><small>Leave the page while it runs</small></span></label>
+                          <label class="cfg-card"><input id="inspect_archives" name="inspect_archives" type="checkbox" /><span><b>Open ZIP archives</b><small id="archives-note">Read the files inside</small></span></label>
+                        </div>
+                      </fieldset>
+
+                      <fieldset class="cfg-fieldset" aria-label="Compliance mapping" aria-describedby="compliance-hint">
+                        <legend>Compliance frameworks</legend>
+                        <input id="compliance-enabled" type="checkbox" class="cfg-hidden-toggle" tabindex="-1" aria-hidden="true" />
+                        <div class="cfg-cards" data-compliance-frameworks="file-server"></div>
+                        <small class="field-hint" id="compliance-hint">Findings are mapped to the frameworks you choose.</small>
+                      </fieldset>
+                    </section>
+                  </div>
+
+                  <details class="cfg-advanced" id="cfg-advanced">
+                    <summary>
+                      <svg class="cfg-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+                      <span class="cfg-advanced-title">Advanced options</span>
+                      <span class="cfg-advanced-hint">Folders, file size and date, hidden and system files</span>
+                      <span class="cfg-advanced-state" data-advanced-state>Using defaults</span>
+                    </summary>
+                    <div class="cfg-advanced-body">
+                      <div class="cfg-advanced-row cfg-advanced-folders">
+                        <div class="cfg-field">
+                          <label for="file-server-scope-include_paths">Only these folders</label>
+                          <textarea id="file-server-scope-include_paths" data-scope-field="include_paths" rows="2" spellcheck="false" placeholder="Finance/Reports" aria-describedby="include-paths-hint"></textarea>
+                          <small id="include-paths-hint" class="field-hint">One per line, as share/folder. Empty scans the whole target.</small>
+                        </div>
+                        <div class="cfg-field">
+                          <label for="file-server-scope-exclude_paths">Skip these folders</label>
+                          <textarea id="file-server-scope-exclude_paths" data-scope-field="exclude_paths" rows="2" spellcheck="false" placeholder="Finance/Archive" aria-describedby="exclude-paths-hint"></textarea>
+                          <small id="exclude-paths-hint" class="field-hint">One per line. Everything under each folder is skipped.</small>
+                        </div>
+                      </div>
+                      <div class="cfg-advanced-row cfg-advanced-files">
+                        <div class="cfg-field">
+                          <label for="file-server-scope-min_size">Minimum file size</label>
+                          <div class="cfg-size">
+                            <input id="file-server-scope-min_size" data-scope-field="min_size" type="number" min="0" step="any" inputmode="decimal" placeholder="No minimum" />
+                            <select data-scope-unit="min_size" aria-label="Unit of the minimum size"><option value="KB" selected>KB</option><option value="MB">MB</option><option value="GB">GB</option></select>
+                          </div>
+                        </div>
+                        <div class="cfg-field">
+                          <label for="file-server-scope-max_size">Maximum file size</label>
+                          <div class="cfg-size">
+                            <input id="file-server-scope-max_size" data-scope-field="max_size" type="number" min="0" step="any" inputmode="decimal" placeholder="No maximum" />
+                            <select data-scope-unit="max_size" aria-label="Unit of the maximum size"><option value="KB">KB</option><option value="MB" selected>MB</option><option value="GB">GB</option></select>
+                          </div>
+                        </div>
+                        <div class="cfg-field">
+                          <label for="file-server-scope-modified_after">Modified on or after</label>
+                          <input id="file-server-scope-modified_after" data-scope-field="modified_after" type="date" />
+                        </div>
+                        <div class="cfg-field">
+                          <label for="fs-hidden-files">Hidden files</label>
+                          <select id="fs-hidden-files">
+                            <option value="include" selected>Include</option>
+                            <option value="skip">Skip, with hidden folders</option>
+                            <option value="only">Only hidden files</option>
+                          </select>
+                        </div>
+                        <div class="cfg-field">
+                          <label for="fs-system-files">System files</label>
+                          <select id="fs-system-files">
+                            <option value="skip" selected>Skip</option>
+                            <option value="include">Include</option>
+                            <option value="only">Only system files</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="cfg-advanced-row cfg-smb-options" data-cfg-target="smb" role="group" aria-labelledby="cfg-smb-label">
+                        <span class="cfg-field-label" id="cfg-smb-label">File server connection</span>
+                        <label class="cfg-check"><input id="include_admin_shares" name="include_admin_shares" type="checkbox" /><span>Include admin shares (C$, ADMIN$)</span></label>
+                        <label class="cfg-check"><input id="smb_encryption" name="smb_encryption" type="checkbox" aria-describedby="smb-encryption-hint" /><span>Require SMB 3 encryption</span></label>
+                        <small id="smb-encryption-hint" class="field-hint">A server that cannot encrypt is refused, never read in the clear. Needs the shares named above.</small>
+                      </div>
+                    </div>
+                  </details>
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="3">
+                <p class="wizard-step-eyebrow">Step 3 — Review &amp; launch</p>
+                <div class="wizard-review-grid">
+                  <section class="scan-card wizard-review-card" aria-label="Review">
+                    <div class="scan-card-head">
+                      <span class="scan-card-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
+                      </span>
+                      <div class="scan-card-heading">
+                        <h4>Review</h4>
+                        <span>Everything this scan will do — select a row to change it</span>
+                      </div>
+                    </div>
+                    <div class="review-rows">
+                      <button type="button" class="review-row" data-wizard-goto="1">
+                        <span class="review-label">Target</span>
+                        <span class="review-value"><b id="scan-summary-target">Local dataset</b><small id="scan-summary-domain">WORKGROUP</small></span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Path</span>
+                        <span class="review-value scan-summary-mono" id="scan-summary-path">enterprise_test_data</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Scan level</span>
+                        <span class="review-value" id="scan-summary-level">Standard</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Depth limit</span>
+                        <span class="review-value" id="scan-summary-depth">No limit</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">File types</span>
+                        <span class="review-value" id="scan-summary-policy">Recommended</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <button type="button" class="review-row" data-wizard-goto="2">
+                        <span class="review-label">Scope</span>
+                        <span class="review-value" id="scan-summary-scope">No scope rules - everything the file types allow</span>
+                        <span class="review-edit" aria-hidden="true">Edit</span>
+                      </button>
+                      <div class="review-row review-row-static">
+                        <span class="review-label">Options</span>
+                        <ul id="scan-summary-options" class="review-option-chips">
+                          <li data-summary-option="async" class="on">Async queue</li>
+                          <li data-summary-option="zip">ZIP inspection</li>
+                          <li data-summary-option="admin">Admin shares</li>
+                          <li data-summary-option="smb3">SMB 3 encryption</li>
+                          <li data-summary-option="compliance">Compliance mapping</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </section>
+                  <section class="scan-card wizard-launch-card" aria-label="Connection check">
+                    <div class="scan-card-head">
+                      <span class="scan-card-ico" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>
+                      </span>
+                      <div class="scan-card-heading">
+                        <h4>Connection check</h4>
+                        <span>Optional — verify access before saving</span>
+                      </div>
+                    </div>
+                    <div class="actions">
+                      <button type="button" id="test-btn" class="secondary-btn">Test connection</button>
+                    </div>
+                    <div id="fs-wizard-status" class="wizard-status-mirror muted">Ready</div>
+                    <p class="wizard-save-note">Saved scans appear on the scan page, ready to run.</p>
+                  </section>
+                </div>
+              </div>
+
+              <footer class="scan-wizard-footer">
+                <button type="button" id="fs-wizard-delete" class="wizard-delete-btn plain-btn hidden">Delete this scan</button>
+                <span id="fs-wizard-hint" class="wizard-hint" aria-live="polite"></span>
+                <div class="wizard-nav">
+                  <button type="button" id="fs-wizard-back" class="secondary-btn" disabled>Back</button>
+                  <button type="button" id="fs-wizard-next">Next</button>
+                  <button type="button" id="fs-wizard-save" class="hidden">Save scan</button>
+                </div>
+                <button type="submit" id="scan-btn" class="hidden" tabindex="-1" aria-hidden="true">Run file scan</button>
+              </footer>
+            </form>
+            </div>
+          </div>
+
+          <section class="context-strip context-strip-trailing" id="file-server-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run a file-server scan or open Data Inventory after another scan completes.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+          </section>
+        </section>
+
+
+        <section id="tab-overview" class="tab-panel active">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Dashboard</h2>
+              <p id="dashboard-freshness" class="freshness-note" role="status" hidden></p>
+            </div>
+          </div>
+
+          <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-file-bar-chart-2" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M8 18v-2"/><path d="M12 18v-4"/><path d="M16 18v-6"/></symbol>
+              <symbol id="li-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+              <symbol id="li-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></symbol>
+              <symbol id="li-rotate-ccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+              <!-- Dashboard glyphs (lucide, ISC). One per risk category and data
+                   class, so a row is recognisable before it is read. -->
+              <symbol id="li-credit-card" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="5" rx="2"/><line x1="2" x2="22" y1="10" y2="10"/></symbol>
+              <symbol id="li-id-card" viewBox="0 0 24 24"><path d="M16 10h2"/><path d="M16 14h2"/><path d="M6.17 15a3 3 0 0 1 5.66 0"/><circle cx="9" cy="11" r="2"/><rect x="2" y="5" width="20" height="14" rx="2"/></symbol>
+              <symbol id="li-heart-pulse" viewBox="0 0 24 24"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/><path d="M3.22 12H9.5l.5-1 2 4.5 2-7 1.5 3.5h5.27"/></symbol>
+              <symbol id="li-mail" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></symbol>
+              <symbol id="li-phone" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></symbol>
+              <symbol id="li-map-pin" viewBox="0 0 24 24"><path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></symbol>
+              <symbol id="li-landmark" viewBox="0 0 24 24"><line x1="3" x2="21" y1="22" y2="22"/><line x1="6" x2="6" y1="18" y2="11"/><line x1="10" x2="10" y1="18" y2="11"/><line x1="14" x2="14" y1="18" y2="11"/><line x1="18" x2="18" y1="18" y2="11"/><polygon points="12 2 20 7 4 7"/></symbol>
+              <symbol id="li-calendar" viewBox="0 0 24 24"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/></symbol>
+              <symbol id="li-banknote" viewBox="0 0 24 24"><rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/></symbol>
+              <symbol id="li-scale" viewBox="0 0 24 24"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v18"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/></symbol>
+              <symbol id="li-briefcase" viewBox="0 0 24 24"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></symbol>
+              <symbol id="li-shield-off" viewBox="0 0 24 24"><path d="m2 2 20 20"/><path d="M5 5a1 1 0 0 0-1 1v7c0 5 3.5 7.5 7.67 8.94a1 1 0 0 0 .67.01c2.35-.82 4.48-1.97 5.9-3.71"/><path d="M9.309 3.652A12.252 12.252 0 0 0 11.24 2.28a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1v7a9.784 9.784 0 0 1-.08 1.264"/></symbol>
+              <symbol id="li-file-diff" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/></symbol>
+              <symbol id="li-file-key" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="10" cy="16" r="2"/><path d="m16 10-4.5 4.5"/><path d="m15 11 1 1"/></symbol>
+              <symbol id="li-eye-off" viewBox="0 0 24 24"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></symbol>
+              <symbol id="li-hash" viewBox="0 0 24 24"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></symbol>
+              <symbol id="li-cloud" viewBox="0 0 24 24"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></symbol>
+              <symbol id="li-badge-check" viewBox="0 0 24 24"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z"/><path d="m9 12 2 2 4-4"/></symbol>
+              <symbol id="li-stethoscope" viewBox="0 0 24 24"><path d="M11 2v2"/><path d="M5 2v2"/><path d="M5 3H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/></symbol>
+              <symbol id="li-trending-up" viewBox="0 0 24 24"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></symbol>
+              <symbol id="li-trending-down" viewBox="0 0 24 24"><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></symbol>
+              <symbol id="li-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+              <symbol id="li-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+              <symbol id="li-user-round" viewBox="0 0 24 24"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></symbol>
+              <symbol id="li-folder" viewBox="0 0 24 24"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></symbol>
+              <symbol id="li-inbox" viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></symbol>
+              <symbol id="li-archive" viewBox="0 0 24 24"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></symbol>
+              <symbol id="mk-eu-stars" viewBox="0 0 24 24"><circle cx="20.00" cy="12.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="18.93" cy="16.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.00" cy="18.93" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.00" cy="20.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="8.00" cy="18.93" r="1.3" fill="currentColor" stroke="none"/><circle cx="5.07" cy="16.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="4.00" cy="12.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="5.07" cy="8.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="8.00" cy="5.07" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.00" cy="4.00" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.00" cy="5.07" r="1.3" fill="currentColor" stroke="none"/><circle cx="18.93" cy="8.00" r="1.3" fill="currentColor" stroke="none"/></symbol>
+              <symbol id="li-receipt" viewBox="0 0 24 24"><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 17.5v-11"/></symbol>
+            </defs>
+          </svg>
+          <section class="ledger-row" aria-label="Findings by severity">
+            <button type="button" class="ledger-cell plain-btn" data-sev="critical" data-risk-jump="CRITICAL">
+              <span class="ledger-cell-label">Critical</span>
+              <strong class="ledger-cell-value" id="critical-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="high" data-risk-jump="HIGH">
+              <span class="ledger-cell-label">High</span>
+              <strong class="ledger-cell-value" id="high-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="medium" data-risk-jump="MEDIUM">
+              <span class="ledger-cell-label">Medium</span>
+              <strong class="ledger-cell-value" id="medium-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="low" data-risk-jump="LOW">
+              <span class="ledger-cell-label">Low</span>
+              <strong class="ledger-cell-value" id="low-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="protected" data-risk-jump="PROTECTED">
+              <span class="ledger-cell-label">Protected</span>
+              <strong class="ledger-cell-value" id="protected-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
+            </button>
+            <button type="button" class="ledger-cell plain-btn" data-sev="total" data-risk-jump="ALL">
+              <span class="ledger-cell-label">All files</span>
+              <strong class="ledger-cell-value" id="total-count">0</strong>
+              <span class="sr-only">files, open in Findings</span>
+            </button>
+          </section>
+
+          <!-- Two narrow cards on the left say how bad it is and who
+               regulates it; the middle says what kind of data and how much of
+               the estate we have actually read; the right says where to go
+               first. Each one is a way in to Findings. -->
+          <div class="dash-board">
+            <section class="visual-panel dash-card dash-card-posture" aria-labelledby="posture-card-title">
+              <div class="panel-title">
+                <h3 id="posture-card-title">Security posture</h3>
+                <span id="posture-card-meta">No scan yet</span>
+              </div>
+              <div id="posture-card" class="dash-card-body"></div>
+            </section>
+
+            <section class="visual-panel dash-card dash-card-frameworks" aria-labelledby="frameworks-card-title">
+              <div class="panel-title">
+                <h3 id="frameworks-card-title">Compliance frameworks</h3>
+                <span id="frameworks-card-meta">No scan yet</span>
+              </div>
+              <div id="frameworks-card" class="dash-card-body"></div>
+            </section>
+
+            <section class="visual-panel dash-card dash-card-classes" aria-labelledby="classes-card-title">
+              <div class="panel-title">
+                <h3 id="classes-card-title">Top data classes</h3>
+                <span id="classes-card-meta">No scan yet</span>
+              </div>
+              <div id="data-classes-card" class="dash-card-body"></div>
+            </section>
+
+            <section class="visual-panel dash-card dash-card-coverage" aria-labelledby="coverage-card-title">
+              <div class="panel-title">
+                <h3 id="coverage-card-title">Assessment coverage</h3>
+                <span id="coverage-card-meta">No scan yet</span>
+              </div>
+              <div id="coverage-card" class="dash-card-body"></div>
+            </section>
+
+            <section class="visual-panel dash-card dash-card-stale" aria-labelledby="stale-card-title">
+              <div class="panel-title">
+                <h3 id="stale-card-title">Stale sensitive data</h3>
+                <span id="stale-card-meta">No scan yet</span>
+              </div>
+              <div id="stale-card" class="dash-card-body"></div>
+            </section>
+
+            <section class="visual-panel dash-card dash-card-locations" aria-labelledby="locations-card-title">
+              <div class="panel-title">
+                <h3 id="locations-card-title">Where the risk is</h3>
+                <span id="locations-card-meta">No scan yet</span>
+              </div>
+              <div id="locations-card" class="dash-card-body"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="tab-findings" class="tab-panel findings-pristine">
+          <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-fingerprint" viewBox="0 0 24 24"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></symbol>
+              <symbol id="li-clock-3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4.5"/></symbol>
+              <symbol id="li-arrow-up-down" viewBox="0 0 24 24"><path d="m21 16-4 4-4-4"/><path d="M17 20V4"/><path d="m3 8 4-4 4 4"/><path d="M7 4v16"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Findings</h2>
+            </div>
+          </div>
+          <section class="workspace" id="inventory-workspace">
+            <div class="table-toolbar inventory-toolbar">
+              <!-- The page is the inventory, so it does not need to say so. The
+                   scan line stays: it is the only thing here that says which
+                   scan these rows came from. -->
+              <p id="scan-meta" class="inventory-scan-meta">No scan has been run yet.</p>
+              <div class="inventory-toolbar-actions">
+                <div class="inventory-search-box">
+                  <span aria-hidden="true"><svg class="f-ico" aria-hidden="true"><use href="#li-search"/></svg></span>
+                  <input id="filter" placeholder="Search file, path, finding, source, risk..." autocomplete="off" />
+                </div>
+                <div class="inventory-export-actions" aria-label="Stream filtered inventory">
+                  <button type="button" id="inventory-export-csv" class="secondary-btn mini-btn" data-requires="export" aria-describedby="inventory-export-status">Stream CSV</button>
+                  <button type="button" id="inventory-export-ndjson" class="secondary-btn mini-btn" data-requires="export" aria-describedby="inventory-export-status">Stream NDJSON</button>
+                </div>
+                <span id="inventory-export-status" class="visually-hidden" role="status" aria-live="polite">Exports stream filtered metadata directly to disk.</span>
+                <span id="inventory-sort-status" class="visually-hidden" role="status" aria-live="polite"></span>
+              </div>
+            </div>
+
+            <section class="inventory-command-bar" aria-label="Inventory filters and context">
+              <div class="inventory-facet-row">
+                <label>
+                  Severity
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-off"/></svg><select id="inventory-risk-filter">
+                    <option value="ALL">All severities</option>
+                    <option value="CRITICAL">Critical</option>
+                    <option value="HIGH">High</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LOW">Low</option>
+                    <option value="PROTECTED">Protected</option>
+                    <option value="NONE">Clear (no signal)</option>
+                  </select></span>
+                </label>
+                <label class="inventory-scan-facet">
+                  Scan source
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="inventory-source-filter">
+                    <option value="ALL">All scans</option>
+                  </select></span>
+                </label>
+                <label>
+                  Finding type
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-scan-search"/></svg><select id="inventory-finding-filter">
+                    <option value="ALL">All finding types</option>
+                  </select></span>
+                </label>
+                <label>
+                  Framework
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="inventory-framework-select">
+                    <option value="ALL">All frameworks</option>
+                  </select></span>
+                </label>
+                <label>
+                  Folder / path
+                  <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder"/></svg><select id="inventory-folder-filter">
+                    <option value="ALL">Anywhere</option>
+                  </select></span>
+                </label>
+                <div class="facet-actions">
+                  <button type="button" id="inventory-apply-filters" class="facet-apply"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-search"/></svg>Search</button>
+                  <button type="button" id="clear-inventory-filters" class="secondary-btn mini-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Clear filters</button>
+                </div>
+              </div>
+              <div id="inventory-context-metrics" class="inventory-context-metrics">
+                <div><span>Visible</span><strong>0</strong><small>files</small></div>
+                <div><span>Sensitive</span><strong>0</strong><small>files</small></div>
+                <div><span>Avg risk</span><strong>0</strong><small>/100</small></div>
+              </div>
+            </section>
+
+            <div class="table-wrap inventory-table-wrap">
+              <table class="inventory-table">
+                <thead>
+                  <tr>
+                    <th class="inv-sortable" data-inventory-sort="name" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by name">File<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="scan_label" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by scan">Source<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="finding_count" aria-sort="none" tabindex="0" role="columnheader" title="Sort every file by finding count">Findings<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th class="inv-sortable" data-inventory-sort="risk_score" aria-sort="descending" tabindex="0" role="columnheader" title="Sort every file by risk score">Risk<span class="inv-sort-ind" aria-hidden="true"></span></th>
+                    <th>Reasons</th>
+                    <th>DLP recommendations</th>
+                  </tr>
+                </thead>
+                <tbody id="results-body" aria-live="polite" aria-relevant="all">
+                  <tr>
+                    <td colspan="6" class="inventory-empty-cell">
+                      <div class="inventory-empty-panel is-pristine">
+                        <span class="inventory-empty-icon" aria-hidden="true"></span>
+                        <strong>See your sensitive data clearly</strong>
+                        <p>Run a file-server or endpoint scan to build a readable inventory of findings, risk reasons, and recommended actions.</p>
+                        <button type="button" class="mc-empty-cta" data-tab-jump="file-servers" data-requires="scan.run">Start your first scan</button>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-risk" class="tab-panel remediation-center">
+          <div class="remediation-drawer-shell">
+            <input id="remediation-drawer-toggle" type="checkbox" class="remediation-drawer-toggle" aria-label="Finding details" />
+            <div class="remediation-page-content">
+              <div class="section-header">
+                <div>
+                  <h2 class="page-title">Remediation</h2>
+                  <p id="remediation-freshness" class="freshness-note" role="status" hidden></p>
+                </div>
+              </div>
+
+              <section class="workspace" id="remediation-workspace">
+                <div class="table-toolbar inventory-toolbar">
+                  <p id="remediation-scope-summary" class="visually-hidden" aria-live="polite">Loading findings…</p>
+                  <div class="inventory-toolbar-actions">
+                    <div class="inventory-search-box">
+                      <span aria-hidden="true"><svg class="f-ico" aria-hidden="true"><use href="#li-search"/></svg></span>
+                      <input id="remediation-search" type="search" placeholder="Search finding, file, asset, owner, status..." autocomplete="off" />
+                    </div>
+                    <div class="inventory-export-actions">
+                      <button type="button" id="remediation-apply-filters" class="facet-apply"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-search"/></svg>Search</button>
+                      <button type="button" id="remediation-reset-filters" class="secondary-btn mini-btn" data-remediation-reset><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-list-filter"/></svg>Clear filters</button>
+                      <button type="button" id="refresh-executive-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+                    </div>
+                  </div>
+                </div>
+
+                <section class="inventory-command-bar" aria-label="Remediation filters and context">
+
+                  <form id="remediation-filters" class="inventory-facet-row" role="search">
+                    <label>
+                      <span class="facet-name">Severity</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-off"/></svg><select id="remediation-severity-filter">
+                        <option value="ALL">All severities</option>
+                        <option value="CRITICAL">Critical</option>
+                        <option value="HIGH">High</option>
+                        <option value="MEDIUM">Medium</option>
+                        <option value="LOW">Low</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">Risk category</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="remediation-category-filter">
+                        <option value="ALL">All categories</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">Scope</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="remediation-scope-filter">
+                        <option value="current">Current scope</option><option value="historical">Historical scope</option><option value="all">All scopes</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">Status</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-scan-search"/></svg><select id="remediation-status-filter"><option value="active">Active findings</option></select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">Owner</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user-round"/></svg><select id="remediation-owner-filter"><option value="ALL">Owner</option></select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">Framework</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="remediation-framework-filter"><option value="ALL">Framework</option></select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">Data type</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-file-text"/></svg><select id="remediation-data-filter"><option value="ALL">Data type</option></select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">Asset</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-database"/></svg><select id="remediation-asset-filter"><option value="ALL">Asset</option></select></span>
+                    </label>
+                    <label>
+                      <span class="facet-name">SLA</span>
+                      <span class="field-shell facet-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-clock-3"/></svg><select id="remediation-sla-filter">
+                        <option value="ALL">SLA</option><option value="OVERDUE">Overdue</option><option value="DUE_SOON">Due in 24h</option><option value="ON_TRACK">On track</option><option value="NO_SLA">No SLA</option>
+                      </select></span>
+                    </label>
+                  </form>
+
+                  <div id="remediation-stats" class="inventory-context-metrics"></div>
+                </section>
+
+                <p id="remediation-result-count" class="visually-hidden" role="status" aria-live="polite">Loading findings…</p>
+
+                <div id="remediation-error" class="alert remediation-error" role="alert" hidden>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
+                  <div><strong>Unable to load remediation findings.</strong><span data-remediation-error-reason>Please try again.</span></div>
+                  <button type="button" class="secondary-btn mini-btn" data-remediation-retry>Retry</button>
+                </div>
+
+                <div id="remediation-workflow" class="remediation-workflow"></div>
+              </section>
+            </div>
+
+            <div class="remediation-drawer-side">
+              <label for="remediation-drawer-toggle" aria-label="Close finding details" class="remediation-drawer-overlay"></label>
+              <aside class="remediation-drawer-panel" aria-label="Finding details">
+                <div id="remediation-drawer-body" class="remediation-drawer-body">
+                  <div class="remediation-drawer-empty"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v5c0 5-3.5 9-8 10-4.5-1-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg><strong>Select a finding</strong><span>Choose a queue item to inspect its risk and remediation workflow.</span></div>
+                </div>
+              </aside>
+            </div>
+          </div>
+
+          <dialog id="remediation-assignment-modal" class="remediation-dialog">
+            <form id="remediation-assignment-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Ownership</span><h3>Assign finding</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <label>Owner<input id="remediation-assignment-owner" name="owner" class="input" required maxlength="160" autocomplete="off" /></label>
+              <label>Due date<input id="remediation-assignment-due" name="sla_due" class="input" type="date" /></label>
+              <label>Comment<textarea id="remediation-assignment-comment" name="comment" class="textarea" maxlength="1000" placeholder="Add assignment context"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Assign</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-risk-modal" class="remediation-dialog">
+            <form id="remediation-risk-form" class="remediation-modal-box remediation-modal-wide">
+              <div class="remediation-modal-header remediation-span-two"><div><span class="eyebrow">Auditable exception</span><h3>Risk acceptance</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <p class="remediation-modal-note remediation-span-two">Acceptance records a time-bound security decision. It does not remediate the underlying finding.</p>
+              <label class="remediation-span-two">Business justification<textarea name="business_justification" class="textarea" required maxlength="2000"></textarea></label>
+              <label>Approver<input name="approver" class="input" required maxlength="160" /></label>
+              <label>Accepted volume<input name="accepted_volume" class="input" type="number" min="1" max="100000000" required /></label>
+              <label>Review date<input name="review_date" class="input" type="date" required /></label>
+              <label>Expiration date<input name="expiration_date" class="input" type="date" required /></label>
+              <label class="remediation-span-two">Compensating controls<textarea name="compensating_controls" class="textarea" required placeholder="One control per line"></textarea></label>
+              <label class="remediation-span-two">Affected assets<textarea name="affected_assets" class="textarea" required placeholder="One asset per line"></textarea></label>
+              <p class="remediation-modal-error remediation-span-two" data-remediation-modal-error aria-live="polite"></p>
+              <div class="remediation-modal-actions remediation-span-two"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Accept risk</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-false-positive-modal" class="remediation-dialog">
+            <form id="remediation-false-positive-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Review outcome</span><h3>Mark as false positive</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <label>Reason<textarea name="reason" class="textarea" required maxlength="1000" placeholder="Why is this detection not valid?"></textarea></label>
+              <label>Optional comment<textarea name="comment" class="textarea" maxlength="1000"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Confirm</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-suppression-modal" class="remediation-dialog">
+            <form id="remediation-suppression-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Temporary exception</span><h3>Suppress finding</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <div class="alert remediation-modal-note"><span>Suppression temporarily hides the finding and does not remediate the underlying risk.</span></div>
+              <label>Reason<textarea name="reason" class="textarea" required maxlength="1000"></textarea></label>
+              <label>Expiration date<input name="expiration_date" class="input" type="date" required /></label>
+              <label>Optional comment<textarea name="comment" class="textarea" maxlength="1000"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" class="btn btn-primary">Suppress</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
+          </dialog>
+
+          <dialog id="remediation-action-modal" class="remediation-dialog">
+            <form id="remediation-action-form" class="remediation-modal-box">
+              <div class="remediation-modal-header"><div><span class="eyebrow">Workflow update</span><h3 id="remediation-action-title">Update finding</h3></div><button type="button" class="btn btn-ghost btn-icon" data-close-remediation-modal aria-label="Close">×</button></div>
+              <p id="remediation-action-description" class="remediation-modal-note"></p>
+              <label>Comment<textarea id="remediation-action-comment" name="comment" class="textarea" maxlength="1000"></textarea></label>
+              <p class="remediation-modal-error" data-remediation-modal-error aria-live="polite"></p>
+              <div class="remediation-modal-actions"><button type="button" class="btn" data-close-remediation-modal>Cancel</button><button type="submit" id="remediation-action-submit" class="btn btn-primary">Continue</button></div>
+            </form><form method="dialog" class="remediation-dialog-dismiss"><button type="submit" class="plain-btn" tabindex="-1" aria-label="Close">Close</button></form>
+          </dialog>
+        </section>
+
+        <section id="tab-settings" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-save" viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></symbol>
+              <symbol id="li-search-code" viewBox="0 0 24 24"><path d="m13 13.5 2-2.5-2-2.5"/><path d="m21 21-4.3-4.3"/><path d="M9 8.5 7 11l2 2.5"/><circle cx="11" cy="11" r="8"/></symbol>
+            </defs>
+          </svg>
+          <div class="asset-header">
+            <div>
+              <h2 class="page-title">Asset rules</h2>
+              <p>Define tenant-specific crown-jewel paths, folders, extensions, or filenames. Saved rules are applied to every new scan.</p>
+            </div>
+            <div class="asset-actions">
+              <button type="button" class="secondary-btn" data-tab-jump="logic"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-shield-alert"/></svg>Risk logic</button>
+              <button type="button" id="add-asset-btn" class="secondary-btn">Add asset</button>
+              <button type="button" id="save-assets-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-save"/></svg>Save rules</button>
+            </div>
+          </div>
+
+          <div class="asset-editor">
+            <div class="asset-form-grid">
+              <label>
+                Match pattern
+                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-search-code"/></svg><input id="asset-pattern" placeholder="finance, /HR/, .env, password.txt" /></span>
+              </label>
+              <label>
+                Forced risk
+                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-alert"/></svg><select id="asset-level">
+                  <option value="CRITICAL">Critical</option>
+                  <option value="HIGH">High</option>
+                  <option value="MEDIUM">Medium</option>
+                  <option value="LOW">Low</option>
+                </select></span>
+              </label>
+              <label>
+                Business reason
+                <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-file-text"/></svg><input id="asset-reason" placeholder="Customer considers this a regulated or crown-jewel asset" /></span>
+              </label>
+            </div>
+            <p id="asset-save-status" class="save-status">Rules are loaded from this browser.</p>
+          </div>
+
+          <div class="asset-rule-list" id="asset-rule-list"></div>
+
+          <section class="panel history-panel edm-panel" id="edm-panel" data-requires="rules.manage">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Exact-match reference sets</h3>
+                <p class="panel-note">Approved lists of real values. A finding whose value is on a list is confirmed.
+                  Each value is fingerprinted with this workspace's key and dropped: only fingerprints are kept, and a list
+                  is never shown again.</p>
+              </div>
+              <div class="panel-actions">
+                <button type="button" id="refresh-edm-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <form id="edm-form" class="edm-form" autocomplete="off">
+              <label>Name<input id="edm-name" maxlength="80" required placeholder="Customer e-mail addresses" /></label>
+              <label>Data type<select id="edm-type"></select></label>
+              <label class="edm-values-field">Values, one per line
+                <textarea id="edm-values" rows="5" spellcheck="false" autocomplete="off" placeholder="One value per line" aria-describedby="edm-count"></textarea>
+                <small id="edm-count" class="field-hint" aria-live="polite"></small>
+              </label>
+              <label class="edm-file-field">Or read a file
+                <input type="file" id="edm-file" accept=".txt,.csv,text/plain,text/csv" aria-describedby="edm-file-hint" />
+                <small id="edm-file-hint" class="field-hint">.txt or .csv, one value per line. Read here; the file is not uploaded.</small>
+              </label>
+              <div class="edm-actions"><button type="submit">Add set</button><p id="edm-status" class="save-status" role="status"></p></div>
+            </form>
+            <div class="panel-table-wrap">
+              <table class="ledger-table">
+                <thead>
+                  <tr><th scope="col">Name</th><th scope="col">Data type</th><th scope="col" class="is-numeric">Values</th><th scope="col">Added</th><th scope="col">Key</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+                </thead>
+                <tbody id="edm-sets-body">
+                  <tr><td colspan="6" class="empty">Loading reference sets&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-reports" class="tab-panel">
+          <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-file-check-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="m3 15 2 2 4-4"/></symbol>
+              <symbol id="li-file-spreadsheet" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M8 13h2"/><path d="M14 13h2"/><path d="M8 17h2"/><path d="M14 17h2"/></symbol>
+              <symbol id="li-file-text" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
+              <symbol id="li-file-type-2" viewBox="0 0 24 24"><path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 13v-1h6v1"/><path d="M5 12v6"/><path d="M4 18h2"/></symbol>
+              <symbol id="li-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+              <symbol id="li-sliders" viewBox="0 0 24 24"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></symbol>
+              <symbol id="li-files" viewBox="0 0 24 24"><path d="M20 7h-3a2 2 0 0 1-2-2V2"/><path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l5 5v9a2 2 0 0 1-2 2Z"/><path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Reports</h2>
+            </div>
+          </div>
+
+          <!-- A report is a sentence: prepare THIS report, for THIS scope, at
+               THIS depth, as THIS format. The rail asks it in that order and
+               the document answers it, so every control is in one column and
+               every result is in the other.
+
+               Each control costs one row. The four documents are one line each
+               until you pick one; the six scope fields are a two-column grid;
+               and the section list carries ONE explainer that follows the
+               pointer rather than fifteen repeated ones. That is what pays for
+               a rail that holds everything at once. -->
+          <div class="report-stage" id="report-stage">
+            <form id="report-composer" class="report-composer" aria-label="Compose a report">
+              <div class="composer-group">
+                <p class="composer-legend" id="report-type-label">Report</p>
+                <div class="report-type-list" id="report-type-list" role="radiogroup" aria-labelledby="report-type-label"></div>
+              </div>
+
+              <div class="composer-group composer-drawer">
+                <button type="button" class="composer-summary plain-btn" id="report-scope-toggle"
+                        aria-expanded="false" aria-controls="report-scope-fields">
+                  <span class="composer-summary-name" id="report-scope-label">Scope</span>
+                  <span class="composer-summary-value" id="report-scope-summary"></span>
+                  <svg class="f-ico composer-caret" aria-hidden="true"><use href="#li-chevron-down"/></svg>
+                </button>
+                <div class="composer-fields" id="report-scope-fields" role="group" aria-labelledby="report-scope-label" hidden>
+                  <label>
+                    <span class="composer-field-name">Coverage</span>
+                    <select id="report-coverage">
+                      <option value="current">This scan</option>
+                      <option value="all">With history</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Severity</span>
+                    <select id="report-severity">
+                      <option value="ALL">All severities</option>
+                      <option value="CRITICAL">Critical only</option>
+                      <option value="CRITICAL,HIGH">Critical and high</option>
+                      <option value="CRITICAL,HIGH,MEDIUM">Critical to medium</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Status</span>
+                    <select id="report-status">
+                      <option value="all">Every status</option>
+                      <option value="active">Open work only</option>
+                      <option value="resolved">Resolved only</option>
+                      <option value="exceptions">Accepted and suppressed</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Length</span>
+                    <select id="report-depth">
+                      <option value="brief">Brief</option>
+                      <option value="standard" selected>Standard</option>
+                      <option value="full">Full</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Written out</span>
+                    <select id="report-detail-count">
+                      <option value="0">No findings</option>
+                      <option value="5">Top 5 findings</option>
+                      <option value="10" selected>Top 10 findings</option>
+                      <option value="20">Top 20 findings</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span class="composer-field-name">Ordered by</span>
+                    <select id="report-order">
+                      <option value="risk_score">Risk score</option>
+                      <option value="severity">Severity</option>
+                      <option value="sla_due">SLA date</option>
+                      <option value="asset">Affected asset</option>
+                      <option value="finding_name">Finding name</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              <div class="composer-group composer-group-grow composer-drawer">
+                <button type="button" class="composer-summary plain-btn" id="report-sections-toggle"
+                        aria-expanded="false" aria-controls="report-sections-body">
+                  <span class="composer-summary-name" id="report-sections-label">Sections</span>
+                  <span class="composer-summary-value" id="report-sections-summary"></span>
+                  <svg class="f-ico composer-caret" aria-hidden="true"><use href="#li-chevron-down"/></svg>
+                </button>
+                <div class="composer-drawer-body" id="report-sections-body" hidden>
+                  <div class="report-section-list" id="report-sections" role="group" aria-labelledby="report-sections-label"></div>
+                  <p class="report-section-explainer" id="report-section-explainer" role="status" aria-live="polite"></p>
+                </div>
+              </div>
+
+              <div class="composer-foot">
+                <div class="composer-group">
+                  <p class="composer-legend" id="report-format-label">Format</p>
+                  <div class="report-format" id="report-format" role="radiogroup" aria-labelledby="report-format-label"></div>
+                  <p class="report-format-note" id="report-format-note"></p>
+                </div>
+
+                <!-- The rail and the document are one system, so the last thing
+                     before the button says what the button makes - in the same
+                     words the document's own cover prints. -->
+                <!-- The title and the scope used to be printed here too. With
+                     the rail this short they sat a finger's width from the card
+                     that names the report and the row that states the scope, so
+                     all three said the same thing. What is left is the only line
+                     nothing else says: what the button is about to produce. -->
+                <p class="report-carrier report-build-line" id="report-build-line" role="status" aria-live="polite"></p>
+
+                <button type="submit" class="facet-apply" id="report-generate" data-requires="report.create"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-file-check-2"/></svg><span id="report-generate-label">Generate report</span></button>
+              </div>
+            </form>
+
+            <div class="report-preview" id="report-preview" role="region" tabindex="0" aria-label="Report preview"></div>
+          </div>
+        </section>
+
+        <!-- D3: the alerts scans raise, where each was delivered, and who acknowledged it.
+             Delivery is the server's (a queue, retried until the receiver accepts); this
+             page shows it and records the acknowledgement. -->
+        <section id="tab-alerts" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Alerts</h2>
+            </div>
+          </div>
+          <section class="panel history-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Raised by scans</h3>
+                <p class="panel-note" id="alerts-context">Loading alerts&hellip;</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Show</span>
+                  <select id="alerts-filter" title="Which alerts to show">
+                    <option value="open">Open</option>
+                    <option value="">All</option>
+                  </select>
+                </label>
+                <button type="button" id="refresh-alerts-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table" id="alerts-table">
+                <thead>
+                  <tr><th scope="col">Raised</th><th scope="col">Severity</th><th scope="col">Alert</th><th scope="col">Delivered to</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+                </thead>
+                <tbody id="alerts-body">
+                  <tr><td colspan="6" class="empty">Loading alerts&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="panel-foot">An alert is sent to the workspace's webhook and e-mail relay (Account &rarr; Settings &rarr;
+              Features &rarr; Alerts &amp; tickets) and written to the audit trail, which carries it to the SIEM when one is
+              set. A delivery that fails is retried until the receiver accepts it.</p>
+          </section>
+        </section>
+
+        <section id="tab-access" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Who can read</h2>
+              <p id="access-freshness" class="freshness-note" role="status" hidden></p>
+            </div>
+          </div>
+          <section class="panel history-panel" aria-labelledby="access-exposure-title">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title" id="access-exposure-title">Exposure of sensitive files</h3>
+                <p class="panel-note">From the permissions each scan read. Direct ACL access: the rights each file&rsquo;s own entries grant. Group membership is not expanded, so this is not effective access.</p>
+              </div>
+            </div>
+            <dl class="access-headline" id="access-headline">
+              <div data-level="exposed"><dt>Sensitive files a broad group can read</dt><dd id="access-head-broad-read">&ndash;</dd></div>
+              <div data-level="exposed"><dt>Sensitive files a broad group can write</dt><dd id="access-head-broad-write">&ndash;</dd></div>
+              <div><dt>Files with an unresolved SID</dt><dd id="access-head-unresolved">&ndash;</dd></div>
+              <div><dt>Files whose permissions could not be read</dt><dd id="access-head-unread">&ndash;</dd></div>
+            </dl>
+          </section>
+          <section class="panel history-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Accounts and groups in the access lists</h3>
+                <p class="panel-note" id="access-context">Loading access&hellip;</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Show</span>
+                  <select id="access-kind" title="Which principals to show">
+                    <option value="">Every principal</option>
+                    <option value="broad">Broad groups</option>
+                    <option value="privileged">Privileged accounts</option>
+                    <option value="service">Service and indexer identities</option>
+                    <option value="unresolved">Unresolved SIDs</option>
+                  </select>
+                </label>
+                <button type="button" id="access-kind-files" class="secondary-btn" hidden>Their files</button>
+                <button type="button" id="refresh-access-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table access-table">
+                <thead>
+                  <tr><th scope="col">Principal</th><th scope="col">Kind</th><th scope="col" class="is-numeric">Sensitive files it can read</th><th scope="col" class="is-numeric">Can read</th><th scope="col" class="is-numeric">Can write (sensitive)</th><th scope="col" class="is-numeric">Full control</th><th scope="col" class="is-numeric">Owns</th><th scope="col" class="is-numeric">Denied on</th></tr>
+                </thead>
+                <tbody id="access-principals-body">
+                  <tr><td colspan="8" class="empty">Loading access&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="panel-foot">What a principal&rsquo;s own entries allow, less what they deny. A group is shown as itself: who is in it is not resolved here.</p>
+          </section>
+          <section class="panel history-panel" id="access-files-panel" hidden>
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title" id="access-files-title">Files</h3>
+                <p class="panel-note" id="access-files-note"></p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Access</span>
+                  <select id="access-access" title="Which access to list">
+                    <option value="read">Can read</option>
+                    <option value="write">Can write</option>
+                    <option value="modify">Can modify</option>
+                    <option value="full_control">Full control</option>
+                    <option value="deny">Denied</option>
+                    <option value="owner">Owns</option>
+                    <option value="explicit">Explicit entry</option>
+                    <option value="inherited">Inherited entry</option>
+                    <option value="any">Any entry</option>
+                  </select>
+                </label>
+                <label class="access-toggle"><input type="checkbox" id="access-sensitive-only" checked /> Only sensitive files</label>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table">
+                <thead>
+                  <tr><th scope="col">File</th><th scope="col">Owner</th><th scope="col">Risk</th><th scope="col" class="is-numeric">Findings</th><th scope="col">Access</th></tr>
+                </thead>
+                <tbody id="access-files-body"></tbody>
+              </table>
+            </div>
+            <button type="button" id="access-files-more" class="secondary-btn mini-btn" hidden>Show more</button>
+          </section>
+          <section class="panel history-panel" id="access-changes-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Permission changes</h3>
+                <p class="panel-note">Who gained or lost access between two scans. A permission change is a security change of its own; the file&rsquo;s content did not change.</p>
+              </div>
+              <div class="panel-actions">
+                <label class="access-toggle"><input type="checkbox" id="access-changes-sensitive" /> Only sensitive files</label>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table">
+                <thead>
+                  <tr><th scope="col">When</th><th scope="col">Severity</th><th scope="col">File</th><th scope="col">What changed</th></tr>
+                </thead>
+                <tbody id="access-changes-body">
+                  <tr><td colspan="4" class="empty">Loading changes&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-history" class="tab-panel">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">History & audit</h2>
+            </div>
+          </div>
+          <!-- Two halves, because the page is named for two things and only ever
+               had one of them: what the scanner found, and what people did. The
+               scan table's last column is the point of it - absolute counts make
+               a reader do arithmetic; the change against the last comparable
+               scan is the history. -->
+          <section class="panel history-panel">
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Scan history</h3>
+                <p class="panel-note" id="history-context">Loading scan history&hellip;</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Range</span>
+                  <select id="history-range" title="Filter scan history">
+                    <option value="all">All scans</option>
+                    <option value="1">Last 24 hours</option>
+                    <option value="5">Last 5 days</option>
+                    <option value="7">Last 7 days</option>
+                    <option value="30">Last 30 days</option>
+                    <option value="custom">Custom range</option>
+                  </select>
+                </label>
+                <input id="history-from" class="history-date hidden" type="date" title="From date" />
+                <input id="history-to" class="history-date hidden" type="date" title="To date" />
+                <button type="button" id="refresh-history-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+              </div>
+            </div>
+            <div class="panel-table-wrap">
+              <table class="ledger-table" id="history-table">
+                <thead id="history-head"></thead>
+                <tbody id="history-body">
+                  <tr><td colspan="9" class="empty">Loading scan history&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="panel-foot">Change compares each scan with the most recent earlier scan that covered
+              comparable ground, and counts critical and high findings together. A scan with no comparable
+              predecessor is a baseline.</p>
+          </section>
+
+          <section class="panel history-panel" id="audit-section" hidden>
+            <div class="panel-head">
+              <div>
+                <h3 class="panel-title">Audit trail</h3>
+                <p class="panel-note">Every action taken in this workspace, recorded as it happens and never edited.</p>
+              </div>
+              <div class="panel-actions">
+                <label class="field">
+                  <span class="field-name">Range</span>
+                  <select id="audit-range" title="Filter audit trail">
+                    <option value="all">All events</option>
+                    <option value="1">Last 24 hours</option>
+                    <option value="5">Last 5 days</option>
+                    <option value="7">Last 7 days</option>
+                    <option value="30">Last 30 days</option>
+                    <option value="custom">Custom range</option>
+                  </select>
+                </label>
+                <input id="audit-from" class="history-date hidden" type="date" title="Audit from date" />
+                <input id="audit-to" class="history-date hidden" type="date" title="Audit to date" />
+                <button type="button" id="refresh-audit-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh</button>
+                <button type="button" id="verify-audit-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>Verify integrity</button>
+              </div>
+            </div>
+            <p id="audit-integrity" class="audit-integrity" role="status" aria-live="polite" hidden></p>
+            <div class="panel-table-wrap">
+              <table class="ledger-table" id="audit-table">
+                <thead id="audit-head"></thead>
+                <tbody id="audit-body">
+                  <tr><td colspan="4" class="empty">Loading audit events&hellip;</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+                <section id="tab-endpoint" class="tab-panel" data-requires="scan.run">
+<svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-radar" viewBox="0 0 24 24"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62a10 10 0 1 0 19.02-1.27"/><path d="M16.24 7.76a6 6 0 1 0-8.01 8.91"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></symbol>
+              <symbol id="li-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></symbol>
+              <symbol id="li-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+              <symbol id="li-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></symbol>
+              <symbol id="li-shield-check" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></symbol>
+              <symbol id="li-key-round" viewBox="0 0 24 24"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+              <symbol id="li-bookmark" viewBox="0 0 24 24"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></symbol>
+              <symbol id="li-folder-tree" viewBox="0 0 24 24"><path d="M20 10a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-2.5a1 1 0 0 1-.8-.4l-.9-1.2A1 1 0 0 0 15 3h-2a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M20 21a1 1 0 0 0 1-1v-3a1 1 0 0 0-1-1h-2.9a1 1 0 0 1-.88-.55l-.42-.85a1 1 0 0 0-.92-.6H13a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1Z"/><path d="M3 5a2 2 0 0 0 2 2h3"/><path d="M3 3v13a2 2 0 0 0 2 2h3"/></symbol>
+              <symbol id="li-folder-cog" viewBox="0 0 24 24"><circle cx="18" cy="18" r="3"/><path d="M10.3 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v3.3"/><path d="m21.7 19.4-.9-.3"/><path d="m15.2 16.9-.9-.3"/><path d="m16.6 21.7.3-.9"/><path d="m19.1 15.2.3-.9"/><path d="m19.6 21.7-.4-1"/><path d="m16.8 15.3-.4-1"/><path d="m14.3 19.6 1-.4"/><path d="m20.7 16.8 1-.4"/></symbol>
+              <symbol id="li-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></symbol>
+              <symbol id="li-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
+              <symbol id="li-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+              <symbol id="li-file-archive" viewBox="0 0 24 24"><path d="M10 12v-1"/><path d="M10 18v-2"/><path d="M10 7V6"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M15.5 22H18a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v16a2 2 0 0 0 .274 1.01"/><circle cx="10" cy="20" r="2"/></symbol>
+              <symbol id="li-circle-stop" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><rect x="9" y="9" width="6" height="6" rx="1"/></symbol>
+              <symbol id="li-scan-search" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/></symbol>
+              <symbol id="li-scan-line" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></symbol>
+              <symbol id="li-plug-zap" viewBox="0 0 24 24"><path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z"/><path d="m2 22 3-3"/><path d="M7.5 13.5 10 11"/><path d="M10.5 16.5 13 14"/><path d="m18 3-4 4h6l-4 4"/></symbol>
+              <symbol id="li-activity" viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></symbol>
+              <symbol id="li-star" viewBox="0 0 24 24"><path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/></symbol>
+              <symbol id="li-layout-grid" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
+              <symbol id="li-sparkles" viewBox="0 0 24 24"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></symbol>
+              <symbol id="li-monitor-cog" viewBox="0 0 24 24"><path d="M12 17v4"/><path d="M8 21h8"/><path d="M22 12.5V15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5"/><circle cx="18.5" cy="6" r="3"/><path d="m15.2 4.9-.9-.4"/><path d="m15.2 7.1-.9.4"/><path d="m16.9 3.2-.4-.9"/><path d="m16.9 8.8-.4.9"/><path d="m19.5 3.2.4-.9"/><path d="m19.5 8.8.4.9"/><path d="m21.7 4.9.9-.4"/><path d="m21.7 7.1.9.4"/></symbol>
+              <symbol id="li-list-checks" viewBox="0 0 24 24"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></symbol>
+              <symbol id="li-server-cog" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M4.5 10H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-.5"/><path d="M4.5 14H4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2h-.5"/><path d="M6 6h.01"/><path d="M6 18h.01"/><path d="m15.7 13.4-.9-.3"/><path d="m9.2 10.9-.9-.3"/><path d="m10.6 15.7.3-.9"/><path d="m13.6 15.7-.4-1"/><path d="m10.8 8.3-.4-1"/><path d="m13.4 8.4-.3.9"/><path d="m16.2 10.8-1 .4"/><path d="m8.8 13.2-1 .4"/></symbol>
+              <symbol id="li-folder-search" viewBox="0 0 24 24"><path d="M10.7 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v4.1"/><circle cx="17" cy="17" r="3"/><path d="m21 21-1.5-1.5"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Endpoint scan</h2>
+            </div>
+          </div>
+
+          <div id="endpoint-scan-deck" class="scan-deck">
+            <div id="endpoint-profile-grid" class="scan-profile-grid" aria-label="Saved endpoint scans">
+              <button type="button" class="scan-socket scan-socket-hero" data-open-scan-wizard="endpoint">
+                <span class="socket-plus" aria-hidden="true">+</span>
+                <strong>Set up your first endpoint scan</strong>
+                <small>Choose a workstation and profile once. Run it whenever you need to.</small>
+              </button>
+            </div>
+            <div id="endpoint-deck-live" class="scan-deck-live">
+              <p id="endpoint-status" class="save-status">Ready. Saved endpoint scans start from their card.</p>
+              <div id="endpoint-scan-progress" class="scan-progress endpoint-scan-progress hidden" aria-live="polite">
+                <div class="scan-pulse" aria-hidden="true"></div>
+                <div>
+                  <div class="scan-progress-header">
+                    <strong id="endpoint-scan-progress-label">Scanning endpoint...</strong>
+                    <span id="endpoint-scan-progress-percent">0%</span>
+                  </div>
+                  <div class="scan-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="endpoint-scan-progress-bar"></span></div>
+                </div>
+              </div>
+              <div class="scan-deck-live-actions">
+                <button type="button" id="endpoint-cancel-btn" class="secondary-btn hidden">Cancel scan</button>
+                <button type="button" id="endpoint-view-overview-btn" class="secondary-btn hidden" data-tab-jump="overview">View in Overview</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="endpoint-wizard" class="scan-wizard hidden">
+            <header class="scan-wizard-head">
+              <button type="button" id="endpoint-wizard-close" class="secondary-btn mini-btn wizard-back-link" title="Back to scans" aria-label="Back to scans"><svg viewBox="0 0 24 24" class="back-ico" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg></button>
+              <div class="scan-wizard-title">
+                <h4 id="endpoint-wizard-heading">New endpoint scan</h4>
+                <span id="endpoint-wizard-current-step" class="wizard-current-step" aria-live="polite">Step 1: Scan identity</span>
+              </div>
+              <ol class="scan-stepper" data-stepper="endpoint">
+                <li class="stepper-node is-current" data-step-node="1"><span class="stepper-dot">1</span><span class="stepper-label">Basics</span></li>
+                <li class="stepper-node" data-step-node="2"><span class="stepper-dot">2</span><span class="stepper-label">Configuration</span></li>
+                <li class="stepper-node" data-step-node="3"><span class="stepper-dot">3</span><span class="stepper-label">Connect &amp; launch</span></li>
+              </ol>
+            </header>
+
+            <div class="scan-form-column">
+              <div class="wizard-step" data-wizard-step="1">
+                <p class="wizard-step-eyebrow">Step 1 — Scan identity</p>
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan identity">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-server"/></svg></span>Basics</h4>
+                    <span>Name this scan and enter the target machine</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label class="scan-form-wide">
+                      Scan name
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-bookmark"/></svg><input id="endpoint-profile-name" maxlength="80" placeholder="HR laptop, Finance workstation..." /></span>
+                    </label>
+                    <label>
+                      Endpoint host / IP
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-server"/></svg><input id="endpoint-host" placeholder="10.10.10.25 or laptop01.domain.local" /></span>
+                    </label>
+                    <label>
+                      Target Windows user
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user"/></svg><input id="endpoint-target-username" placeholder="j.doe, optional for drive scans" /></span>
+                    </label>
+                    <label>
+                      Domain
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-globe"/></svg><input id="endpoint-domain" value="WORKGROUP" /></span>
+                    </label>
+                    <!-- Not "Admin". A scan reads; nothing on the scan path
+                         tests for administrator. An account in the target's
+                         Remote Management Users group with read access to the
+                         folders being scanned is enough, and the access check
+                         on the last step proves it before a scan is run. -->
+                    <label>
+                      Scan username
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><input id="endpoint-username" autocomplete="username" placeholder="svc_dspm_scan" /></span>
+                    </label>
+                    <label>
+                      Scan password
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="endpoint-password" type="password" autocomplete="current-password" /></span>
+                    </label>
+                    <label>
+                      Credential ref
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-bookmark"/></svg><input id="endpoint-credential-ref" placeholder="Stored after first credential save" /></span>
+                    </label>
+                  </div>
+                </section>
+
+                <!-- C0.1: the collector has always been able to speak TLS; until
+                     these controls existed the console could only ask for cleartext
+                     HTTP on 5985, so an install that requires TLS could not scan at
+                     all. The certificate choice is here rather than in a settings
+                     page because it belongs to the endpoint, not to the install. -->
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Transport">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-lock"/></svg></span>Transport</h4>
+                    <span>How Sentro reaches this machine, and how it trusts it</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label>
+                      Connection
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="endpoint-transport">
+                        <option value="http">HTTP (port 5985)</option>
+                        <option value="https">HTTPS / TLS (port 5986)</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Port override
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-server"/></svg><input id="endpoint-port" type="number" min="1" max="65535" placeholder="Default for the connection" /></span>
+                    </label>
+                    <label>
+                      Certificate trust
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-shield-check"/></svg><select id="endpoint-cert-trust" disabled>
+                        <option value="system">This machine's trust store</option>
+                        <option value="ca_bundle">CA bundle file</option>
+                        <option value="thumbprint">Pinned certificate thumbprint</option>
+                        <option value="insecure">Do not check (lab only)</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Authentication
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-user"/></svg><select id="endpoint-kerberos">
+                        <option value="">Install default</option>
+                        <option value="off">NTLM</option>
+                        <option value="prefer">Kerberos, NTLM if unavailable</option>
+                        <option value="require">Kerberos only</option>
+                      </select></span>
+                    </label>
+                    <label class="scan-form-wide hidden" id="endpoint-ca-bundle-field">
+                      CA bundle path (on the Sentro machine)
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><input id="endpoint-ca-bundle" placeholder="C:\Sentro\trust\internal-root.pem" /></span>
+                    </label>
+                    <label class="scan-form-wide hidden" id="endpoint-thumbprint-field">
+                      Certificate thumbprint
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-key-round"/></svg><input id="endpoint-cert-thumbprint" placeholder="Get-ChildItem Cert:\LocalMachine\My on the endpoint" maxlength="200" /></span>
+                    </label>
+                  </div>
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="2">
+                <p class="wizard-step-eyebrow">Step 2 — Configuration</p>
+                <section class="visual-panel endpoint-panel endpoint-io-panel" aria-label="Scan scope">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-folder-tree"/></svg></span>Scope</h4>
+                    <span>What to walk on the endpoint, and how</span>
+                  </div>
+                  <div class="asset-form-grid endpoint-form">
+                    <label>
+                      Path scope
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-tree"/></svg><select id="endpoint-path-scope">
+                        <option value="default">User profile quick scan</option>
+                        <option value="desktop">Desktop only</option>
+                        <option value="documents">Documents only</option>
+                        <option value="downloads">Downloads only</option>
+                        <option value="onedrive">OneDrive only</option>
+                        <option value="all">Target profile data</option>
+                        <option value="all_profiles">All user profiles</option>
+                        <option value="c_drive">C drive data scan</option>
+                        <option value="all_fixed_drives">All fixed drives</option>
+                        <option value="custom">Custom paths</option>
+                      </select></span>
+                    </label>
+                    <label>
+                      Custom paths
+                      <span class="field-shell field-shell-top"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-folder-cog"/></svg><textarea id="endpoint-custom-paths" rows="2" placeholder="C:\Users\j.doe\Desktop; C:\Temp; \\server\share" disabled></textarea></span>
+                    </label>
+                    <label>
+                      Depth limit
+                      <span class="field-shell"><svg class="f-ico field-ico" aria-hidden="true"><use href="#li-layers"/></svg><input id="endpoint-max-depth" type="number" min="1" max="12" placeholder="No limit" aria-describedby="endpoint-max-depth-hint" /></span>
+                      <small id="endpoint-max-depth-hint" class="field-hint">Leave empty to enter every folder under the paths.</small>
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-read-content" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-eye"/></svg>
+                      Read content preview
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-read-acl" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-lock"/></svg>
+                      Read permissions / ACL
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-inspect-archives" type="checkbox" />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-file-archive"/></svg>
+                      Inspect archive contents
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-async-scan" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-circle-stop"/></svg>
+                      Run as cancellable job
+                    </label>
+                    <label class="checkbox-row endpoint-checkbox">
+                      <input id="endpoint-incremental-enabled" type="checkbox" checked />
+                      <svg class="f-ico check-ico" aria-hidden="true"><use href="#li-scan-search"/></svg>
+                      Incremental (new/changed content only)
+                    </label>
+                  </div>
+<div class="extension-filter endpoint-extension-filter">
+              <label>Endpoint extension policy</label>
+              <div id="endpoint-ext-simple-mode" class="ext-mode-panel">
+                <div class="ext-preset-grid">
+                  <label class="ext-preset-card ext-tier-secrets">
+                    <input type="radio" name="endpoint-ext-preset" value="secrets" />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span>
+                    <span class="ext-preset-title">Secrets & credentials</span>
+                    <span class="ext-preset-desc">Keys, vaults, configs, remote access profiles.</span>
+                  </label>
+                  <label class="ext-preset-card ext-tier-recommended">
+                    <input type="radio" name="endpoint-ext-preset" value="recommended" />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-star"/></svg></span>
+                    <span class="ext-preset-badge">Default</span>
+                    <span class="ext-preset-title">Recommended</span>
+                    <span class="ext-preset-desc">Secrets, documents, data exports, mailboxes.</span>
+                  </label>
+                  <label class="ext-preset-card ext-tier-broad">
+                    <input type="radio" name="endpoint-ext-preset" value="broad" />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-layout-grid"/></svg></span>
+                    <span class="ext-preset-title">Broad</span>
+                    <span class="ext-preset-desc">Enterprise coverage without media-heavy files.</span>
+                  </label>
+                  <label class="ext-preset-card ext-tier-all">
+                    <input type="radio" name="endpoint-ext-preset" value="all" checked />
+                    <span class="ext-tier-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-sparkles"/></svg></span>
+                    <span class="ext-preset-title">All extensions</span>
+                    <span class="ext-preset-desc">Full inventory sweep across every known file type.</span>
+                  </label>
+                </div>
+              </div>
+              <div id="endpoint-ext-advanced-mode" class="ext-mode-panel hidden">
+                <input id="endpoint-extension-search" type="search" placeholder="Search extension, e.g. docx, pdf, hidden" />
+                <div class="extension-selected" data-extension-selected-for="endpoint"></div>
+                <div id="endpoint_allowed_extensions" class="extension-list" role="group" aria-label="Endpoint extension filter"></div>
+                <div class="extension-actions" aria-label="Endpoint extension presets">
+                  <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="all">All</button>
+                  <button type="button" class="secondary-btn mini-btn" data-endpoint-extension-preset="clear">Clear</button>
+                </div>
+                <div class="extension-actions" aria-label="Endpoint custom extension">
+                  <input id="endpoint-custom-extension-input" type="text" placeholder=".custom" />
+                  <button type="button" class="secondary-btn mini-btn" id="endpoint-add-custom-extension-btn">Add</button>
+                </div>
+              </div>
+              <button type="button" id="endpoint-ext-mode-toggle" class="secondary-btn mini-btn ext-mode-toggle">Advanced</button>
+            </div>
+
+<div class="scope-card endpoint-scope-card" data-scan-scope="endpoint"></div>
+
+<div class="compliance-selector endpoint-compliance-selector" data-compliance-scope="endpoint">
+              <div class="compliance-selector-head">
+                <label class="checkbox-row option-tile compliance-toggle">
+                  <input id="endpoint-compliance-enabled" type="checkbox" />
+                  <span class="compliance-toggle-switch" aria-hidden="true"></span>
+                  <span>Enable compliance mapping</span>
+                </label>
+                <span class="compliance-hint">Enable to choose compliance frameworks. GDPR, PCI DSS, and NIST are currently available.</span>
+              </div>
+              <div class="compliance-framework-grid" data-compliance-frameworks="endpoint"></div>
+            </div>
+
+                </section>
+              </div>
+
+              <div class="wizard-step hidden" data-wizard-step="3">
+                <p class="wizard-step-eyebrow">Step 3 — Connect &amp; launch</p>
+                <section class="visual-panel endpoint-panel endpoint-io-panel wizard-review-card" aria-label="Review">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-checks"/></svg></span>Review</h4>
+                    <span>Select a row to change it</span>
+                  </div>
+                  <div class="review-rows" id="endpoint-review-rows"></div>
+                </section>
+                <section class="visual-panel endpoint-panel winrm-activation-panel endpoint-io-panel" aria-label="Target WinRM">
+                  <div class="panel-title">
+                    <h4><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-plug-zap"/></svg></span>Prepare target <abbr title="Windows Remote Management">WinRM</abbr></h4>
+                    <span>Uses the admin credential from Basics</span>
+                  </div>
+                  <div class="hidden" aria-hidden="true">
+                    <input id="winrm-activate-host" tabindex="-1" />
+                    <input id="winrm-target-username" tabindex="-1" autocomplete="username" />
+                    <input id="winrm-activate-domain" tabindex="-1" value="WORKGROUP" />
+                    <input id="winrm-activate-username" tabindex="-1" autocomplete="username" />
+                    <input id="winrm-activate-password" tabindex="-1" type="password" autocomplete="current-password" />
+                  </div>
+                  <div class="actions endpoint-actions">
+                    <button type="button" id="endpoint-activate-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-plug-zap"/></svg>Prepare &amp; Test target WinRM</button>
+                    <button type="button" id="endpoint-test-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-activity"/></svg>Test endpoint</button>
+                    <button type="button" id="endpoint-access-btn" class="secondary-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-shield-check"/></svg>Check access</button>
+                  </div>
+                  <p id="winrm-activate-status" class="save-status">Preparing WinRM is one-time per machine and needs an administrator on the target. Scanning does not: check access to see what this credential can already read.</p>
+                  <div id="endpoint-wizard-status" class="wizard-status-mirror muted">Ready</div>
+                </section>
+<details class="scan-advanced">
+            <summary>Optional — prepare WinRM on this server (rarely needed)</summary>
+
+          <section class="visual-panel endpoint-panel winrm-activation-panel">
+            <div class="panel-title">
+              <h4>Optional local readiness</h4>
+              <span>This server only</span>
+            </div>
+            <div class="asset-form-grid endpoint-form">
+              <label>
+                Domain
+                <input id="local-winrm-domain" value="WORKGROUP" />
+              </label>
+              <label>
+                Admin username
+                <input id="local-winrm-username" autocomplete="username" placeholder="Local admin on this server" />
+              </label>
+              <label>
+                Admin password
+                <input id="local-winrm-password" type="password" autocomplete="current-password" />
+              </label>
+            </div>
+            <div class="actions endpoint-actions">
+              <button type="button" id="local-winrm-activate-btn" class="secondary-btn">Prepare WinRM on this server</button>
+            </div>
+            <p id="local-winrm-status" class="save-status">Optional: prepares only the Windows machine Sentro runs on. Don’t enter domain or domain-controller credentials here unless this machine needs them — the credential for the machine you want to scan goes below.</p>
+          </section>
+          </details>
+              </div>
+
+              <footer class="scan-wizard-footer">
+                <button type="button" id="endpoint-wizard-delete" class="wizard-delete-btn plain-btn hidden">Delete this scan</button>
+                <span id="endpoint-wizard-hint" class="wizard-hint" aria-live="polite"></span>
+                <div class="wizard-nav">
+                  <button type="button" id="endpoint-wizard-back" class="secondary-btn" disabled>Back</button>
+                  <button type="button" id="endpoint-wizard-next">Next</button>
+                  <button type="button" id="endpoint-wizard-save" class="hidden">Save scan</button>
+                </div>
+                <button type="button" id="endpoint-scan-btn" class="hidden" tabindex="-1" aria-hidden="true"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-scan-line"/></svg>Scan endpoint</button>
+              </footer>
+            </div>
+          </div>
+
+          <section class="context-strip context-strip-trailing" id="endpoint-context">
+            <div>
+              <span>Latest workspace data</span>
+              <strong>No scan loaded</strong>
+              <p>Run an endpoint scan or review the latest file-server scan in Data Inventory.</p>
+            </div>
+            <button type="button" class="secondary-btn" data-tab-jump="inventory">Open inventory</button>
+          </section>
+        </section>
+
+
+        <section id="tab-security" class="tab-panel" data-admin-only>
+          <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-users-round" viewBox="0 0 24 24"><path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="8" r="5"/><path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/></symbol>
+              <symbol id="li-user-cog" viewBox="0 0 24 24"><circle cx="18" cy="15" r="3"/><circle cx="9" cy="7" r="4"/><path d="M10 15H6a4 4 0 0 0-4 4v2"/><path d="m21.7 16.4-.9-.3"/><path d="m15.2 13.9-.9-.3"/><path d="m16.6 18.7.3-.9"/><path d="m19.1 12.2.3-.9"/><path d="m19.6 18.7-.4-1"/><path d="m16.8 12.3-.4-1"/><path d="m14.3 16.6 1-.4"/><path d="m20.7 13.8 1-.4"/></symbol>
+              <symbol id="li-file-json" viewBox="0 0 24 24"><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M10 12a1 1 0 0 0-1 1v1a1 1 0 0 1-1 1 1 1 0 0 1 1 1v1a1 1 0 0 0 1 1"/><path d="M14 18a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1 1 1 0 0 1-1-1v-1a1 1 0 0 0-1-1"/></symbol>
+              <symbol id="li-list-filter" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></symbol>
+              <symbol id="li-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+              <!-- The inventory row drew these two inline, a hundred times per
+                   page: 744 bytes of path data per row. Same geometry, one
+                   copy. -->
+              <symbol id="inv-open" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 11.5 12.5"/><path d="M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"/></symbol>
+              <symbol id="inv-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Security operations</h2>
+            </div>
+          </div>
+
+          <div class="security-grid">
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4 aria-level="3"><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-user-cog"/></svg></span>User management</h4>
+                <span class="panel-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
+              </div>
+              <div class="asset-form-grid compact-form">
+                <label>
+                  Username
+                  <input id="new-user-username" autocomplete="off" />
+                </label>
+                <label>
+                  Role
+                  <select id="new-user-role">
+                    <option value="viewer">Viewer</option>
+                    <option value="auditor">Auditor</option>
+                    <option value="scan_operator">Scan operator</option>
+                    <option value="analyst">Analyst</option>
+                    <option value="admin">Tenant administrator</option>
+                  </select>
+                </label>
+                <label>
+                  Tenant
+                  <select id="new-user-tenant">
+                    <option value="default">default</option>
+                  </select>
+                </label>
+                <label>
+                  Full name
+                  <input id="new-user-full-name" autocomplete="off" />
+                </label>
+                <label>
+                  Password
+                  <input id="new-user-password" type="password" autocomplete="new-password" />
+                </label>
+              </div>
+              <button type="button" id="create-user-btn">Create user</button>
+              <p id="user-management-status" class="save-status">User controls load after admin sign-in.</p>
+            </section>
+
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4 aria-level="3"><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-key-round"/></svg></span>API key management</h4>
+                <span class="panel-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
+              </div>
+              <label>
+                Key label
+                <input id="api-key-label" value="automation" />
+              </label>
+              <button type="button" id="create-api-key-btn">Create API key</button>
+              <pre id="api-key-output" class="code-output">No key generated in this session.</pre>
+            </section>
+
+            <section class="visual-panel" id="custom-roles-panel">
+              <div class="panel-title">
+                <h4 aria-level="3"><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-user-cog"/></svg></span>Custom roles</h4>
+                <span class="panel-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
+              </div>
+              <p class="panel-copy">A role is a set of permissions. The built-in roles are fixed; a custom role can be given to this tenant's users, invites and API keys.</p>
+              <div class="asset-form-grid compact-form">
+                <label>
+                  Name
+                  <input id="custom-role-name" autocomplete="off" placeholder="privacy_reviewer" />
+                </label>
+                <label>
+                  Label
+                  <input id="custom-role-label" autocomplete="off" placeholder="Privacy reviewer" />
+                </label>
+              </div>
+              <fieldset id="custom-role-permissions" class="extension-list">
+                <legend>Permissions</legend>
+              </fieldset>
+              <button type="button" id="save-custom-role-btn">Save role</button>
+              <p id="custom-role-status" class="save-status" role="status">Custom roles load after admin sign-in.</p>
+              <ul id="custom-roles-list"></ul>
+            </section>
+
+            <section class="visual-panel" id="scan-targets-panel">
+              <div class="panel-title">
+                <h4 aria-level="3"><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-list-filter"/></svg></span>Scan targets</h4>
+                <span class="panel-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
+              </div>
+              <p class="panel-copy">The networks and host names this workspace may scan. A scan of anything else is refused before it connects, and the refusal is recorded in the audit trail.</p>
+              <p id="scan-targets-mode" class="panel-copy" role="status"></p>
+              <div class="asset-form-grid compact-form">
+                <label>
+                  Network or host name
+                  <input id="scan-target-value" autocomplete="off" placeholder="10.20.0.0/16 or fs01.corp.example" />
+                </label>
+                <label>
+                  Note
+                  <input id="scan-target-note" autocomplete="off" maxlength="200" placeholder="Finance file servers" />
+                </label>
+              </div>
+              <button type="button" id="add-scan-target-btn">Add target</button>
+              <p id="scan-target-status" class="save-status" role="status">Scan targets load after admin sign-in.</p>
+              <ul id="scan-targets-list"></ul>
+              <div class="asset-form-grid compact-form">
+                <label>
+                  Check a host
+                  <input id="scan-target-check-host" autocomplete="off" placeholder="fs01.corp.example" />
+                </label>
+              </div>
+              <button type="button" id="check-scan-target-btn" class="secondary-btn">Check</button>
+              <p id="scan-target-check-result" class="save-status" role="status"></p>
+            </section>
+
+            <section class="visual-panel">
+              <div class="panel-title">
+                <h4 aria-level="3"><span class="panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-file-json"/></svg></span>DLP policy export</h4>
+                <span class="panel-badge">Generic JSON</span>
+              </div>
+              <p class="panel-copy">Exports the current customer asset rules as an import-ready policy skeleton.</p>
+              <button type="button" id="export-dlp-policy-btn" class="secondary-btn" data-requires="export">Generate policy</button>
+              <pre id="dlp-policy-output" class="code-output">No policy generated yet.</pre>
+            </section>
+          </div>
+
+          <section class="workspace">
+            <div class="table-toolbar">
+              <div>
+                <h3>Users and roles</h3>
+                <p>Manage tenant access levels and reset local passwords.</p>
+              </div>
+              <button type="button" id="refresh-users-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh users</button>
+            </div>
+            <div class="table-wrap">
+              <table class="logic-table">
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Tenant</th>
+                    <th>Role</th>
+                    <th>Last login</th>
+                    <th>Reset password</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="users-body">
+                  <tr><td colspan="6" class="empty">Sign in as admin to load users.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+        </section>
+
+        <section id="tab-admin" class="tab-panel" data-admin-only>
+          <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+            <defs>
+              <symbol id="li-building-2" viewBox="0 0 24 24"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></symbol>
+              <symbol id="li-scroll-text" viewBox="0 0 24 24"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></symbol>
+              <symbol id="li-shield-alert" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1 1 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></symbol>
+              <symbol id="li-lock-keyhole" viewBox="0 0 24 24"><circle cx="12" cy="16" r="1"/><rect x="3" y="10" width="18" height="12" rx="2"/><path d="M7 10V7a5 5 0 0 1 10 0v3"/></symbol>
+              <symbol id="li-user-plus" viewBox="0 0 24 24"><path d="M2 21a8 8 0 0 1 13.292-6"/><circle cx="10" cy="8" r="5"/><path d="M19 16v6"/><path d="M22 19h-6"/></symbol>
+              <symbol id="li-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+            </defs>
+          </svg>
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Tenants</h2>
+            </div>
+          </div>
+
+          <section class="visual-panel tenant-admin-panel">
+            <div class="panel-title">
+              <h4 aria-level="3"><span class="panel-ico adm-panel-ico" aria-hidden="true"><svg class="f-ico"><use href="#li-building-2"/></svg></span>Add tenant</h4>
+              <span class="admin-only-badge"><svg class="f-ico" aria-hidden="true"><use href="#li-lock-keyhole"/></svg>Admin only</span>
+            </div>
+            <div class="asset-form-grid compact-form">
+              <label>
+                Tenant id
+                <input id="new-tenant-id" placeholder="customer-a" />
+              </label>
+              <label>
+                Display name
+                <input id="new-tenant-name" placeholder="Customer A" />
+              </label>
+            </div>
+            <button type="button" id="create-tenant-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-user-plus"/></svg>Create tenant</button>
+            <p id="tenant-management-status" class="save-status">Tenant controls load after admin sign-in.</p>
+          </section>
+
+          <section class="workspace">
+            <div class="table-toolbar">
+              <div>
+                <h3>Tenant list</h3>
+                <p>Available tenants are used by registration, user management, and the <abbr title="Managed security service provider — one customer workspace per tenant">MSSP</abbr> switcher.</p>
+              </div>
+              <button type="button" id="refresh-tenants-btn" class="secondary-btn mini-btn refresh-btn"><svg class="f-ico btn-ico" aria-hidden="true"><use href="#li-rotate-ccw"/></svg>Refresh tenants</button>
+            </div>
+            <div class="table-wrap">
+              <table class="logic-table">
+                <thead>
+                  <tr>
+                    <th>Tenant</th>
+                    <th>Registration code</th>
+                    <th>Reports</th>
+                    <th>Audit</th>
+                    <th>Alerts</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="tenants-body">
+                  <tr><td colspan="6" class="empty">Sign in as admin to load tenants.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-logic" class="tab-panel risk-logic">
+          <div class="section-header">
+            <div>
+              <h2 class="page-title">Risk logic</h2>
+              <p>Scoring model, severity ranges, detection signals, and customer asset context.</p>
+            </div>
+          </div>
+
+          <div id="risk-rules-body" class="risk-logic-board">
+            <div class="empty compact">Loading risk logic...</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="data-classes-dialog" class="asset-detail-modal classes-modal hidden" role="dialog" aria-modal="true" aria-labelledby="data-classes-dialog-title">
+      <div class="asset-detail-backdrop" data-close-classes-modal></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Data classes</span>
+            <h3 id="data-classes-dialog-title">All data classes</h3>
+            <p id="data-classes-dialog-count" class="asset-detail-path"></p>
+          </div>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-classes-modal title="Close" aria-label="Close data classes">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div id="data-classes-dialog-body" class="sheet-body"></div>
+      </div>
+    </div>
+
+    <div id="asset-detail-modal" class="asset-detail-modal hidden" role="dialog" aria-modal="true" aria-labelledby="asset-modal-title">
+      <div class="asset-detail-backdrop" data-close-asset-modal></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Asset &amp; scan detail</span>
+            <h3 id="asset-modal-title">Asset</h3>
+            <p id="asset-modal-path" class="asset-detail-path"></p>
+          </div>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-asset-modal title="Close" aria-label="Close asset detail">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div class="asset-detail-tabs" role="tablist" aria-label="Asset detail sections">
+          <button type="button" id="asset-tab-essential" class="asset-tab active" data-asset-tab="essential" role="tab" aria-controls="asset-modal-body" aria-selected="true">Essentials</button>
+          <button type="button" id="asset-tab-findings" class="asset-tab" data-asset-tab="findings" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Findings</button>
+          <button type="button" id="asset-tab-permissions" class="asset-tab" data-asset-tab="permissions" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Permissions</button>
+          <button type="button" id="asset-tab-reasons" class="asset-tab" data-asset-tab="reasons" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Reasons</button>
+          <button type="button" id="asset-tab-actions" class="asset-tab" data-asset-tab="actions" role="tab" aria-controls="asset-modal-body" aria-selected="false" tabindex="-1">Actions</button>
+        </div>
+        <div id="asset-modal-body" class="asset-detail-body" role="tabpanel" aria-labelledby="asset-tab-essential" tabindex="0"></div>
+      </div>
+    </div>
+
+    <!-- C13: reveal one value behind a finding. The server reads the file again; the value
+         is shown here only, and cleared when this closes or after a minute. -->
+    <div id="reveal-modal" class="asset-detail-modal confirm-modal hidden" role="dialog" aria-modal="true" aria-labelledby="reveal-title">
+      <div class="asset-detail-backdrop" data-close-reveal></div>
+      <div class="asset-detail-panel">
+        <div class="asset-detail-header">
+          <div class="asset-detail-heading">
+            <span class="asset-detail-eyebrow">Reveal a value</span>
+            <h3 id="reveal-title">See the value behind <span id="reveal-sample" class="mono"></span></h3>
+          </div>
+          <button type="button" class="tb-icon-btn asset-modal-close" data-close-reveal title="Close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <form id="reveal-form" class="sheet-body confirm-sheet" novalidate>
+          <p class="confirm-note">The file is read again from where the scan found it. If it has changed since, nothing is shown. The value appears here only, for a minute, and your reason is recorded in the audit trail.</p>
+          <label class="confirm-field">Why do you need it?<textarea id="reveal-reason" rows="3" maxlength="500" spellcheck="true"></textarea></label>
+          <div id="reveal-result" class="reveal-result" hidden>
+            <code id="reveal-value" class="reveal-value"></code>
+            <span id="reveal-countdown" class="confirm-note"></span>
+          </div>
+          <p class="confirm-error" data-reveal-error aria-live="polite"></p>
+          <div class="confirm-actions">
+            <button type="button" class="secondary-btn" data-close-reveal>Close</button>
+            <button type="submit" id="reveal-submit">Reveal</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="notice-host" class="notice-host" role="region" aria-live="polite" aria-label="Notifications"></div>
+
+
+    <script src="/static/console/alerts.js?v=1"></script>
+    <script src="/static/console/permissions.js?v=1"></script>
+    <script src="/static/console/access.js?v=2"></script>
+    <script src="/static/console/exact-match.js?v=1"></script>
+    <script src="/static/console/scan-scope.js?v=19"></script>
+    <script src="/static/console/scan-setup.js?v=18"></script>
+    <script src="/static/app.js?v=276"></script>
+    <!-- Live "Scan summary" rail on the File Server Scan tab: read-only mirror of the form -->
+    <script src="/static/scan-summary.js?v=21"></script>
+    <!-- SENTRO Mission Control effects: cursor, spotlight, Ctrl/Cmd+K palette -->
+    <script src="/static/sentro-fx.js?v=16" defer></script>
+  </body>
+</html>

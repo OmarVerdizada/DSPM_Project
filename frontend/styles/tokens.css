@@ -1,0 +1,330 @@
+/* ============================================================
+   Sentro design tokens — the contract
+   Roadmap: docs/frontend/FRONTEND_UX_ASSESSMENT_AND_ROADMAP_2026-09.md, phase F0
+
+   This file is the single place where a colour, a size, a radius, a shadow,
+   a stacking level or a duration is decided. Components consume these tokens;
+   they do not invent values. The lint gate (scripts/check_frontend_tokens.py)
+   enforces that on every change.
+
+   WHY THE NAMES READ LIKE STATIONERY. Sentro is not a cloud graph — it is an
+   on-prem record of what was found, where, by which scan, and when. The design
+   thesis is a ledger: ink on paper, one column of truth, provenance beside
+   every figure. The role names carry that so the vocabulary survives contact
+   with the codebase.
+
+   SCOPE OF F0. These tokens are additive. The 119 legacy variables in
+   styles.css still render the product today; they are retired page by page in
+   phase F3, using the bridge table at the bottom of this file. Nothing here
+   changes a pixel on its own — that is deliberate, and it is what makes the
+   foundation safe to land while other work is in flight.
+   ============================================================ */
+
+:root {
+  /* ── Ledger palette ───────────────────────────────────────
+     Six roles. Every surface, border and piece of text in the product comes
+     from one of them. Values are the product's current effective values, so
+     adopting the contract costs nothing visually; the win is that there is
+     now one place to change them. (The assessment proposed nudging ink, line
+     and muted by 1–3 units; that recolour belongs in F3 where it can be seen
+     page by page, not in a foundation commit.) */
+  --ink: #111827;              /* primary text */
+  --ink-muted: #6b7280;        /* secondary text — never below 12px */
+  --paper: #f8f9fb;            /* page ground */
+  /* Not #ffffff. Pure white next to a #f8fafc page is a hard step that the
+     eye reads as a seam rather than a card, and on a long working session it
+     is the brightest thing on screen. One degree off white keeps the card
+     distinct from the page without the edge. */
+  --surface: #fdfdfe;          /* cards, tables, inputs */
+  --line: #e5e7eb;             /* every border and divider: one weight, one colour */
+  --indigo: #4f46e5;           /* the one accent: primary action, active nav, focus, links */
+  --indigo-wash: #eef2ff;      /* the accent's quiet background */
+  /* The accent as TEXT. On light paper this is the same value; on dark paper
+     it cannot be, because one colour cannot be both a surface that carries
+     white text and text that sits on a near-black ground. Splitting the role
+     is what lets the ledger strip's scan label stay readable in both themes
+     (it measured 3.97:1 in dark before this). */
+  --indigo-ink: #4f46e5;
+
+  /* ── The pointer, and the choice ──────────────────────────
+     One wash says "the pointer is on this", everywhere in the product: a
+     table row, a card, a nav item, a menu item, a tab, a socket. Before this
+     there were SIXTY-THREE different hover backgrounds across a hundred and
+     eighteen rules - 3% of the accent here, 10% there, a flat #f6f7fd, two
+     gradients, a 28% blue - which is not a colour scheme, it is an
+     accumulation.
+
+     5% and not more. The old row hover measured 6.5 dE2000 against the
+     surface, which is a step you notice as a colour rather than as a
+     pointer; this is 4.3, still clearly perceptible on a 40px row but no
+     longer a flash. Alpha rather than a mix with white, so the same token
+     works over a card, over the page and over a striped row.
+
+     Selection is a different question - it survives the pointer leaving - so
+     it keeps a stronger wash, 2.6 dE2000 clear of the hover. */
+  --hover-wash: color-mix(in srgb, var(--indigo) 5%, transparent);
+  --selected-wash: color-mix(in srgb, var(--indigo) 12%, transparent);
+
+  /* ── Severity — reserved ──────────────────────────────────
+     These five say how bad something is. They are not available for
+     decoration: if a border is red in this product, the thing behind it is
+     critical. Today the same colours also tint KPI tile borders and icon
+     chips, which is why "everything looks urgent"; F3 removes those uses.
+
+     One correction is encoded here: medium currently renders blue (#2563eb)
+     in the dashboard donut and amber (#ca8a04) in the filter pills. A
+     severity ramp has to be monotonic to be readable at a glance, so medium
+     is amber.
+
+     Medium is amber-700 rather than amber-600 because the severity band now
+     sets its figures in these colours: #ca8a04 measures 2.94:1 on paper, which
+     misses even the large-text floor. One shade down, and all five pass as
+     text (4.83 / 5.02 / 4.91 / 5.01 / 4.55).
+
+     Medium is also pulled toward olive. Once the ramp had to work as adjacent
+     FILLS in one stacked bar, amber-700 and #b45309 sat 9.5 dE2000 apart -
+     close enough that a medium segment and the high segment beside it read as
+     one brown block, so the bar did not climb. This value holds its 4.9:1 as
+     text and opens the gap to 20.6. */
+  --sev-critical: #dc2626;
+  --sev-high: #b45309;
+  --sev-medium: #8a6d0b;
+  --sev-low: #15803d;
+  --sev-protected: #7b5bf2;
+
+  /* ── The same ramp, one step back ────────────────────────────
+     The severity band across the top of the dashboard is the loudest thing on
+     the page, and it should be: it is the headline. The same five values then
+     repeated inside every card's bar meant six saturated blocks competing at
+     once. The -soft set mixes each value 26% toward the card it sits on, so a
+     bar still reads as its severity but stops shouting alongside the band.
+     Mixing toward --surface softens in BOTH themes: toward white on paper,
+     toward the dark ground at night. */
+  --sev-critical-soft: color-mix(in srgb, var(--sev-critical) 80%, var(--surface));
+  --sev-high-soft:     color-mix(in srgb, var(--sev-high) 80%, var(--surface));
+  --sev-medium-soft:   color-mix(in srgb, var(--sev-medium) 80%, var(--surface));
+  --sev-low-soft:      color-mix(in srgb, var(--sev-low) 80%, var(--surface));
+  /* 80%, not less: at 74% the softest step measured 3.02:1 against the card in
+     light, and 3:1 is the floor for a graphic that carries meaning. */
+
+  /* ── Categories — what KIND of data, not how bad ───────────
+     The severity ramp answers "how bad". It was also answering "what kind of
+     data" and "which framework", which is why one screen came out 50% red and
+     why three cards looked like each other: one scale was doing three jobs.
+
+     This is a CATEGORICAL scale — eight hues with no order between them,
+     because a payment card is not "more" than a health record, it is a
+     different thing. It appears in exactly one place: the coin at the head of
+     a row. Severity keeps the ramp and keeps the shapes it always had (the
+     band's column caps, the ring's arcs, the framework bars, and now a word).
+     Two scales, two jobs, two shapes — that is what makes them readable
+     side by side rather than confusable. */
+  /* Indigo-700, not the accent itself: --indigo is reserved for primary
+     action, active nav and focus, and a data category that IS the accent
+     makes an identity coin look like a control. Same hue family, one
+     step deeper. */
+  --cat-identity: #4338ca;     /* people: names, IDs, passports, biometrics */
+  --cat-contact: #0369a1;      /* reachable: email, phone, address, device */
+  --cat-finance: #0f766e;      /* money: cards, bank, tax, payroll */
+  --cat-health: #be185d;       /* health: medical, PHI, genetic */
+  --cat-secret: #6d28d9;       /* keys: credentials, tokens, certificates */
+  --cat-legal: #7c2d12;        /* legal and special-category material */
+  --cat-record: #475569;       /* documents, archives, changes, locked files */
+  --cat-code: #a21caf;         /* source, repos, build and infrastructure */
+
+  /* ── Marks — third-party identity, not palette ─────────────
+     The compliance card shows each framework under its own recognisable
+     mark, the way a card shows a bank's logo. These colours belong to those
+     organisations, not to Sentro: they appear only inside a 28px badge with
+     a white glyph, never as text, never as a surface, never mixed into the
+     ramp. The one exception is the neutral mark for a framework the product
+     has no badge for, which takes the accent. */
+  --mark-gdpr: #003399;        /* EU flag blue */
+  --mark-pci: #0b6e4f;         /* PCI SSC green */
+  --mark-nist: #1a4480;        /* NIST navy */
+  --mark-hipaa: #1d6fb8;       /* health services blue */
+  --mark-iso: #c8102e;         /* ISO red */
+  --mark-generic: var(--indigo);
+  --on-mark: #ffffff;          /* the glyph on a mark, in both themes */
+
+  /* ── Type — three faces, three jobs ───────────────────────
+     Display is the signature and is rationed to page titles and the brand
+     wordmark. Figures are set in the text face, whatever their size: an
+     indicator that changes typeface between one panel and the next reads as
+     a different kind of measurement. Data is the on-prem product's own voice — paths, scan ids,
+     hostnames, hashes, timestamps: anything an operator might copy. */
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-text: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-data: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+
+  /* Six sizes. The product currently renders 43. Nothing goes below 12px —
+     the 3px and 7px labels on Remediation are a bug, not a size. */
+  --text-xs: 12px;             /* eyebrows, table meta, chart labels */
+  --text-sm: 13px;             /* table cells, dense UI */
+  --text-md: 14px;             /* body default */
+  --text-lg: 16px;             /* card titles */
+  --text-xl: 20px;             /* page titles */
+  --text-2xl: 28px;            /* ledger numbers */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;      /* the heaviest weight in the product */
+  --leading-text: 1.45;
+  --leading-display: 1.1;
+  --tracking-eyebrow: .02em;
+
+  /* ── Space — one rhythm ───────────────────────────────────
+     Replaces 39 distinct padding values. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* ── Radius — three, by role ──────────────────────────────
+     Replaces 21 values. A radius says what kind of thing this is. */
+  --radius-control: 6px;       /* inputs, chips, buttons */
+  --radius-card: 10px;         /* panels, cards, table wrappers */
+  --radius-modal: 14px;        /* modals, drawers */
+
+  /* ── Elevation — two ──────────────────────────────────────
+     Replaces 422 shadow declarations. Things inside a card get a border,
+     not a shadow; only the card itself lifts off the paper. */
+  --elev-raised: 0 4px 16px rgba(17, 24, 39, .06);
+  --elev-overlay: 0 24px 48px rgba(17, 24, 39, .18);
+  /* What dims the page behind a modal dialog, painted by the dialog itself
+     (::backdrop paints nothing on the engine the console ships in). The
+     same in both themes. */
+  --scrim: rgba(0, 0, 0, .4);
+
+  /* ── Stacking — five named levels ─────────────────────────
+     Replaces 25 ad-hoc z-index values spanning 0–20000. */
+  --z-base: 0;
+  --z-raised: 10;
+  --z-sticky: 100;
+  --z-overlay: 1000;
+  /* Above the legacy profile panel (10000), which is still one of the
+     ad-hoc values this ladder has yet to replace. Below the avatar crop
+     modal (20000): that is a focused task with its own controls. */
+  --z-toast: 10001;
+
+  /* ── Motion — one vocabulary ──────────────────────────────
+     The console currently runs three page-transition systems at once and
+     none at all for filters, data arrival and theme. One set of durations
+     ends both problems. Anything that appears comes from somewhere;
+     anything that leaves goes somewhere. */
+  --motion-fast: 120ms;        /* hover, focus, chips, table body swap */
+  --motion-base: 200ms;        /* page and sub-page change, drawers, menus */
+  --motion-slow: 320ms;        /* wizard arrival, modal, theme cross-fade */
+  --ease-out: cubic-bezier(.2, .7, .3, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  --motion-rise: 6px;          /* the distance a panel travels on entry */
+
+  /* ── Focus — one ring, everywhere ─────────────────────────
+     Keyboard focus is a feature of a security console, not an afterthought. */
+  --focus-ring-width: 3px;
+  --focus-ring-color: rgba(79, 70, 229, .35);
+
+  /* ── Shell metrics — F1 targets ───────────────────────────
+     Declared now so the shell rebuild has a number to hit and cannot drift.
+     Current values are in brackets; nothing consumes these yet. */
+  --shell-topbar-h: 34px;      /* the header cluster; it shares the title row and costs no height of its own */
+  --shell-sidebar-w: 220px;    /* today: 236px */
+  --shell-rail-w: 64px;        /* today: 68px */
+  --shell-gutter: var(--space-5);
+  /* The header cluster sits on each page's title row; the row reserves this
+     much on the right so title and controls never overlap. */
+  --shell-head-reserve: 640px;
+}
+
+:root[data-theme="dark"] {
+  /* A token swap, not a second design. Roles keep their meaning; only the
+     values move. Severity hues lighten because they sit on dark paper. */
+  --ink: #f9fafb;
+  --ink-muted: #9ca3af;
+  --paper: #0b0f1a;
+  --surface: #111827;
+  --line: #1f2937;
+  /* One tone deeper than #6366f1, where white on a filled control measured 4.46:1;
+     at #5f62ef it is 4.69. Text on dark paper takes --indigo-ink. */
+  --indigo: #5f62ef;
+  --indigo-wash: rgba(99, 102, 241, .14);
+  --indigo-ink: #a5b4fc;
+  /* Same perceived step on dark paper: 6% measures 4.4 dE2000 against
+     #111827, where 5% would measure 4.0 on white. */
+  --hover-wash: color-mix(in srgb, var(--indigo) 6%, transparent);
+  --selected-wash: color-mix(in srgb, var(--indigo) 16%, transparent);
+  /* The sidebar's secondary labels take the contract's muted ink in both
+     themes; the legacy value failed AA on both grounds. */
+  --sidebar-muted: #9ca3af;
+
+  /* High is orange, not a second yellow. On dark paper amber-400 and
+     yellow-400 measure 5.1 dE2000 apart - the two middle steps of the ramp
+     were the same colour, which is worse here than in light because the
+     stacked bar is the only place they meet. Orange-500 keeps 6.3:1 on the
+     surface and puts 31 dE between medium and high. */
+  --sev-critical: #f87171;
+  --sev-high: #f97316;
+  --sev-medium: #facc15;
+  --sev-low: #4ade80;
+  --sev-protected: #a78bfa;
+
+  /* The categorical scale, lifted for dark paper. Same eight kinds, same
+     order, each measured against its own 10% wash over --surface. */
+  --cat-identity: #a5b4fc;
+  --cat-contact: #7dd3fc;
+  --cat-finance: #5eead4;
+  --cat-health: #f9a8d4;
+  --cat-secret: #c4b5fd;
+  --cat-legal: #fdba74;
+  --cat-record: #cbd5e1;
+  --cat-code: #f0abfc;
+
+  --elev-raised: 0 8px 24px rgba(0, 0, 0, .35);
+  --elev-overlay: 0 24px 48px rgba(0, 0, 0, .5);
+  --focus-ring-color: rgba(99, 102, 241, .45);
+}
+
+/* Reduced motion is part of the contract, not a patch on top of it. Everything
+   collapses to a short opacity change: state still reads as having changed,
+   nothing travels. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 80ms;
+    --motion-base: 80ms;
+    --motion-slow: 80ms;
+    --motion-rise: 0px;
+  }
+}
+
+/* ============================================================
+   Bridge — legacy variable → contract role
+
+   The product still renders from these legacy names. F3 replaces them page by
+   page; this table is the mapping to use, so the migration is mechanical
+   rather than a judgement call each time.
+
+     --text, --text-primary, --cp-text          → --ink
+     --muted, --text-secondary, --text-muted    → --ink-muted
+     --bg, --bg-base                            → --paper
+     --surface, --card, --bg-elevated, --cp-bg  → --surface
+     --line, --border-default, --cp-border      → --line
+     --accent, --accent-primary, --cp-accent    → --indigo
+     --accent-soft, --filter-count-surface      → --indigo-wash
+     --accent-strong                            → --indigo (hover: colour-mix)
+     --critical / --status-critical             → --sev-critical
+     --high / --status-high                     → --sev-high
+     --medium / --status-medium                 → --sev-medium   (blue → amber)
+     --low / --status-low                       → --sev-low
+     --filter-protected / --status-safe         → --sev-protected
+     --radius-sm / --radius-xs                  → --radius-control
+     --radius-md / --radius-lg                  → --radius-card
+     --shadow, --shadow-soft                    → --elev-raised
+     --sidebar-width                            → --shell-sidebar-w
+     --collapsed-sidebar-width                  → --shell-rail-w
+
+   Retired in F0 because every declaration was already overridden later in the
+   cascade and had no effect: the original teal --accent block, its dark twin,
+   and three further duplicate blocks (78 declarations in total).
+   ============================================================ */

@@ -1,0 +1,750 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings | SENTRO</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1" />
+    <script src="/static/auth-boot.js?v=1"></script>
+    <link rel="stylesheet" href="/static/fonts/fonts.css?v=1" />
+    <link rel="stylesheet" href="/static/styles/tokens.css?v=1" />
+    <link rel="stylesheet" href="/static/styles.css?v=249" />
+    <link rel="stylesheet" href="/static/styles/shell.css?v=1" />
+  </head>
+  <body class="profile-page settings-page">
+    <svg xmlns="http://www.w3.org/2000/svg" class="svg-defs" aria-hidden="true">
+      <defs>
+        <symbol id="st-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M5 21c0-3.5 3-6 7-6s7 2.5 7 6"/></symbol>
+        <symbol id="st-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M9.5 12l2 2 3.5-3.5"/></symbol>
+        <symbol id="st-palette" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18"/><path d="M12 12l6.4-6.4"/></symbol>
+        <symbol id="st-sliders" viewBox="0 0 24 24"><path d="M4 8h10M18 8h2M4 16h4M12 16h8"/><circle cx="16" cy="8" r="2"/><circle cx="10" cy="16" r="2"/></symbol>
+        <symbol id="st-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></symbol>
+        <symbol id="st-back" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+        <symbol id="st-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></symbol>
+      </defs>
+    </svg>
+
+    <div class="settings-shell">
+      <aside class="settings-rail" aria-label="Settings navigation">
+        <div class="settings-rail-head">
+          <a class="settings-back" href="/dashboard">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-back"/></svg>
+            <span class="s-label">Back to console</span>
+          </a>
+          <button type="button" id="settings-rail-toggle" class="settings-rail-burger" aria-label="Collapse navigation" title="Collapse navigation">
+            <svg class="s-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+        </div>
+
+                <nav class="settings-nav">
+          <button type="button" class="settings-nav-item active" data-section="profile">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-user"/></svg><span class="s-label">Profile</span>
+          </button>
+          <button type="button" class="settings-nav-item" data-section="security">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-shield"/></svg><span class="s-label">Security</span>
+          </button>
+          <button type="button" class="settings-nav-item" data-section="features">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-sliders"/></svg><span class="s-label">Features</span>
+          </button>
+          <button type="button" class="settings-nav-item" data-section="session">
+            <svg class="s-ico" aria-hidden="true"><use href="#st-clock"/></svg><span class="s-label">Session</span>
+          </button>
+        </nav>
+
+        <div class="settings-identity">
+          <div id="settings-avatar" class="profile-avatar settings-identity-avatar">U</div>
+          <div class="settings-identity-copy">
+            <strong id="settings-identity-name">Account</strong>
+            <span class="settings-identity-sub"><span id="settings-identity-role">viewer</span><i aria-hidden="true"></i><span id="settings-identity-tenant">default</span></span>
+          </div>
+        </div>
+      </aside>
+
+      <main class="settings-main">
+        <header class="settings-head">
+          <div>
+            <p class="eyebrow">SENTRO account</p>
+            <h1 id="settings-title">Settings</h1>
+          </div>
+          <div class="settings-head-actions">
+            <span id="settings-protection-badge" class="settings-badge" hidden>Protected account</span>
+            <button type="button" id="settings-theme-toggle" class="theme-toggle tb-icon-btn" aria-label="Switch theme" title="Switch theme">
+              <span class="theme-icon" aria-hidden="true">&#9790;</span>
+            </button>
+          </div>
+        </header>
+
+        <!-- ── Profile ─────────────────────────────────────────── -->
+        <section class="settings-section active" data-panel="profile" aria-label="Profile">
+          <article class="settings-card settings-avatar-card">
+            <div class="settings-card-copy">
+              <h2>Profile photo</h2>
+              <p>Shown in the console sidebar and account menus. Stored with your account, so it follows you to any browser.</p>
+            </div>
+            <div class="settings-avatar-row">
+              <div id="profile-avatar-preview" class="profile-avatar settings-avatar-preview">U</div>
+              <div class="settings-avatar-actions">
+                <input id="avatar-file-input" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" />
+                <button type="button" id="choose-avatar-btn">Choose image</button>
+                <button type="button" id="remove-avatar-btn" class="secondary-btn">Remove photo</button>
+                <p id="avatar-help" class="settings-hint">PNG, JPG, or WebP up to 2 MB. Minimum 160&times;160 px.</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Name</h2>
+              <p>The display name shown across the console and in user management.</p>
+            </div>
+            <form id="profile-form" class="settings-form-row">
+              <label class="settings-field">
+                Full name
+                <input id="profile-full-name" name="full_name" autocomplete="name" placeholder="Your name" />
+              </label>
+              <button type="submit" id="save-profile-btn">Save name</button>
+            </form>
+            <p id="profile-status" class="settings-hint" role="status">&nbsp;</p>
+          </article>
+
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Account</h2>
+              <p>Identity is managed by your administrator.</p>
+            </div>
+            <div class="settings-kv">
+              <div><span>Username</span><strong id="profile-username">-</strong></div>
+              <div><span>Role</span><strong id="profile-role-label">-</strong></div>
+              <div><span>Tenant</span><strong id="profile-tenant-label" class="mono">-</strong></div>
+            </div>
+          </article>
+        </section>
+
+        <!-- ── Security ────────────────────────────────────────── -->
+        <section class="settings-section" data-panel="security" aria-label="Security">
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Password</h2>
+              <p>Change your local account password. This signs you out everywhere, this browser included.</p>
+            </div>
+            <form id="password-form" class="settings-form-grid">
+              <label class="settings-field">
+                Current password
+                <input id="current-password" name="current_password" type="password" autocomplete="current-password" />
+              </label>
+              <label class="settings-field">
+                New password
+                <input id="new-password" name="new_password" type="password" autocomplete="new-password" />
+              </label>
+              <label class="settings-field">
+                Confirm new password
+                <input id="confirm-password" name="confirm_password" type="password" autocomplete="new-password" />
+              </label>
+              <div class="settings-form-foot">
+                <span class="settings-hint">At least 12 characters with letters and digits; not a common or breached password, and not your username.</span>
+                <button type="submit" id="save-password-btn">Change password</button>
+              </div>
+            </form>
+            <p id="password-status" class="settings-hint" role="status">&nbsp;</p>
+          </article>
+
+          <!-- C2: sign-in with the workspace's directory. The service account's password
+               is kept in the vault and never sent back: the field stays empty, and a
+               saved password is shown only as configured. -->
+          <article class="settings-card" id="directory-card" hidden>
+            <div class="settings-card-copy">
+              <h2>Directory sign-in</h2>
+              <p>Let people in this workspace sign in with their Active Directory or LDAP account. Their groups decide their role, and a removed group takes effect within minutes.</p>
+            </div>
+            <div class="settings-feature-row">
+              <div class="settings-feature-copy">
+                <strong>Sign in with the directory</strong>
+                <span id="directory-state" class="siem-state" data-state="loading"><span class="siem-dot" aria-hidden="true"></span><span id="directory-state-text">Checking&hellip;</span></span>
+              </div>
+              <label class="settings-switch" for="directory-toggle">
+                <input type="checkbox" id="directory-toggle" disabled aria-controls="directory-panel" aria-expanded="false" aria-label="Sign in with the directory" />
+                <span class="settings-switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div id="directory-panel" class="siem-panel" hidden>
+              <form id="directory-form" class="settings-form-grid" novalidate>
+                <label class="settings-field">
+                  Directory host
+                  <input id="directory-host" name="host" autocomplete="off" spellcheck="false" placeholder="dc01.corp.local" />
+                </label>
+                <label class="settings-field">
+                  Connection
+                  <select id="directory-security" name="security">
+                    <option value="ldaps">LDAPS</option>
+                    <option value="starttls">StartTLS</option>
+                  </select>
+                </label>
+                <label class="settings-field">
+                  Port
+                  <input id="directory-port" name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="636" />
+                </label>
+                <label class="settings-field">
+                  Certificate verification
+                  <select id="directory-trust" name="trust">
+                    <option value="system">System trust store</option>
+                    <option value="custom">Private CA</option>
+                  </select>
+                </label>
+                <div class="settings-field siem-ca-field" id="directory-ca-field" hidden>
+                  <span>CA certificate</span>
+                  <div class="siem-ca-row">
+                    <span id="directory-ca-summary" class="siem-ca-summary">No certificate uploaded</span>
+                    <input type="file" id="directory-ca-file" accept=".pem,.crt,.cer" hidden />
+                    <button type="button" class="secondary-btn" id="directory-ca-choose">Upload certificate</button>
+                  </div>
+                </div>
+                <label class="settings-field directory-wide">
+                  User search base
+                  <input id="directory-base-dn" name="base_dn" autocomplete="off" spellcheck="false" placeholder="OU=Staff,DC=corp,DC=local" />
+                </label>
+                <label class="settings-field directory-wide">
+                  Service account
+                  <input id="directory-bind-dn" name="bind_dn" autocomplete="off" spellcheck="false" placeholder="CN=svc-sentro,OU=Service,DC=corp,DC=local" />
+                </label>
+                <div class="settings-field">
+                  <label for="directory-bind-password">Service account password</label>
+                  <input id="directory-bind-password" name="bind_password" type="password" autocomplete="new-password" spellcheck="false" />
+                  <span class="settings-hint directory-secret-note" id="directory-secret-note">Not set.</span>
+                </div>
+                <label class="settings-field">
+                  Find people by
+                  <select id="directory-user-attribute" name="user_attribute">
+                    <option value="sAMAccountName">sAMAccountName</option>
+                    <option value="userPrincipalName">userPrincipalName</option>
+                    <option value="uid">uid</option>
+                    <option value="mail">mail</option>
+                  </select>
+                </label>
+                <label class="settings-field">
+                  Read groups from
+                  <select id="directory-group-search" name="group_search">
+                    <option value="memberof">memberOf</option>
+                    <option value="ad_nested">Nested groups (Active Directory)</option>
+                  </select>
+                </label>
+                <label class="settings-field directory-wide" id="directory-group-base-field" hidden>
+                  Group search base
+                  <input id="directory-group-base-dn" name="group_base_dn" autocomplete="off" spellcheck="false" placeholder="OU=Groups,DC=corp,DC=local" />
+                </label>
+                <div class="settings-field directory-wide">
+                  <span>Groups and roles</span>
+                  <span class="settings-hint directory-map-note">A person gets the role of the first group on this list that they belong to. Anyone in none of them cannot sign in.</span>
+                  <ol id="directory-mappings" class="directory-mappings"></ol>
+                  <div><button type="button" class="secondary-btn" id="directory-add-mapping">Add group</button></div>
+                </div>
+                <div class="settings-form-foot">
+                  <span class="siem-actions directory-test">
+                    <input id="directory-test-login" class="directory-test-login" autocomplete="off" spellcheck="false" placeholder="Optional: a person's sign-in name" aria-label="Sign-in name to test" />
+                    <button type="button" class="secondary-btn" id="directory-test-btn">Test connection</button>
+                  </span>
+                  <button type="submit" id="directory-save-btn">Save</button>
+                </div>
+              </form>
+              <div class="settings-kv siem-facts">
+                <div><span>Directory</span><strong id="directory-fact-host" class="mono">&ndash;</strong></div>
+                <div><span>Certificate</span><strong id="directory-fact-ca" class="mono">&ndash;</strong></div>
+                <div><span>Last changed</span><strong id="directory-fact-changed">&ndash;</strong></div>
+              </div>
+            </div>
+            <div class="siem-remove-row" id="directory-remove-row" hidden>
+              <span class="settings-hint">Removing deletes these settings and the service account's password. Directory accounts can no longer sign in; local accounts are not affected.</span>
+              <button type="button" class="settings-danger-btn" id="directory-remove-btn">Remove configuration</button>
+            </div>
+            <p id="directory-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
+          </article>
+          <!-- C12: the workspace's saved scan credentials. Accounts and dates only: a
+               password is typed to replace one and never shown or sent back. -->
+          <article class="settings-card" id="credentials-card" hidden>
+            <div class="settings-card-copy">
+              <h2>Saved scan credentials</h2>
+              <p>Accounts the scans sign in with. Change each password regularly (every <span id="credentials-rotation-days">90</span> days is the recommendation), and scan with an account that can read, not administer.</p>
+            </div>
+            <div class="credentials-table-wrap">
+              <table class="credentials-table">
+                <thead>
+                  <tr><th scope="col">Account</th><th scope="col">Saved</th><th scope="col">Last used</th><th scope="col">Password changed</th><th scope="col">Privilege</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+                </thead>
+                <tbody id="credentials-body"><tr><td colspan="6" class="settings-hint">Loading&hellip;</td></tr></tbody>
+              </table>
+            </div>
+            <form id="credential-replace-form" class="settings-form-grid credential-replace" hidden>
+              <p class="settings-hint credential-replace-lead" id="credential-replace-lead"></p>
+              <label class="settings-field">
+                User name
+                <input id="credential-replace-user" name="username" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="settings-field">
+                Domain
+                <input id="credential-replace-domain" name="domain" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="settings-field">
+                New password
+                <input id="credential-replace-password" name="password" type="password" autocomplete="new-password" />
+              </label>
+              <div class="settings-form-foot">
+                <button type="button" class="secondary-btn" id="credential-replace-cancel">Cancel</button>
+                <button type="submit" id="credential-replace-save">Save new password</button>
+              </div>
+            </form>
+            <p id="credentials-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
+          </article>
+        </section>
+
+        
+
+        <!-- ── Features ────────────────────────────────────────── -->
+        <section class="settings-section" data-panel="features" aria-label="Features">
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>Install features</h2>
+              <p>Optional capabilities of this SENTRO install. Changes apply from the next scan &mdash; no restart needed.</p>
+            </div>
+            <div class="settings-feature-row" id="feature-ocr-row">
+              <div class="settings-feature-copy">
+                <strong>Image OCR</strong>
+                <span id="feature-ocr-desc">Extract text from images and scanned documents during scans.</span>
+                <span id="feature-ocr-state" class="settings-hint">Checking&hellip;</span>
+              </div>
+              <label class="settings-switch" for="feature-ocr-toggle">
+                <input type="checkbox" id="feature-ocr-toggle" disabled />
+                <span class="settings-switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+            <p id="features-status" class="settings-hint" role="status">&nbsp;</p>
+
+            <!-- C4: the audit trail forwarded to the customer's SIEM. The engine (queue,
+                 retries, TLS, delivery) is the server's; this is its configuration. -->
+            <div class="settings-feature-row siem-row" id="feature-siem-row">
+              <div class="settings-feature-copy">
+                <strong>SIEM Integration</strong>
+                <span>Forward every audit event to your SIEM as syslog, with its place in the tamper-evident audit chain.</span>
+                <span id="siem-state" class="siem-state" data-state="loading"><span class="siem-dot" aria-hidden="true"></span><span id="siem-state-text">Checking&hellip;</span></span>
+              </div>
+              <label class="settings-switch" for="feature-siem-toggle">
+                <input type="checkbox" id="feature-siem-toggle" disabled aria-controls="siem-panel" aria-expanded="false" aria-label="SIEM Integration" />
+                <span class="settings-switch-track" aria-hidden="true"></span>
+              </label>
+            </div>
+            <div id="siem-panel" class="siem-panel" hidden>
+              <form id="siem-form" class="settings-form-grid" novalidate>
+                <label class="settings-field">
+                  Receiver host or IP address
+                  <input id="siem-host" name="host" autocomplete="off" spellcheck="false" placeholder="siem.corp.local" />
+                </label>
+                <label class="settings-field">
+                  Port
+                  <input id="siem-port" name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="6514" />
+                </label>
+                <label class="settings-field">
+                  Transport
+                  <select id="siem-transport" name="transport">
+                    <option value="tls">TLS (encrypted)</option>
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                </label>
+                <label class="settings-field">
+                  Syslog format
+                  <select id="siem-format" name="format">
+                    <option value="cef">CEF</option>
+                    <option value="json">JSON</option>
+                  </select>
+                </label>
+                <label class="settings-field siem-tls-only">
+                  Certificate verification
+                  <select id="siem-trust" name="trust">
+                    <option value="system">System trust store</option>
+                    <option value="custom">Private CA</option>
+                  </select>
+                </label>
+                <div class="settings-field siem-tls-only siem-ca-field" id="siem-ca-field">
+                  <span>CA certificate</span>
+                  <div class="siem-ca-row">
+                    <span id="siem-ca-summary" class="siem-ca-summary">No certificate uploaded</span>
+                    <input type="file" id="siem-ca-file" accept=".pem,.crt,.cer" hidden />
+                    <button type="button" class="secondary-btn" id="siem-ca-choose">Upload certificate</button>
+                    <button type="button" class="secondary-btn" id="siem-ca-remove" hidden>Remove certificate</button>
+                  </div>
+                </div>
+                <p class="settings-hint siem-note" id="siem-transport-note"></p>
+                <div class="settings-form-foot">
+                  <span class="siem-actions">
+                    <button type="button" class="secondary-btn" id="siem-test-btn">Test connection</button>
+                    <button type="button" class="secondary-btn" id="siem-retry-btn" hidden>Retry now</button>
+                  </span>
+                  <button type="submit" id="siem-save-btn">Save</button>
+                </div>
+              </form>
+              <div class="settings-kv siem-facts" id="siem-facts">
+                <div><span>Receiver</span><strong id="siem-fact-receiver" class="mono">&ndash;</strong></div>
+                <div><span>Last delivery</span><strong id="siem-fact-delivery">&ndash;</strong></div>
+                <div><span>Queued events</span><strong id="siem-fact-queue">&ndash;</strong></div>
+                <div><span>Certificate</span><strong id="siem-fact-ca" class="mono">&ndash;</strong></div>
+                <div id="siem-fact-error-row" hidden><span>Last error</span><strong id="siem-fact-error"></strong></div>
+              </div>
+            </div>
+            <div class="siem-remove-row" id="siem-remove-row" hidden>
+              <span class="settings-hint" id="siem-remove-note">Removing deletes the receiver and its certificate. Events already queued stay queued.</span>
+              <button type="button" class="settings-danger-btn" id="siem-remove-btn">Remove configuration</button>
+            </div>
+            <p id="siem-status" class="settings-hint" role="status" aria-live="polite">&nbsp;</p>
+
+            <!-- D10: the offline licence. A file the publisher signed; the server verifies it and
+                 keeps the installed one if the new one is refused. -->
+            <div class="settings-feature-row siem-row" id="feature-licence-row" hidden>
+              <div class="settings-feature-copy">
+                <strong>Licence</strong>
+                <span>A licence file from the publisher. Nothing is fetched; it is checked here, against the publisher key this install trusts.</span>
+                <span id="licence-state" class="siem-state" data-state="loading"><span class="siem-dot" aria-hidden="true"></span><span id="licence-state-text">Checking&hellip;</span></span>
+              </div>
+              <span class="siem-actions">
+                <input type="file" id="licence-file" accept=".licence,.lic,.json" hidden />
+                <button type="button" class="secondary-btn" id="licence-install-btn">Install licence file</button>
+              </span>
+            </div>
+            <p id="licence-status" class="settings-hint" role="status" aria-live="polite" hidden>&nbsp;</p>
+          </article>
+          <!-- D3: where this workspace's alerts and tickets go. Delivery - the queue, retries,
+               signatures, TLS - is the server's; this is its configuration. A secret is typed
+               to set or replace it and is never shown or sent back. -->
+          <article class="settings-card" id="integrations-card" hidden>
+            <div class="settings-card-copy">
+              <h2>Alerts &amp; tickets</h2>
+              <p>Where this workspace&rsquo;s alerts are sent, and the ticket system findings can be sent to. A delivery that fails is retried until it is accepted.</p>
+            </div>
+            <div class="integration" data-channel="webhook">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>Webhook</strong>
+                  <span>POST each alert as JSON to an HTTPS endpoint, signed with a secret only it and Sentro hold.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="Webhook" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field directory-wide">
+                    Endpoint address (https://)
+                    <input name="url" autocomplete="off" spellcheck="false" placeholder="hooks.corp.local/sentro" />
+                  </label>
+                  <label class="settings-field">
+                    Send alerts from
+                    <select name="min_severity">
+                      <option value="CRITICAL">Critical</option>
+                      <option value="HIGH">High and above</option>
+                      <option value="MEDIUM">Medium and above</option>
+                      <option value="LOW">Every alert</option>
+                    </select>
+                  </label>
+                  <div class="settings-field directory-wide">
+                    <span>Signing secret</span>
+                    <span class="settings-hint" data-role="signing-note">Made when you save. Every delivery is signed with it (X-Sentro-Signature).</span>
+                    <div class="siem-ca-row" data-role="shown-secret" hidden>
+                      <input class="mono" readonly data-role="shown-secret-value" aria-label="Signing secret" />
+                      <button type="button" class="secondary-btn" data-action="copy">Copy</button>
+                    </div>
+                    <div><button type="button" class="secondary-btn" data-action="rotate" hidden>Make a new secret</button></div>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the endpoint and its signing secret. Alerts waiting for it are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+            <div class="integration" data-channel="email">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>E-mail</strong>
+                  <span>Mail each alert through your relay. The message says what was found and where, never a value.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="E-mail" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field">
+                    Mail relay
+                    <input name="host" autocomplete="off" spellcheck="false" placeholder="smtp.corp.local" />
+                  </label>
+                  <label class="settings-field">
+                    Connection
+                    <select name="security">
+                      <option value="starttls">STARTTLS</option>
+                      <option value="tls">TLS</option>
+                      <option value="none">None (no password)</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    Port
+                    <input name="port" type="number" min="1" max="65535" inputmode="numeric" placeholder="587" />
+                  </label>
+                  <label class="settings-field">
+                    Send alerts from
+                    <select name="min_severity">
+                      <option value="CRITICAL">Critical</option>
+                      <option value="HIGH">High and above</option>
+                      <option value="MEDIUM">Medium and above</option>
+                      <option value="LOW">Every alert</option>
+                    </select>
+                  </label>
+                  <label class="settings-field">
+                    From
+                    <input name="sender" autocomplete="off" spellcheck="false" placeholder="sentro@corp.local" />
+                  </label>
+                  <label class="settings-field">
+                    To (comma-separated)
+                    <input name="recipients" autocomplete="off" spellcheck="false" placeholder="soc@corp.local" />
+                  </label>
+                  <label class="settings-field">
+                    User name (optional)
+                    <input name="username" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="settings-field">
+                    <label>Password<input name="password" type="password" autocomplete="new-password" spellcheck="false" data-secret /></label>
+                    <span class="settings-hint" data-role="secret-note">Not set.</span>
+                    <button type="button" class="secondary-btn" data-action="remove-secret" hidden>Remove saved password</button>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the relay settings and its password. Alerts waiting for it are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+            <div class="integration" data-channel="jira">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>Jira</strong>
+                  <span>Send a finding to Jira as an issue; closing the issue resolves the finding here.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="Jira" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field directory-wide">
+                    Jira address (https://)
+                    <input name="base_url" autocomplete="off" spellcheck="false" placeholder="corp.atlassian.net" />
+                  </label>
+                  <label class="settings-field">
+                    Project key
+                    <input name="project_key" autocomplete="off" spellcheck="false" placeholder="SEC" />
+                  </label>
+                  <label class="settings-field">
+                    Issue type
+                    <input name="issue_type" autocomplete="off" spellcheck="false" placeholder="Task" />
+                  </label>
+                  <label class="settings-field">
+                    Account e-mail (empty for a Data Center token)
+                    <input name="username" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="settings-field">
+                    <label>API token<input name="token" type="password" autocomplete="new-password" spellcheck="false" data-secret /></label>
+                    <span class="settings-hint" data-role="secret-note">Not set.</span>
+                    <button type="button" class="secondary-btn" data-action="remove-secret" hidden>Remove saved api token</button>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the Jira settings and its token. Tickets not yet created are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+            <div class="integration" data-channel="servicenow">
+              <div class="settings-feature-row siem-row">
+                <div class="settings-feature-copy">
+                  <strong>ServiceNow</strong>
+                  <span>Send a finding to ServiceNow as an incident; resolving it resolves the finding here.</span>
+                  <span class="siem-state" data-state="loading" data-role="state"><span class="siem-dot" aria-hidden="true"></span><span data-role="state-text">Checking&hellip;</span></span>
+                </div>
+                <label class="settings-switch">
+                  <input type="checkbox" data-role="toggle" disabled aria-expanded="false" aria-label="ServiceNow" />
+                  <span class="settings-switch-track" aria-hidden="true"></span>
+                </label>
+              </div>
+              <div class="siem-panel" data-role="panel" hidden>
+                <form class="settings-form-grid" data-role="form" novalidate>
+                  <label class="settings-field directory-wide">
+                    ServiceNow instance (https://)
+                    <input name="instance_url" autocomplete="off" spellcheck="false" placeholder="corp.service-now.com" />
+                  </label>
+                  <label class="settings-field">
+                    User name
+                    <input name="username" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="settings-field">
+                    Assignment group (optional)
+                    <input name="assignment_group" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <div class="settings-field">
+                    <label>Password<input name="password" type="password" autocomplete="new-password" spellcheck="false" data-secret /></label>
+                    <span class="settings-hint" data-role="secret-note">Not set.</span>
+                    <button type="button" class="secondary-btn" data-action="remove-secret" hidden>Remove saved password</button>
+                  </div>
+                  <div class="settings-field directory-wide siem-ca-field">
+                    <span>Private CA (optional)</span>
+                    <div class="siem-ca-row">
+                      <span class="siem-ca-summary" data-role="ca-summary">System trust store</span>
+                      <input type="file" accept=".pem,.crt,.cer" hidden data-role="ca-file" />
+                      <button type="button" class="secondary-btn" data-action="ca-choose">Upload certificate</button>
+                      <button type="button" class="secondary-btn" data-action="ca-remove" hidden>Remove certificate</button>
+                    </div>
+                  </div>
+                  <div class="settings-form-foot">
+                    <span class="siem-actions">
+                      <button type="button" class="secondary-btn" data-action="test">Test connection</button>
+                      <button type="button" class="secondary-btn" data-action="retry" hidden>Retry now</button>
+                    </span>
+                    <button type="submit" data-action="save">Save</button>
+                  </div>
+                </form>
+                <div class="settings-kv siem-facts">
+                  <div><span>Last delivery</span><strong data-fact="delivery">&ndash;</strong></div>
+                  <div><span>Waiting</span><strong data-fact="queue">&ndash;</strong></div>
+                  <div><span>Certificate</span><strong data-fact="ca" class="mono">&ndash;</strong></div>
+                  <div data-fact="error-row" hidden><span>Last error</span><strong data-fact="error"></strong></div>
+                </div>
+              </div>
+              <div class="siem-remove-row" data-role="remove-row" hidden>
+                <span class="settings-hint">Removing deletes the ServiceNow settings and its password. Tickets not yet created are cancelled.</span>
+                <button type="button" class="settings-danger-btn" data-action="remove">Remove configuration</button>
+              </div>
+              <p class="settings-hint" data-role="status" role="status" aria-live="polite">&nbsp;</p>
+            </div>
+          </article>
+        </section>
+
+        <!-- ── Session ─────────────────────────────────────────── -->
+        <section class="settings-section" data-panel="session" aria-label="Session">
+          <article class="settings-card">
+            <div class="settings-card-copy">
+              <h2>This session</h2>
+              <p>Signing out ends this browser&rsquo;s session, including the renewal that keeps it signed in.</p>
+            </div>
+            <div class="settings-kv">
+              <div><span>Signed in as</span><strong id="session-user">-</strong></div>
+              <div><span>Role</span><strong id="session-role">-</strong></div>
+              <div><span>Tenant</span><strong id="session-tenant" class="mono">-</strong></div>
+              <div><span>Access token valid until</span><strong id="session-expires">-</strong></div>
+            </div>
+            <div class="settings-form-foot">
+              <span></span>
+              <button type="button" id="profile-logout-btn" class="settings-danger-btn">
+                <svg class="s-ico" aria-hidden="true"><use href="#st-logout"/></svg>Sign out
+              </button>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div id="avatar-crop-modal" class="avatar-crop-modal hidden" role="dialog" aria-modal="true" aria-labelledby="avatar-crop-title">
+      <div class="avatar-crop-panel">
+        <div class="avatar-crop-header">
+          <div>
+            <p class="eyebrow">Profile photo</p>
+            <h2 id="avatar-crop-title">Crop avatar</h2>
+          </div>
+          <button type="button" id="avatar-crop-close" class="secondary-btn">Close</button>
+        </div>
+        <div class="avatar-crop-stage-wrap">
+          <canvas id="avatar-crop-canvas" width="320" height="320" aria-label="Avatar crop preview"></canvas>
+        </div>
+        <label class="avatar-zoom-control">
+          Zoom
+          <input id="avatar-zoom" type="range" min="1" max="3" step="0.01" value="1" />
+        </label>
+        <div class="avatar-crop-actions">
+          <button type="button" id="avatar-apply-btn">Apply photo</button>
+          <button type="button" id="avatar-crop-cancel" class="secondary-btn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/profile.js?v=106"></script>
+  </body>
+</html>

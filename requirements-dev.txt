@@ -1,0 +1,19 @@
+# Development and test dependencies.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Production installs must use requirements.txt alone so that no test framework
+# is shipped in the runtime image.
+
+-r requirements.txt
+# The connector tests (encrypted SMB3, SFTP) import smbprotocol and paramiko directly.
+-r requirements-connectors.txt
+
+# Test runner. The suite itself is written against the stdlib `unittest`
+# module, so it also runs via `python -m unittest discover tests`. pytest is
+# used as the runner because it gives clearer output and is what CI invokes.
+pytest==9.1.1
+
+# PostgreSQL certification (Phase 6 CI job + local opt-in PG runs).
+psycopg[binary]==3.3.4
+psycopg-pool==3.3.1

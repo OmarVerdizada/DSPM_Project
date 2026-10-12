@@ -1,0 +1,25 @@
+# Sentro behind Caddy 2 on the same host (C5). See README.md in this folder.
+#
+# The backend listens on loopback only:
+#   python main.py serve --host 127.0.0.1 --port 8000
+# with DSPM_TRUSTED_HOSTS=sentro.corp.example and DSPM_TRUSTED_PROXIES=127.0.0.1.
+#
+# Caddy's defaults already follow the proxy rules in README.md: it passes the Host header
+# through, sets X-Forwarded-For to the client it saw and X-Forwarded-Proto to https, and
+# does not pass on a client's own X-Forwarded-* headers (no trusted_proxies is set here).
+
+sentro.corp.example {
+	# A certificate from your internal CA. Remove this line to have Caddy obtain one
+	# publicly, if the name is public.
+	tls C:/Sentro/tls/sentro.crt C:/Sentro/tls/sentro.key
+
+	# Matches the backend's own DSPM_MAX_BODY_BYTES (25 MB by default).
+	request_body {
+		max_size 25MB
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		# Inventory exports stream; send each chunk as it comes.
+		flush_interval -1
+	}
+}

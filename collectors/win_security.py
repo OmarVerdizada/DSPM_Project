@@ -1,0 +1,424 @@
+"""In-process Windows security-descriptor reads.
+
+Owner/ACL resolution used to spawn one ``powershell.exe`` per file. Measured on
+this codebase that was **91% of total scan time**: 143 s of a 157 s local scan
+(362 files), and roughly 11 of the 13 minutes of a 421-file SMB scan, while all
+content classification together cost 0.9 s. Win32 exposes the same data in
+microseconds, and ``GetNamedSecurityInfoW`` accepts UNC paths, so one
+implementation serves both the local and the SMB collector.
+
+The output is deliberately identical to what the PowerShell path produced -
+owner as ``DOMAIN\\Account``, the ``.Access`` principal list, and .NET
+``FileSystemRights`` names - so reports, evidence, and baselines do not shift.
+
+Everything degrades to "no answer" (empty string / empty dict) rather than
+raising: a security descriptor we cannot read must never fail a scan.
+"""
+
+from __future__ import annotations
+
+import os
+import platform
+import threading
+from typing import Any
+
+IS_WINDOWS = platform.system().lower() == "windows"
+
+# Win32 constants
+_SE_FILE_OBJECT = 1
+_OWNER_SECURITY_INFORMATION = 0x00000001
+_DACL_SECURITY_INFORMATION = 0x00000004
+_ERROR_SUCCESS = 0
+_ACCESS_ALLOWED_ACE_TYPE = 0
+_ACCESS_DENIED_ACE_TYPE = 1
+_INHERITED_ACE = 0x10
+_INHERIT_ONLY_ACE = 0x08
+_SE_DACL_PROTECTED = 0x1000
+_FILE_ALL_ACCESS = 0x1F01FF
+_EVERYONE_SID = "S-1-1-0"
+# Why a descriptor could not be read, by Win32 error (winerror.h).
+_READ_ERRORS = {2: "not_found", 3: "not_found", 5: "access_denied", 32: "sharing_violation", 53: "unreachable",
+                67: "unreachable", 64: "unreachable", 1326: "logon_failure", 1219: "credential_conflict"}
+
+# .NET System.Security.AccessControl.FileSystemRights, ascending by value.
+# Enum.ToString() for a [Flags] enum walks these largest-first, subtracting and
+# prepending, so the rendered string matches Get-Acl exactly.
+_FILE_SYSTEM_RIGHTS: tuple[tuple[int, str], ...] = (
+    (1, "ReadData"),
+    (2, "CreateFiles"),
+    (4, "AppendData"),
+    (8, "ReadExtendedAttributes"),
+    (16, "WriteExtendedAttributes"),
+    (32, "ExecuteFile"),
+    (64, "DeleteSubdirectoriesAndFiles"),
+    (128, "ReadAttributes"),
+    (256, "WriteAttributes"),
+    (278, "Write"),
+    (65536, "Delete"),
+    (131072, "ReadPermissions"),
+    (131209, "Read"),
+    (131241, "ReadAndExecute"),
+    (197055, "Modify"),
+    (262144, "ChangePermissions"),
+    (524288, "TakeOwnership"),
+    (1048576, "Synchronize"),
+    (2032127, "FullControl"),
+)
+
+_sid_name_cache: dict[str, str] = {}
+# SID -> its principal type (permissions.acl_analyzer.SID_NAME_USE_TYPES), from the same
+# LookupAccountSidW call that named it: the type costs nothing extra.
+_sid_type_cache: dict[str, str] = {}
+_sid_name_lock = threading.Lock()
+
+_advapi32: Any = None
+_kernel32: Any = None
+_ctypes: Any = None
+_wintypes: Any = None
+_init_lock = threading.Lock()
+_init_done = False
+_available = False
+
+
+def _init() -> bool:
+    """Bind the Win32 entry points once. Returns False on any non-Windows or
+    unexpected environment, which makes every public helper a graceful no-op."""
+    global _init_done, _available, _advapi32, _kernel32, _ctypes, _wintypes
+    if _init_done:
+        return _available
+    with _init_lock:
+        if _init_done:
+            return _available
+        _init_done = True
+        if not IS_WINDOWS:
+            _available = False
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+            advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+            advapi32.GetNamedSecurityInfoW.argtypes = [
+                wintypes.LPCWSTR,       # pObjectName
+                ctypes.c_int,           # ObjectType
+                wintypes.DWORD,         # SecurityInfo
+                ctypes.POINTER(ctypes.c_void_p),  # ppsidOwner
+                ctypes.POINTER(ctypes.c_void_p),  # ppsidGroup
+                ctypes.POINTER(ctypes.c_void_p),  # ppDacl
+                ctypes.POINTER(ctypes.c_void_p),  # ppSacl
+                ctypes.POINTER(ctypes.c_void_p),  # ppSecurityDescriptor
+            ]
+
+            advapi32.LookupAccountSidW.restype = wintypes.BOOL
+            advapi32.LookupAccountSidW.argtypes = [
+                wintypes.LPCWSTR, ctypes.c_void_p,
+                wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+                wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+                ctypes.POINTER(ctypes.c_int),
+            ]
+
+            advapi32.ConvertSidToStringSidW.restype = wintypes.BOOL
+            advapi32.ConvertSidToStringSidW.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)
+            ]
+
+            advapi32.GetAclInformation.restype = wintypes.BOOL
+            advapi32.GetAclInformation.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int
+            ]
+
+            advapi32.GetAce.restype = wintypes.BOOL
+            advapi32.GetAce.argtypes = [
+                ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)
+            ]
+
+            advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+            advapi32.GetSecurityDescriptorControl.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD)
+            ]
+
+            kernel32.LocalFree.restype = ctypes.c_void_p
+            kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+
+            _ctypes = ctypes
+            _wintypes = wintypes
+            _advapi32 = advapi32
+            _kernel32 = kernel32
+            _available = True
+        except Exception:
+            _available = False
+        return _available
+
+
+def available() -> bool:
+    """True when in-process security reads can be used on this host."""
+    return _init()
+
+
+def _sid_to_string(sid_ptr: Any) -> str:
+    ctypes, wintypes = _ctypes, _wintypes
+    buffer = wintypes.LPWSTR()
+    if not _advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(buffer)):
+        return ""
+    try:
+        return str(buffer.value or "")
+    finally:
+        _kernel32.LocalFree(ctypes.cast(buffer, ctypes.c_void_p))
+
+
+def _lookup(system: str | None, sid_ptr: Any) -> tuple[str, str]:
+    """(``DOMAIN\\Account``, principal type) from one LookupAccountSidW on ``system``
+    (None: this machine); ("", "") when no authority there can name the SID."""
+    from permissions.acl_analyzer import SID_NAME_USE_TYPES
+
+    ctypes, wintypes = _ctypes, _wintypes
+    name_len = wintypes.DWORD(0)
+    domain_len = wintypes.DWORD(0)
+    use = ctypes.c_int(0)
+    # First call sizes the buffers (expected to fail with ERROR_INSUFFICIENT_BUFFER).
+    _advapi32.LookupAccountSidW(system, sid_ptr, None, ctypes.byref(name_len),
+                                None, ctypes.byref(domain_len), ctypes.byref(use))
+    if not name_len.value:
+        return "", ""
+    name = ctypes.create_unicode_buffer(name_len.value)
+    domain = ctypes.create_unicode_buffer(max(1, domain_len.value))
+    if not _advapi32.LookupAccountSidW(system, sid_ptr, name, ctypes.byref(name_len),
+                                       domain, ctypes.byref(domain_len), ctypes.byref(use)):
+        return "", ""
+    account = str(name.value or "")
+    domain_name = str(domain.value or "")
+    resolved = f"{domain_name}\\{account}" if domain_name and account else account
+    return resolved, SID_NAME_USE_TYPES.get(int(use.value), "unknown")
+
+
+def remote_lookup_enabled() -> bool:
+    """``DSPM_ACL_REMOTE_SID_LOOKUP`` (on): a SID this machine cannot name is asked of the
+    file server that holds the file - its own local accounts are named only there. One
+    lookup a SID a server, cached; off, such a SID is reported unresolved."""
+    return os.getenv("DSPM_ACL_REMOTE_SID_LOOKUP", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _account_for_sid(sid_ptr: Any, system: str | None = None) -> str:
+    """``DOMAIN\\Account`` for a SID, cached by SID string - and its type
+    (``_sid_type_cache``) from the same call.
+
+    The cache is the point: LookupAccountSidW round-trips to a domain
+    controller for domain SIDs, and a scan sees the same handful of principals
+    across thousands of files. A SID this machine cannot name is asked of
+    ``system`` - the file server - once.
+    """
+    sid_string = _sid_to_string(sid_ptr)
+    cache_key = sid_string
+    if sid_string:
+        with _sid_name_lock:
+            cached = _sid_name_cache.get(sid_string)
+            if cached is None and system:
+                cached = _sid_name_cache.get(f"{system.lower()}|{sid_string}")
+        if cached is not None:
+            return cached
+
+    resolved, kind = _lookup(None, sid_ptr)
+    if not resolved and system and remote_lookup_enabled():
+        resolved, kind = _lookup(system, sid_ptr)
+        cache_key = f"{system.lower()}|{sid_string}"
+    # An unresolvable SID still identifies the principal - Get-Acl renders the
+    # SID string in exactly this case, so keep that behaviour.
+    if not resolved:
+        resolved, kind = sid_string, "unresolved_sid"
+
+    if sid_string:
+        with _sid_name_lock:
+            _sid_name_cache[cache_key] = resolved
+            _sid_type_cache[cache_key] = kind
+    return resolved
+
+
+def _type_for_sid(sid_string: str, system: str | None = None) -> str:
+    with _sid_name_lock:
+        kind = _sid_type_cache.get(sid_string)
+        if kind is None and system:
+            kind = _sid_type_cache.get(f"{system.lower()}|{sid_string}")
+    return kind or ""
+
+
+def _server_of(path: str) -> str | None:
+    """The server of a UNC path (``\\\\server\\share\\...`` or ``\\\\?\\UNC\\server\\...``)."""
+    text = str(path or "")
+    if text.startswith("\\\\?\\UNC\\"):
+        text = "\\\\" + text[8:]
+    elif text.startswith("\\\\?\\") or text.startswith("\\\\.\\"):
+        return None
+    if not text.startswith("\\\\"):
+        return None
+    server = text[2:].split("\\", 1)[0].strip()
+    return server or None
+
+
+def rights_to_names(mask: int) -> str:
+    """Render an access mask the way .NET's FileSystemRights.ToString() does."""
+    remaining = int(mask) & 0xFFFFFFFF
+    if remaining == 0:
+        return "0"
+    parts: list[str] = []
+    for value, name in reversed(_FILE_SYSTEM_RIGHTS):
+        if value and (remaining & value) == value:
+            remaining -= value
+            parts.insert(0, name)
+    if remaining:
+        parts.insert(0, str(remaining))
+    return ", ".join(parts) if parts else str(mask)
+
+
+def _null_dacl() -> tuple[list[str], list[str], list[dict]]:
+    """What a NULL DACL means: no access list at all, so Windows lets everyone do
+    everything. Reported as the one entry that says so - Everyone, full control, the
+    stand-in .NET itself uses for a NULL DACL - marked as standing in for no list."""
+    rights = rights_to_names(_FILE_ALL_ACCESS)
+    entry = {"principal": "Everyone", "sid": _EVERYONE_SID, "rights": rights, "mask": _FILE_ALL_ACCESS,
+             "type": "allow", "inherited": False, "null_dacl": True}
+    return ["Everyone"], [rights], [entry]
+
+
+def _read_dacl(dacl_ptr: Any, system: str | None = None) -> tuple[list[str], list[str], list[dict]]:
+    """(principals, permissions) parallel lists, mirroring Get-Acl's .Access, and the
+    entries themselves: principal, SID, rights, access mask, allow or deny, inherited.
+
+    D7: the parallel lists cannot say whether an entry allows or denies - a Deny for
+    Everyone read exactly like an Allow, and was flagged as broad access. The entries
+    carry the type; the lists stay as they were for reports and baselines."""
+    ctypes = _ctypes
+    if not dacl_ptr:
+        # GetNamedSecurityInfoW succeeded and gave no DACL: a NULL (or absent) DACL, which
+        # grants everyone full control - not "no access", which it was reported as. An
+        # EMPTY DACL (present, no entries) is the one that grants nothing; that is below.
+        return _null_dacl()
+
+    class ACL_SIZE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("AceCount", ctypes.c_ulong),
+            ("AclBytesInUse", ctypes.c_ulong),
+            ("AclBytesFree", ctypes.c_ulong),
+        ]
+
+    info = ACL_SIZE_INFORMATION()
+    # AclSizeInformation == 2
+    if not _advapi32.GetAclInformation(dacl_ptr, ctypes.byref(info),
+                                       ctypes.sizeof(info), 2):
+        return [], [], []
+
+    principals: list[str] = []
+    permissions: list[str] = []
+    entries: list[dict] = []
+    unsupported = 0
+    for index in range(int(info.AceCount)):
+        ace_ptr = ctypes.c_void_p()
+        if not _advapi32.GetAce(dacl_ptr, index, ctypes.byref(ace_ptr)):
+            continue
+        address = ace_ptr.value
+        if not address:
+            continue
+        ace_type = ctypes.c_ubyte.from_address(address).value
+        if ace_type not in (_ACCESS_ALLOWED_ACE_TYPE, _ACCESS_DENIED_ACE_TYPE):
+            # Object and callback entries (conditional ACEs, AD object types) are not
+            # evaluated here; counted, so their presence is said rather than lost.
+            unsupported += 1
+            continue
+        ace_flags = ctypes.c_ubyte.from_address(address + 1).value
+        # ACCESS_ALLOWED_ACE: ACE_HEADER (4 bytes) + ACCESS_MASK (4) + SidStart
+        mask = ctypes.c_ulong.from_address(address + 4).value
+        sid_ptr = ctypes.c_void_p(address + 8)
+        principal = _account_for_sid(sid_ptr, system)
+        sid_string = _sid_to_string(sid_ptr)
+        rights = rights_to_names(mask)
+        principals.append(principal)
+        permissions.append(rights)
+        entry = {
+            "principal": principal,
+            "sid": sid_string,
+            "principal_type": _type_for_sid(sid_string, system),
+            "rights": rights,
+            "mask": int(mask),
+            "type": "deny" if ace_type == _ACCESS_DENIED_ACE_TYPE else "allow",
+            "inherited": bool(ace_flags & _INHERITED_ACE),
+            # The raw ACE header flags: object/container inherit, no-propagate, inherit-only.
+            "flags": int(ace_flags),
+        }
+        if ace_flags & _INHERIT_ONLY_ACE:
+            entry["inherit_only"] = True
+        entries.append(entry)
+    if unsupported and entries:
+        entries[0] = {**entries[0], "unsupported_entries": unsupported}
+    return principals, permissions, entries
+
+
+def read_security(path: str, *, with_dacl: bool = True) -> dict:
+    """Owner (and optionally the DACL) for a local or UNC path, or why it could not be read.
+
+    Read: ``{owner, owner_sid, owner_type, principals, permissions, entries, protected,
+    state: "collected"}`` - ``protected`` when the DACL does not inherit (SE_DACL_PROTECTED).
+    Not read: ``{state: "failed", error}`` (``access_denied``, ``not_found``,
+    ``unreachable``, ``win32_error_<n>``), or ``{}`` where this cannot run at all.
+    """
+    if not _init() or not path:
+        return {}
+    ctypes, wintypes = _ctypes, _wintypes
+    owner_sid = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    descriptor = ctypes.c_void_p()
+    info = _OWNER_SECURITY_INFORMATION | (_DACL_SECURITY_INFORMATION if with_dacl else 0)
+    try:
+        status = _advapi32.GetNamedSecurityInfoW(
+            str(path), _SE_FILE_OBJECT, info,
+            ctypes.byref(owner_sid), None,
+            ctypes.byref(dacl) if with_dacl else None, None,
+            ctypes.byref(descriptor),
+        )
+    except Exception as exc:
+        return {"state": "failed", "error": type(exc).__name__}
+    if status != _ERROR_SUCCESS or not descriptor.value:
+        if descriptor.value:
+            _kernel32.LocalFree(descriptor)
+        return {"state": "failed", "error": _READ_ERRORS.get(int(status), f"win32_error_{int(status)}")}
+    system = _server_of(str(path))
+    try:
+        owner_string = _sid_to_string(owner_sid) if owner_sid.value else ""
+        result: dict = {"owner": _account_for_sid(owner_sid, system) if owner_sid.value else "",
+                        "owner_sid": owner_string, "owner_type": _type_for_sid(owner_string, system),
+                        "state": "collected"}
+        if with_dacl:
+            principals, permissions, entries = _read_dacl(dacl.value, system)
+            result["principals"] = principals
+            result["permissions"] = permissions
+            result["entries"] = entries
+            control = wintypes.WORD(0)
+            revision = wintypes.DWORD(0)
+            if _advapi32.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+                result["protected"] = bool(control.value & _SE_DACL_PROTECTED)
+        return result
+    except Exception as exc:
+        return {"state": "failed", "error": type(exc).__name__}
+    finally:
+        _kernel32.LocalFree(descriptor)
+
+
+def security_for_path(path: str, *, with_dacl: bool = True) -> dict:
+    """Owner (and optionally principals/permissions) for a local or UNC path.
+
+    Returns ``{}`` when the descriptor cannot be read, so callers can fall back;
+    ``read_security`` says why.
+    """
+    result = read_security(path, with_dacl=with_dacl)
+    return {} if result.get("state") != "collected" else result
+
+
+def owner_for_path(path: str) -> str:
+    """Just the owner - skips DACL parsing when the caller needs nothing else."""
+    return str(security_for_path(path, with_dacl=False).get("owner") or "")
+
+
+def cache_stats() -> dict:
+    with _sid_name_lock:
+        return {"sid_cache_entries": len(_sid_name_cache)}

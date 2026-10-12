@@ -1,0 +1,48 @@
+name: Performance and scale gates (nightly)
+
+# Track P-F: "fastest" stays measured and defended. The same gate runs in the
+# normal test job (tests/test_perf_gate.py) on every PR, where it gates what a
+# loaded machine cannot change: parity and the incremental delta-ratio. This job
+# owns its runner, so it is the one that gates the two WALL-CLOCK speedups (the
+# per-PR job measures and reports them), and it records absolute
+# throughput/latency against a per-host baseline for trend tracking.
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf-gate:
+    name: Performance regression gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (runtime from the hash-verified lock)
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.lock
+          pip install -r requirements-dev.txt
+
+      - name: Run performance gate (parity + regression ratios, absolute report)
+        run: python scripts/perf_gate.py --json
+
+      # B8: the Phase B envelopes - the estate write's slope, a partitioned scan holding
+      # one partition and agreeing with a single one, a redelivered partition running
+      # nothing twice, an endpoint scan following its batch budget, one value being one
+      # finding. The test job runs the same gate on a smaller corpus; this one runs it at
+      # the size where the memory ratio can actually discriminate.
+      - name: Run scale gate (Phase B envelopes)
+        run: python scripts/scale_gate.py --files 400 --json

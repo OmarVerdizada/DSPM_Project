@@ -1,0 +1,23 @@
+{
+  "requested_files": 200000,
+  "plan": {
+    "files": 200000,
+    "volume": "C:\\",
+    "total_gib": 78.7,
+    "free_gib": 3.8,
+    "reserve_gib": 15.73,
+    "state_bytes_per_file": 643072,
+    "basis": "quality audit",
+    "projected_gib": 150.717,
+    "free_after_gib": -146.91,
+    "within_reserve": false,
+    "projected_bytes": 161831500000,
+    "free_bytes": 4084342784
+  },
+  "host": {
+    "cpus": 6
+  },
+  "held": [
+    "HELD FOR SCALE HOST: 200,000 files need about 150.717 GiB (quality audit), and C:\\ must keep 15.73 GiB free; it has 3.8 GiB."
+  ]
+}

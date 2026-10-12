@@ -1,0 +1,12 @@
+# C7: the static-analysis gates (scripts/static_gate.py), pinned so a new rule release
+# never turns CI red on its own. Installed only by the CI static-analysis job and by a
+# developer running the gates; never part of the runtime image.
+#
+#   pip install -r requirements-static.txt
+#
+# Semgrep pins its own dependencies, which collide with the runtime lock, so it lives in
+# requirements-semgrep.txt and is installed into a virtualenv of its own; point SEMGREP_BIN
+# at that virtualenv's semgrep.
+ruff==0.16.8
+mypy==2.3.1
+bandit==1.9.4

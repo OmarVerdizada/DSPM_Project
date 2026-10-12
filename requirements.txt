@@ -1,0 +1,60 @@
+# Runtime dependencies only. Development and test tooling lives in
+# requirements-dev.txt; optional ML classification extras live in
+# requirements-ml.txt.
+#
+# Requires Python 3.12 or newer (tested to 3.14). The floor moved from 3.10 to
+# 3.12 on 2026-09-21 (roadmap M0/Q3): 3.10 leaves upstream support in October
+# 2026, and the lock must be generated on the floor, so the floor has to be a
+# version this project actually builds and tests on.
+#
+# Direct dependencies are pinned exactly here. For a fully reproducible,
+# hash-verified install of the entire transitive tree, use the generated lock:
+#     pip install --require-hashes -r requirements.lock
+# Regenerate it after changing this file:
+#     pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+# Generate it on the FLOOR interpreter (3.12): the drift gate in CI regenerates
+# it there and compares pins and hashes.
+# (CI verifies requirements.lock stays in sync and builds the SBOM from it.)
+
+# Runtime API and web server
+fastapi==0.136.1
+uvicorn==0.46.0
+pydantic==2.13.4
+
+# SMB/file-server and Windows endpoint connectors
+pysmb==1.2.10
+pywinrm==0.5.0
+# Kerberos for endpoint scans is opt-in and needs an extra: pip install "pywinrm[kerberos]"
+# See docs/ENDPOINT_LEAST_PRIVILEGE.md. DSPM_WINRM_KERBEROS=1 without it now fails loudly.
+pypdf==6.19.0
+# M8: defuse untrusted document XML (blocks billion-laughs / XXE / external DTD)
+defusedxml==0.7.1
+
+# Encrypted credential vault
+cryptography==50.0.1
+
+# Async HTTP client used by outbound integrations
+httpx==0.28.1
+
+# Imported directly (backend/failures.py, the WinRM endpoint scanner) as well as being
+# pywinrm's transport, so it is declared here rather than left to arrive transitively.
+requests==2.34.2
+
+# Process liveness for job recovery: at startup and in the resume sweep, a queued or
+# running job is only taken over when the process that owned it is gone
+# (backend/store.py job_owner_state). Without it, recovery is skipped.
+psutil==7.2.2
+
+# C2: directory sign-in (Active Directory / LDAP over LDAPS or StartTLS). Pure Python,
+# LGPL-3.0; its one dependency, pyasn1, is already in the tree (via pysmb).
+ldap3==2.9.1
+
+# Local .env loading. Currently declared but not imported anywhere; all config
+# is read via os.getenv(). Retained for backward compatibility with existing
+# deployment environments - safe to drop once confirmed unused by operators.
+python-dotenv==1.2.2
+
+# SQLite is provided by Python's built-in sqlite3 module.
+# The operator console in frontend/ is static HTML/CSS/JavaScript served by the
+# backend and needs no npm install or Node at runtime (Node is used only for the
+# eslint gate - see frontend/package.json).

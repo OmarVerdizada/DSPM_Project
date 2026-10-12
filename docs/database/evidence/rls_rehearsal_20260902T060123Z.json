@@ -1,0 +1,14 @@
+{
+  "rehearsed_at": "2026-09-02T06:03:22.364509+00:00",
+  "checks": {
+    "migration": "PASS",
+    "roles": "PASS",
+    "unscoped_reads_everything": "PASS",
+    "scoped_select_confined": "PASS",
+    "cross_tenant_write_refused": "PASS",
+    "same_tenant_write_allowed": "PASS",
+    "scope_is_transaction_local": "PASS",
+    "seam_scoped_query_cannot_cross": "PASS"
+  },
+  "result": "PASS"
+}

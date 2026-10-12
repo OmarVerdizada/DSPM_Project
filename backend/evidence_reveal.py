@@ -1,0 +1,249 @@
+"""Reveal ONE value behind a finding, read again from its source (C13).
+
+A scan keeps no raw sensitive value: it keeps a masked sample and a keyed fingerprint of
+each value (`classification.regex_classifier._fingerprint`). Revealing therefore never
+reads a stored secret - there is none. It reads the FILE again:
+
+  1. the finding, and the fingerprint the person chose, which must be one of its own;
+  2. the asset's recorded identity (whole-file SHA-256 and size - or, for a text file
+     inspected up to its cap, the SHA-256 of exactly the bytes inspected, ``head:``, W2.2);
+  3. the file, from where the scan read it - the server's own disk for a local scan, or
+     the SMB share with the saved credential the scan used. A scan run with a password
+     typed at scan time kept no credential, so it cannot be read again: unrevealable;
+  4. if the file changed since the scan (digest or size differ), nothing is revealed;
+  5. detection again on the text, the same rules, and the one candidate whose
+     fingerprint equals the chosen one is the value returned. Nothing else is returned,
+     and nothing is written anywhere.
+
+Every attempt - revealed or refused, and why - is audited by the route with the actor,
+the workspace, the source, the file and the reason given; never the value.
+
+Endpoint (WinRM) scans are not revealable yet: their re-read needs the endpoint session
+the scan held, and a reveal must not open a remote shell on its own.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+REASON_MIN = 12
+REASON_MAX = 500
+
+
+class RevealRefused(Exception):
+    """Nothing was revealed; `code` names why, the message says it to a person."""
+
+    client_safe = True
+
+    def __init__(self, code: str, message: str, status: int = 409) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        # where the value would have come from, once known - for the audit row
+        self.location: dict = {}
+
+
+def _refuse(code: str, message: str, status: int = 409):
+    raise RevealRefused(code, message, status)
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _server_from_reuse_key(reuse_key: str) -> str:
+    # smb://<server>/<share><path>
+    if reuse_key.lower().startswith("smb://"):
+        return reuse_key[len("smb://"):].split("/", 1)[0]
+    return ""
+
+
+def _identity(asset: dict) -> tuple[str, int]:
+    digest = str(asset.get("sha256") or asset.get("file_hash") or "").lower()
+    try:
+        size = int(asset.get("size") or asset.get("size_bytes") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return digest, size
+
+
+def _is_product_file(path: Path) -> bool:
+    from discovery.discovery_engine import product_private_paths
+
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return True
+    for private in product_private_paths():
+        try:
+            root = private.resolve()
+        except OSError:
+            continue
+        if resolved == root or root in resolved.parents:
+            return True
+    return False
+
+
+def _head_cap(asset: dict) -> int | None:
+    """The cap a ``head:`` identity was taken at: the re-read takes the same bytes, so a cap
+    changed since the scan does not read as a changed file."""
+    from collectors.content_policy import head_identity_cap
+
+    return head_identity_cap(_identity(asset)[0])
+
+
+def _read_local(asset: dict) -> tuple[str, str, int]:
+    from collectors.file_scanner import read_text_preview_and_sha256
+
+    path = Path(str(asset.get("path") or ""))
+    if _is_product_file(path):
+        # The install's own data (the shared server log, the database, keys) is never a
+        # source a value is revealed from, whatever an older scan recorded.
+        _refuse("product_file", "Values are not revealed from Sentro's own data folder.")
+    if not path.is_file():
+        _refuse("source_missing", "The file is no longer where the scan found it.")
+    try:
+        size = path.stat().st_size
+        text, digest = read_text_preview_and_sha256(path, _head_cap(asset))
+    except FileNotFoundError:
+        _refuse("source_missing", "The file is no longer where the scan found it.")
+    return text, digest, size
+
+
+def _read_smb(tenant_id: str, asset: dict, source: dict) -> tuple[str, str, int]:
+    from backend.config import smb_encryption_required
+    from backend.vault import CredentialVault
+    from collectors.file_scanner import detect_extension
+    from collectors.smb_scanner import SMBConfig, SMBScanner
+
+    server = str(source.get("server") or _server_from_reuse_key(str(asset.get("reuse_key") or "")))
+    share = str(asset.get("share") or "")
+    path = str(asset.get("path") or "")
+    if not (server and share and path):
+        _refuse("no_location", "The scan did not record enough of where the file is to read it again.")
+    try:
+        account = CredentialVault().resolve(tenant_id, str(source["credential_ref"]))
+    except KeyError:
+        _refuse("credential_gone", "The saved credential this scan used has been deleted.")
+    # D1: a file the scan read over encrypted SMB 3 is read again the same way, never in the
+    # clear - and so is every file, whatever its scan recorded, once the installation
+    # requires encryption: a finding from an older "smb" scan would otherwise be re-read
+    # over pysmb in the clear on an installation that has forbidden exactly that.
+    encrypted = str(source.get("source_kind") or "") == "smb3" or smb_encryption_required()
+    scanner = SMBScanner(SMBConfig(server=server, tenant_id=tenant_id, username=account.get("username", ""),
+                                   password=account.get("password", ""), domain=account.get("domain", "WORKGROUP"),
+                                   require_encryption=encrypted, allowed_shares=(share,) if encrypted else None))
+    try:
+        if not scanner.connect():
+            _refuse("source_unreachable", "The file server could not be reached with the scan's saved credential.")
+        try:
+            # The size the share reports NOW: reading the size the scan recorded would hash
+            # only that many bytes, and a file that grew since would pass as unchanged.
+            size = int(getattr(scanner.connection.getAttributes(share, path), "file_size", -1))
+        except Exception:
+            _refuse("source_missing", "The file is no longer where the scan found it on the share.")
+        _identity_digest, recorded = _identity(asset)
+        cap = _head_cap(asset)
+        if cap is not None:
+            scanner.config.max_read_bytes = cap
+        if recorded and size != recorded:
+            _refuse("file_changed", "The file has changed since the scan. Scan it again; nothing is revealed from a "
+                                    "file that is not the one the finding came from.")
+        data = scanner._acquire_file_data(share, path, detect_extension(Path(path)), size)
+    finally:
+        try:
+            if scanner.connection is not None:
+                scanner.connection.close()
+        except Exception:
+            pass
+    return str(data.content or ""), str(data.sha256 or ""), size
+
+
+def reread(tenant_id: str, asset: dict, source: dict | None) -> str:
+    """The file's text as the scan saw it - or RevealRefused when that cannot be had."""
+    kind = str(asset.get("source") or (source or {}).get("source_kind") or "").lower()
+    if kind.startswith("endpoint"):
+        _refuse("unsupported_source", "Values found on endpoint (WinRM) scans cannot be revealed yet.")
+    if kind in {"smb", "smb3"}:
+        if source is None:
+            _refuse("no_scan_record", "This scan was run before reveal was possible and did not record its "
+                                      "credential. Scan the share again with a saved credential.")
+        if source.get("credential_kind") != "saved" or not source.get("credential_ref"):
+            _refuse("typed_credential", "This scan used a password typed at scan time, which is never kept, so the "
+                                        "file cannot be read again. Scan with a saved credential to reveal its values.")
+        text, digest, size = _read_smb(tenant_id, asset, source)
+    elif kind == "local":
+        text, digest, size = _read_local(asset)
+    else:
+        _refuse("unsupported_source", f"Values from '{kind or 'unknown'}' sources cannot be revealed.")
+    expected_digest, expected_size = _identity(asset)
+    if not expected_digest:
+        _refuse("no_identity", "The scan recorded no digest for this file, so a changed file could not be told "
+                               "from the one scanned. Nothing is revealed.")
+    if expected_digest.startswith(("meta:", "sampled:")):
+        # Named by its metadata or a sample, not by the bytes a value came from: a changed
+        # file could pass as the one scanned (W2.2). Not a source a value is revealed from.
+        _refuse("no_identity", "The scan did not read this file whole, so a changed file could not be told from "
+                               "the one scanned. Nothing is revealed.")
+    if digest.lower() != expected_digest or (expected_size and size and size != expected_size):
+        _refuse("file_changed", "The file has changed since the scan. Scan it again; nothing is revealed from a "
+                                "file that is not the one the finding came from.")
+    return text
+
+
+def candidates(text: str):
+    """Every value the redacting regex rules find in `text`, with the fingerprint a scan
+    gives it - the same rules, validators and fingerprint the classifier uses."""
+    from classification.regex_classifier import RULES, _fingerprint
+
+    for rule in RULES:
+        if not rule.redact:
+            continue
+        if rule.finder is not None:
+            values = [value for value, _extra in rule.finder(text)]
+        else:
+            values = []
+            for match in rule.pattern.finditer(text):
+                value = match.group(rule.value_group) if rule.value_group else match.group(0)
+                if value is None:
+                    value = match.group(0)
+                if rule.validator is None or rule.validator(value):
+                    values.append(value)
+        for value in values:
+            yield rule.name, value, _fingerprint(value)
+
+
+def reveal(tenant_id: str, finding_id: str, fingerprint: str, reason: str) -> dict:
+    """The one value behind `fingerprint` in finding `finding_id`, read again now."""
+    from backend import store
+    from classification.masking import mask
+
+    reason = " ".join(str(reason or "").split())
+    if len(reason) < REASON_MIN:
+        _refuse("reason_required", f"Say why the value is needed (at least {REASON_MIN} characters).", 400)
+    finding = store.get_finding(tenant_id, finding_id)
+    location = store.finding_location(tenant_id, finding_id)
+    if finding is None or location is None:
+        _refuse("not_found", "Finding not found.", 404)
+    if fingerprint not in (finding.get("secure_value_fingerprints") or []):
+        _refuse("unknown_occurrence", "That value is not one of this finding's.", 400)
+    asset = store.get_inventory_asset(tenant_id, location["asset_id"])
+    if asset is None:
+        _refuse("asset_gone", "The file this finding came from is no longer in the inventory.")
+    source = store.get_scan_source(tenant_id, location.get("scan_id") or "")
+    where = {"source": asset.get("source") or (source or {}).get("source_kind") or "",
+             "server": (source or {}).get("server") or _server_from_reuse_key(str(asset.get("reuse_key") or "")),
+             "share": asset.get("share") or "", "path": asset.get("path") or ""}
+    try:
+        text = reread(tenant_id, asset, source)
+        for rule_name, value, candidate in candidates(text):
+            if candidate == fingerprint:
+                return {"finding_id": finding_id, "type": finding.get("type") or rule_name, "fingerprint": fingerprint,
+                        "value": value, "masked": mask(value, str(finding.get("data_class") or "generic")),
+                        "location": where}
+        _refuse("not_found_again", "The file is unchanged, but the value was not found in it again; nothing is revealed.")
+    except RevealRefused as refused:
+        refused.location = where
+        raise
+    return {}  # unreachable

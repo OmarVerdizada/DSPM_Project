@@ -1,0 +1,185 @@
+"""SMB scan coverage visibility: the scan must record which shares were
+discovered, scanned, skipped, and access-denied - so a share that is not
+exported or is unreadable by the scan account is visible, not silently absent
+(the 'cc.png cannot be found' class of confusion)."""
+
+from __future__ import annotations
+
+import os
+import unittest
+from unittest import mock
+
+from collectors.smb_scanner import SMBConfig, SMBScanner
+
+
+class _Share:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeConn:
+    """listShares -> a fixed set; listPath denies some shares, allows others."""
+
+    def __init__(self, denied: set[str]) -> None:
+        self._denied = denied
+
+    def listShares(self):
+        return [_Share("Executive"), _Share("Finance"), _Share("Shared"), _Share("IPC$")]
+
+    def listPath(self, share, folder):
+        if share in self._denied:
+            raise Exception(f"Failed to list  on {share}: Unable to open directory")
+        return []  # readable but empty
+
+    def close(self):
+        pass
+
+
+class SmbShareCoverageTests(unittest.TestCase):
+    def test_scan_records_share_coverage(self) -> None:
+        scanner = SMBScanner(SMBConfig(server="fs", username="u", password="p", domain="CORP"))
+        scanner.last_scan_diagnostics = {}
+        # A stateless fake connection is safe to hand to every (parallel) share
+        # worker; connect() must set it so each worker's thread-local is live.
+        fake = _FakeConn(denied={"Executive", "Finance"})
+
+        def fake_connect() -> bool:
+            scanner.connection = fake
+            scanner.server_used = "fs"
+            return True
+
+        with mock.patch.object(scanner, "connect", side_effect=fake_connect), \
+             mock.patch.object(scanner, "close"), \
+             mock.patch.object(scanner, "_emit_collection_progress"):
+            scanner.scan()
+        diag = scanner.last_scan_diagnostics
+        self.assertEqual(diag["shares_discovered"], ["Executive", "Finance", "Shared", "IPC$"])
+        self.assertIn("Shared", diag["shares_scanned"])       # readable share was scanned
+        self.assertIn("IPC$", diag["shares_skipped"])          # system share skipped
+        self.assertEqual(diag["shares_access_denied"], ["Executive", "Finance"])
+
+    def test_missing_share_is_simply_absent_from_discovered(self) -> None:
+        # If the folder holding the file is not exported over SMB, its share name
+        # never appears in shares_discovered - which is the actionable signal.
+        scanner = SMBScanner(SMBConfig(server="fs"))
+        scanner.last_scan_diagnostics = {}
+        fake = _FakeConn(denied=set())
+
+        def fake_connect() -> bool:
+            scanner.connection = fake
+            scanner.server_used = "fs"
+            return True
+
+        with mock.patch.object(scanner, "connect", side_effect=fake_connect), \
+             mock.patch.object(scanner, "close"), \
+             mock.patch.object(scanner, "_emit_collection_progress"):
+            scanner.scan()
+        self.assertNotIn("Marketing", scanner.last_scan_diagnostics["shares_discovered"])
+
+
+class _ResettingConn:
+    """listPath raises a connection reset for named shares, succeeds otherwise."""
+
+    def __init__(self, reset: set[str]) -> None:
+        self._reset = reset
+
+    def listShares(self):
+        return [_Share("Executive"), _Share("Public"), _Share("IPC$")]
+
+    def listPath(self, share, folder):
+        if share in self._reset:
+            raise ConnectionResetError("[WinError 10054] An existing connection was forcibly closed")
+        return []
+
+    def close(self):
+        pass
+
+
+class SmbConnectionResetTests(unittest.TestCase):
+    def test_transient_reset_recovers_on_retry(self) -> None:
+        scanner = SMBScanner(SMBConfig(server="dc"))
+        scanner.last_scan_diagnostics = {}
+        calls = {"connect": 0}
+
+        def fake_connect():
+            calls["connect"] += 1
+            # First connection resets Executive; the reconnected one is clean, so
+            # the one-shot retry reads Executive successfully.
+            scanner.connection = _ResettingConn({"Executive"} if calls["connect"] == 1 else set())
+            scanner.server_used = "dc"
+            return True
+
+        with mock.patch.object(scanner, "connect", side_effect=fake_connect), \
+             mock.patch.object(scanner, "_skip_path", return_value=False), \
+             mock.patch.object(scanner, "_emit_collection_progress"):
+            scanner.scan()
+
+        diag = scanner.last_scan_diagnostics
+        # A TRANSIENT reset must not silently drop the share: Executive is retried,
+        # succeeds, is scanned, and is NOT left marked as reset.
+        self.assertNotIn("Executive", diag.get("shares_connection_reset", []))
+        self.assertIn("Executive", diag["shares_scanned"])
+        self.assertGreaterEqual(calls["connect"], 2)  # reconnected and retried
+        self.assertIn("Public", diag["shares_scanned"])
+        self.assertNotIn("scan_aborted_reason", diag)
+
+    def test_persistent_per_share_reset_recorded_but_scan_continues(self) -> None:
+        scanner = SMBScanner(SMBConfig(server="dc"))
+        scanner.last_scan_diagnostics = {}
+
+        def fake_connect():
+            scanner.connection = _ResettingConn({"Executive"})  # resets on every attempt
+            scanner.server_used = "dc"
+            return True
+
+        with mock.patch.object(scanner, "connect", side_effect=fake_connect), \
+             mock.patch.object(scanner, "_skip_path", return_value=False), \
+             mock.patch.object(scanner, "_emit_collection_progress"):
+            scanner.scan()
+
+        diag = scanner.last_scan_diagnostics
+        # Reset on both attempts -> recorded as connection-reset (not access-denied),
+        # but the scan reconnects and still reaches the other shares.
+        self.assertEqual(diag["shares_connection_reset"], ["Executive"])
+        self.assertNotIn("Executive", diag.get("shares_access_denied", []))
+        self.assertIn("Public", diag["shares_scanned"])
+        self.assertNotIn("scan_aborted_reason", diag)
+
+    def test_persistent_reset_aborts_with_reason(self) -> None:
+        # The real "server resets every share" case: after 5 consecutive resets
+        # the scan stops with a clear reason instead of thrashing every share.
+        # This is the SERIAL cascade (DSPM_SMB_PARALLEL=0) - the exact one-share-
+        # at-a-time early abort. The parallel breaker (bounded by the worker pool)
+        # is covered separately in test_pb2_parallel_collection.py.
+        class _AllReset:
+            def listShares(self):
+                return [_Share(f"Dept{i}") for i in range(8)]
+
+            def listPath(self, share, folder):
+                raise ConnectionResetError("[WinError 10054] An existing connection was forcibly closed")
+
+            def close(self):
+                pass
+
+        scanner = SMBScanner(SMBConfig(server="dc"))
+        scanner.last_scan_diagnostics = {}
+
+        def fake_connect():
+            scanner.connection = _AllReset()
+            scanner.server_used = "dc"
+            return True
+
+        with mock.patch.dict(os.environ, {"DSPM_SMB_PARALLEL": "0"}), \
+             mock.patch.object(scanner, "connect", side_effect=fake_connect), \
+             mock.patch.object(scanner, "_skip_path", return_value=False), \
+             mock.patch.object(scanner, "_emit_collection_progress"):
+            scanner.scan()
+
+        diag = scanner.last_scan_diagnostics
+        self.assertEqual(diag.get("scan_aborted_reason"), "smb_connection_reset")
+        # It stopped early (did not attempt all 8 shares after hitting the cap).
+        self.assertLessEqual(len(diag["shares_connection_reset"]), 6)
+
+
+if __name__ == "__main__":
+    unittest.main()

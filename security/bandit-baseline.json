@@ -1,0 +1,1041 @@
+{
+  "about": "C7: Bandit findings at medium severity and above, each reviewed. The gate (scripts/static_gate.py bandit) fails on any finding not listed here; a listed one is matched by file, test and code, not line number. Low-severity checks are not gated: in this codebase they are names like 'password' in field lists and try/except/pass around optional features.",
+  "findings": [
+    {
+      "file": "backend/backup.py",
+      "test_id": "B608",
+      "code": "counts[table] = conn.execute( f'SELECT COUNT(*) FROM \"{table}\"' ).fetchone()[0]",
+      "reviewed": "2026-09-28",
+      "reason": "Row counts per table for the backup manifest; table names come from the schema, not from input."
+    },
+    {
+      "file": "backend/db.py",
+      "test_id": "B608",
+      "code": "set_clause = \", \".join(f\"{c} = EXCLUDED.{c}\" for c in set_cols) return f\"{body} ON CONFLICT {conflict} DO UPDATE SET {set_clause}\" # All columns are part of the PK: replacing changes nothing -> DO NOTHING.",
+      "reviewed": "2026-09-28",
+      "reason": "ON CONFLICT clause from the code-owned primary-key map (db._PK); no input reaches it."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "affected_row = conn.execute( f\"SELECT COUNT(DISTINCT asset_id) AS n FROM findings WHERE {where} AND status IN ({active_values})\", (tenant_id, *scope_params),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "cap_sql = f\"SELECT COUNT(*) FROM (SELECT 1 FROM assets WHERE {' AND '.join(where)} LIMIT ?) t\" total = int(conn.execute(cap_sql, tuple(params) + (_INVENTORY_COUNT_CAP + 1,)).fetchone()[0])",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "child_rows = conn.execute( \"SELECT a.share AS owner, \" + _first_path_segment_sql() + \" AS folder, \" \"a.risk_level AS severity, COUNT(*) AS n FROM assets AS a \"",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"UPDATE scan_schedules SET {', '.join(sets)} WHERE tenant_id = ? AND schedule_id = ?\", (*params, tenant_id, str(schedule_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a SET list from a code-owned column whitelist. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM assets WHERE id = ?{scope_sql}\", args) if demo_ids:",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute(open_ddl) conn.execute(f\"INSERT INTO users_c3_open ({columns}) SELECT {columns} FROM users\") conn.execute(\"DROP TABLE users\")",
+      "reviewed": "2026-09-28",
+      "reason": "Revision 0020 table rebuild: column names read from the schema itself (sqlite_master), not from input."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "cursor = conn.execute( f\"UPDATE suppression_rules SET {', '.join(sets)} WHERE tenant_id = ? AND rule_id = ?\", (*values, tenant_id, rule_id),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a SET list from a code-owned column whitelist. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "existing = conn.execute( f\"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules \" \"WHERE tenant_id = ? AND active = 1 AND finding_type = ? AND source = ? \" \"AND path_pattern = ? AND fingerprint = ?\", (tenant_id, finding_type, source, path_pattern, fingerprint),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for table in _TENANT_ERASURE_TABLES: conn.execute(f\"DELETE FROM {table} WHERE tenant_id = ?\", (tenant_id,))",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a table name from a code-owned tuple (erasure, retention or integrity lists). Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "head = conn.execute( f\"SELECT last_seq, last_hash FROM audit_chain_heads WHERE tenant_id = ?{lock}\", (tenant_id,) ).fetchone()",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "if apply and stale: conn.execute(f\"DELETE FROM {table} WHERE {clause}\", params) results.append({",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a table name from a code-owned tuple (erasure, retention or integrity lists); WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "if apply and unchained: conn.execute(f\"DELETE FROM audit_events WHERE seq IS NULL AND timestamp < ?{held_clause}\", (cutoff, *held)) rows = conn.execute(",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "return conn.execute( \"SELECT item.value AS value, COUNT(*) AS n, COALESCE(SUM(f.occurrence_count), 0) AS occurrences \" \"FROM findings AS f CROSS JOIN LATERAL \" \"jsonb_array_elements_text(COALESCE(f.frameworks_json, '[]')::jsonb) AS item(value) \" f\"WHERE {where} GROUP BY item.value\", params,",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "return conn.execute( \"SELECT item.value AS value, COUNT(*) AS n, COALESCE(SUM(f.occurrence_count), 0) AS occurrences \" \"FROM findings AS f, json_each(COALESCE(f.frameworks_json, '[]')) AS item \" f\"WHERE {where} GROUP BY item.value\", params,",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "return conn.execute( f\"SELECT item.value AS value, COUNT(*) AS n FROM assets AS a \" f\"CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(a.{column}, '[]')::jsonb) \" \"AS item(value) WHERE a.tenant_id = ? GROUP BY item.value\", (tenant_id,),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a facet column that is a literal in the code (checked against a set, or passed as a constant). Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "return conn.execute( f\"SELECT item.value AS value, COUNT(*) AS n FROM assets AS a, \" f\"json_each(COALESCE(a.{column}, '[]')) AS item \" \"WHERE a.tenant_id = ? GROUP BY item.value\", (tenant_id,),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a facet column that is a literal in the code (checked against a set, or passed as a constant). Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( \"SELECT COUNT(*) AS total_findings, COALESCE(SUM(occurrence_count), 0) AS total_occurrences, \" f\"SUM(CASE WHEN status IN ({active_values}) THEN 1 ELSE 0 END) AS active_findings, \" f\"SUM(CASE WHEN status IN ({open_values}) THEN 1 ELSE 0 END) AS open_n, \" f\"SUM(CASE WHEN status IN ({progress_values}) THEN 1 ELSE 0 END) AS progress_n, \" f\"SUM(CASE WHEN status IN ({validation_values}) THEN 1 ELSE 0 END) AS validation_n, \" f\"SUM(CASE WHEN status IN ({active_values}) AND sla_due <> '' AND sla_due < ? THEN 1 ELSE 0 END) AS overdue_n, \" \"SUM(CASE WHEN status = 'RESOLVED' THEN 1 ELSE 0 END) AS resolved_n, \" \"SUM(CASE WHEN status = 'RISK_ACCEPTED' THEN 1 ELSE 0 END) AS risk_accepted_n, \" \"SUM(CASE WHEN status = 'SUPPRESSED' THEN 1 ELSE 0 END) AS suppressed_n, \" \"SUM(CASE WHEN status = 'FALSE_POSITIVE' THEN 1 ELSE 0 END) AS false_positive_n \" f\"FROM findings WHERE {where}\", (datetime.now(timezone.utc).isoformat(), tenant_id, *scope_params),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT COUNT(*) AS n FROM {table} t \" \"WHERE NOT EXISTS (SELECT 1 FROM tenants x WHERE x.tenant_id = t.tenant_id)\" ).fetchone()",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a table name from a code-owned tuple (erasure, retention or integrity lists). Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_PARTITIONED_SCAN_COLUMNS} FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?\", (tenant_id, str(scan_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_PARTITIONED_SCAN_COLUMNS} FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?\", (tenant_id, str(scan_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_PARTITION_COLUMNS} FROM scan_partitions \" \"WHERE tenant_id = ? AND scan_id = ? AND partition_id = ? AND status = 'queued'\", (tenant_id, str(scan_id), str(partition_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_PARTITION_COLUMNS} FROM scan_partitions \" \"WHERE tenant_id = ? AND scan_id = ? AND status = 'queued' \" \"ORDER BY ordinal LIMIT 1\", (tenant_id, str(scan_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_PARTITION_COLUMNS} FROM scan_partitions WHERE tenant_id = ? AND scan_id = ? AND partition_id = ?\", (tenant_id, str(scan_id), str(partition_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? AND schedule_id = ?\", (tenant_id, schedule_id),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? AND schedule_id = ?\", (tenant_id, str(schedule_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? AND schedule_id = ?\", (tenant_id, str(schedule_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ? AND rule_id = ?\", (tenant_id, rule_id),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ? AND rule_id = ?\", (tenant_id, rule_id),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ? AND rule_id = ?\", (tenant_id, rule_id),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"\"\" WITH selected_tenants AS ( SELECT tenant_id, display_name, registration_code, created_at, updated_at FROM tenants {selected_where} ), latest_ranked AS ( SELECT sr.tenant_id, sr.scan_id, sr.timestamp, sr.source, sr.summary_json, ROW_NUMBER() OVER ( PARTITION BY sr.tenant_id ORDER BY sr.created_at DESC, sr.scan_id DESC ) AS row_number FROM scan_reports AS sr JOIN selected_tenants AS st ON st.tenant_id = sr.tenant_id ), scan_counts AS ( SELECT sr.tenant_id, COUNT(*) AS n FROM scan_reports AS sr JOIN selected_tenants AS st ON st.tenant_id = sr.tenant_id GROUP BY sr.tenant_id ), audit_counts AS ( SELECT ae.tenant_id, COUNT(*) AS n FROM audit_events AS ae JOIN selected_tenants AS st ON st.tenant_id = ae.tenant_id GROUP BY ae.tenant_id ), alert_counts AS ( SELECT ae.tenant_id, COUNT(*) AS n FROM alert_events AS ae JOIN selected_tenants AS st ON st.tenant_id = ae.tenant_id GROUP BY ae.tenant_id ), baseline_counts AS ( SELECT b.tenant_id, COUNT(*) AS n FROM scan_object_baselines AS b JOIN selected_tenants AS st ON st.tenant_id = b.tenant_id GROUP BY b.tenant_id ) SELECT st.tenant_id, st.display_name, st.registration_code, st.created_at, st.updated_at, lr.scan_id AS latest_scan_id, lr.timestamp AS latest_timestamp, lr.source AS latest_source, lr.summary_json AS latest_summary_json, COALESCE(sc.n, 0) AS scan_count, COALESCE(ac.n, 0) AS audit_count, COALESCE(alc.n, 0) AS alert_count, COALESCE(bc.n, 0) AS baseline_count FROM selected_tenants AS st LEFT JOIN latest_ranked AS lr ON lr.tenant_id = st.tenant_id AND lr.row_number = 1 LEFT JOIN scan_counts AS sc ON sc.tenant_id = st.tenant_id LEFT JOIN audit_counts AS ac ON ac.tenant_id = st.tenant_id LEFT JOIN alert_counts AS alc ON alc.tenant_id = st.tenant_id LEFT JOIN baseline_counts AS bc ON bc.tenant_id = st.tenant_id ORDER BY st.tenant_id \"\"\", params,",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT *, {expression} AS sort_value FROM findings WHERE {page_where} \" f\"ORDER BY {expression} {sort_direction}, id {sort_direction} LIMIT ?\", (*page_params, page_size + 1),",
+      "reviewed": "2026-10-02",
+      "reason": "Interpolates an ORDER BY from a whitelist (REMEDIATION_SORTS / INVENTORY_SORTS) and ASC/DESC only; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter. 2026-10-02: the sort expression is also selected AS sort_value so the page cursor carries what rows are ordered by - the same whitelisted expression."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT id, detail_json FROM assets WHERE tenant_id = ? AND id IN ({placeholders})\", (tenant_id, *chunk),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT id, path FROM assets WHERE path LIKE ?{scope_sql}\", like_args ).fetchall()",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {', '.join(_INVENTORY_COLS)} FROM assets \" f\"WHERE {' AND '.join(where)} ORDER BY {id_expr} ASC LIMIT ?\", tuple(params),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant; an ORDER BY from a whitelist (REMEDIATION_SORTS / INVENTORY_SORTS) and ASC/DESC only; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {', '.join(columns)} FROM assets \" \"WHERE (tenant_id > ? OR (tenant_id = ? AND id > ?)) \" \"ORDER BY tenant_id ASC, id ASC LIMIT ?\", (cursor_tenant, cursor_tenant, cursor_id, batch_size),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {', '.join(columns)} FROM assets WHERE {predicates}\", params ).fetchall()",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {_PARTITION_COLUMNS} FROM scan_partitions \" \"WHERE tenant_id = ? AND scan_id = ? ORDER BY ordinal\", (tenant_id, str(scan_id)),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules \" \"WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at LIMIT ?\", (stamp, max(1, int(limit))),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {_SCHEDULE_COLUMNS} FROM scan_schedules WHERE tenant_id = ? ORDER BY created_at, schedule_id\", (tenant_id,),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {_SUPPRESSION_COLUMNS} FROM suppression_rules WHERE tenant_id = ?{clause} \" \"ORDER BY created_at DESC, rule_id\", (tenant_id,),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {column} AS value, COUNT(*) AS n FROM findings WHERE {where} \" f\"{nonempty} GROUP BY {column} ORDER BY n DESC, {column} ASC LIMIT ?\", (tenant_id, *scope_params, limit),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a facet column that is a literal in the code (checked against a set, or passed as a constant); WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "severity_rows = conn.execute( f\"SELECT severity, COUNT(*) AS n FROM findings WHERE {where} GROUP BY severity\", (tenant_id, *scope_params),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "sql = ( f\"SELECT {', '.join(_INVENTORY_READ_COLS)} FROM assets WHERE {' AND '.join(where)} \" f\"ORDER BY {order_expr} {direction}, {id_expr} {direction} LIMIT ?\" )",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant; an ORDER BY from a whitelist (REMEDIATION_SORTS / INVENTORY_SORTS) and ASC/DESC only; WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "sql = ( f\"SELECT {_PARTITIONED_SCAN_COLUMNS} FROM partitioned_scans \" \"WHERE status IN ('running', 'finalizing')\" )",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a code-owned column list constant. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "stale = int(conn.execute( f\"SELECT COUNT(*) AS n FROM {table} WHERE {clause}\", params, ).fetchone()[\"n\"] or 0)",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates a table name from a code-owned tuple (erasure, retention or integrity lists); WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "status_rows = conn.execute( f\"SELECT status, COUNT(*) AS n FROM findings WHERE {where} GROUP BY status\", (tenant_id, *scope_params),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "unchained = int(conn.execute( f\"SELECT COUNT(*) AS n FROM audit_events WHERE seq IS NULL AND timestamp < ?{held_clause}\", (cutoff, *held)).fetchone()[\"n\"] or 0)",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates WHERE/lock fragments assembled from code-owned SQL text. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "upper_row = conn.execute( f\"SELECT id FROM assets WHERE tenant_id = ? ORDER BY {id_expr} DESC LIMIT 1\", (tenant_id,),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates an ORDER BY from a whitelist (REMEDIATION_SORTS / INVENTORY_SORTS) and ASC/DESC only. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "work = conn.execute( \"SELECT COUNT(DISTINCT CASE WHEN exposure IN ('PUBLIC', 'BROAD_INTERNAL', 'WRITABLE_INTERNAL') \" \"THEN asset_id END) AS exposed, \" f\"SUM(CASE WHEN status IN ({active}) THEN 1 ELSE 0 END) AS active_n, \" f\"SUM(CASE WHEN status IN ({active}) AND COALESCE(sla_due, '') <> '' \" \"AND sla_due < ? THEN 1 ELSE 0 END) AS overdue_n \" \"FROM findings WHERE tenant_id = ? AND is_current = 1\", (*REMEDIATION_ACTIVE_STATUSES, *REMEDIATION_ACTIVE_STATUSES, now, tenant_id),",
+      "reviewed": "2026-09-28",
+      "reason": "Interpolates an IN (...) list of '?' placeholders or code-owned status literals. Every value is a bound parameter."
+    },
+    {
+      "file": "backend/backup.py",
+      "test_id": "B608",
+      "code": "\"SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name\")] counts = {table: conn.execute(f'SELECT COUNT(*) FROM \"{table}\"').fetchone()[0] for table in tables} revision = None",
+      "reviewed": "2026-09-28",
+      "reason": "C11 backup verification counts the rows of every table the SQLite snapshot's own sqlite_master lists, quoted as identifiers; no outside input reaches the SQL."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"\"\" SELECT username, role, tenant_id, full_name, is_active, created_at, updated_at, last_login_at, login_name, auth_source FROM users {where} ORDER BY tenant_id, username \"\"\", params,",
+      "reviewed": "2026-09-28",
+      "reason": "list_users: interpolates a WHERE fragment assembled from code-owned SQL text (C2 added login_name and auth_source to the column list). Every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( f\"SELECT {', '.join(keys)}, {column} AS v FROM {table} WHERE {column} <> ''\").fetchall():  # noqa: S608 - fixed names rows.append((table, {key: row[key] for key in keys}, str(row[\"v\"])))",
+      "reviewed": "2026-09-28",
+      "reason": "C12 vault key operations (M3 exit review: rows with their identifiers): table and column names come from the fixed _SEALED_COLUMNS constant; no value is interpolated."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {', '.join(keys)}, {column} AS v FROM {table} WHERE {column} <> ''\").fetchall()  # noqa: S608 for row in rows:",
+      "reviewed": "2026-09-28",
+      "reason": "C12 vault re-seal: table and column names come from the fixed _SEALED_COLUMNS constant; every value, including the compared sealed value, is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "changed += conn.execute( f\"UPDATE {table} SET {column} = ?{stamp} WHERE {where} AND {column} = ?\",  # noqa: S608 tuple(params)).rowcount",
+      "reviewed": "2026-09-28",
+      "reason": "C12 vault re-seal: table and column names come from the fixed _SEALED_COLUMNS constant; every value, including the compared sealed value, is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "args = (asset_id,) + ((tenant_id,) if tenant_id else ()) conn.execute(f\"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}\", args)",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "placeholders = \",\".join(\"?\" for _ in id_chunk) conn.execute(f\"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk))",
+      "reviewed": "2026-09-28",
+      "reason": "D7 access index: only '?' placeholder lists, a fixed sub-select and column names chosen from fixed dictionaries are interpolated; every value is a bound parameter."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "params += system return (f\"SELECT table_schema, table_name FROM information_schema.tables WHERE {' AND '.join(clauses)} \" \"ORDER BY table_schema, table_name\", params)",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "def columns_sql(self) -> str: return (\"SELECT column_name, data_type FROM information_schema.columns \" f\"WHERE table_schema = {self.marker} AND table_name = {self.marker} ORDER BY ordinal_position\")",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "def count_sql(self, schema: str, table: str) -> str: return f\"SELECT COUNT(*) FROM {self.quote(schema)}.{self.quote(table)}\"",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "selected = \", \".join(f\"left({self.quote(column)}::text, {int(max_chars)})\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
+      "reviewed": "2026-10-01",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters; the value cut (max_value_chars, M4 exit review) is an int too, bounded 16-4096."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "selected = \", \".join(f\"LEFT(CAST({self.quote(column)} AS CHAR), {int(max_chars)})\" for column in columns) return f\"SELECT {selected} FROM {self.quote(schema)}.{self.quote(table)} LIMIT {int(limit)}\"",
+      "reviewed": "2026-10-01",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters; the value cut (max_value_chars, M4 exit review) is an int too, bounded 16-4096."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "def count_sql(self, schema: str, table: str) -> str: return f\"SELECT COUNT_BIG(*) FROM {self.quote(schema)}.{self.quote(table)}\"",
+      "reviewed": "2026-09-29",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters."
+    },
+    {
+      "file": "collectors/database_scanner.py",
+      "test_id": "B608",
+      "code": "selected = \", \".join(f\"LEFT(CAST({self.quote(column)} AS NVARCHAR(MAX)), {int(max_chars)})\" for column in columns) return f\"SELECT TOP ({int(limit)}) {selected} FROM {self.quote(schema)}.{self.quote(table)}\"",
+      "reviewed": "2026-10-01",
+      "reason": "D6 column sampling: schema, table and column names come from the scanned database's own information_schema and are quoted by the dialect's identifier escaping (doubled quote characters); the row limit is an int; filter values are bound parameters; the value cut (max_value_chars, M4 exit review) is an int too, bounded 16-4096."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id read from the assets table; the ids are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"DELETE FROM asset_versions WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id; the ids are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"DELETE FROM asset_access WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id; the ids are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( \"DELETE FROM assets WHERE tenant_id = ? AND scan_label = ? AND current_scan_id <> ? \" f\"AND id IN ({placeholders})\", (tenant_id, scan_label, scan_id, *id_chunk),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 prune: only '?' placeholders are interpolated, one per stale asset id; the ids and scope are bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( \"SELECT scan_id, is_current, status, owner, sla_due, lifecycle_json, display_name, rule, \" \"file_path, file_name, affected_asset, data_type, exposure, frameworks_json \" f\"FROM findings WHERE tenant_id = ? AND id = ?{for_update}\", (tenant_id, finding_id),",
+      "reviewed": "2026-10-02",
+      "reason": "W1.4 lifecycle: the only interpolation is the literal ' FOR UPDATE' (PostgreSQL) or ''; every value is bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( \"UPDATE scan_object_baselines SET last_scan_id = ?, last_seen_at = ?, updated_at = ? \" f\"WHERE tenant_id = ? AND scope_key = ? AND object_key IN ({placeholders})\", (scan_id, now, now, tenant_id, scope_key, *key_chunk),",
+      "reviewed": "2026-10-05",
+      "reason": "W2.1 set-based presence update; the IN list is '?' placeholders, values bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT id, status, owner, sla_due, severity_rank, row_digest, seq, last_seen, is_current \" f\"FROM findings WHERE tenant_id = ? AND id IN ({placeholders})\", (tenant_id, *chunk),",
+      "reviewed": "2026-10-05",
+      "reason": "W2.1 lifecycle/digest read; the IN list is '?' placeholders, values bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( f\"SELECT {key_column} AS k, {value_column} AS v FROM {table} \" f\"WHERE tenant_id = ?{scope_sql} AND {key_column} IN ({placeholders})\", (tenant_id, *scope_args, *chunk),",
+      "reviewed": "2026-10-05",
+      "reason": "W2.1 digest read; table and columns must be one of _STORED_VALUE_SHAPES (checked, ValueError otherwise), keys bound as '?'."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "str(row[\"id\"]) for row in conn.execute( f\"SELECT id FROM findings WHERE tenant_id = ? AND is_current = 1 AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-05",
+      "reason": "W2.1 read of current findings to retire the absent ones; '?' placeholders."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "placeholders = \",\".join(\"?\" for _ in id_chunk) conn.execute(f\"UPDATE findings SET is_current = 0 WHERE tenant_id = ? AND id IN ({placeholders})\", (tenant_id, *id_chunk))",
+      "reviewed": "2026-10-05",
+      "reason": "W2.1 retire of absent findings; '?' placeholders."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"UPDATE findings SET scan_id = ? WHERE tenant_id = ? AND id IN ({placeholders}) AND scan_id <> ?\", (scan_id, tenant_id, *id_chunk, scan_id),",
+      "reviewed": "2026-10-05",
+      "reason": "W2.1 set-based presence update; '?' placeholders."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "taken = conn.execute( f\"UPDATE scan_jobs SET status = ?, message = ?, error = ?, {finish_sql}, \" \"updated_at = ? WHERE id = ? AND tenant_id = ? AND status IN ('queued', 'running') \" \"AND owner_instance = ? AND heartbeat_at = ?\", (status, message, error, *finish_args, now, record[\"id\"], record[\"tenant_id\"],",
+      "reviewed": "2026-10-05",
+      "reason": "W2.4 recovery; finish_sql is one of two literals chosen in code, values bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "renewed += int(conn.execute( f\"UPDATE scan_jobs SET heartbeat_at = ? WHERE owner_instance = ? AND id IN ({marks}) \" \"AND status IN ('queued', 'running')\", (now, instance, *chunk),",
+      "reviewed": "2026-10-05",
+      "reason": "W2.4 heartbeat; the IN list is '?' placeholders, values bound."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {_PARTITION_COLUMNS} FROM scan_partitions \" \"WHERE tenant_id = ? AND scan_id = ? AND status = 'failed' AND attempt - interruptions >= ? \" \"ORDER BY ordinal\", (tenant_id, str(scan_id), int(max_attempts)),",
+      "reviewed": "2026-10-07",
+      "reason": "W3.2 ledger SQL: the f-string inserts only the fixed column list _PARTITION_COLUMNS or the fixed expired/scope fragments; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "changed += int(conn.execute( \"UPDATE scan_partitions SET status = 'quarantined', \" \"error = 'its holder stopped ' || CAST(interruptions + 1 AS TEXT) || \" \"' times without finishing it (a crash or a hang)', interruptions = interruptions + 1, \" \"finished_at = ?, lease_owner = '', lease_expires_at = '', updated_at = ? \" f\"WHERE {expired} AND interruptions + 1 >= ?{scope}\", (stamp, stamp, cutoff, int(max_interruptions), *scope_params),",
+      "reviewed": "2026-10-07",
+      "reason": "W3.2 ledger SQL: the f-string inserts only the fixed column list _PARTITION_COLUMNS or the fixed expired/scope fragments; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "changed += int(conn.execute( \"UPDATE scan_partitions SET status = 'queued', lease_owner = '', lease_expires_at = '', updated_at = ?, \" \"interruptions = interruptions + 1 \" f\"WHERE {expired}{scope}\", (stamp, cutoff, *scope_params),",
+      "reviewed": "2026-10-07",
+      "reason": "W3.2 ledger SQL: the f-string inserts only the fixed column list _PARTITION_COLUMNS or the fixed expired/scope fragments; every value is a bound parameter."
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( f\"SELECT id, row_digest, content_hash FROM assets WHERE tenant_id = ? AND id IN ({placeholders})\", (tenant_id, *chunk),",
+      "reviewed": "2026-10-07",
+      "reason": "W3.3 (2026-10-07): SQL text built only from fixed column lists, fixed clause fragments and placeholder counts; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "candidates = [str(row[\"id\"]) for row in conn.execute( f\"SELECT id FROM findings WHERE {' AND '.join(clauses)} ORDER BY seq LIMIT 50\",  # noqa: S608 - fixed clauses tuple(params),",
+      "reviewed": "2026-10-07",
+      "reason": "W3.3 (2026-10-07): SQL text built only from fixed column lists, fixed clause fragments and placeholder counts; every value is a bound parameter"
+    },
+    {
+      "file": "backend/siem_settings.py",
+      "test_id": "B608",
+      "code": "\"ON CONFLICT(key) DO NOTHING\", (STATUS_KEY, _now())) row = conn.execute(\"SELECT value FROM app_settings WHERE key = ?\" + store._for_update(), (STATUS_KEY,)).fetchone()",
+      "reviewed": "2026-10-07",
+      "reason": "W3.4 (2026-10-07): the only text appended is the constant ' FOR UPDATE' (store._for_update) on PostgreSQL; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "# W3.4: the record's row lock - the one an append takes with its compare-and-set. conn.execute(\"SELECT scan_id FROM partitioned_scans WHERE tenant_id = ? AND scan_id = ?\" + _for_update(), (tenant_id, str(scan_id))).fetchone()",
+      "reviewed": "2026-10-07",
+      "reason": "W3.4 (2026-10-07): the only text appended is the constant ' FOR UPDATE' (store._for_update) on PostgreSQL; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "with _connect() as conn: row = conn.execute(\"SELECT status_json FROM alert_channels WHERE tenant_id = ? AND channel = ?\" + _for_update(), (tenant_id, channel)).fetchone() if row is None:",
+      "reviewed": "2026-10-07",
+      "reason": "W3.4 (2026-10-07): the only text appended is the constant ' FOR UPDATE' (store._for_update) on PostgreSQL; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "result = conn.execute( f\"UPDATE finding_index SET response_json = '' \"  # noqa: S608 - placeholders only f\"WHERE tenant_id = ? AND response_json <> '' AND scan_id NOT IN ({placeholders})\", (tenant_id, *sorted(recent)),",
+      "reviewed": "2026-10-07",
+      "reason": "W3.5: fixed SQL - the per-label finding-index window binds every value as a placeholder; the batched retention delete takes its table and key only from literals in _reduce_scan_to_summary"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "count = int(conn.execute( f\"DELETE FROM {table} WHERE tenant_id = ? AND scan_id = ? AND {key} IN (\"  # noqa: S608 - fixed names f\"SELECT {key} FROM {table} WHERE tenant_id = ? AND scan_id = ? LIMIT ?)\", (tenant_id, scan_id, tenant_id, scan_id, int(batch)),",
+      "reviewed": "2026-10-07",
+      "reason": "W3.5: fixed SQL - the per-label finding-index window binds every value as a placeholder; the batched retention delete takes its table and key only from literals in _reduce_scan_to_summary"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"UPDATE assets SET current_scan_id = ?, observed_at = ? WHERE tenant_id = ? AND id IN ({placeholders}) \"  # noqa: S608 \"AND current_scan_id <> ?\", (scan_id, observed_at, tenant_id, *id_chunk, scan_id),",
+      "reviewed": "2026-10-08",
+      "reason": "W2.1 / revision 0049: fixed SQL - _stamp_presence binds the scan id, the timestamp, the tenant and every asset id as placeholders; only the count of placeholders is interpolated"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "counts = conn.execute( \"SELECT SUM(CASE WHEN content_changed_scan_id = ? THEN 1 ELSE 0 END) AS changed, \" \"SUM(CASE WHEN first_seen_scan_id = ? THEN 1 ELSE 0 END) AS added \" f\"FROM assets WHERE {where}\",  # noqa: S608 - fixed clauses (scan_id, scan_id, *bound),",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - {where} is _scan_assets_bound's literal (tenant, label, scan) clause and every value is a placeholder"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( f\"SELECT path, name, source, share, detail_json, previous_content_hash, content_hash FROM assets \"  # noqa: S608 f\"WHERE {where} AND content_changed_scan_id = ? ORDER BY lower(path), id LIMIT ?\", (*bound, scan_id, HASH_CHANGES_LIMIT),",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - {where} is _scan_assets_bound's literal clause; the scan id and the limit are placeholders"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( \"SELECT content_hash, n, COUNT(*) OVER () AS group_total FROM (\" f\"SELECT content_hash, COUNT(*) AS n FROM assets WHERE {where} AND content_hash <> '' \"  # noqa: S608 \"GROUP BY content_hash HAVING COUNT(*) > 1) AS g ORDER BY n DESC, content_hash LIMIT ?\", (*bound, HASH_CHANGES_LIMIT),",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - {where} is _scan_assets_bound's literal clause; the limit is a placeholder"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( \"SELECT content_hash, path, name, source, share, detail_json FROM (\" \"SELECT content_hash, path, name, source, share, detail_json, \" \"ROW_NUMBER() OVER (PARTITION BY content_hash ORDER BY lower(path), id) AS rn \" f\"FROM assets WHERE {where} AND content_hash IN ({placeholders})) AS m \"  # noqa: S608 \"WHERE rn <= ? ORDER BY content_hash, rn\", (*bound, *[digest for digest, _n in groups], _HASH_GROUP_KEYS),",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - {where} is _scan_assets_bound's literal clause, and the IN list is one placeholder per hash"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "kept = {str(level_row[\"level\"] or \"LOW\").upper(): int(level_row[\"n\"] or 0) for level_row in conn.execute( \"SELECT UPPER(COALESCE(risk_level, 'LOW')) AS level, COUNT(*) AS n FROM assets \" f\"WHERE {where} GROUP BY UPPER(COALESCE(risk_level, 'LOW'))\",  # noqa: S608 - fixed clauses bound,",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - {where} is _scan_assets_bound's literal clause and every value is a placeholder"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for asset in conn.execute( \"SELECT a.detail_json, a.path, a.name, a.source, a.extension, a.risk_level, a.risk_score FROM assets AS a \" f\"WHERE {owned}{level_sql} \"  # noqa: S608 - fixed clauses \"ORDER BY a.risk_score DESC, a.id LIMIT ?\", (*bound, *level_args, limit),",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - {owned} is _scan_assets_bound's literal clause and {level_sql} one placeholder per severity; values and the limit are placeholders"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "signals = [{\"type\": str(signal[\"rule\"]), \"count\": int(signal[\"n\"] or 0)} for signal in conn.execute( \"SELECT f.rule AS rule, SUM(CASE WHEN f.occurrence_count > 0 THEN f.occurrence_count ELSE 1 END) AS n \" \"FROM findings AS f JOIN assets AS a ON a.tenant_id = f.tenant_id AND a.id = f.asset_id \" f\"WHERE f.tenant_id = ? AND f.is_current = 1 AND {owned}{level_sql} \"  # noqa: S608 \"AND COALESCE(f.rule, '') <> '' GROUP BY f.rule ORDER BY n DESC, f.rule\", (tenant_id, *bound, *level_args),",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - {owned} is _scan_assets_bound's literal clause and {level_sql} one placeholder per severity"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {', '.join(_INVENTORY_COLS)}, search_text, reason_count, dlp_count FROM assets \"  # noqa: S608 f\"WHERE {where} ORDER BY path, id LIMIT ?\", (*bound, scan_run_view_max_files()),",
+      "reviewed": "2026-10-08",
+      "reason": "Revision 0049: fixed SQL - the column list is the literal _INVENTORY_COLS and {where} is _scan_assets_bound's literal clause; values and the limit are placeholders"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "return ( \"EXISTS (SELECT 1 FROM scan_unit_coverage c JOIN scan_records u \" \"ON u.tenant_id = c.tenant_id AND u.unit_key = c.unit_key \" f\"WHERE c.tenant_id = {alias}.tenant_id AND c.folder_key = {alias}.folder_key \" f\"AND c.entry_key IN ('', {alias}.entry_key) AND u.scan_id = ? AND u.skipped = 1)\" )",
+      "reviewed": "2026-10-08",
+      "reason": "W4.2 (reviewed 2026-10-08): placeholder-only IN lists over fixed tables and columns (skipped-unit locations, the baseline prune by object key, the manifest rows of a batch), and the drawer's fixed column tuple gaining folder_key/entry_key; no value reaches the SQL text"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( \"SELECT c.folder_key, c.entry_key FROM scan_unit_coverage c JOIN scan_records u \" \"ON u.tenant_id = c.tenant_id AND u.unit_key = c.unit_key \" f\"WHERE c.tenant_id = ? AND u.scan_id = ? AND u.skipped = 1 AND c.folder_key IN ({placeholders})\",  # noqa: S608 (tenant_id, str(scan_id), *chunk),",
+      "reviewed": "2026-10-08",
+      "reason": "W4.2 (reviewed 2026-10-08): placeholder-only IN lists over fixed tables and columns (skipped-unit locations, the baseline prune by object key, the manifest rows of a batch), and the drawer's fixed column tuple gaining folder_key/entry_key; no value reaches the SQL text"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( \"DELETE FROM scan_object_baselines WHERE tenant_id = ? AND scope_key = ? \" f\"AND object_key IN ({placeholders})\",  # noqa: S608 - placeholders only (tenant_id, scope_key, *chunk),",
+      "reviewed": "2026-10-08",
+      "reason": "W4.2 (reviewed 2026-10-08): placeholder-only IN lists over fixed tables and columns (skipped-unit locations, the baseline prune by object key, the manifest rows of a batch), and the drawer's fixed column tuple gaining folder_key/entry_key; no value reaches the SQL text"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( \"SELECT unit_key, listing_digest, policy_digest, files, assets, records_ref, records_json, records_bytes, \" \"summary_json, diagnostics_json, fold_json, acl_explicit, acl_checked_at FROM scan_unit_manifest \" f\"WHERE tenant_id = ? AND scope_key = ? AND unit_key IN ({placeholders})\",  # noqa: S608 (tenant_id, scope_key, *chunk),",
+      "reviewed": "2026-10-08",
+      "reason": "W4.2 (reviewed 2026-10-08): placeholder-only IN lists over fixed tables and columns (skipped-unit locations, the baseline prune by object key, the manifest rows of a batch), and the drawer's fixed column tuple gaining folder_key/entry_key; no value reaches the SQL text"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"SELECT {', '.join(_INVENTORY_COLS)}, detail_json, observed_at, current_scan_id, folder_key, entry_key \"  # noqa: S608 \"FROM assets WHERE tenant_id = ? AND id = ?\", (tenant_id, asset_id),",
+      "reviewed": "2026-10-08",
+      "reason": "W4.2 (reviewed 2026-10-08): placeholder-only IN lists over fixed tables and columns (skipped-unit locations, the baseline prune by object key, the manifest rows of a batch), and the drawer's fixed column tuple gaining folder_key/entry_key; no value reaches the SQL text"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "where = f\" WHERE {dim.where}\" if dim.where else \"\" return (f\"SELECT r.tenant_id AS tenant_id, '{dim.name}' AS dim, {keys[0]} AS k1, {keys[1]} AS k2, \" f\"{keys[2]} AS k3, {sign} AS n, ({dim.occ}) * {sign} AS occ FROM {source} AS r {joined}{where}\")",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "rows = _union(all_dims, table, f\"(SELECT {row})\", sign) return (f\"INSERT INTO {COUNTS_TABLE} (tenant_id, dim, k1, k2, k3, n, occ) \" f\"SELECT tenant_id, dim, k1, k2, k3, SUM(n), SUM(occ) FROM ({rows}) WHERE 1 \" \"GROUP BY tenant_id, dim, k1, k2, k3 \" \"ON CONFLICT (tenant_id, dim, k1, k2, k3) DO UPDATE SET n = n + excluded.n, occ = occ + excluded.occ;\")",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "continue sql = (f\"SELECT tenant_id, dim, k1, k2, k3, SUM(n) AS n, SUM(occ) AS occ FROM ({_select(dim, source, 1)}) AS d \" \"GROUP BY tenant_id, dim, k1, k2, k3\") params = (tenant_id,) if tenant_id is not None else ()",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "if tenant_id is None: conn.execute(f\"DELETE FROM {COUNTS_TABLE}\") conn.execute(f\"DELETE FROM {DELTAS_TABLE}\")",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM {COUNTS_TABLE}\") conn.execute(f\"DELETE FROM {DELTAS_TABLE}\") else:",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "else: conn.execute(f\"DELETE FROM {COUNTS_TABLE} WHERE tenant_id = ?\", (tenant_id,)) conn.execute(f\"DELETE FROM {DELTAS_TABLE} WHERE tenant_id = ?\", (tenant_id,))",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM {COUNTS_TABLE} WHERE tenant_id = ?\", (tenant_id,)) conn.execute(f\"DELETE FROM {DELTAS_TABLE} WHERE tenant_id = ?\", (tenant_id,)) if rows:",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "if rows: conn.executemany(f\"INSERT INTO {COUNTS_TABLE} (tenant_id, dim, k1, k2, k3, n, occ) \" \"VALUES (?, ?, ?, ?, ?, ?, ?)\", rows)",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "_DISTINCT_DIMS = \", \".join(f\"'{dim}'\" for dim in DISTINCT) _FOLD_SQL = f\"\"\" WITH moved AS ( DELETE FROM {DELTAS_TABLE} WHERE tenant_id = ? RETURNING dim, k1, k2, k3, n, occ ), net AS ( SELECT dim, k1, k2, k3, SUM(n) AS n, SUM(occ) AS occ FROM moved GROUP BY dim, k1, k2, k3 HAVING SUM(n) <> 0 OR SUM(occ) <> 0 ), folded AS ( INSERT INTO {COUNTS_TABLE} AS c (tenant_id, dim, k1, k2, k3, n, occ) SELECT ?, dim, k1, k2, k3, n, occ FROM net ON CONFLICT (tenant_id, dim, k1, k2, k3) DO UPDATE SET n = c.n + EXCLUDED.n, occ = c.occ + EXCLUDED.occ RETURNING c.dim, c.k1, c.k2, c.k3, c.n ), crossed AS ( SELECT CASE f.dim {_DISTINCT_CASES} END AS target, f.k3, SUM(CASE WHEN f.n > 0 AND f.n - d.n <= 0 THEN 1 WHEN f.n <= 0 AND f.n - d.n > 0 THEN -1 ELSE 0 END) AS n FROM folded AS f JOIN net AS d ON d.dim = f.dim AND d.k1 = f.k1 AND d.k2 = f.k2 AND d.k3 = f.k3 WHERE f.dim IN ({_DISTINCT_DIMS}) GROUP BY 1, f.k3 ) INSERT INTO {COUNTS_TABLE} AS c (tenant_id, dim, k1, k2, k3, n, occ) SELECT ?, target, '', '', k3, n, 0 FROM crossed WHERE n <> 0 ON CONFLICT (tenant_id, dim, k1, k2, k3) DO UPDATE SET n = c.n + EXCLUDED.n \"\"\"",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "return if conn.execute(f\"SELECT 1 FROM {DELTAS_TABLE} WHERE tenant_id = ? LIMIT 1\", (tenant_id,)).fetchone() is None: return",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "conn.execute(_FOLD_SQL, (tenant_id, tenant_id, tenant_id)) conn.execute(f\"DELETE FROM {COUNTS_TABLE} WHERE tenant_id = ? AND n = 0 AND occ = 0\", (tenant_id,))",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "return int(row[\"n\"] or 0) if row else 0 row = conn.execute(f\"SELECT COUNT(*) AS n FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim = ? AND k3 = ? \" \"AND n > 0\", (tenant_id, per_file, k3)).fetchone() return int(row[\"n\"] or 0) if row else 0",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "kept = {} for row in conn.execute(f\"SELECT dim, k1, k2, k3, n, occ FROM {COUNTS_TABLE} WHERE tenant_id = ?\", (tenant_id,)).fetchall():",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "now = datetime.now(timezone.utc).isoformat() conn.execute(f\"INSERT INTO {STATE_TABLE} (tenant_id, reconciled_at, drift_json, repaired) VALUES (?, ?, ?, ?) \" \"ON CONFLICT (tenant_id) DO UPDATE SET reconciled_at = excluded.reconciled_at, \" \"drift_json = excluded.drift_json, repaired = excluded.repaired\", (tenant_id, now, json.dumps(drift, sort_keys=True), int(bool(differ and repair))))",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "def state(conn, tenant_id: str) -> dict: row = conn.execute(f\"SELECT reconciled_at, drift_json, repaired FROM {STATE_TABLE} WHERE tenant_id = ?\", (tenant_id,)).fetchone()",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "overdue += int(conn.execute( f\"SELECT COUNT(*) AS n FROM findings WHERE {where} AND status IN ({active}) \"  # noqa: S608 - fixed clauses \"AND sla_due >= ? AND sla_due < ?\", (tenant_id, *scope_params, *REMEDIATION_ACTIVE_STATUSES, today, now)).fetchone()[\"n\"] or 0)",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "boundary = conn.execute( f\"SELECT COUNT(*) AS n FROM assets WHERE tenant_id = ? AND finding_count > 0 \"  # noqa: S608 - fixed text f\"AND {expression} >= ? AND {expression} < ?\", (tenant_id, cutoff, after)).fetchone() return whole + int(boundary[\"n\"] or 0)",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "counted = int(conn.execute( f\"SELECT COUNT(*) AS n FROM (SELECT 1 FROM findings WHERE {where} LIMIT ?) AS matching\",  # noqa: S608 (*params, REMEDIATION_COUNT_CAP + 1)).fetchone()[\"n\"] or 0)",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: estate_counts and its readers build SQL from fixed table names and the fixed dimension list; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "# see) is counted on its first read instead. conn.execute(f\"DELETE FROM {STATE_TABLE}\") note = json.dumps({\"keys\": 0, \"by_dim\": {}, \"backfill\": True})",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: the counts backfill writes its state rows by a fixed table name; values are bound parameters"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "note = json.dumps({\"keys\": 0, \"by_dim\": {}, \"backfill\": True}) conn.executemany(f\"INSERT INTO {STATE_TABLE} (tenant_id, reconciled_at, drift_json, repaired) VALUES (?, ?, ?, 0)\", [(tenant, now, note) for tenant in sorted({row[0] for row in rows})])",
+      "reviewed": "2026-10-09",
+      "reason": "W4.4: the counts backfill writes its state rows by a fixed table name; values are bound parameters"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "found = conn.execute( f\"SELECT dim, k1, k2, k3, SUM(n) AS n, SUM(occ) AS occ FROM (\" f\"SELECT dim, k1, k2, k3, n, occ FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim IN ({marks}) \" f\"UNION ALL SELECT dim, k1, k2, k3, n, occ FROM {DELTAS_TABLE} WHERE tenant_id = ? AND dim IN ({marks})\" \") AS c GROUP BY dim, k1, k2, k3 HAVING SUM(n) <> 0 OR SUM(occ) <> 0\", (tenant_id, *names, tenant_id, *names)).fetchall()",
+      "reviewed": "2026-10-09",
+      "reason": "W4.5: the counted readers and the unit row locks interpolate only module table constants and ? placeholders; every value is bound"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "found = conn.execute( f\"SELECT dim, k1, n FROM (SELECT dim, k1, SUM(n) AS n, ROW_NUMBER() OVER (PARTITION BY dim \" f\"ORDER BY SUM(n) DESC, k1 ASC) AS position FROM (\" f\"SELECT dim, k1, n FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim IN ({marks}) AND k3 IN ({scopes}) \" f\"UNION ALL SELECT dim, k1, n FROM {DELTAS_TABLE} WHERE tenant_id = ? AND dim IN ({marks}) AND k3 IN ({scopes})\" \") AS c GROUP BY dim, k1 HAVING SUM(n) > 0) AS r ORDER BY dim, position\", (tenant_id, *names, *k3s, tenant_id, *names, *k3s)).fetchall()",
+      "reviewed": "2026-10-09",
+      "reason": "W4.5: the counted readers and the unit row locks interpolate only module table constants and ? placeholders; every value is bound"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "found = conn.execute( f\"WITH pending AS (SELECT k1, SUM(n) AS n FROM {DELTAS_TABLE} WHERE tenant_id = ? AND dim = ? AND k3 = ? \" \"GROUP BY k1), \" f\"head_keys AS (SELECT k1, n FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim = ? AND k3 = ? AND n > 0 \" \"ORDER BY n DESC, k1 ASC LIMIT ? + (SELECT COUNT(*) FROM pending)), \" f\"held AS (SELECT c.k1, c.n FROM {COUNTS_TABLE} AS c JOIN pending AS p ON p.k1 = c.k1 \" \"WHERE c.tenant_id = ? AND c.dim = ? AND c.k3 = ? AND c.k1 NOT IN (SELECT k1 FROM head_keys)) \" \"SELECT k1, SUM(n) AS n FROM (SELECT k1, n FROM head_keys UNION ALL SELECT k1, n FROM held \" \"UNION ALL SELECT k1, n FROM pending) AS c WHERE k1 <> '' GROUP BY k1 HAVING SUM(n) > 0 \" \"ORDER BY SUM(n) DESC, k1 ASC LIMIT ?\", (tenant_id, name, k3, tenant_id, name, k3, limit, tenant_id, name, k3, limit)).fetchall()",
+      "reviewed": "2026-10-09",
+      "reason": "W4.5: the counted readers and the unit row locks interpolate only module table constants and ? placeholders; every value is bound"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "row = conn.execute( f\"WITH pending AS (SELECT k1, SUM(n) AS d FROM {DELTAS_TABLE} WHERE tenant_id = ? AND dim = ? AND k3 = ? \" \"GROUP BY k1 HAVING SUM(n) <> 0), \" \"crossed AS (SELECT SUM(CASE WHEN COALESCE(c.n, 0) <= 0 AND COALESCE(c.n, 0) + p.d > 0 THEN 1 \" \"WHEN COALESCE(c.n, 0) > 0 AND COALESCE(c.n, 0) + p.d <= 0 THEN -1 ELSE 0 END) AS n \" f\"FROM pending AS p LEFT JOIN {COUNTS_TABLE} AS c ON c.tenant_id = ? AND c.dim = ? AND c.k3 = ? \" \"AND c.k2 = '' AND c.k1 = p.k1) \" f\"SELECT COALESCE((SELECT n FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim = ? AND k1 = '' AND k2 = '' \" \"AND k3 = ?), 0) + COALESCE((SELECT n FROM crossed), 0) AS n\", (tenant_id, per_file, k3, tenant_id, per_file, k3, tenant_id, DISTINCT[per_file], k3)).fetchone()",
+      "reviewed": "2026-10-09",
+      "reason": "W4.5: the counted readers and the unit row locks interpolate only module table constants and ? placeholders; every value is bound"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"SELECT id FROM assets WHERE tenant_id = ? AND id IN ({', '.join('?' for _ in chunk)}) \"  # noqa: S608 \"ORDER BY id FOR UPDATE\", (tenant_id, *chunk)).fetchall()",
+      "reviewed": "2026-10-09",
+      "reason": "W4.5: the counted readers and the unit row locks interpolate only module table constants and ? placeholders; every value is bound"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "listed = \", \".join(f\"k_{key}\" for key in keys) insert = f\"INSERT INTO {DELTAS_TABLE} (tenant_id, dim, k1, k2, k3, n, occ) \"              \"SELECT tenant_id, dim, k1, k2, k3, SUM(n), SUM(occ) FROM ({rows}) AS d \"              \"GROUP BY tenant_id, dim, k1, k2, k3 HAVING SUM(n) <> 0 OR SUM(occ) <> 0\" function = f\"estate_counts_{table}\"",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "# paired on the key, and a pair whose counted columns are all the same cancels out. changed = (f\"(SELECT COALESCE(o.tenant_id, n.tenant_id) AS t, {picked} \" f\"FROM old_rows AS o FULL JOIN new_rows AS n ON n.tenant_id = o.tenant_id AND {joined} \" f\"WHERE o.{first} IS NULL OR n.{first} IS NULL OR ROW({compared}) IS DISTINCT FROM ROW({compared_new}))\") old_keys = \", \".join(f\"o.{key}\" for key in keys)",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "new_keys = \", \".join(f\"n.{key}\" for key in keys) changed_old = f\"(SELECT o.* FROM old_rows AS o WHERE (o.tenant_id, {old_keys}) IN (SELECT t, {listed} FROM changed_keys))\" changed_new = f\"(SELECT n.* FROM new_rows AS n WHERE (n.tenant_id, {new_keys}) IN (SELECT t, {listed} FROM changed_keys))\"",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "changed_old = f\"(SELECT o.* FROM old_rows AS o WHERE (o.tenant_id, {old_keys}) IN (SELECT t, {listed} FROM changed_keys))\" changed_new = f\"(SELECT n.* FROM new_rows AS n WHERE (n.tenant_id, {new_keys}) IN (SELECT t, {listed} FROM changed_keys))\" body = f\"\"\"",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "continue source = f\"(SELECT * FROM {table} WHERE tenant_id = ?)\" if tenant_id is not None else table for dim in all_dims:",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "found = conn.execute( f\"SELECT dim, k1, SUM(n) AS n FROM (\" f\"SELECT dim, k1, n FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim IN ({marks}) AND k1 IN ({key_marks}) \" f\"UNION ALL SELECT dim, k1, n FROM {DELTAS_TABLE} WHERE tenant_id = ? AND dim IN ({marks}) \" f\"AND k1 IN ({key_marks})) AS c GROUP BY dim, k1 HAVING SUM(n) <> 0\", (tenant_id, *names, *keys, tenant_id, *names, *keys)).fetchall()",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "found = conn.execute( f\"WITH pending AS (SELECT k1, SUM(n) AS n FROM {DELTAS_TABLE} WHERE tenant_id = ? AND dim = ?{k2_sql} \" \"GROUP BY k1), \" # One row a key (k2 follows from k1, k3 is ''): read in index order, no aggregate. f\"head_keys AS (SELECT k1, n FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim = ? AND k3 = ''{k2_sql} \" \"AND n > 0 ORDER BY n DESC, k1 ASC LIMIT ? + (SELECT COUNT(*) FROM pending)), \" f\"held AS (SELECT c.k1, c.n FROM {COUNTS_TABLE} AS c JOIN pending AS p ON p.k1 = c.k1 \" f\"WHERE c.tenant_id = ? AND c.dim = ? AND c.k3 = ''{k2_sql.replace('k2', 'c.k2')} \" \"AND c.k1 NOT IN (SELECT k1 FROM head_keys)) \" \"SELECT k1, SUM(n) AS n FROM (SELECT k1, n FROM head_keys UNION ALL SELECT k1, n FROM held \" \"UNION ALL SELECT k1, n FROM pending) AS c WHERE k1 <> '' GROUP BY k1 HAVING SUM(n) > 0 \" \"ORDER BY SUM(n) DESC, k1 ASC LIMIT ?\", (tenant_id, name, *k2_args, tenant_id, name, *k2_args, limit, tenant_id, name, *k2_args, limit)).fetchall()",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/estate_counts.py",
+      "test_id": "B608",
+      "code": "found = conn.execute( f\"SELECT DISTINCT k1 FROM (SELECT k1 FROM {COUNTS_TABLE} WHERE tenant_id = ? AND dim IN {_CLASS_DIMS} \" f\"AND k2 = ? AND n > 0 UNION SELECT k1 FROM {DELTAS_TABLE} WHERE tenant_id = ? AND dim IN {_CLASS_DIMS} \" \"AND k2 = ?) AS c\", (tenant_id, k2, tenant_id, k2)).fetchall() return sorted(str(row[\"k1\"]) for row in found if row[\"k1\"])",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM asset_versions WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM asset_acl_changes WHERE asset_id = ?{scope_sql}\", args)",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM asset_access WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM asset_acl_changes WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args)",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute(f\"DELETE FROM asset_acl_changes WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM findings WHERE asset_id = ?{scope_sql}\", args) conn.execute(f\"DELETE FROM assets WHERE id = ?{scope_sql}\", args)",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "for row in conn.execute( f\"SELECT asset_id, scan_id, {listed} FROM asset_access \"  # noqa: S608 - fixed columns f\"WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn, f\"INSERT INTO asset_access (tenant_id, asset_id, {listed}, scan_id) VALUES ({marks})\",  # noqa: S608 ((tenant_id, asset_id, *row, scan_id) for asset_id in changed for row in (wanted.get(asset_id) or {}).values()),",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "conn.execute( f\"DELETE FROM asset_acl_changes WHERE tenant_id = ? AND asset_id IN ({placeholders})\", (tenant_id, *id_chunk),",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "# chose to scan the table for a key it took for common (MEASURED, 10,000 files). f\"SELECT * FROM (SELECT principal_key, principal, sid, principal_type, broad, privileged, service, \" f\"unresolved FROM asset_access WHERE tenant_id = ? AND principal_key = ? \" f\"ORDER BY sensitive DESC, risk_score DESC, asset_id LIMIT 1) AS q{index}\" for index in range(len(chunk)))",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( \"SELECT aa.principal_key AS principal_key, MAX(aa.principal) AS principal, MAX(aa.sid) AS sid, \" \"MAX(aa.principal_type) AS principal_type, MAX(aa.broad) AS broad, MAX(aa.privileged) AS privileged, \" \"MAX(aa.service) AS service, MAX(aa.unresolved) AS unresolved, \" \"SUM(aa.can_read) AS read_n, SUM(aa.can_read * aa.sensitive) AS read_sensitive_n, \" \"SUM(aa.can_write) AS write_n, SUM(aa.can_write * aa.sensitive) AS write_sensitive_n, \" \"SUM(aa.full_control) AS full_n, SUM(aa.full_control * aa.sensitive) AS full_sensitive_n, \" \"SUM(aa.has_deny) AS deny_n, SUM(aa.is_owner) AS owner_n, SUM(aa.has_explicit) AS explicit_n \" f\"FROM asset_access aa WHERE aa.tenant_id = ?{kind_sql} GROUP BY aa.principal_key \"  # noqa: S608 - fixed \"HAVING SUM(aa.can_read) + SUM(aa.can_write) + SUM(aa.has_deny) + SUM(aa.is_owner) > 0\", (tenant_id,),",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "return conn.execute( f\"SELECT {_ACCESS_FILE_COLUMNS} FROM asset_access aa JOIN assets a \"  # noqa: S608 - fixed fragments f\"ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id WHERE {' AND '.join(clauses)} \" \"ORDER BY aa.sensitive DESC, aa.risk_score DESC, aa.asset_id ASC LIMIT ? OFFSET ?\", (*params, limit, offset),",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "keys = estate_counts.class_keys(conn, tenant_id, kind)[:ACCESS_KIND_KEY_LIMIT] if estate_counts.enabled()             else [str(row[\"principal_key\"]) for row in conn.execute( f\"SELECT DISTINCT principal_key FROM asset_access WHERE tenant_id = ? AND {kind} = 1 \"  # noqa: S608 \"LIMIT ?\", (tenant_id, ACCESS_KIND_KEY_LIMIT)).fetchall()] # The first `bounded + offset` distinct files are within each key's first that many.",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( f\"SELECT {_ACCESS_FILE_COLUMNS} FROM asset_access aa JOIN assets a \"  # noqa: S608 - fixed fragments \"ON a.tenant_id = aa.tenant_id AND a.id = aa.asset_id WHERE aa.tenant_id = ? AND aa.asset_id = ?\", (tenant_id, asset_id)).fetchall()",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "rows = conn.execute( \"SELECT id, asset_id, path, scan_id, previous_scan_id, detected_at, severity, sensitive, broad_exposure, \" \"gained_write, owner_changed, deny_removed, change_count, summary, changes_json FROM asset_acl_changes \" f\"WHERE {' AND '.join(clauses)} ORDER BY detected_at DESC, id DESC LIMIT ?\",  # noqa: S608 - fixed (*params, max(1, min(int(limit), 200))),",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    },
+    {
+      "file": "backend/store.py",
+      "test_id": "B608",
+      "code": "def distinct(where: str) -> int: return int(conn.execute(f\"SELECT COUNT(DISTINCT asset_id) AS n FROM asset_access \"  # noqa: S608 f\"WHERE tenant_id = ? AND {where}\", (tenant_id,)).fetchone()[\"n\"] or 0)",
+      "reviewed": "2026-10-10",
+      "reason": "Revision 0055 access model: SQL assembled from fixed table/column names, fixed filter fragments chosen from constant maps (ACCESS_FILTERS, ACCESS_KINDS validated first) and '?' placeholder lists; every value is a bound parameter"
+    }
+  ]
+}

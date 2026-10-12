@@ -1,0 +1,205 @@
+{
+  "requested_files": 3000,
+  "plan": {
+    "files": 3000,
+    "volume": "C:\\",
+    "total_gib": 78.7,
+    "free_gib": 3.14,
+    "reserve_gib": 15.73,
+    "state_bytes_per_file": 643072,
+    "basis": "quality audit",
+    "projected_gib": 2.261,
+    "free_after_gib": 0.88,
+    "within_reserve": false,
+    "projected_bytes": 2427472500,
+    "free_bytes": 3370332160
+  },
+  "host": {
+    "cpus": 6
+  },
+  "held": [
+    "HELD FOR SCALE HOST: 3,000 files need about 2.261 GiB (quality audit), and C:\\ must keep 15.73 GiB free; it has 3.14 GiB."
+  ],
+  "bounded": {
+    "cap_mb": 483,
+    "why": "the host is already below its reserve; this run's projected footprint is capped, and it is a measurement, not the gate",
+    "largest_safe_files": 3000
+  },
+  "calibration": {
+    "files": 200,
+    "state_bytes_per_file": 58157,
+    "parity": {
+      "the corpus was scanned": true,
+      "partitioned reports the same files": true,
+      "partitioned reports the same findings per file": true,
+      "no finding lost or added": true,
+      "no file twice": true,
+      "no finding id twice": true,
+      "unchanged incremental gives the same answer": true,
+      "unchanged incremental reads no file again": true
+    }
+  },
+  "measured": {
+    "files": 3000,
+    "partition_max_files": 2000,
+    "partition_size_is": "the product default",
+    "runs": [
+      {
+        "mode": "full",
+        "tenant": "c14-full",
+        "seconds": 38.74,
+        "files": 3000,
+        "findings": 4250,
+        "digest": "1c19eae93ada50636cb42740f3bef2ef24a35319fb94209de05a97c1d1672211",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 0,
+        "content_reads": 3000,
+        "partitions": null,
+        "peak_combined_mib": 171.7,
+        "peak_processes": 1,
+        "peak_with_verification_mib": 171.7,
+        "peak_by_tree_mib": {
+          "scan": 171.7
+        },
+        "samples": 156,
+        "files_per_second": 77.4,
+        "state_growth_bytes": 34609172
+      },
+      {
+        "mode": "partitioned",
+        "tenant": "default",
+        "seconds": 27.71,
+        "files": 3000,
+        "findings": 4250,
+        "digest": "1c19eae93ada50636cb42740f3bef2ef24a35319fb94209de05a97c1d1672211",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 0,
+        "content_reads": 3000,
+        "partitions": 2,
+        "peak_combined_mib": 137.0,
+        "peak_processes": 1,
+        "peak_with_verification_mib": 137.0,
+        "peak_by_tree_mib": {
+          "scan": 137.0
+        },
+        "samples": 112,
+        "files_per_second": 108.3,
+        "state_growth_bytes": 52478338
+      },
+      {
+        "mode": "incremental",
+        "tenant": "default",
+        "seconds": 21.18,
+        "files": 3000,
+        "findings": 4250,
+        "digest": "1c19eae93ada50636cb42740f3bef2ef24a35319fb94209de05a97c1d1672211",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 3000,
+        "content_reads": 0,
+        "partitions": 2,
+        "peak_combined_mib": 179.8,
+        "peak_processes": 1,
+        "peak_with_verification_mib": 179.8,
+        "peak_by_tree_mib": {
+          "scan": 179.8
+        },
+        "samples": 88,
+        "files_per_second": 141.6,
+        "state_growth_bytes": 18545046
+      },
+      {
+        "mode": "compliance",
+        "tenant": "c14-comp",
+        "seconds": 34.48,
+        "files": 3000,
+        "findings": 7727,
+        "digest": "aa7ec5fbfd4d6a711f6fb3225cdec97d880b8f1fd1896c63a0a863203b9222f8",
+        "duplicate_files": 0,
+        "duplicate_finding_ids": 0,
+        "cache_reused_files": 0,
+        "content_reads": 3000,
+        "partitions": null,
+        "peak_combined_mib": 637.3,
+        "peak_processes": 6,
+        "peak_with_verification_mib": 637.3,
+        "peak_by_tree_mib": {
+          "scan": 637.3
+        },
+        "samples": 136,
+        "files_per_second": 87.0,
+        "state_growth_bytes": 61915436
+      }
+    ],
+    "corpus_text_bytes": 463725,
+    "parity": {
+      "the corpus was scanned": true,
+      "partitioned reports the same files": true,
+      "partitioned reports the same findings per file": true,
+      "no finding lost or added": true,
+      "no file twice": true,
+      "no finding id twice": true,
+      "unchanged incremental gives the same answer": true,
+      "unchanged incremental reads no file again": true
+    },
+    "disk": {
+      "database_bytes": 130068480,
+      "cache_bytes": 24354284,
+      "artifact_bytes": 13125228,
+      "corpus_bytes": 480225,
+      "state_bytes": 167547992,
+      "state_bytes_per_file": 55849
+    }
+  },
+  "gate": {
+    "peak combined working set < 2 GiB": {
+      "measured_mib": 637.3,
+      "holds_here": true,
+      "at_gate_size": false
+    },
+    "parity with the unpartitioned result": {
+      "holds_here": true,
+      "at_gate_size": false
+    },
+    "responsive dashboard under scan": {
+      "holds_here": null,
+      "note": "run with --dashboard",
+      "at_gate_size": false
+    }
+  },
+  "plan_at_requested_size": {
+    "files": 3000,
+    "volume": "C:\\",
+    "total_gib": 78.7,
+    "free_gib": 3.14,
+    "reserve_gib": 15.73,
+    "state_bytes_per_file": 58157,
+    "basis": "measured on this host",
+    "projected_gib": 0.218,
+    "free_after_gib": 2.93,
+    "within_reserve": false,
+    "projected_bytes": 234041250,
+    "free_bytes": 3375505408
+  },
+  "projection_to_requested_size": {
+    "files": 3000,
+    "state_gib": 0.16,
+    "full_hours": 0.01,
+    "partitioned_hours": 0.01,
+    "incremental_hours": 0.01,
+    "compliance_hours": 0.01,
+    "note": "a linear projection from the bounded run; the peak at 3,000 files is what the scale host must measure",
+    "unpartitioned_memory": {
+      "full": {
+        "kib_per_file": 35.99,
+        "projected_scan_peak_gib": 0.17
+      },
+      "compliance": {
+        "kib_per_file": 71.31,
+        "projected_scan_peak_gib": 0.62
+      }
+    }
+  }
+}

@@ -1,0 +1,346 @@
+"""Bounded, workload-aware concurrency policy for discovery scans.
+
+Track P-B deliberately keeps policy separate from the collectors and detector
+implementation.  A value of zero means "auto"; explicit positive values remain
+available for constrained installations and deterministic tests.
+"""
+
+from __future__ import annotations
+
+from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass
+import os
+import threading
+import time
+
+
+MAX_ANALYSIS_WORKERS = 32
+MAX_IO_WORKERS = 64
+MAX_PIPELINE_BUFFER = 1024
+# Hard ceiling on the process-wide collector-I/O admission budget (P-B.2). This
+# caps concurrent connection-holding collector workers across ALL scan jobs, so
+# N concurrent DSPM_JOB_WORKERS scans each using io_workers threads cannot open
+# N x io_workers connections and oversubscribe one target host.
+MAX_HOST_IO_BUDGET = 128
+
+
+def _env_int(name: str, default: int = 0) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bounded(value: int, default: int, maximum: int) -> int:
+    selected = value if value > 0 else default
+    return max(1, min(int(selected), maximum))
+
+
+@dataclass(frozen=True, slots=True)
+class ParallelismPlan:
+    cpu_count: int
+    analysis_workers: int
+    io_workers: int
+    ocr_workers: int
+    pipeline_buffer: int
+    pipeline_enabled: bool
+    analysis_source: str
+    io_source: str
+
+    def to_dict(self) -> dict:
+        return {
+            "cpu_count": self.cpu_count,
+            "analysis_workers": self.analysis_workers,
+            "io_workers": self.io_workers,
+            "ocr_workers": self.ocr_workers,
+            "pipeline_buffer": self.pipeline_buffer,
+            "pipeline_enabled": self.pipeline_enabled,
+            "analysis_source": self.analysis_source,
+            "io_source": self.io_source,
+        }
+
+
+def resolve_parallelism(
+    *,
+    analysis_workers: int = 0,
+    io_workers: int = 0,
+    pipeline_buffer: int = 0,
+    pipeline_enabled: bool = True,
+) -> ParallelismPlan:
+    """Resolve explicit/configured values into a bounded per-scan plan.
+
+    Analysis defaults to one worker per logical CPU (capped at 32).  I/O gets a
+    larger budget because those workers spend most of their time waiting, but it
+    is only a policy value until a collector opts into parallel acquisition.
+    OCR stays at one inference per process: one ONNX inference already consumes
+    the configured intra-op CPU threads and concurrent inference benchmarked
+    worse on the reference host.
+    """
+
+    cpu_count = max(1, int(os.cpu_count() or 1))
+
+    env_analysis = _env_int("DSPM_ANALYSIS_WORKERS")
+    if analysis_workers > 0:
+        selected_analysis = analysis_workers
+        analysis_source = "scan_config"
+    elif env_analysis > 0:
+        selected_analysis = env_analysis
+        analysis_source = "environment"
+    else:
+        selected_analysis = cpu_count
+        analysis_source = "auto_cpu"
+
+    env_io = _env_int("DSPM_IO_WORKERS")
+    if io_workers > 0:
+        selected_io = io_workers
+        io_source = "scan_config"
+    elif env_io > 0:
+        selected_io = env_io
+        io_source = "environment"
+    else:
+        # I/O workers wait on network round-trips, not CPU. An SMB file costs
+        # ~3 RTTs, so 2x CPU (12 on a 6-core host) left the link mostly idle and
+        # made collection the wall-clock floor. 6x CPU keeps the pipe full; the
+        # process-wide admission budget below is still the real safety valve.
+        selected_io = max(16, cpu_count * 6)
+        io_source = "auto_io"
+
+    resolved_analysis = _bounded(selected_analysis, cpu_count, MAX_ANALYSIS_WORKERS)
+    resolved_io = _bounded(selected_io, max(16, cpu_count * 6), MAX_IO_WORKERS)
+    env_buffer = _env_int("DSPM_PIPELINE_BUFFER")
+    selected_buffer = pipeline_buffer if pipeline_buffer > 0 else env_buffer
+    if selected_buffer <= 0:
+        # Deep enough that collectors never block waiting for an analysis slot
+        # (records are small; this is a RAM-for-throughput trade by design).
+        selected_buffer = max(resolved_analysis * 8, resolved_io * 2, 64)
+
+    return ParallelismPlan(
+        cpu_count=cpu_count,
+        analysis_workers=resolved_analysis,
+        io_workers=resolved_io,
+        ocr_workers=1,
+        pipeline_buffer=_bounded(selected_buffer, resolved_analysis * 2, MAX_PIPELINE_BUFFER),
+        pipeline_enabled=bool(pipeline_enabled) and _env_bool("DSPM_PIPELINE_ENABLED", True),
+        analysis_source=analysis_source,
+        io_source=io_source,
+    )
+
+
+# ---------------------------------------------------------------------------
+# P-B.2: process-wide collector-I/O admission budget.
+# ---------------------------------------------------------------------------
+
+
+class HostAdmissionBudget:
+    """A process-wide cap on concurrently connected collector I/O workers.
+
+    Each parallel collector connection (an SMB share worker, a WinRM session, a
+    local acquisition worker) holds one slot for the duration of its network
+    work. Because the budget is shared across every scan job in the process, a
+    burst of concurrent ``DSPM_JOB_WORKERS`` scans cannot multiply
+    ``io_workers`` into an unbounded connection count against one target host -
+    excess workers block until a slot frees. Slots are counted (not fair-queued)
+    and contention is recorded for diagnostics."""
+
+    __slots__ = ("_limit", "_sem", "_lock", "_in_use", "_peak", "_grants", "_waits", "_wait_seconds")
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+        self._sem = threading.Semaphore(self._limit)
+        self._lock = threading.Lock()
+        self._in_use = 0
+        self._peak = 0
+        self._grants = 0
+        self._waits = 0
+        self._wait_seconds = 0.0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    @contextmanager
+    def slot(self, timeout: float | None = None):
+        """Hold one admission slot for the duration of the ``with`` block. Blocks
+        when the budget is exhausted; raises TimeoutError if ``timeout`` elapses."""
+        waited = False
+        if not self._sem.acquire(blocking=False):
+            waited = True
+            started = time.monotonic()
+            if not self._sem.acquire(timeout=timeout):
+                raise TimeoutError("host I/O admission budget exhausted")
+            wait_seconds = time.monotonic() - started
+        else:
+            wait_seconds = 0.0
+        with self._lock:
+            self._in_use += 1
+            self._grants += 1
+            self._peak = max(self._peak, self._in_use)
+            if waited:
+                self._waits += 1
+                self._wait_seconds += wait_seconds
+        try:
+            yield
+        finally:
+            self._sem.release()
+            with self._lock:
+                self._in_use -= 1
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "limit": self._limit,
+                "in_use": self._in_use,
+                "peak_in_use": self._peak,
+                "grants": self._grants,
+                "waits": self._waits,
+                "wait_seconds": round(self._wait_seconds, 4),
+            }
+
+
+def _resolve_host_io_budget() -> int:
+    env = _env_int("DSPM_HOST_IO_BUDGET")
+    cpu = max(1, int(os.cpu_count() or 1))
+    return _bounded(env, max(16, cpu * 6), MAX_HOST_IO_BUDGET)
+
+
+_host_budget: HostAdmissionBudget | None = None
+_host_budget_lock = threading.Lock()
+
+
+def host_admission_budget() -> HostAdmissionBudget:
+    """The process-wide collector-I/O admission budget (lazy singleton, sized by
+    DSPM_HOST_IO_BUDGET or ~2x CPU)."""
+    global _host_budget
+    if _host_budget is None:
+        with _host_budget_lock:
+            if _host_budget is None:
+                _host_budget = HostAdmissionBudget(_resolve_host_io_budget())
+    return _host_budget
+
+
+# W4.6: what one character of content costs while a record waits for and goes through its
+# analysis: the text, and what the analysis allocates on top of it - MEASURED on a 16 MiB
+# text (tracemalloc, 2026-10-08) 1.0x with compliance off and 2.84x with it on. Charged
+# for every record in flight, waiting ones included, so the budget errs on the safe side.
+WORKING_SIZE_FACTOR = 4
+DEFAULT_IN_FLIGHT_MB = 512
+
+
+def working_size(record: dict) -> int:
+    """What a record's content holds in memory until its analysis ends (W4.6)."""
+    content = record.get("content")
+    return len(content) * WORKING_SIZE_FACTOR if isinstance(content, str) and content else 0
+
+
+class InFlightBytes:
+    """A process-wide budget of the content records hold between collection and the end of
+    their analysis (W4.6), charged at working size.
+
+    The pipeline's other bound is a count of records - right for small files, and up to
+    72 texts of 16 MiB each on a six-core host. Every scan in the process charges here, in
+    order: a record waits while the records ahead of it would leave too little, and one
+    larger than the whole budget runs alone, so none is refused and none starves. A record
+    without content costs nothing and does not wait."""
+
+    __slots__ = ("_limit", "_cond", "_queue", "_used", "_peak", "_waits", "_wait_seconds")
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, int(limit))
+        self._cond = threading.Condition()
+        self._queue: deque = deque()
+        self._used = 0
+        self._peak = 0
+        self._waits = 0
+        self._wait_seconds = 0.0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def acquire(self, size: int, cancelled=None) -> bool:
+        """Charge ``size`` bytes, waiting for room; ``False`` if ``cancelled()`` turned true first."""
+        size = max(0, int(size))
+        if not size:
+            return True
+        ticket = object()
+        with self._cond:
+            self._queue.append(ticket)
+            started = time.monotonic()
+            waited = False
+            try:
+                while not (self._queue[0] is ticket and (self._used == 0 or self._used + size <= self._limit)):
+                    if cancelled is not None and cancelled():
+                        return False
+                    waited = True
+                    self._cond.wait(0.5)
+                self._used += size
+                self._peak = max(self._peak, self._used)
+                if waited:
+                    self._waits += 1
+                    self._wait_seconds += time.monotonic() - started
+                return True
+            finally:
+                self._queue.remove(ticket)
+                self._cond.notify_all()
+
+    def release(self, size: int) -> None:
+        size = max(0, int(size))
+        if not size:
+            return
+        with self._cond:
+            self._used = max(0, self._used - size)
+            self._cond.notify_all()
+
+    @property
+    def used(self) -> int:
+        with self._cond:
+            return self._used
+
+    def stats(self) -> dict:
+        with self._cond:
+            return {"limit": self._limit, "in_use": self._used, "peak_in_use": self._peak,
+                    "waits": self._waits, "wait_seconds": round(self._wait_seconds, 4)}
+
+
+def _resolve_in_flight_bytes() -> int:
+    megabytes = _env_int("DSPM_IN_FLIGHT_MB", DEFAULT_IN_FLIGHT_MB)
+    return max(16, min(megabytes if megabytes > 0 else DEFAULT_IN_FLIGHT_MB, 65_536)) * 1024 * 1024
+
+
+_in_flight: InFlightBytes | None = None
+_in_flight_lock = threading.Lock()
+
+
+def in_flight_bytes() -> InFlightBytes:
+    """The process-wide in-flight content budget (``DSPM_IN_FLIGHT_MB``, 512; a node profile
+    sets it)."""
+    global _in_flight
+    if _in_flight is None:
+        with _in_flight_lock:
+            if _in_flight is None:
+                _in_flight = InFlightBytes(_resolve_in_flight_bytes())
+    return _in_flight
+
+
+def reset_in_flight_bytes(limit: int | None = None) -> InFlightBytes:
+    """Replace the process-wide budget (tests, an explicit reconfigure)."""
+    global _in_flight
+    with _in_flight_lock:
+        _in_flight = InFlightBytes(limit if limit is not None else _resolve_in_flight_bytes())
+    return _in_flight
+
+
+def reset_host_admission_budget(limit: int | None = None) -> HostAdmissionBudget:
+    """Replace the process-wide budget (used by tests / an explicit reconfigure)."""
+    global _host_budget
+    with _host_budget_lock:
+        _host_budget = HostAdmissionBudget(limit if limit is not None else _resolve_host_io_budget())
+    return _host_budget

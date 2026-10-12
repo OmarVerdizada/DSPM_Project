@@ -1,0 +1,137 @@
+{
+  "evidence_kind": "capacity_soak",
+  "track": "P7/S-C.1",
+  "generated_at": "2026-09-03T06:22:50.718953+00:00",
+  "profile": "single-host engineering baseline (2026-09-02)",
+  "database": "postgresql",
+  "mode": "certification",
+  "documents": 5000000,
+  "tenant_documents": 2500000,
+  "repeats": 20,
+  "query_p95_target_ms": 300.0,
+  "ingest_and_index_seconds": 573.208,
+  "scenarios": {
+    "first_page": {
+      "rows": 101,
+      "p50_ms": 2.216,
+      "p95_ms": 3.185,
+      "max_ms": 3.46,
+      "under_target": true,
+      "plan": [
+        "Limit  (cost=0.56..5.24 rows=101 width=29)",
+        "  ->  Index Only Scan Backward using track_s_bench_278f277d9343_risk_id on track_s_bench_278f277d9343  (cost=0.56..114865.84 rows=2478587 width=29)",
+        "        Index Cond: (tenant_id = 'bench-a'::text)"
+      ],
+      "count_plan": [
+        "Aggregate  (cost=334.98..334.99 rows=1 width=8)",
+        "  ->  Limit  (cost=0.43..209.97 rows=10001 width=4)",
+        "        ->  Index Only Scan using track_s_bench_278f277d9343_protected on track_s_bench_278f277d9343  (cost=0.43..51929.72 rows=2478587 width=4)",
+        "              Index Cond: (tenant_id = 'bench-a'::text)"
+      ]
+    },
+    "deep_keyset": {
+      "rows": 101,
+      "p50_ms": 3.877,
+      "p95_ms": 7.034,
+      "max_ms": 23.002,
+      "under_target": true,
+      "plan": [
+        "Limit  (cost=0.56..5.49 rows=101 width=29)",
+        "  ->  Index Only Scan Backward using track_s_bench_278f277d9343_risk_id on track_s_bench_278f277d9343  (cost=0.56..59124.31 rows=1210294 width=29)",
+        "        Index Cond: ((tenant_id = 'bench-a'::text) AND (ROW(risk_score, id) < ROW('50'::smallint, 'ffffffffffffffffffffffff'::text)))"
+      ],
+      "count_plan": [
+        "Aggregate  (cost=614.13..614.14 rows=1 width=8)",
+        "  ->  Limit  (cost=0.56..489.11 rows=10001 width=4)",
+        "        ->  Index Only Scan using track_s_bench_278f277d9343_risk_id on track_s_bench_278f277d9343  (cost=0.56..59124.31 rows=1210294 width=4)",
+        "              Index Cond: ((tenant_id = 'bench-a'::text) AND (ROW(risk_score, id) < ROW('50'::smallint, 'ffffffffffffffffffffffff'::text)))"
+      ]
+    },
+    "filtered": {
+      "rows": 101,
+      "p50_ms": 3.052,
+      "p95_ms": 4.699,
+      "max_ms": 4.715,
+      "under_target": true,
+      "plan": [
+        "Limit  (cost=0.56..7.12 rows=101 width=29)",
+        "  ->  Index Only Scan Backward using track_s_bench_278f277d9343_filtered_risk_id on track_s_bench_278f277d9343  (cost=0.56..1482.33 rows=22791 width=29)",
+        "        Index Cond: ((tenant_id = 'bench-a'::text) AND (risk_level = 'CRITICAL'::text) AND (source = 'smb'::text) AND (extension = '.txt'::text))"
+      ],
+      "count_plan": [
+        "Aggregate  (cost=775.79..775.80 rows=1 width=8)",
+        "  ->  Limit  (cost=0.56..650.78 rows=10001 width=4)",
+        "        ->  Index Only Scan using track_s_bench_278f277d9343_filtered_risk_id on track_s_bench_278f277d9343  (cost=0.56..1482.33 rows=22791 width=4)",
+        "              Index Cond: ((tenant_id = 'bench-a'::text) AND (risk_level = 'CRITICAL'::text) AND (source = 'smb'::text) AND (extension = '.txt'::text))"
+      ]
+    },
+    "protected": {
+      "rows": 101,
+      "p50_ms": 2.142,
+      "p95_ms": 2.893,
+      "max_ms": 3.498,
+      "under_target": true,
+      "plan": [
+        "Limit  (cost=0.56..5.99 rows=101 width=29)",
+        "  ->  Index Only Scan Backward using track_s_bench_278f277d9343_protected_risk_id on track_s_bench_278f277d9343  (cost=0.56..605.28 rows=11236 width=29)",
+        "        Index Cond: ((tenant_id = 'bench-a'::text) AND (is_protected = true))"
+      ],
+      "count_plan": [
+        "Aggregate  (cost=364.63..364.64 rows=1 width=8)",
+        "  ->  Limit  (cost=0.43..239.62 rows=10001 width=4)",
+        "        ->  Index Only Scan using track_s_bench_278f277d9343_protected on track_s_bench_278f277d9343  (cost=0.43..269.15 rows=11236 width=4)",
+        "              Index Cond: ((tenant_id = 'bench-a'::text) AND (is_protected = true))"
+      ]
+    },
+    "filtered_search": {
+      "rows": 101,
+      "p50_ms": 219.877,
+      "p95_ms": 260.83,
+      "max_ms": 260.898,
+      "under_target": true,
+      "plan": [
+        "Limit  (cost=8729.82..8730.07 rows=101 width=29)",
+        "  ->  Sort  (cost=8729.82..8734.43 rows=1847 width=29)",
+        "        Sort Key: risk_score DESC, id DESC",
+        "        ->  Bitmap Heap Scan on track_s_bench_278f277d9343  (cost=1857.67..8659.09 rows=1847 width=29)",
+        "              Recheck Cond: ((tenant_id = 'bench-a'::text) AND (risk_level = 'CRITICAL'::text) AND (source = 'smb'::text) AND (lower(COALESCE(search_text, ''::text)) ~~ '%sentroneedle%'::text))",
+        "              ->  Bitmap Index Scan on track_s_bench_278f277d9343_filter_search_trgm  (cost=0.00..1857.20 rows=1847 width=0)",
+        "                    Index Cond: ((tenant_id = 'bench-a'::text) AND (risk_level = 'CRITICAL'::text) AND (source = 'smb'::text) AND (lower(COALESCE(search_text, ''::text)) ~~ '%sentroneedle%'::text))"
+      ],
+      "count_plan": [
+        "Aggregate  (cost=8682.18..8682.19 rows=1 width=8)",
+        "  ->  Limit  (cost=1857.67..8659.09 rows=1847 width=4)",
+        "        ->  Bitmap Heap Scan on track_s_bench_278f277d9343  (cost=1857.67..8659.09 rows=1847 width=4)",
+        "              Recheck Cond: ((tenant_id = 'bench-a'::text) AND (risk_level = 'CRITICAL'::text) AND (source = 'smb'::text) AND (lower(COALESCE(search_text, ''::text)) ~~ '%sentroneedle%'::text))",
+        "              ->  Bitmap Index Scan on track_s_bench_278f277d9343_filter_search_trgm  (cost=0.00..1857.20 rows=1847 width=0)",
+        "                    Index Cond: ((tenant_id = 'bench-a'::text) AND (risk_level = 'CRITICAL'::text) AND (source = 'smb'::text) AND (lower(COALESCE(search_text, ''::text)) ~~ '%sentroneedle%'::text))"
+      ]
+    }
+  },
+  "concurrent_soak": {
+    "workers": 8,
+    "requested_seconds": 300.0,
+    "elapsed_seconds": 300.007,
+    "operations": 1613268,
+    "errors": 0,
+    "throughput_per_second": 5377.44,
+    "p50_ms": 1.369,
+    "p95_ms": 2.692,
+    "p99_ms": 3.667
+  },
+  "lock_contention": {
+    "configured_timeout_ms": 1000,
+    "observed_wait_ms": 1025.778,
+    "timeout_observed": true,
+    "bounded": true,
+    "unrelated_tenant_read_ms": 148.074
+  },
+  "gates": {
+    "all_inventory_p95_under_target": true,
+    "projected_rows_loaded": true,
+    "soak_duration_met": true,
+    "concurrent_soak_clean": true,
+    "lock_wait_bounded": true
+  },
+  "result": "PASS"
+}

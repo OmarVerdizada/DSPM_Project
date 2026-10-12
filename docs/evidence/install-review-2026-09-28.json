@@ -1,0 +1,141 @@
+{
+  "reviewed_at": "2026-09-28T14:16:05Z",
+  "database": "<install root>\\data\\dspm.sqlite",
+  "database_bytes": 186548224,
+  "commit": "c72a124",
+  "working_tree_clean": true,
+  "passed": 25,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "audit hash chains verify (V7)",
+      "passed": true,
+      "detail": "OK     1: 8 rows (rows 1-8 sealed at upgrade 2026-09-25T07:01:37) | OK     23: 28 rows (rows 1-28 sealed at upgrade 2026-09-25T07:01:37) | OK     94: 4 rows (rows 1-4 sealed at upgrade 2026-09-25T07:01:37) | OK     default: 139 rows (rows 1-132 sealed at upgrade 2026-09-25T07:01:37)"
+    },
+    {
+      "check": "the copy upgrades to this tree's schema and is ready",
+      "passed": true,
+      "detail": "{\"applied\": 25, \"expected\": 25}"
+    },
+    {
+      "check": "/: strict CSP (V14)",
+      "passed": true,
+      "detail": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; b"
+    },
+    {
+      "check": "/: security headers (V14)",
+      "passed": true,
+      "detail": "{}"
+    },
+    {
+      "check": "/: every versioned asset URL is its content digest (C6)",
+      "passed": true,
+      "detail": "5 references, stale=[]"
+    },
+    {
+      "check": "/: no other origin (C6)",
+      "passed": true,
+      "detail": "[]"
+    },
+    {
+      "check": "/dashboard: strict CSP (V14)",
+      "passed": true,
+      "detail": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; b"
+    },
+    {
+      "check": "/dashboard: security headers (V14)",
+      "passed": true,
+      "detail": "{}"
+    },
+    {
+      "check": "/dashboard: every versioned asset URL is its content digest (C6)",
+      "passed": true,
+      "detail": "13 references, stale=[]"
+    },
+    {
+      "check": "/dashboard: no other origin (C6)",
+      "passed": true,
+      "detail": "[]"
+    },
+    {
+      "check": "/profile: strict CSP (V14)",
+      "passed": true,
+      "detail": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; b"
+    },
+    {
+      "check": "/profile: security headers (V14)",
+      "passed": true,
+      "detail": "{}"
+    },
+    {
+      "check": "/profile: every versioned asset URL is its content digest (C6)",
+      "passed": true,
+      "detail": "6 references, stale=[]"
+    },
+    {
+      "check": "/profile: no other origin (C6)",
+      "passed": true,
+      "detail": "[]"
+    },
+    {
+      "check": "GET /api/findings without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "GET /api/inventory without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "GET /api/audit without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "GET /api/users without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "GET /api/scan-targets without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "GET /api/settings/siem without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "POST /api/v1/reports/office without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "POST /api/v1/reports without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "POST /api/scan without a session is refused (V4)",
+      "passed": true,
+      "detail": "401"
+    },
+    {
+      "check": "the API is never cached (V8)",
+      "passed": true,
+      "detail": "no-store"
+    },
+    {
+      "check": "the production boundary can be evaluated (V13)",
+      "passed": true,
+      "detail": "2 thing(s) a production start would refuse"
+    }
+  ],
+  "production_boundary_problems": [
+    "DSPM_TRUSTED_HOSTS is empty: set it to the host name(s) the console is reached by, e.g. DSPM_TRUSTED_HOSTS=sentro.corp.example",
+    "serving on loopback, so a reverse proxy on this host is the only way in, but DSPM_TRUSTED_PROXIES does not name it: every client would be the proxy. Set DSPM_TRUSTED_PROXIES=127.0.0.1"
+  ],
+  "copy_removed": true
+}

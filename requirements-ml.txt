@@ -1,0 +1,23 @@
+# Optional ML / NER classification extras.
+#
+#   pip install -r requirements.txt -r requirements-ml.txt
+#   python -m spacy download en_core_web_sm
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# classification/ml_classifier.py imports spacy (line 21) and loads the
+# `en_core_web_sm` model (line 26). Neither was declared in requirements.txt.
+# Both failures are swallowed and return [], so on a standard install the
+# ML/NER detection path is SILENTLY DISABLED and classification falls back to
+# _heuristic_findings(). There is no log line or health flag indicating this.
+#
+# These extras are kept OPTIONAL rather than promoted into requirements.txt on
+# purpose: installing them changes detection output (the NER path starts
+# producing ml_ner_* findings), which is a runtime behaviour change and is out
+# of scope for the Phase 0 Part 0.2 production-readiness pass.
+#
+# Before enabling in production, decide explicitly whether ML classification is
+# meant to be on, and make the degraded state observable rather than silent.
+# Tracked in docs/phase0_production_readiness_report.md.
+
+spacy==3.8.7

@@ -1,0 +1,24 @@
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.52.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MEILI_PORT:-7700}:7700"
+    environment:
+      MEILI_ENV: production
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:?set a random master key of at least 16 bytes}
+      MEILI_DB_PATH: /meili_data/data.ms
+      MEILI_DUMP_DIR: /meili_data/dumps
+      MEILI_SNAPSHOT_DIR: /meili_data/snapshots
+      MEILI_SCHEDULE_SNAPSHOT: ${MEILI_SCHEDULE_SNAPSHOT:-86400}
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      - sentro_meilisearch:/meili_data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 60s
+
+volumes:
+  sentro_meilisearch:

@@ -1,0 +1,92 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+# packaging/windows build environment (a local venv; never source)
+.build-venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+sdist/
+
+# Test / coverage / type-checker caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# Generated supply-chain artifacts. requirements.lock IS tracked; the SBOM is
+# produced fresh in CI, and requirements.lock.ci is a CI verification temp.
+sbom.json
+requirements.lock.ci
+# C7: Semgrep's own virtualenv (requirements-semgrep.txt) and seeded-gate test copies.
+.semgrep-venv/
+frontend/.gate-seed-*/
+
+# ---------------------------------------------------------------------------
+# Node (frontend/ lint tooling only - the console itself is static files)
+# ---------------------------------------------------------------------------
+node_modules/
+.npm/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------------------
+# Secrets and local configuration
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+.jwt_secret
+.evidence_hmac_key
+
+# ---------------------------------------------------------------------------
+# Runtime state and generated artifacts (never source)
+# ---------------------------------------------------------------------------
+# data/ also holds a source install's config\sentro.toml and secrets\ (scripts/setup.ps1).
+data/
+tmp/
+tmp*/
+w-mprof/
+w-scalene/
+# Written into a release or handover export, never into the repository.
+/BUILD.json
+*.sqlite
+*.sqlite3
+*.db
+*.log
+report.json
+
+# Generated demo/scan corpora. Regenerate with:
+#   python scripts/generate_enterprise_test_data.py --output enterprise_test_data
+enterprise_test_data/
+enterprise_test_data_repro/
+
+# ---------------------------------------------------------------------------
+# Editor, tooling and OS cruft (developer-only, must not ship)
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+.obsidian/
+.claude/
+.agents/
+skills-lock.json
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# C11: offline Windows packages built by packaging/windows/build_package.py
+/dist/

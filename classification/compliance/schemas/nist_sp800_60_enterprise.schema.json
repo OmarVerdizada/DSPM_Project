@@ -1,0 +1,529 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/nist-sp800-60-enterprise-guideline.schema.json",
+  "title": "NIST SP 800-60 Enterprise DSPM Detection Catalog",
+  "type": "object",
+  "required": [
+    "framework",
+    "language",
+    "mode",
+    "catalog",
+    "global_models",
+    "categories",
+    "rules"
+  ],
+  "properties": {
+    "framework": {
+      "const": "nist_sp800_60_enterprise"
+    },
+    "language": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 32
+    },
+    "mode": {
+      "enum": [
+        "merge",
+        "replace_type",
+        "replace_category",
+        "replace_framework",
+        "replace_language"
+      ]
+    },
+    "catalog": {
+      "type": "object",
+      "required": [
+        "name",
+        "schema_version",
+        "catalog_version",
+        "source_version",
+        "source_status",
+        "scope_summary",
+        "disclaimers"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "display_name_az": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "catalog_version": {
+          "type": "string"
+        },
+        "generated_date": {
+          "type": "string"
+        },
+        "source_status_checked": {
+          "type": "string"
+        },
+        "source_version": {
+          "type": "string"
+        },
+        "source_status": {
+          "type": "string"
+        },
+        "scope_summary": {
+          "type": "object"
+        },
+        "scope_note": {
+          "type": "string"
+        },
+        "normative_hierarchy": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disclaimers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "global_models": {
+      "type": "object"
+    },
+    "categories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "category",
+          "category_id",
+          "label_az",
+          "rule_count",
+          "source_kind",
+          "default_cia"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "category_id": {
+            "type": "string",
+            "pattern": "^nist_[a-z0-9_]+$"
+          },
+          "label_az": {
+            "type": "string"
+          },
+          "rule_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "source_kind": {
+            "type": "string"
+          },
+          "context_terms_en": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "context_terms_az": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "negative_context": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default_cia": {
+            "$ref": "#/$defs/cia"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "cia": {
+      "type": "object",
+      "required": [
+        "confidentiality",
+        "integrity",
+        "availability",
+        "overall"
+      ],
+      "properties": {
+        "confidentiality": {
+          "enum": [
+            "LOW",
+            "MODERATE",
+            "HIGH"
+          ]
+        },
+        "integrity": {
+          "enum": [
+            "LOW",
+            "MODERATE",
+            "HIGH"
+          ]
+        },
+        "availability": {
+          "enum": [
+            "LOW",
+            "MODERATE",
+            "HIGH"
+          ]
+        },
+        "overall": {
+          "enum": [
+            "LOW",
+            "MODERATE",
+            "HIGH"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "regex": {
+      "type": "object",
+      "required": [
+        "id",
+        "pattern",
+        "flags",
+        "validator",
+        "confidence",
+        "notes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "flags": {
+          "type": "string"
+        },
+        "validator": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rule": {
+      "type": "object",
+      "required": [
+        "rule_id",
+        "framework",
+        "source_kind",
+        "category",
+        "category_id",
+        "data_type",
+        "type",
+        "label",
+        "tier_original",
+        "handling_tier",
+        "why",
+        "official_definition_en",
+        "operational_definition_az",
+        "classification",
+        "detection",
+        "evidence",
+        "remediation",
+        "framework_mappings",
+        "governance",
+        "test_cases"
+      ],
+      "properties": {
+        "rule_id": {
+          "type": "string",
+          "pattern": "^NIST-(CUI|PII|NC)-[A-Z0-9]+-\\d{3}$"
+        },
+        "framework": {
+          "const": "nist_sp800_60_enterprise"
+        },
+        "source_kind": {
+          "type": "string"
+        },
+        "source_catalog": {
+          "type": "string"
+        },
+        "source_version": {
+          "type": "string"
+        },
+        "source_status": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "category_id": {
+          "type": "string",
+          "pattern": "^nist_[a-z0-9_]+$"
+        },
+        "data_type": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "pattern": "^nist_[a-z0-9_]+$"
+        },
+        "label": {
+          "type": "string"
+        },
+        "label_az": {
+          "type": "string"
+        },
+        "tier_original": {
+          "type": "string"
+        },
+        "handling_tier": {
+          "enum": [
+            "PUBLIC",
+            "INTERNAL",
+            "CONFIDENTIAL",
+            "RESTRICTED"
+          ]
+        },
+        "why": {
+          "type": "string"
+        },
+        "cui_control_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "official_definition_en": {
+          "type": "string"
+        },
+        "operational_definition_az": {
+          "type": "string"
+        },
+        "classification": {
+          "type": "object",
+          "required": [
+            "product_severity",
+            "base_risk_score",
+            "confidentiality_impact",
+            "integrity_impact",
+            "availability_impact",
+            "overall_impact",
+            "impact_basis",
+            "risk_modifiers"
+          ],
+          "properties": {
+            "product_severity": {
+              "enum": [
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "CRITICAL"
+              ]
+            },
+            "base_risk_score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "confidentiality_impact": {
+              "enum": [
+                "LOW",
+                "MODERATE",
+                "HIGH"
+              ]
+            },
+            "integrity_impact": {
+              "enum": [
+                "LOW",
+                "MODERATE",
+                "HIGH"
+              ]
+            },
+            "availability_impact": {
+              "enum": [
+                "LOW",
+                "MODERATE",
+                "HIGH"
+              ]
+            },
+            "overall_impact": {
+              "enum": [
+                "LOW",
+                "MODERATE",
+                "HIGH"
+              ]
+            },
+            "impact_basis": {
+              "type": "string"
+            },
+            "risk_modifiers": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "detection": {
+          "type": "object",
+          "required": [
+            "mode",
+            "minimum_context_score",
+            "proximity_characters",
+            "keyword_groups",
+            "regex_patterns",
+            "conditions",
+            "score_model",
+            "allowed_file_types",
+            "excluded_paths"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "DOCUMENT_MARKING_AND_CONTEXT",
+                "ENTITY_CONTEXT_COMPOSITE",
+                "VALUE_PATTERN_PLUS_CONTEXT",
+                "SECRET_PATTERN_COMPOSITE",
+                "TECHNICAL_ARTIFACT_COMPOSITE"
+              ]
+            },
+            "minimum_context_score": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "proximity_characters": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "keyword_groups": {
+              "type": "object",
+              "required": [
+                "primary_and_aliases",
+                "schema_and_field_names",
+                "azerbaijani_terms",
+                "supporting_context",
+                "negative_and_exclusion_context"
+              ],
+              "properties": {
+                "primary_and_aliases": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "schema_and_field_names": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "azerbaijani_terms": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "supporting_context": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "negative_and_exclusion_context": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            "regex_patterns": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/regex"
+              }
+            },
+            "conditions": {
+              "type": "array",
+              "minItems": 5,
+              "items": {
+                "type": "string"
+              }
+            },
+            "score_model": {
+              "type": "object"
+            },
+            "allowed_file_types": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "excluded_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "correlation": {
+          "type": "object"
+        },
+        "evidence": {
+          "type": "object"
+        },
+        "remediation": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "framework_mappings": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "governance": {
+          "type": "object"
+        },
+        "test_cases": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

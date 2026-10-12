@@ -1,0 +1,37 @@
+{
+  "profile_version": 1,
+  "name": "single-host engineering baseline (2026-09-02)",
+  "projection": {
+    "documents": 5000000,
+    "concurrent_workers": 8,
+    "soak_seconds": 300,
+    "query_p95_ms": 300,
+    "lock_timeout_ms": 1000
+  },
+  "database": {
+    "approved_major": 18,
+    "minimum_version": "18.4",
+    "patch_baseline_reviewed_at": "2026-09-02T00:00:00Z",
+    "patch_review_max_age_days": 90
+  },
+  "regional_recovery": {
+    "required": false,
+    "reason": "No regional-recovery customer contract is in scope for this single-host engineering baseline."
+  },
+  "activity_monitoring": {
+    "required": false,
+    "reason": "No customer contract requiring database activity monitoring is in scope for this engineering baseline."
+  },
+  "evidence_max_age_days": {
+    "backup_success": 2,
+    "restore_result": 90,
+    "access_review": 90,
+    "retention_run": 31,
+    "schema_changes": 31,
+    "patch_compliance": 31,
+    "capacity_soak": 180,
+    "corruption_game_day": 90,
+    "regional_recovery": 31,
+    "activity_monitoring": 31
+  }
+}

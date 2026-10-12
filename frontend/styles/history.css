@@ -1,0 +1,669 @@
+/* ── History & audit ───────────────────────────────────────────
+   The page answers one question: what has happened in this workspace, and is
+   the estate getting better or worse? Two tables answer it - what the scanner
+   found, and what people did - and until now the page had only the first, in
+   the chrome of the previous design: shadowed cards that lift on hover,
+   uppercase labels at weight 750, a 24px figure, and four KPI tiles of which
+   one printed the tenant id the sidebar already shows.
+
+   Every rule for this page used to live in styles.css. This sheet replaces
+   them; the losing ones are deleted there rather than out-specified here.
+
+   The one place colour carries meaning is the Change column, which is the
+   point of the page: a table of absolute counts makes a reader do arithmetic,
+   and the move against the last comparable scan is the history. */
+
+#tab-history.tab-panel.active {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+
+/* ── A panel ──────────────────────────────────────────────────
+   Flat, one hairline, no lift. The card that rose 2px on hover belonged to a
+   dashboard tile, not to a table you read. */
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.panel-head > div { min-width: 0; }
+
+.panel-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.panel-note {
+  margin: 2px 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+
+.panel-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.panel-actions .field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.panel-actions .field-name {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.panel-actions select {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+
+.panel-actions select:hover { border-color: color-mix(in srgb, var(--indigo) 32%, var(--line)); }
+
+.panel-actions .secondary-btn {
+  min-height: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.panel-actions .history-date {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+}
+
+.panel-foot {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+/* ── The tables ───────────────────────────────────────────────
+   A ledger: hairline rows, tabular figures, no zebra. `table { min-width:
+   1180px }` in styles.css is for the inventory grid and would force a
+   horizontal scrollbar onto nine narrow columns. */
+.panel-table-wrap {
+  overflow-x: auto;
+  border-top: 1px solid var(--line);
+}
+
+.ledger-table {
+  width: 100%;
+  min-width: 0;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+}
+
+.ledger-table th {
+  /* styles.css makes every `thead th` sticky for tables inside a `.table-wrap`.
+     These are not in one, so the nearest scrollport is the window and the
+     header would peel off and float over the page. */
+  position: static;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.ledger-table td {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.ledger-table tbody tr:last-child td { border-bottom: 0; }
+
+.ledger-table tbody tr {
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.ledger-table tbody tr:hover { background: var(--hover-wash); }
+
+.ledger-table .is-numeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ledger-table .empty {
+  padding: var(--space-5) var(--space-2);
+  color: var(--ink-muted);
+  text-align: center;
+}
+
+/* ── Sorting ──────────────────────────────────────────────────
+   The same `data-sort` / `aria-sort` contract the findings queue uses, so a
+   sortable column looks and reads the same wherever it appears. */
+.ledger-table th[data-sort] {
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+
+.ledger-table th[data-sort]:hover { color: var(--indigo); }
+
+.ledger-table th[data-sort]::after {
+  content: "";
+  display: inline-block;
+  margin-left: 5px;
+  opacity: .55;
+}
+
+.ledger-table th[data-sort][aria-sort="ascending"]::after { content: "\25B4"; }
+.ledger-table th[data-sort][aria-sort="descending"]::after { content: "\25BE"; }
+.ledger-table th[data-sort]:not([aria-sort="none"]) { color: var(--ink); }
+
+/* ── A scan row ───────────────────────────────────────────────*/
+.history-when {
+  display: block;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Replaces the raw ISO timestamp that used to sit under every friendly one -
+   the same instant said twice, once unreadably. */
+.history-ago {
+  display: block;
+  margin-top: 1px;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.history-name {
+  color: var(--ink);
+  font-weight: var(--weight-medium);
+}
+
+.history-name[data-unnamed] {
+  color: var(--ink-muted);
+  font-weight: var(--weight-regular);
+}
+
+.history-sub {
+  display: block;
+  margin-top: 1px;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.history-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium);
+}
+
+.history-count[data-severity="CRITICAL"] { color: var(--sev-critical); }
+.history-count[data-severity="HIGH"] { color: var(--sev-high); }
+.history-count[data-severity="MEDIUM"] { color: var(--sev-medium); }
+.history-count[data-severity="LOW"] { color: var(--sev-low); }
+
+/* A zero is a fact worth reading past, not one worth colouring. */
+.history-count[data-zero] { color: var(--ink-muted); font-weight: var(--weight-regular); }
+
+/* ── The change ───────────────────────────────────────────────
+   The signature of this page. Up is worse and down is better, which is the one
+   place on the page where the severity ramp earns its meaning. Baseline is not
+   a failure: it says the two scans did not cover comparable ground, which is
+   the honest answer and the one the dashboard gives too. */
+.history-change {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.history-change[data-move="up"] {
+  border-color: color-mix(in srgb, var(--sev-critical) 38%, var(--line));
+  background: color-mix(in srgb, var(--sev-critical) 8%, var(--surface));
+  color: var(--sev-critical);
+}
+
+.history-change[data-move="down"] {
+  border-color: color-mix(in srgb, var(--sev-low) 38%, var(--line));
+  background: color-mix(in srgb, var(--sev-low) 8%, var(--surface));
+  color: var(--sev-low);
+}
+
+.history-change[data-move="flat"],
+.history-change[data-move="none"] {
+  border-color: transparent;
+  color: var(--ink-muted);
+  font-weight: var(--weight-regular);
+}
+
+/* ── An audit row ─────────────────────────────────────────────*/
+.audit-actor {
+  color: var(--ink);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+}
+
+.audit-label {
+  display: block;
+  color: var(--ink);
+}
+
+/* Which half of the product the action came from. It is derived from the
+   action's own namespace, so it costs nothing and saves a filter. */
+.audit-area {
+  display: inline-block;
+  margin-top: 2px;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.audit-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--space-3);
+}
+
+.audit-detail.is-empty { color: var(--ink-muted); }
+
+/* The detail used to be JSON.stringify inside a <code>. These are the same
+   facts, labelled. */
+.audit-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+.audit-pair > span { color: var(--ink-muted); }
+
+.audit-pair > b {
+  overflow: hidden;
+  max-width: 30ch;
+  color: var(--ink);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Narrower ─────────────────────────────────────────────────*/
+@media (max-width: 1000px) {
+  .panel-head {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .panel-actions { flex-wrap: wrap; }
+}
+
+
+/* ── The Evidence panels' actions ─────────────────────────────
+   An icon and a word. The icon had no size on these pages, so it drew at an
+   SVG's default 300px and stretched Alerts' Refresh button across the panel. */
+.history-panel .panel-actions .secondary-btn:not([hidden]) {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.history-panel .panel-actions .btn-ico {
+  flex: none;
+  width: 15px;
+  height: 15px;
+}
+
+/* ── Who can read (D7) ─────────────────────────────────────────
+   Two ledgers on the History pattern: the principals, then - when one is picked -
+   the files it can read. A picked row keeps a rule on its left edge. */
+#tab-access.tab-panel.active {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+
+.access-row { cursor: pointer; }
+
+.access-row.is-chosen {
+  background: var(--hover-wash);
+  box-shadow: inset 3px 0 0 var(--indigo);
+}
+/* The muted SID measured 4.49:1 on the picked row's wash. */
+.access-row.is-chosen .access-sid { color: color-mix(in srgb, var(--ink-muted) 80%, var(--ink)); }
+
+.access-row:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: -2px;
+}
+
+.access-sid {
+  display: block;
+  color: var(--ink-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.access-kind {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.access-kind[data-kind="broad"] {
+  border-color: color-mix(in srgb, var(--sev-high) 40%, var(--line));
+  color: var(--sev-high);
+}
+
+.access-kind[data-kind="privileged"] {
+  border-color: color-mix(in srgb, var(--indigo) 40%, var(--line));
+  color: var(--indigo-ink);
+}
+
+.access-file {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: var(--ink);
+  background: none;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.access-file:hover,
+.access-file:focus-visible {
+  color: var(--indigo);
+  text-decoration: underline;
+}
+
+.access-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+/* A checkbox, not a 36px input field. */
+.access-toggle input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--indigo);
+}
+
+#access-files-more { align-self: center; }
+
+/* ── Access exposure (revision 0055) ──────────────────────────
+   The headline numbers above the principals; a principal's class and a file's grant
+   as words on a hairline, never as colour alone. */
+.access-headline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.access-headline > div {
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.access-headline dt {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.access-headline dd {
+  margin: var(--space-1) 0 0;
+  color: var(--ink);
+  font-family: var(--font-data);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+}
+
+.access-headline > div[data-level="exposed"] dd { color: var(--sev-high); }
+
+.access-kind[data-kind="service"] {
+  border-color: color-mix(in srgb, var(--sev-medium) 40%, var(--line));
+  color: var(--ink);
+}
+
+.access-kind[data-kind="unresolved"] {
+  border-style: dashed;
+  color: var(--ink);
+}
+
+.access-grant {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+/* ── File permissions: owner, summary, the ACL (revision 0055) ── */
+.perm-owner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+
+.perm-label,
+.perm-owner-kind {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.perm-owner-name strong { color: var(--ink); }
+
+.perm-sid {
+  display: block;
+  color: var(--ink-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.perm-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+}
+
+.perm-summary > div {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+
+.perm-summary dt {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.perm-summary dd {
+  margin: 0;
+  font-family: var(--font-data);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.perm-table td { vertical-align: top; }
+.perm-table tr.is-muted td { color: var(--ink-muted); }
+
+.perm-chip,
+.perm-source,
+.perm-access {
+  display: inline-block;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.perm-chip[data-perm="broad"],
+.perm-access[data-access="deny"] {
+  border-color: color-mix(in srgb, var(--sev-high) 40%, var(--line));
+  color: var(--sev-high);
+}
+
+.perm-chip[data-perm="unresolved"] { border-style: dashed; }
+
+.perm-chip[data-perm="privileged"],
+.perm-source[data-source="explicit"] {
+  border-color: color-mix(in srgb, var(--indigo) 40%, var(--line));
+  color: var(--indigo-ink);
+}
+
+.perm-deny {
+  display: block;
+  color: var(--sev-high);
+  font-size: var(--text-xs);
+}
+
+.perm-state,
+.perm-inheritance,
+.perm-model,
+.perm-ok,
+.perm-why {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.perm-state { color: var(--ink); }
+.perm-why { color: var(--ink); }
+
+.perm-advanced { margin-top: var(--space-2); }
+
+.perm-advanced > summary {
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.perm-changes {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.perm-changes li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.perm-changes time {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.perm-exposure {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 720px) {
+  .perm-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Exact-match reference sets (D2) ──────────────────────────
+   On the Asset rules page, under the rules: a form above the list of sets. */
+.edm-panel { margin-top: var(--space-4); }
+
+.edm-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 240px);
+  gap: var(--space-3);
+}
+
+.edm-form label {
+  display: grid;
+  gap: var(--space-1);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+
+.edm-values-field,
+.edm-file-field,
+.edm-actions { grid-column: 1 / -1; }
+
+.edm-values-field textarea {
+  min-height: 96px;
+  font-family: var(--font-data);
+  resize: vertical;
+}
+
+.edm-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.edm-actions .save-status { margin: 0; }
+
+.edm-stale { color: var(--sev-high); }
+
+@media (max-width: 720px) {
+  .edm-form { grid-template-columns: minmax(0, 1fr); }
+}

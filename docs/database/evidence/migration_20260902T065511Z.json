@@ -1,0 +1,99 @@
+{
+  "migrated_at": "2026-09-02T06:55:11.948026+00:00",
+  "source_file": "dspm.sqlite",
+  "schema_revision": 5,
+  "tables": {
+    "app_settings": {
+      "source": 2,
+      "dest": 2
+    },
+    "login_failures": {
+      "source": 0,
+      "dest": 0
+    },
+    "revoked_tokens": {
+      "source": 0,
+      "dest": 0
+    },
+    "search_reconciliation_state": {
+      "source": 0,
+      "dest": 0
+    },
+    "tenants": {
+      "source": 3,
+      "dest": 3
+    },
+    "alert_events": {
+      "source": 14,
+      "dest": 14
+    },
+    "api_keys": {
+      "source": 0,
+      "dest": 0
+    },
+    "asset_versions": {
+      "source": 1369,
+      "dest": 1369
+    },
+    "assets": {
+      "source": 1369,
+      "dest": 1369
+    },
+    "audit_events": {
+      "source": 104,
+      "dest": 104
+    },
+    "finding_index": {
+      "source": 52657,
+      "dest": 52657
+    },
+    "finding_occurrences": {
+      "source": 52657,
+      "dest": 52657
+    },
+    "findings": {
+      "source": 14187,
+      "dest": 14187
+    },
+    "registration_invites": {
+      "source": 0,
+      "dest": 0
+    },
+    "scan_jobs": {
+      "source": 24,
+      "dest": 24
+    },
+    "scan_object_baselines": {
+      "source": 3015,
+      "dest": 3015
+    },
+    "scan_profiles": {
+      "source": 5,
+      "dest": 5
+    },
+    "scan_reports": {
+      "source": 24,
+      "dest": 24
+    },
+    "scan_runs": {
+      "source": 24,
+      "dest": 24
+    },
+    "secrets": {
+      "source": 18,
+      "dest": 18
+    },
+    "users": {
+      "source": 1,
+      "dest": 1
+    }
+  },
+  "tables_skipped_missing_on_dest": [],
+  "rows_total": 125473,
+  "per_tenant_mismatches": {},
+  "identity_sequences": {
+    "audit_events.id": 1297,
+    "alert_events.id": 70
+  },
+  "result": "PASS"
+}

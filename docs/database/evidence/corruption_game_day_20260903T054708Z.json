@@ -1,0 +1,16 @@
+{
+  "evidence_kind": "corruption_game_day",
+  "generated_at": "2026-09-03T05:47:08.493928+00:00",
+  "result": "PASS",
+  "scenarios": {
+    "artifact_object_substitution": {
+      "corruption_detected": true,
+      "original_recovery_ok": true
+    },
+    "backup_ciphertext_tamper": {
+      "corruption_detected": true,
+      "original_recovery_ok": true
+    }
+  },
+  "scope": "isolated temporary copies; no live data modified"
+}

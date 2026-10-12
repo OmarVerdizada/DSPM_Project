@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+import hashlib
+import html
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+from backend.reporting.report_model import build_report_model, report_title
+from backend.reporting.report_pdf import REPORT_TEMPLATE_ID, render_visual_report_pdf
+from backend.security import Principal, create_artifact_download_token
+from backend.store import DATA_DIR, read_report_source
+from classification.masking import mask_in_text
+
+
+ARTIFACT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+ARTIFACT_ROOT = DATA_DIR / "reports_artifacts"
+
+
+class ArtifactError(Exception):
+    """Raised when a report artifact cannot be created or served safely."""
+
+    # C8: its message is written for the operator; backend.errors may show it.
+    client_safe = True
+
+
+def _safe(value: str) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_"})[:80] or "default"
+
+
+def _basename(value: str) -> str:
+    """SC-13: reduce a scanned file path to its basename for the HTML report,
+    matching the path-exposure policy chat and the PDF already apply. Full
+    absolute/UNC paths must not be printed into the evidence register."""
+    text = str(value or "").replace("\\", "/").rstrip("/")
+    return text.rsplit("/", 1)[-1] if text else ""
+
+
+def _artifact_dir(principal: Principal) -> Path:
+    """The folder an account files its reports in: named by a hash of the exact (workspace,
+    account).
+
+    It was named by _safe(account), which drops '.', '@' and every other character it does
+    not keep and cuts at 80: "john.doe" and "johndoe" - or "john@acme", the key an account
+    gets when its sign-in name is taken elsewhere, and "johnacme" - shared one folder and
+    could fetch each other's reports. The '.' in the name is one _safe never keeps, so no
+    account's old folder (_legacy_artifact_dir) can be named like another's new one."""
+    digest = hashlib.sha256(json.dumps([principal.tenant_id, principal.subject]).encode("utf-8")).hexdigest()
+    return ARTIFACT_ROOT / _safe(principal.tenant_id) / "artifacts" / f"acct.{digest[:32]}"
+
+
+# The subjects that act in every workspace without an account row there: the platform
+# administrator, who may pivot into any workspace, and the API keys.
+_ACCOUNTS_IN_EVERY_WORKSPACE = frozenset({"admin", "api-key"})
+
+
+def _same_folder(first: str, second: str) -> bool:
+    """Whether two folder names may be one folder on disk: NTFS compares names without case."""
+    return first.casefold() == second.casefold() or first.upper() == second.upper()
+
+
+def _legacy_artifact_dir(principal: Principal) -> Path | None:
+    """The folder this account filed its reports in before _artifact_dir was hashed - when
+    that folder can only be this account's: no other workspace's folder is the same one on
+    disk, and no other account that acts in the workspace has a name _safe made the same
+    (or the same but for case). A folder that may be shared is not read at all."""
+    from backend import db, store
+
+    workspace, name = _safe(principal.tenant_id), _safe(principal.subject)
+    with db.tenant_scope(principal.tenant_id), store._connect() as conn:
+        workspaces = {str(row["tenant_id"]) for row in conn.execute("SELECT tenant_id FROM tenants").fetchall()}
+    if any(_same_folder(_safe(other), workspace) for other in workspaces - {principal.tenant_id}):
+        return None
+    accounts = {str(user.get("username") or "") for user in store.list_users(principal.tenant_id)}
+    others = (accounts | _ACCOUNTS_IN_EVERY_WORKSPACE) - {principal.subject}
+    if any(_same_folder(_safe(other), name) for other in others):
+        return None
+    return ARTIFACT_ROOT / workspace / "artifacts" / name
+
+
+def prune_report_artifacts(tenant_id: str, scan_ids: set[str]) -> int:
+    """Remove the reports filed from scans that are past their retention window (W3.5): a
+    generated report is an artifact under the same retention as its scan. Returns how many
+    reports went."""
+    root = ARTIFACT_ROOT / _safe(tenant_id) / "artifacts"
+    if not root.is_dir() or not scan_ids:
+        return 0
+    removed = 0
+    for metadata_path in root.glob("*/*.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(metadata.get("source_scan_id") or "") not in scan_ids:
+            continue
+        for name in (metadata.get("storage_filename"), metadata.get("html_storage_filename")):
+            if name and ARTIFACT_ID_RE.fullmatch(Path(str(name)).stem or ""):
+                (metadata_path.parent / Path(str(name)).name).unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+        removed += 1
+    return removed
+
+
+_SCOPE_DESCRIPTION = {
+    "full": "Full scan (all severities).",
+    "severity": "Scoped to severity: {label}.",
+    "extension": "Scoped to file type: {label}.",
+    "finding": "Scoped to a single finding: {label}.",
+}
+
+
+def _scope_line(scope: dict) -> str:
+    kind = scope.get("kind", "full")
+    template = _SCOPE_DESCRIPTION.get(kind, _SCOPE_DESCRIPTION["full"])
+    return template.format(label=scope.get("label", ""))
+
+
+def _render_report_html(model: dict) -> str:
+    """Accessible HTML companion for the shared visual PDF report."""
+
+    def e(value: object, quote: bool = True) -> str:
+        # C9: the same export masking the PDF and the Office files apply, then escaped.
+        return html.escape(mask_in_text(value)[0], quote=quote)
+
+    scope = model.get("scope") or {}
+    posture = model.get("posture") or {}
+    full = model.get("full_summary") or {}
+    scoped = model.get("scoped_summary") or {}
+
+    def _rows(items: list[dict], cells) -> str:
+        if not items:
+            return '<tr><td colspan="9">No rows in this report scope.</td></tr>'
+        return "".join("<tr>" + "".join(f"<td>{c}</td>" for c in cells(row)) + "</tr>" for row in items)
+
+    dist_rows = "".join(
+        f'<tr><td><span class="risk {e(item.get("level",""))}">{e(str(item.get("level","")))}</span></td>'
+        f"<td>{e(str(item.get('count', 0)))}</td></tr>"
+        for item in model.get("distribution") or []
+    )
+    signal_rows = "".join(
+        f"<tr><td>{e(str(item.get('type','')))}</td><td>{e(str(item.get('count',0)))}</td></tr>"
+        for item in (model.get("detection_signals") or [])
+    ) or '<tr><td colspan="2">No detection signals in scope.</td></tr>'
+    remediation_items = "".join(
+        f"<li>{e(str(step))}</li>" for step in (model.get("remediation_steps") or [])
+    ) or "<li>No scoped findings require remediation in this report.</li>"
+    comparison_rows = "".join(
+        f"<tr><td>{e(str(row.get('label','')))}</td><td>{e(str(row.get('current',0)))}</td>"
+        f"<td>{e(str(row.get('prior',0)))}</td>"
+        f"<td>{'+' if row.get('delta',0) > 0 else ''}{e(str(row.get('delta',0)))}</td></tr>"
+        for row in (model.get("comparison") or [])
+    ) or '<tr><td colspan="4">Run and save at least two scans to populate comparison.</td></tr>'
+    priority_rows = _rows(
+        model.get("priority_files") or [],
+        lambda row: [
+            f"<strong>{e(str(row.get('name','')))}</strong>",
+            e(str(row.get("source", ""))),
+            f'<span class="risk {e(str(row.get("severity","")))}">{e(str(row.get("severity","")))} {e(str(row.get("risk_score","")))}</span>',
+            e("; ".join(row.get("findings") or []) or "None"),
+            e("; ".join(row.get("actions") or []) or "Review ownership and access"),
+        ],
+    )
+    register_note = ""
+    if model.get("evidence_register_truncated"):
+        # W3.3: the register is built from rows up to the report's ceiling, highest risk first.
+        listed = len(model.get("evidence_register") or [])
+        register_note = (f'<p class="muted">The {listed} highest-risk of {int(model.get("evidence_register_total") or 0)}'
+                         " files in scope are listed; the inventory export lists all of them.</p>")
+    register_rows = _rows(
+        model.get("evidence_register") or [],
+        lambda row: [
+            f"<strong>{e(str(row.get('name','')))}</strong>",
+            e(_basename(row.get("path", ""))),
+            e(str(row.get("source", ""))),
+            f'<span class="risk {e(str(row.get("severity","")))}">{e(str(row.get("severity","")))} {e(str(row.get("risk_score","")))}</span>',
+            e("; ".join(row.get("findings") or []) or "None"),
+            e("; ".join(row.get("reasons") or []) or ""),
+            e("; ".join(row.get("actions") or []) or "Review ownership and access"),
+        ],
+    )
+    return f"""<!doctype html><html lang="en" data-report-template="{REPORT_TEMPLATE_ID}"><head><meta charset="utf-8">
+<title>{e(str(model.get('title', 'DSPM Assessment Report')))}</title>
+<style>
+body{{font-family:Arial,Helvetica,sans-serif;margin:28px;color:#0f172a;line-height:1.45;background:#f8fafc}}
+h1{{margin:0 0 4px;color:#0b1739}} h2{{margin:22px 0 6px;border-bottom:2px solid #4f46e5;padding-bottom:3px;color:#102a56}}
+.muted{{color:#64748b}} table{{width:100%;border-collapse:collapse;margin-top:6px;font-size:13px}}
+th,td{{border:1px solid #d8dee8;padding:5px 7px;text-align:left;vertical-align:top}}
+th{{background:#f1f5f9;text-transform:uppercase;font-size:11px;letter-spacing:.04em}}
+.risk{{display:inline-block;border-radius:999px;padding:2px 8px;color:#fff;font-weight:800;font-size:12px}}
+.CRITICAL{{background:#9f1239}}.HIGH{{background:#c2410c}}.MEDIUM{{background:#b7791f}}.LOW{{background:#15803d}}
+.kpis{{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}}
+.kpi{{border:1px solid #c7d2fe;border-radius:12px;padding:8px 14px;min-width:96px;background:#fff}}
+.kpi strong{{display:block;font-size:22px}} .scope{{background:#eef4ff;border:1px dashed #818cf8;border-radius:12px;padding:10px 12px;margin-top:8px}}
+</style></head><body>
+<h1>{e(str(model.get('title', 'DSPM Assessment Report')))}</h1>
+<p class="muted">Scan {e(str(model.get('scan_id','')))} &middot; generated {e(str(model.get('timestamp','')))}
+&middot; tenant {e(str(model.get('tenant','')))} &middot; {full.get('total_files', 0)} files analyzed</p>
+<div class="scope"><strong>Report scope:</strong> {e(_scope_line(scope))}
+&middot; {scoped.get('total_files', 0)} file(s) in this report</div>
+
+<h2>Executive summary</h2>
+<p>{e(str(posture.get('status_text','')))} This pack follows the dashboard PDF Composer structure:
+decision summary first, then the evidence register.</p>
+<div class="kpis">
+<div class="kpi"><span>Posture</span><strong>{posture.get('score')}</strong><span>grade {e(str(posture.get('grade','')))}</span></div>
+<div class="kpi"><span>Priority exposure</span><strong>{full.get('critical_high', 0)}</strong><span>critical + high</span></div>
+<div class="kpi CRITICAL"><span>Critical</span><strong>{full.get('critical', 0)}</strong></div>
+<div class="kpi HIGH"><span>High</span><strong>{full.get('high', 0)}</strong></div>
+<div class="kpi MEDIUM"><span>Medium</span><strong>{full.get('medium', 0)}</strong></div>
+<div class="kpi LOW"><span>Low</span><strong>{full.get('low', 0)}</strong></div>
+</div>
+
+<h2>Risk posture</h2>
+<p>Score {posture.get('score')}/100 (grade {e(str(posture.get('grade','')))}, trend {e(str(posture.get('trend','')))}).</p>
+
+<h2>Risk distribution</h2>
+<table><thead><tr><th>Severity</th><th>Files in scope</th></tr></thead><tbody>{dist_rows}</tbody></table>
+
+<h2>Detection signals</h2>
+<table><thead><tr><th>Type</th><th>Count</th></tr></thead><tbody>{signal_rows}</tbody></table>
+
+<h2>Recommended remediation plan</h2>
+<ol>{remediation_items}</ol>
+
+<h2>Scan comparison</h2>
+<table><thead><tr><th>Metric</th><th>Latest</th><th>Previous</th><th>Delta</th></tr></thead><tbody>{comparison_rows}</tbody></table>
+
+<h2>Priority file queue</h2>
+<table><thead><tr><th>File</th><th>Source</th><th>Risk</th><th>Findings</th><th>Action</th></tr></thead><tbody>{priority_rows}</tbody></table>
+
+<h2>Full evidence register</h2>
+{register_note}<table><thead><tr><th>File</th><th>Path</th><th>Source</th><th>Risk</th><th>Findings</th><th>Reasons</th><th>DLP / action</th></tr></thead><tbody>{register_rows}</tbody></table>
+</body></html>"""
+
+
+def _scope_filename_tag(scope: dict) -> str:
+    kind = scope.get("kind", "full")
+    try:
+        limit = int(scope.get("limit") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    prefix = f"top{limit}_" if limit > 0 else ""
+    if kind == "severity":
+        return prefix + "_".join(str(s).lower() for s in scope.get("severities") or [])
+    if kind == "extension":
+        extension = re.sub(r"[^a-z0-9]+", "", str(scope.get("extension") or "").lower())
+        return f"{prefix}{extension}_files" if extension else prefix.rstrip("_")
+    if kind == "finding":
+        return "finding_" + re.sub(r"[^A-Za-z0-9]+", "-", str(scope.get("finding_ref") or "")).strip("-").lower()[:40]
+    return prefix.rstrip("_")
+
+
+def _resolve_scope(scope: dict | None, filter_severity: str | None) -> dict:
+    if scope:
+        return dict(scope)
+    if filter_severity:
+        return {"kind": "severity", "severities": [str(filter_severity).upper()]}
+    return {"kind": "full"}
+
+
+def _previous_scan_summary(tenant_id: str, current_scan_id: str) -> dict | None:
+    """The summary of the scan saved immediately before this one - the "Previous" column of
+    the scan comparison - in read_scan_history's order (created_at, then scan_id).
+
+    It was looked for among the five newest scans only: a report on an older scan never
+    found its own scan there and compared itself against the newest - a LATER scan,
+    labelled "Previous". A scan past its retention window (W3.5) keeps its summary, so it
+    still serves as the previous one."""
+    from backend import db, store
+
+    with db.tenant_scope(tenant_id), store._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT earlier.summary_json
+            FROM scan_reports AS this_scan
+            JOIN scan_reports AS earlier
+              ON earlier.tenant_id = this_scan.tenant_id
+             AND (earlier.created_at < this_scan.created_at
+                  OR (earlier.created_at = this_scan.created_at AND earlier.scan_id < this_scan.scan_id))
+            WHERE this_scan.tenant_id = ? AND this_scan.scan_id = ?
+            ORDER BY earlier.created_at DESC, earlier.scan_id DESC
+            LIMIT 1
+            """,
+            (tenant_id, str(current_scan_id)),
+        ).fetchone()
+    return json.loads(row["summary_json"] or "{}") if row else None
+
+
+def create_report_artifact(
+    principal: Principal,
+    session_context: dict | None,
+    scan_id: str | None = None,
+    filter_severity: str | None = None,
+    *,
+    scope: dict | None = None,
+) -> dict:
+    # W3.3: from rows - the scan's counts, and its highest-risk files up to the report's row
+    # ceiling - never the scan's whole body.
+    resolved_scope = _resolve_scope(scope, filter_severity)
+    severities = resolved_scope.get("severities") if resolved_scope.get("kind") == "severity" else None
+    source = read_report_source(principal.tenant_id, scan_id, severities=severities)
+    if not source:
+        raise ArtifactError("No DSPM scan report is available to export.")
+    report = source["report"]
+    artifact_id = uuid4().hex
+    created_at = datetime.now(timezone.utc).isoformat()
+    source_scan_id = str(report.get("scan_id") or scan_id or "latest")
+    previous_summary = _previous_scan_summary(principal.tenant_id, source_scan_id)
+    model = build_report_model(report, resolved_scope, previous_summary, tenant_id=principal.tenant_id,
+                               totals=source["totals"])
+    normalized_scope = model.get("scope") or {"kind": "full", "label": "Full scan"}
+
+    tag = _scope_filename_tag(normalized_scope)
+    filename = f"dspm_report_{source_scan_id}{('_' + tag) if tag else ''}.pdf"
+    safe_filename = re.sub(r"[^A-Za-z0-9_.-]", "_", filename)
+    root = _artifact_dir(principal)
+    root.mkdir(parents=True, exist_ok=True)
+    pdf_path = root / f"{artifact_id}.pdf"
+    html_path = root / f"{artifact_id}.html"
+    metadata_path = root / f"{artifact_id}.json"
+    # The model composes the title from the same normalized scope, so the name in
+    # the metadata, in the HTML head and in the PDF is one string, not three.
+    title = str(model.get("title") or report_title(normalized_scope))
+    html_path.write_text(_render_report_html(model), encoding="utf-8")
+    pdf_info = render_visual_report_pdf(pdf_path, model)
+    if not pdf_path.exists():
+        raise ArtifactError("Report generation failed. The file could not be written.")
+    # C8: one fetch, by the session that asked for the report. The token is bound to
+    # that session and spent on first use; the console presents it in a header.
+    dl_token = create_artifact_download_token(
+        artifact_id, principal.tenant_id, principal.subject, principal.role,
+        session_id=principal.session_id,
+    )
+    filter_severity_meta = (
+        normalized_scope.get("label") if normalized_scope.get("kind") == "severity" else None
+    )
+    artifact_path = f"/api/v1/reports/artifacts/{artifact_id}"
+    metadata = {
+        "artifact_id": artifact_id,
+        "type": "pdf",
+        "filename": safe_filename,
+        # C8: no URL carries the token any more. A query string is written to every
+        # proxy and access log on the path; these are the plain addresses, fetched with
+        # the token in X-Artifact-Token or with the caller's own session.
+        "download_url": artifact_path,
+        "preview_url": f"{artifact_path}?inline=1",
+        "html_download_url": f"{artifact_path}?format=html",
+        "created_at": created_at,
+        "source_scan_id": source_scan_id,
+        "filter_severity": filter_severity_meta,
+        "scope": normalized_scope,
+        "scope_label": normalized_scope.get("label", "Full scan"),
+        "title": title,
+        "media_type": "application/pdf",
+        "storage_filename": pdf_path.name,
+        "html_storage_filename": html_path.name,
+        "truncated": pdf_info["truncated"],
+        "original_line_count": pdf_info["original_line_count"],
+        "included_line_count": pdf_info["included_line_count"],
+        "render_style": pdf_info["render_style"],
+        "template_id": pdf_info["template_id"],
+        "page_count": pdf_info["page_count"],
+        "font": pdf_info["font"],
+    }
+    # The signed download token is a CREDENTIAL with a five-minute life. It is
+    # handed to the caller that just authenticated and is not written beside the
+    # artifact, where it would outlive its purpose in a file anyone with the
+    # data directory can read.
+    persisted = {key: value for key, value in metadata.items() if not key.endswith("_url")}
+    persisted["artifact_path"] = f"/api/v1/reports/artifacts/{artifact_id}"
+    metadata_path.write_text(json.dumps(persisted, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        **{key: value for key, value in metadata.items() if key not in {"storage_filename", "html_storage_filename", "media_type"}},
+        # Preferred delivery: the caller fetches with this in a header, so the
+        # token never enters a proxy or web-server access log.
+        "artifact_path": f"/api/v1/reports/artifacts/{artifact_id}",
+        "download_token": dl_token,
+    }
+
+
+def _locate(principal: Principal, artifact_id: str) -> tuple[Path, dict] | None:
+    """(folder, metadata) of one of this account's reports: in its own folder, or in the
+    one it filed reports in before, while that folder can only be its own."""
+    if not ARTIFACT_ID_RE.fullmatch(artifact_id or ""):
+        return None
+    folder = _artifact_dir(principal)
+    if not (folder / f"{artifact_id}.json").is_file():
+        legacy = _legacy_artifact_dir(principal)
+        if legacy is None:
+            return None
+        folder = legacy
+    try:
+        data = json.loads((folder / f"{artifact_id}.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("artifact_id") != artifact_id:
+        return None
+    return folder, data
+
+
+def load_artifact_metadata(principal: Principal, artifact_id: str) -> dict | None:
+    located = _locate(principal, artifact_id)
+    return located[1] if located else None
+
+
+def artifact_file(principal: Principal, artifact_id: str, format: str = "pdf") -> tuple[Path, dict] | None:
+    located = _locate(principal, artifact_id)
+    if not located:
+        return None
+    folder, metadata = located
+    storage_key = "html_storage_filename" if format == "html" else "storage_filename"
+    filename = str(metadata.get(storage_key) or "")
+    if not re.fullmatch(r"[a-f0-9]{32}\.(?:pdf|html)", filename):
+        return None
+    path = (folder / filename).resolve()
+    root = folder.resolve()
+    if not path.is_file() or root not in path.parents:
+        return None
+    return path, metadata

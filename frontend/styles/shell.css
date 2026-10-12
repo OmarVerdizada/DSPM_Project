@@ -1,0 +1,1137 @@
+/* ============================================================
+   Sentro shell — phases F1 (frame) and F2 (motion)
+   Roadmap: docs/frontend/FRONTEND_UX_ASSESSMENT_AND_ROADMAP_2026-09.md
+
+   Everything here is derived from frontend/styles/tokens.css. No raw colours,
+   no sizes off the scale, no !important. It loads after styles.css because it
+   REPLACES legacy shell rules — the rules it supersedes are deleted from
+   styles.css in the same change, so this is a swap, not another layer.
+   ============================================================ */
+
+/* ── The shell grid ───────────────────────────────────────────
+   The sidebar column IS the sidebar width. Twenty legacy declarations
+   disagreed about it (208px to 300px); the one that won set 236px while the
+   sidebar itself is 220px, leaving a 16px dead strip between them — which is
+   why the register head still read as a box parked next to the nav instead of
+   a band attached to it. Below 980px the same disagreement was worse: a 220px
+   sidebar in a 208px column overlapped the content.
+
+   One value, from the token, at every width. The collapsed rail keeps its
+   legacy rule: it is a more specific selector and it already agrees. */
+.app-shell {
+  grid-template-columns: var(--shell-sidebar-w) minmax(0, 1fr);
+}
+@media (max-width: 860px) {
+  /* Below this the nav stacks above the content, as it always has. */
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── The register head, parallel to the page title ────────────
+   F1 flattened the 104px floating pill into a 56px band. This pass removes
+   the band: its controls — search, New scan, theme, Connected, tenant — sit at
+   the top-right of the content area on the SAME ROW as the page's title, so
+   every page gets 56px back and the console reads as one frame rather than a
+   toolbar parked over a page.
+
+   Not sticky. The dashboard and Remediation never scroll; on the pages that
+   do, the controls scroll away like any page header. A pill that floats over
+   table rows is the thing F1 removed, and it is not coming back as a cluster.
+
+   `main` is the containing block, so the cluster is positioned in the page's
+   own coordinate space; every title row reserves its width (below) so the two
+   never overlap. */
+.app-shell > main { position: relative; }
+
+.topbar {
+  position: absolute;
+  top: var(--space-5);
+  right: var(--shell-gutter);
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--shell-topbar-h);
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+/* Every page's first row reserves the cluster's footprint. The value is the
+   cluster's measured width plus one gutter; it shrinks with the cluster. */
+.section-header,
+.asset-header,
+.report-header,
+.history-toolbar {
+  padding-right: var(--shell-head-reserve);
+  min-height: 34px;
+}
+/* ── The header is on every page ──────────────────────────────
+   Search, New Scan, the theme, the connection and the workspace selector are
+   the console's, not the dashboard's: they were hidden on every other page,
+   so switching customer or searching meant going back to the dashboard first.
+   An application header stays where it is on every page (the product owner's
+   review, 2026-10-02); each page's title row keeps the room for it. */
+
+/* The header is one row across the page: the title on the left, the cluster on
+   the right. Each page's own h2 is hidden from sight only (assistive technology
+   still reads it, in its place), and the row it stood in becomes the space the
+   header sits in. Where a page's title row carries more - Asset rules'
+   description and buttons, Risk logic's subtitle - that comes on the next row:
+   overlaying the cluster on them is why the header was once kept to the
+   dashboard. Below 820px the header is in the page's flow and the page shows
+   its own title as before. */
+@media (min-width: 821px) {
+  .topbar { left: var(--shell-gutter); }
+  .tb-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .tab-panel > :is(.section-header, .asset-header) .page-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  #tab-logic > .section-header {
+    padding-top: calc(var(--shell-topbar-h) + var(--space-3));
+    padding-right: 0;
+  }
+  :root:root:root #tab-settings > .asset-header {
+    padding: calc(var(--shell-topbar-h) + var(--space-3)) 0 0 !important; /* token-gate: allow - a legacy rule zeroes this padding with important */
+  }
+}
+@media (max-width: 820px) {
+  .tb-title { display: none; }
+}
+
+/* One rhythm under every title row: 16px, then the page's first box. Pages
+   had 12px (Reports, Remediation), 32px (History, Who can read - a 16px gap
+   AND a 16px margin) and 20px (Asset rules). */
+.tab-panel.active > :is(.section-header, .asset-header) { margin-bottom: var(--space-4); }
+.tab-panel.active:is(#tab-overview, #tab-history, #tab-access, #tab-reports) > :is(.section-header, .asset-header) {
+  margin-bottom: 0;
+}
+#tab-risk .remediation-page-content { gap: var(--space-4); }
+
+/* One refresh control, the Remediation page's: outlined, 32px, the
+   counter-clockwise arrow. */
+.refresh-btn.secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  min-height: 32px;
+  margin: 0;
+  padding: 0 var(--space-3);
+  white-space: nowrap;
+}
+.refresh-btn .btn-ico { width: 15px; height: 15px; }
+
+/* A checkbox clicked with the mouse drew the legacy 4px input focus ring - on a
+   box the legacy input height had stretched to 36px - so a frame appeared
+   round the tick. The ring is for the keyboard. */
+:root input:is([type="checkbox"], [type="radio"]):focus:not(:focus-visible) {
+  box-shadow: none !important; /* token-gate: allow - the legacy input focus ring is important */
+}
+
+.title-with-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+/* A page action beside its title is a quiet control on the title's own line,
+   not a form button: legacy gives .secondary-btn a 14px top margin and a 36px
+   minimum that pushed the whole row 8px off the header cluster's centre. */
+.section-header .title-with-action .secondary-btn {
+  margin: 0;
+  min-height: 0;
+  height: 28px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.topbar-left { flex: 0 0 auto; min-width: 0; }
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+/* Search is one control among five: compact at rest, wider while typing. */
+.tb-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 220px;
+  max-width: none;
+  height: 34px;
+  transition: width var(--motion-base) var(--ease-out);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--paper);
+}
+.tb-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+  color: var(--ink);
+}
+.tb-search:focus-within { width: 320px; }
+.tb-search input::placeholder { color: var(--ink-muted); }
+.tb-search svg { width: 15px; height: 15px; flex: 0 0 auto; stroke: var(--ink-muted); fill: none; stroke-width: 2; }
+
+.topbar .tb-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 34px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--indigo);
+  color: var(--surface);
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+  transition: filter var(--motion-fast) var(--ease-out);
+}
+.topbar .tb-primary:hover { filter: brightness(1.08); }
+.topbar .tb-primary svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 2.2; }
+
+.topbar .tb-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-out),
+              border-color var(--motion-fast) var(--ease-out);
+}
+.topbar .tb-icon-btn:hover { color: var(--ink); border-color: var(--ink-muted); }
+
+.topbar .health {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 34px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--ink-muted);
+  white-space: nowrap;
+}
+
+.topbar .tenant-switcher {
+  height: 34px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  font-family: var(--font-text);
+  font-size: var(--text-sm);
+  color: var(--ink);
+}
+
+/* ── Page head — one line on every page ───────────────────────
+   The title, and the one action that belongs to this page if it has one.
+   Restores an h2 per page (the product had none: h1=1, h2=0, h3=15, so every
+   page skipped a level). */
+.page-head,
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-4);
+}
+.page-head > div,
+.section-header > div { min-width: 0; }
+
+.page-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-display);
+  letter-spacing: -.01em;
+  color: var(--ink);
+}
+
+/* The ledger strip that used to sit under every page title is gone: it
+   repeated the same scan line on eleven pages, and the one page that needs to
+   name its scan (Findings) now says so above the table it belongs to. Its
+   rules are deleted rather than left unused. */
+
+/* ── Sidebar rhythm ───────────────────────────────────────── */
+.app-shell > .sidebar { width: var(--shell-sidebar-w); }
+
+/* Contrast (F4). The sidebar's secondary label colour was #9ca3af on a white
+   sidebar: 2.54:1, barely half the 4.5:1 floor, on the console's primary
+   navigation — six destinations a keyboard or low-vision user reads on every
+   visit. The 2026-08 tone pass darkened the tokens used as text on white and
+   missed this one, because it assumed the sidebar was tinted. It is not. */
+:root:not([data-theme="dark"]) { --sidebar-muted: var(--ink-muted); }
+:root[data-theme="dark"] { --sidebar-muted: var(--ink-muted); }
+
+/* The severity ramp, made monotonic (the bridge table in tokens.css calls this
+   one out by name). Medium rendered BLUE in the legacy badges and pills while
+   the dashboard band renders it amber, so the same finding changed colour
+   between two panels on one screen — and blue-on-blue measured 3.28:1 in the
+   remediation queue. Repointing the legacy names at the contract fixes the
+   ramp in all 43 places at once instead of page by page. */
+:root:not([data-theme="dark"]),
+:root[data-theme="dark"] {
+  --medium: var(--sev-medium);
+  --status-medium: var(--sev-medium);
+}
+
+/* The keyboard hint in the search field was 10px at 75% opacity: 1.2:1, and
+   under the 12px floor. It tells a keyboard user how to reach the field, so it
+   is the last thing that should be unreadable. */
+.tb-search .tb-kbd kbd {
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+  opacity: 1;
+}
+
+/* ── Motion (F2) ──────────────────────────────────────────────
+   One vocabulary. The console ran three page-transition systems at once
+   (a JS animate, a CSS fade, and a 450ms staggered rise on every child) and
+   none at all for filters, data arrival or the theme. Both halves of that are
+   fixed here: the stagger and the duplicate fade are deleted from styles.css,
+   and the transitions that were missing are added. */
+
+/* Content replaced in place — a table body, a panel, a KPI value — arrives
+   rather than appearing. app.js adds this class around innerHTML swaps. */
+.is-swapping { opacity: 0; }
+.swap-in { animation: swap-in var(--motion-fast) var(--ease-out); }
+@keyframes swap-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Theme change: the whole screen used to invert in a single frame. */
+body.theme-animating,
+body.theme-animating .topbar,
+body.theme-animating .sidebar,
+body.theme-animating .visual-panel,
+body.theme-animating .metric,
+body.theme-animating .workspace {
+  transition: background-color var(--motion-slow) var(--ease-in-out),
+              color var(--motion-slow) var(--ease-in-out),
+              border-color var(--motion-slow) var(--ease-in-out);
+}
+
+/* ── Field-attached validation (F4) ────────────────────────
+   The message sits under the input it is about, at the smallest size on the
+   scale but never below it, in the severity colour reserved for "this is
+   wrong". The field carries the same colour on its border so the pair reads
+   as one thing, and `aria-invalid` + `aria-describedby` (set in app.js) say
+   the same to a screen reader. */
+.field-error {
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-text);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-text);
+  color: var(--sev-critical);
+}
+/* Drawn as an inset outline rather than a border colour: six legacy rules set
+   these borders with !important and one of them is id-scoped, so a border
+   colour here would lose the specificity argument on exactly the pages the
+   wizard lives on. An outline sits outside that fight and reads the same. */
+:is(input, select, textarea)[aria-invalid="true"] {
+  outline: 2px solid var(--sev-critical);
+  outline-offset: -2px;
+}
+
+/* ── Focus — one ring, everywhere (F4) ─────────────────────
+   Twenty-one rules in styles.css remove the outline and sixty-two put some
+   version of it back, which is how a keyboard user ends up not knowing where
+   they are. One ring, from the token, on anything that takes focus. It is
+   drawn as a box-shadow so it follows the control's own radius, and it is
+   :focus-visible so a mouse click does not leave a halo behind.
+
+   `outline: 2px solid transparent` is not decoration: it is what a Windows
+   high-contrast user sees, where box-shadows are not painted at all. */
+:is(button, a[href], input, select, textarea, summary, [tabindex]):focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
+}
+/* A field also tints its own border, so focus reads at a glance and not only
+   as a halo. */
+:is(input, select, textarea):focus-visible { border-color: var(--indigo); }
+
+/* The search input deliberately has no border of its own - the field around it
+   is the control - so the ring goes on the wrapper. Without this the one
+   control in the register head was the only thing on screen a keyboard user
+   could not see themselves reach. */
+.tb-search:has(input:focus-visible) {
+  border-color: var(--indigo);
+  box-shadow: 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
+}
+
+/* Table rows and list items that open a detail view take focus too; they are
+   full-bleed, so the ring goes inside rather than over the neighbour. */
+tr:focus-visible,
+li:focus-visible {
+  outline: 2px solid transparent;
+  box-shadow: inset 0 0 0 var(--focus-ring-width) var(--focus-ring-color);
+}
+
+/* ── Acronyms — expanded on hover and for a screen reader (F4) ─
+   The console says WinRM, SMB and MSSP before it ever says what they are.
+   Marked up once per destination, so the expansion is available without
+   turning the sentence into a glossary. */
+abbr[title] {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--ink-muted);
+  cursor: help;
+}
+
+/* ── Narrow widths ───────────────────────────────────────── */
+@media (max-width: 1100px) {
+  :root { --shell-head-reserve: 440px; }
+  .tb-search { width: 160px; }
+  .tb-search:focus-within { width: 240px; }
+  .topbar .health { display: none; }
+}
+@media (max-width: 820px) {
+  :root { --shell-head-reserve: 0px; }
+  .topbar {
+    position: static;
+    height: auto;
+    flex-wrap: wrap;
+    padding: var(--space-3) var(--space-4) 0;
+  }
+  .page-head,
+  .section-header { flex-direction: column; align-items: stretch; }
+  .tb-search,
+  .tb-search:focus-within { width: 100%; }
+}
+
+/* On a phone the cluster is two rows, not three: the search, then the actions
+   on one line. New Scan keeps its plus and its name ("New Scan" is still what
+   a screen reader announces); only the visible label goes. */
+@media (max-width: 560px) {
+  .topbar { gap: var(--space-2); }
+  .topbar-left { flex: 1 1 100%; }
+  .topbar-actions { flex: 1 1 100%; flex-wrap: nowrap; gap: var(--space-2); }
+  .tb-primary-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .topbar .tenant-switcher { flex: 1 1 auto; min-width: 0; }
+}
+
+/* ── The nav as a drawer ──────────────────────────────────────
+   Up to 860px the nav is the 68px rail, and opening it used to stack the full
+   nav ABOVE the page: a screen of nav, the page pushed below the fold, and the
+   whole page jumping when it closed. Open, it is now a drawer over the page:
+   the rail keeps its column, the page stays where it is, and a scrim says
+   what a tap outside does (app.js closes it on that tap, on Escape, and when
+   a page is chosen). The legacy layers pin the sidebar sticky and size it
+   with important declarations, so these overrides have to be important too. */
+@media (max-width: 860px) {
+  body:not(.sidebar-collapsed) .app-shell {
+    grid-template-columns: var(--shell-rail-col, 68px) minmax(0, 1fr) !important; /* token-gate: allow — the legacy column rules are !important */
+  }
+  body:not(.sidebar-collapsed) .app-shell > main { grid-column: 2; }
+  body:not(.sidebar-collapsed) .app-shell > .sidebar {
+    position: fixed !important; /* token-gate: allow — a legacy rule pins the sidebar sticky with !important */
+    inset: 0 auto 0 0;
+    z-index: var(--z-overlay);
+    width: min(280px, 86vw);
+    height: 100dvh !important; /* token-gate: allow — a legacy rule sets 100vh with !important */
+    box-shadow: var(--elev-overlay);
+  }
+  body:not(.sidebar-collapsed) .app-shell::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--z-overlay) - 1);
+    background: var(--scrim);
+  }
+  /* A 768px rule hides the account name for the rail; the open drawer has
+     the room, and it is where someone looks to see who they are signed in as. */
+  body:not(.sidebar-collapsed) .side-profile .profile-toggle > .side-profile-copy { display: flex; }
+}
+
+/* On a phone every pixel of the rail is taken from the page: 56px still holds
+   the 44px targets, and the page's own gutters drop from four nested 16px to
+   12 and 8 - the Findings filters had 209px of a 375px screen. */
+@media (max-width: 560px) {
+  :root { --shell-rail-col: 56px; }
+  body.sidebar-collapsed .app-shell {
+    grid-template-columns: var(--shell-rail-col) minmax(0, 1fr) !important; /* token-gate: allow — the legacy rail column is !important */
+  }
+  body.sidebar-collapsed .app-shell > .sidebar {
+    width: var(--shell-rail-col) !important; /* token-gate: allow — the legacy rail width is !important */
+    min-width: var(--shell-rail-col) !important; /* token-gate: allow — as above */
+    max-width: var(--shell-rail-col) !important; /* token-gate: allow — as above */
+    padding-inline: var(--space-1) !important; /* token-gate: allow — the legacy rail padding is !important */
+  }
+  .app-shell > main > .tab-panel.active { padding-inline: var(--space-3); }
+  .app-shell > main .workspace,
+  .app-shell > main .inventory-command-bar,
+  .app-shell > main .inventory-facet-row { padding-inline: var(--space-2); }
+}
+
+/* In the rail the destination names are hidden from sight, not from assistive
+   technology: display:none removed them from the accessibility tree as well,
+   and each icon was announced by its tooltip ("Posture, inventory, latest
+   scan") instead of its name. */
+body.sidebar-collapsed .side-nav .tab > span {
+  display: block !important; /* token-gate: allow — a legacy rule hides the label with display:none */
+  position: absolute !important; /* token-gate: allow — legacy layers reposition the label with !important */
+  width: 1px !important; /* token-gate: allow — as above */
+  height: 1px !important; /* token-gate: allow — as above */
+  overflow: hidden !important; /* token-gate: allow — as above */
+  clip-path: inset(50%);
+  white-space: nowrap !important; /* token-gate: allow — as above */
+}
+
+
+/* ── The scan status box ──────────────────────────────────────
+   A completed scan reports eight diagnostics. As one joined sentence they
+   read as a paragraph of prose; as a headline and a row of figures they read
+   at a glance, which is all anyone wants from a finished scan. */
+.status-headline {
+  display: block;
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+}
+
+.status-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.status-fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 5%, var(--surface));
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.status-fact b {
+  color: var(--ink);
+  font-family: var(--font-data);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── The latest-workspace strip ───────────────────────────────
+   It reported the newest scan from wherever the content above it happened to
+   end. It is the page's footer, so it sits on the bottom edge of the window
+   and stays there while the page above it scrolls. */
+#tab-file-servers.tab-panel.active,
+#tab-endpoint.tab-panel.active {
+  /* The panel is already a flex column, but it stopped where its content did,
+     so `margin-top: auto` had nothing to push against. main starts at the top
+     of the window and carries no padding, so the window's height is the
+     panel's height. */
+  min-height: 100dvh;
+}
+
+#tab-file-servers .context-strip-trailing,
+#tab-endpoint .context-strip-trailing {
+  position: sticky;
+  z-index: var(--z-raised);
+  bottom: 0;
+  margin-top: auto;
+  margin-bottom: 0;
+  backdrop-filter: blur(6px);
+}
+
+
+/* ── Inventory rows: no severity rule ─────────────────────────
+   Every row carried a coloured bar down its left edge repeating the severity
+   badge two columns to its right. With a hundred rows on screen that is a
+   hundred red lines saying what the badge already says.
+   token-gate: allow - the legacy rule sets the pseudo-element unconditionally. */
+#results-body tr.severity-row td:first-child::before { content: none !important; }
+
+/* ── The inventory's context strip ────────────────────────────
+   Four figures, each a label + value + note, wrapped and overlapped in a
+   fixed four-column grid. They are one line of facts, so they read as one
+   line of chips - the same shape the remediation queue already uses. */
+:root:root #inventory-workspace #inventory-context-metrics {
+  display: flex !important;          /* token-gate: allow - the grid is pinned !important */
+  flex-wrap: wrap;
+  gap: var(--space-2) !important;    /* token-gate: allow - see above */
+  grid-template-columns: none !important;  /* token-gate: allow - see above */
+  padding: var(--space-2) var(--space-3);
+}
+:root:root #inventory-workspace #inventory-context-metrics > div {
+  display: inline-flex !important;   /* token-gate: allow - the stacked cell is pinned */
+  flex-direction: row !important;    /* token-gate: allow - see above */
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0 !important;           /* token-gate: allow - see above */
+  min-height: 0 !important;          /* token-gate: allow - see above */
+  height: auto !important;           /* token-gate: allow - see above */
+  /* The legacy layer still draws each chip's icon at left:11px, 15px wide; the
+     text starts after it rather than under it. */
+  padding: 3px var(--space-3) 3px 32px !important;  /* token-gate: allow - 14px pins the height */
+  border-right: 0;
+  border-radius: 999px !important;   /* token-gate: allow - see above */
+  background: color-mix(in srgb, var(--ink) 4%, var(--surface));
+  font-size: 11px;
+}
+#inventory-workspace #inventory-context-metrics > div span { font-size: 10.5px; }
+#inventory-workspace #inventory-context-metrics > div strong {
+  margin: 0 !important;              /* token-gate: allow - a 28px numeral is pinned */
+  font-size: 13px !important;        /* token-gate: allow - see above */
+}
+#inventory-workspace #inventory-context-metrics > div small { font-size: 10px; }
+
+
+/* ── The inventory's filter line ──────────────────────────────
+   #inventory-workspace carries 28 rules for this row across four !important
+   layers, all written for two selects and a row of framework chips. It is
+   five selects now, so the row is re-declared once, here, in the same
+   flowing shape the remediation queue uses.
+   token-gate: allow - every declaration it has to beat is !important. */
+:root:root:root #inventory-workspace .inventory-facet-row {
+  display: flex !important;
+  flex-wrap: wrap;
+  align-items: center !important;
+  gap: var(--space-2) var(--space-3) !important;
+  padding: var(--space-2) var(--space-3) !important;
+  overflow: visible !important;
+}
+
+/* Label above control, not beside it. Beside it, each facet cost its label's
+   width as well as its own - five of them plus the actions came to 1,571px in
+   a 1,314px row, so Folder / path and the two buttons dropped to a second
+   line that was otherwise empty. Above it, the same five facets and both
+   buttons fit one 63px line with 130px to spare, and the row reads the way
+   the queue's nine already do. */
+:root:root:root:root #inventory-workspace .inventory-facet-row > label {
+  display: grid;
+  flex: 0 1 auto;
+  align-items: stretch;
+  gap: 2px;
+  width: auto;
+  min-width: 0;
+  max-width: 184px;
+  margin: 0;
+  grid-template-columns: none;
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* The control fills its facet; the facet decides the width. Without the cap a
+   select sizes to its longest option - "Org chart, employee directory, or
+   reporting hierarchy" made Finding type 411px wide on its own. */
+:root:root:root:root #inventory-workspace .inventory-facet-row .facet-shell,
+:root:root:root:root #inventory-workspace .inventory-facet-row .facet-shell select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+:root:root:root #inventory-workspace .inventory-facet-row select {
+  height: 30px;
+  min-height: 30px !important;
+  margin-top: 0 !important;
+}
+
+:root:root:root #inventory-workspace .inventory-facet-row > .facet-actions { margin-left: auto; }
+
+/* The strip was clipping its last chip against a hidden overflow. */
+:root:root #inventory-workspace #inventory-context-metrics {
+  overflow: visible !important;   /* token-gate: allow - overflow:hidden is pinned */
+}
+
+
+/* ── Scrollbars ───────────────────────────────────────────────
+   The window never scrolls in this console - every page sizes to the viewport
+   and its own panels scroll - so a window scrollbar is a permanent grey stripe
+   reporting nothing.
+
+   Inside a panel the bar is drawn but its thumb is transparent until the
+   pointer is over that panel. The GUTTER is always there, which is the point:
+   fading the whole bar in and out reflows the content under it every time the
+   mouse crosses a card. Only the thumb's colour changes. */
+html {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+html:hover {
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
+}
+
+:where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
+       .remediation-drawer-body, .scroll-card-list, .dash-rows, .drawer-content,
+       .inventory-facet-row, .risk-filter-group, .remediation-modal-box, .detail-list) {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color var(--motion-base) var(--ease-out);
+}
+
+:where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
+       .remediation-drawer-body, .scroll-card-list, .dash-rows, .drawer-content,
+       .inventory-facet-row, .risk-filter-group, .remediation-modal-box, .detail-list):hover,
+:where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap,
+       .remediation-drawer-body, .scroll-card-list, .dash-rows, .drawer-content,
+       .inventory-facet-row, .risk-filter-group, .remediation-modal-box, .detail-list):focus-within {
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
+}
+
+/* Chromium draws its own bar rather than honouring scrollbar-color on every
+   build, so the thumb is styled directly as well. Same rule: the track holds
+   its width, only the thumb appears.
+
+   These are the only scrollbar declarations in the product. styles.css
+   carried sixty-three more - 8px here, 12px there, 14px forced somewhere
+   else, several with a thumb that never faded - and they are deleted rather
+   than out-specified, because a sixty-fourth rule would not have made the
+   answer any clearer. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+  transition: background-color var(--motion-base) var(--ease-out);
+}
+/* The hover has to sit on the scrolling element - a thumb is a part of that
+   element, not a child of it, so a descendant combinator matches nothing. */
+:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 34%, transparent);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover,
+::-webkit-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--ink) 52%, transparent);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── The widget reveals its own bar ───────────────────────────
+   `:hover` on a scrolling element means the pointer is inside THAT element -
+   over the list, the table body, the rows. Over the card's title, its header
+   or the padding around it, the bar a reader is looking for stays invisible,
+   which reads as no scrollbar at all. The box a bar belongs to reveals it. */
+:is(.dash-card, .workspace, .remediation-modal-box, .sheet, .remediation-drawer-panel,
+    .drawer-content, .facet-menu):hover
+:is(.dash-card-body, .dash-rows, .scroll-card-list, .table-wrap,
+    .inventory-table-wrap, .remediation-table-wrap, .remediation-drawer-body,
+    .sheet-body, .detail-list, .facet-menu-list) {
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
+}
+
+:is(.dash-card, .workspace, .remediation-modal-box, .sheet, .remediation-drawer-panel,
+    .drawer-content, .facet-menu):hover
+:is(.dash-card-body, .dash-rows, .scroll-card-list, .table-wrap,
+    .inventory-table-wrap, .remediation-table-wrap, .remediation-drawer-body,
+    .sheet-body, .detail-list, .facet-menu-list)::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 34%, transparent);
+  background-clip: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(.dash-card-body, .table-wrap, .inventory-table-wrap, .remediation-table-wrap) {
+    transition: none;
+  }
+}
+
+
+/* ── One caret, ours ──────────────────────────────────────────
+   token-gate: allow - the shells below are pinned with !important in
+   styles.css, and a caret cannot be drawn in space the control does not
+   reserve. */
+#inventory-workspace .facet-shell,
+#remediation-workspace .facet-shell { position: relative; }
+
+#inventory-workspace .facet-shell::after,
+#remediation-workspace .facet-shell::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 11px;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--ink-muted);
+  border-bottom: 1.5px solid var(--ink-muted);
+  transform: translateY(-70%) rotate(45deg);
+  pointer-events: none;
+}
+
+#inventory-workspace .facet-shell select,
+#remediation-workspace .facet-shell select {
+  appearance: none !important; /* token-gate: allow — the platform arrow is what we are replacing */
+  padding-right: 26px !important; /* token-gate: allow — the shell padding is pinned with !important in styles.css */
+  text-overflow: ellipsis;
+}
+
+#inventory-workspace .facet-shell:focus-within::after,
+#remediation-workspace .facet-shell:focus-within::after {
+  border-color: var(--indigo);
+}
+
+
+/* ── Findings sizes to the window ─────────────────────────────
+   With the window scrollbar gone, a page that overflows scrolls with no
+   indicator that it can. Findings overflowed by about a hundred pixels; the
+   dashboard and the queue already size themselves to the viewport and let
+   their table scroll instead, so this page does the same. */
+#tab-findings.tab-panel.active {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#tab-findings > .section-header { flex: 0 0 auto; }
+
+#tab-findings #inventory-workspace {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#tab-findings #inventory-workspace > :is(.table-toolbar, .inventory-command-bar) {
+  flex: 0 0 auto;
+}
+
+#tab-findings #inventory-workspace > .inventory-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+@media (max-height: 640px) {
+  #tab-findings.tab-panel.active { height: auto; overflow: visible; }
+}
+
+
+/* ── The all-classes panel ────────────────────────────────────
+   The dashboard card shows what its height allows. This shows the rest, in
+   the same rows, so a class looks the same in both places - and in the shape
+   every other panel in the product uses, which is where its backdrop, its
+   icon close, its click-outside and its Escape come from.
+
+   What was here was a <dialog> with a ::backdrop, a header of its own and a
+   text Close button. The ::backdrop paints nothing on this engine, so the
+   page behind stayed bright; the rest is deleted rather than kept beside the
+   pattern it duplicated. */
+/* The asset detail is pinned to 1120px and 92vh with !important because it
+   carries four tabs of content. A list of classes is one column, so it takes
+   the width it needs and stops where the list ends.
+   token-gate: allow — the pin above cannot be undone by specificity alone. */
+:root:root .classes-modal .asset-detail-panel {
+  width: min(560px, 94vw) !important; /* token-gate: allow — the asset panel pins 1120px with !important */
+  height: auto !important; /* token-gate: allow — and 92vh, for four tabs this panel does not have */
+  max-height: min(720px, 86vh) !important; /* token-gate: allow — same pin */
+}
+
+.sheet-body {
+  max-height: min(60vh, 560px);
+  padding: var(--space-2) var(--space-4) var(--space-4);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.sheet-body:hover,
+.sheet-body:focus-within {
+  scrollbar-color: color-mix(in srgb, var(--ink) 34%, transparent) transparent;
+}
+.sheet-body .class-row { height: 36px; }
+
+/* The card meta becomes the way in to the full list. */
+.card-more {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-muted);
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.card-more b { color: var(--indigo-ink); font-weight: var(--weight-semibold); }
+.card-more:hover b { text-decoration: underline; }
+
+/* ── The inventory row's meta line ────────────────────────────
+   Extension, size, source and the file's flags are one sentence about the
+   file, so they read as one line. Wrapped, they pushed every row below them
+   out of rhythm and could collide with the path underneath. */
+#results-body .file-meta-line {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow: hidden;
+}
+#results-body .file-meta-line > span {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+#results-body .file-meta-more {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  color: var(--ink-muted);
+  cursor: help;
+}
+
+/* The whole row opens the file, so it says so on hover. */
+#results-body tr[data-file-key] { cursor: pointer; }
+
+
+/* ── A facet that takes more than one answer ──────────────────
+   The <select> stays: it is where a dozen renderers write their option lists,
+   and it draws the control - icon, caret, ellipsis, and the width rules
+   pinned across four layers of styles.css. What it loses is its input. A
+   transparent trigger covers it, and the answers are ticked in one menu that
+   every facet on the page shares. */
+#inventory-workspace .facet-shell select[data-facet-multi],
+#remediation-workspace .facet-shell select[data-facet-multi] {
+  pointer-events: none;
+}
+
+.facet-trigger {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  cursor: pointer;
+}
+
+.facet-trigger:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+
+/* A facet holding an answer says so without needing to be read. */
+#inventory-workspace .facet-shell:has(.facet-trigger[data-facet-count]) select,
+#remediation-workspace .facet-shell:has(.facet-trigger[data-facet-count]) select {
+  border-color: var(--indigo);
+  color: var(--indigo-ink);
+}
+
+/* The menu lives on the body, not in the facet row: the row scrolls, the
+   command bar clips, and a popover that is clipped is a popover that is
+   half there. */
+/* `element.hidden = true` sets an attribute the UA styles as
+   [hidden]{display:none} - and that UA rule loses to ANY author rule with a
+   class in it, including the one below. So closeFacetMenu() has been setting
+   the attribute on a menu that stayed on screen: through a click elsewhere,
+   through picking another facet, through navigating to another page. */
+.facet-menu[hidden] { display: none; }
+
+.facet-menu {
+  position: fixed;
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 340px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--elev-overlay);
+}
+
+.facet-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.facet-menu-title {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--ink-muted);
+  letter-spacing: var(--tracking-eyebrow);
+}
+
+/* No Clear button per facet: a checkbox is its own undo, and four of them in
+   a row of facets was four controls doing what four clicks already did. What
+   is worth saying is how many are ticked. */
+.facet-menu-chosen {
+  color: var(--indigo);
+  font-size: var(--text-xs);
+}
+
+/* `label` carries a display rule of its own, which outranks the UA's
+   [hidden] and left the search box showing on five-option facets. */
+.facet-menu-search[hidden] { display: none; }
+
+.facet-menu-search input {
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: var(--text-xs);
+}
+
+.facet-menu-list {
+  display: flex;
+  overflow-y: auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.facet-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 5px var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.facet-menu-item:hover { background: var(--hover-wash); }
+
+.facet-menu-item input {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--indigo);
+}
+
+.facet-menu-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.facet-menu-empty {
+  padding: var(--space-2);
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+/* ── Search, once the answers are chosen ──────────────────────
+   Every facet used to refetch the table the moment it changed, so narrowing a
+   query by three facets cost three round trips and two throwaway renders. The
+   selections are now pending until this is pressed, and the button says so. */
+.facet-apply {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--indigo);
+  border-radius: var(--radius-control);
+  background: var(--indigo);
+  color: var(--on-mark);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* Four rules in styles.css paint every <button> as a primary action, all of
+   them behind a `:not()` chain long enough to outweigh a class. An id wins
+   over any number of classes, so the sizing that has to match the facets
+   beside it is scoped to the row it sits in - 30px on Findings, 28px on the
+   queue, the same as the controls it follows. */
+#inventory-workspace .inventory-facet-row .facet-apply,
+#remediation-workspace .facet-apply {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--indigo);
+  border-radius: var(--radius-control);
+  background: var(--indigo);
+  color: var(--on-mark);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+
+/* In the queue's toolbar the neighbours are 32px, not the facet row's 30. */
+#remediation-workspace .facet-apply {
+  height: 32px;
+  min-height: 32px;
+}
+
+#inventory-workspace .inventory-facet-row .facet-apply:hover,
+#remediation-workspace .facet-apply:hover {
+  border-color: var(--indigo-ink);
+  background: var(--indigo-ink);
+}
+
+.facet-apply:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 1px;
+}
+
+/* Unpressed changes are the one state worth interrupting for. */
+.facet-apply[data-facet-dirty] {
+  box-shadow: 0 0 0 3px var(--indigo-wash);
+}
+
+/* Search and Clear filters are one pair: they end the facet row together and
+   wrap together, rather than Clear dropping to a line of its own. */
+.facet-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+#inventory-workspace .inventory-facet-row .facet-actions { margin-left: auto; }
+#inventory-workspace .inventory-facet-row .facet-actions .secondary-btn { margin-left: 0; }
